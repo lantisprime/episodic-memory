@@ -17,10 +17,11 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { fileURLToPath } from 'url'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
-const REPO_DIR = path.dirname(new URL(import.meta.url).pathname)
+const REPO_DIR = path.dirname(fileURLToPath(import.meta.url))
 const REPO_SCRIPTS = path.join(REPO_DIR, 'scripts')
 const REPO_INSTRUCTIONS = path.join(REPO_DIR, 'instructions')
 
