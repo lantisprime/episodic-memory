@@ -115,6 +115,29 @@ For reference documentation (API docs, config references), include enough detail
 
 If web research updates or contradicts a previous research episode, use `em-revise.mjs` to supersede it — the same self-correction mechanism as decisions.
 
+## Staleness Check (Auto-Refresh)
+
+When encountering a URL during a session (in code, docs, or conversation), check if it matches a stored research episode. If it does, check how old the stored content is.
+
+At session start, or when the user asks about a topic with stored research, run:
+
+```bash
+node ~/.episodic-memory/scripts/em-check-stale.mjs [--days 30] [--project <name>]
+```
+
+This returns research episodes older than N days (default: 30). For each stale episode:
+
+1. Re-fetch the source URL
+2. Compare the new content with what's stored
+3. If content has changed, revise the episode with updated information
+4. If content is unchanged, update the `fetched` date by revising with the same content
+
+When you encounter a URL inline during coding:
+
+1. Check if it exists in episodic memory: `em-search.mjs --query "<url>"`
+2. If found and stale, re-fetch and revise if needed
+3. If not found, fetch, distill, and store as a new research episode
+
 ## Revise Workflow (Self-Correction)
 
 When a decision needs correction:

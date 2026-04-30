@@ -45,6 +45,13 @@ List recent:
 node ~/.episodic-memory/scripts/em-list.mjs --project <name> --limit 5
 ```
 
+Check stale research (re-fetch URLs older than N days):
+```bash
+node ~/.episodic-memory/scripts/em-check-stale.mjs --days 30
+```
+
+When encountering a URL during coding, check if it's stored (`em-search.mjs --query "<url>"`). If stale, re-fetch and revise. If missing, fetch and store.
+
 Rebuild index:
 ```bash
 node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all

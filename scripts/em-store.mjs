@@ -85,7 +85,10 @@ const fmLines = [
   `tags: [${tags.join(', ')}]`,
   `summary: ${summary}`,
 ]
-if (url) fmLines.push(`url: ${url}`)
+if (url) {
+  fmLines.push(`url: ${url}`)
+  fmLines.push(`fetched: ${dateStr}`)
+}
 fmLines.push('---')
 const frontmatter = fmLines.join('\n')
 
@@ -102,7 +105,7 @@ fs.writeFileSync(filePath, episodeContent, 'utf8')
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project, category,
   status: 'active', supersedes: null, tags, summary,
-  ...(url ? { url } : {})
+  ...(url ? { url, fetched: dateStr } : {})
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
