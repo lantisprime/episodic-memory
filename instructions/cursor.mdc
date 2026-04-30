@@ -1,0 +1,78 @@
+---
+description: Episodic memory system for persistent decisions across sessions
+globs:
+alwaysApply: true
+---
+
+# Episodic Memory
+
+You have access to a persistent episodic memory system. Use it to store and recall significant decisions, discoveries, milestones, and context across sessions. The system is self-correcting — when a decision proves wrong, revise it.
+
+**Scripts:** `~/.episodic-memory/scripts/`
+**Local data:** `.episodic-memory/` (this project)
+**Global data:** `~/.episodic-memory/` (cross-project)
+
+## When to Use
+
+**Store** (0-3 per session) when:
+- A significant decision is made (technology, architecture, trade-off)
+- An important discovery is found (bug root cause, undocumented behavior)
+- A milestone is reached (feature shipped, migration completed)
+- Critical context emerges (constraints, environment quirks)
+- User says "remember this"
+
+**Recall** when:
+- Starting work on this project — proactively search for episodes (limit 5)
+- User asks "what did we decide about X"
+- Before making a decision that might contradict a past one
+
+**Revise** when a prior decision proves wrong — don't delete, create a revision chain.
+
+## Commands
+
+### Store
+```bash
+node ~/.episodic-memory/scripts/em-store.mjs \
+  --project <project-name> \
+  --category <decision|discovery|milestone|context> \
+  --tags "<tag1,tag2>" \
+  --summary "<one-line summary>" \
+  --body "<detailed description>" \
+  --scope <local|global>
+```
+
+### Revise (Self-Correction)
+```bash
+node ~/.episodic-memory/scripts/em-revise.mjs \
+  --original <episode-id> \
+  --summary "<what changed>" \
+  --body "<why and what the correction is>" \
+  --tags "<tags>"
+```
+
+### Search
+```bash
+node ~/.episodic-memory/scripts/em-search.mjs --project <name> [--query <text>] [--full]
+node ~/.episodic-memory/scripts/em-search.mjs --history <episode-id> --full
+```
+
+### List Recent
+```bash
+node ~/.episodic-memory/scripts/em-list.mjs --project <name> --limit 5
+```
+
+### Rebuild Index
+```bash
+node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
+```
+
+## Episode Categories
+- `decision` — Technology choices, architecture, trade-offs
+- `discovery` — Bug root causes, undocumented behavior, insights
+- `milestone` — Features shipped, migrations completed
+- `context` — Constraints, dependencies, environment quirks
+
+## What NOT to Store
+- Routine edits, file reads, test runs
+- Credentials or sensitive data
+- Information already in .cursorrules or project docs
