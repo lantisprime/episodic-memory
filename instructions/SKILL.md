@@ -59,7 +59,7 @@ Use `--history <id>` to show the full revision chain for any episode.
 
 ## Episode Schema
 
-Categories: `decision`, `discovery`, `milestone`, `context`
+Categories: `decision`, `discovery`, `milestone`, `context`, `research`
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -67,11 +67,12 @@ Categories: `decision`, `discovery`, `milestone`, `context`
 | `date` | string | `YYYY-MM-DD` |
 | `time` | string | `HH:MM` |
 | `project` | string | Project name (from cwd basename or git remote) |
-| `category` | enum | `decision \| discovery \| milestone \| context` |
+| `category` | enum | `decision \| discovery \| milestone \| context \| research` |
 | `status` | enum | `active \| superseded` |
 | `supersedes` | string? | ID of the episode this revises (null if original) |
 | `tags` | string[] | Searchable labels |
 | `summary` | string | One-line description |
+| `url` | string? | Source URL (for `research` episodes) |
 
 ## How to Determine Project Name
 
@@ -82,7 +83,7 @@ Use the basename of the current working directory. If a git remote is available,
 ```bash
 node ~/.episodic-memory/scripts/em-store.mjs \
   --project <project-name> \
-  --category <decision|discovery|milestone|context> \
+  --category <decision|discovery|milestone|context|research> \
   --tags "<tag1,tag2>" \
   --summary "<one-line summary>" \
   --body "<detailed description>" \
@@ -90,6 +91,29 @@ node ~/.episodic-memory/scripts/em-store.mjs \
 ```
 
 Episodes go to the **global common store by default** (`~/.episodic-memory/`), making them available to all projects. Use `--scope local` only for decisions that are truly private to one project.
+
+## Research Workflow (Web Search + Store)
+
+When the user asks to research something from the web:
+
+1. Search the web for the requested information
+2. **First check existing episodes** — run `em-search.mjs --category research --query "<topic>"` to avoid duplicating stored research
+3. If not already stored, distill the findings into a clear summary
+4. Store it with `--category research` and `--url` for the source:
+
+```bash
+node ~/.episodic-memory/scripts/em-store.mjs \
+  --project <project-name> \
+  --category research \
+  --tags "<topic,tags>" \
+  --summary "<what was researched>" \
+  --body "<distilled findings — key points, code examples, gotchas>" \
+  --url "<source-url>"
+```
+
+For reference documentation (API docs, config references), include enough detail in the body that the episode is useful without revisiting the URL. The URL is preserved for when the user needs the original source.
+
+If web research updates or contradicts a previous research episode, use `em-revise.mjs` to supersede it — the same self-correction mechanism as decisions.
 
 ## Revise Workflow (Self-Correction)
 

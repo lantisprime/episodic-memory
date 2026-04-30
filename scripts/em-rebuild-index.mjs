@@ -76,7 +76,8 @@ function rebuildDir(dataDir, label) {
       status: fm.status || 'active',
       supersedes: fm.supersedes || null,
       tags: Array.isArray(fm.tags) ? fm.tags : [],
-      summary: fm.summary
+      summary: fm.summary,
+      ...(fm.url ? { url: fm.url } : {})
     }))
   }
 

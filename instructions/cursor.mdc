@@ -34,7 +34,7 @@ You have access to a persistent episodic memory system. Use it to store and reca
 ```bash
 node ~/.episodic-memory/scripts/em-store.mjs \
   --project <project-name> \
-  --category <decision|discovery|milestone|context> \
+  --category <decision|discovery|milestone|context|research> \
   --tags "<tag1,tag2>" \
   --summary "<one-line summary>" \
   --body "<detailed description>" \
@@ -71,6 +71,7 @@ node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
 - `discovery` — Bug root causes, undocumented behavior, insights
 - `milestone` — Features shipped, migrations completed
 - `context` — Constraints, dependencies, environment quirks
+- `research` — Web research, distilled docs, reference material (include `--url`)
 
 ## What NOT to Store
 - Routine edits, file reads, test runs

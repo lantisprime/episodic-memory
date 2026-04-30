@@ -26,7 +26,7 @@ You have access to a persistent episodic memory system for storing and recalling
 
 Store:
 ```bash
-node ~/.episodic-memory/scripts/em-store.mjs --project <name> --category <decision|discovery|milestone|context> --tags "<t1,t2>" --summary "<text>" --body "<text>" --scope <global|local>
+node ~/.episodic-memory/scripts/em-store.mjs --project <name> --category <decision|discovery|milestone|context|research> --tags "<t1,t2>" --summary "<text>" --body "<text>" --scope <global|local>
 ```
 
 Revise (self-correction):
@@ -55,6 +55,7 @@ node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
 - `discovery` — Bug root causes, undocumented behavior, insights
 - `milestone` — Features shipped, migrations completed
 - `context` — Constraints, dependencies, environment quirks
+- `research` — Web research, distilled docs, reference material (include `--url`)
 
 ## What NOT to Store
 - Routine edits, test runs, file reads

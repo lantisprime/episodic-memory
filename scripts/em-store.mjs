@@ -34,6 +34,7 @@ const category = flag('--category')
 const tagsRaw = flag('--tags')
 const summary = flag('--summary')
 const body = flag('--body')
+const url = flag('--url')
 const scope = flag('--scope') || 'global'
 
 if (!project || !category || !summary || !body) {
@@ -44,7 +45,7 @@ if (!project || !category || !summary || !body) {
   process.exit(1)
 }
 
-const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context']
+const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research']
 if (!VALID_CATEGORIES.includes(category)) {
   console.log(JSON.stringify({
     status: 'error',
@@ -73,7 +74,7 @@ const id = `${ts}-${slug}-${randSuffix}`
 
 const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : []
 
-const frontmatter = [
+const fmLines = [
   '---',
   `id: ${id}`,
   `date: ${dateStr}`,
@@ -83,8 +84,10 @@ const frontmatter = [
   `status: active`,
   `tags: [${tags.join(', ')}]`,
   `summary: ${summary}`,
-  '---',
-].join('\n')
+]
+if (url) fmLines.push(`url: ${url}`)
+fmLines.push('---')
+const frontmatter = fmLines.join('\n')
 
 const episodeContent = `${frontmatter}\n\n# ${summary}\n\n${body}\n`
 
@@ -98,7 +101,8 @@ fs.writeFileSync(filePath, episodeContent, 'utf8')
 
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project, category,
-  status: 'active', supersedes: null, tags, summary
+  status: 'active', supersedes: null, tags, summary,
+  ...(url ? { url } : {})
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
