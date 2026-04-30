@@ -101,7 +101,7 @@ The installer:
 └── index.jsonl               # Project-local index
 ```
 
-Scripts search **local first, then global** by default. Use `--scope local|global|all` to control.
+All episodes go to the **global common store by default**, making them available across all projects. Use `--scope local` for decisions private to one project. Scripts search **both local and global** by default.
 
 ## Self-Correction: Revision Chains
 
@@ -133,7 +133,7 @@ node ~/.episodic-memory/scripts/em-store.mjs \
   --tags "auth,security" \
   --summary "Chose JWT over session cookies" \
   --body "JWT simplifies our stateless API design..." \
-  --scope local
+  --scope global
 ```
 
 ### Revise

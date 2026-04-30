@@ -34,7 +34,7 @@ const category = flag('--category')
 const tagsRaw = flag('--tags')
 const summary = flag('--summary')
 const body = flag('--body')
-const scope = flag('--scope') || 'local'
+const scope = flag('--scope') || 'global'
 
 if (!project || !category || !summary || !body) {
   console.log(JSON.stringify({

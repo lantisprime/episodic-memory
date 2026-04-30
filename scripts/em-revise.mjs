@@ -35,7 +35,7 @@ const project = flag('--project')
 const tagsRaw = flag('--tags')
 const summary = flag('--summary')
 const body = flag('--body')
-const scope = flag('--scope') || 'local'
+const scope = flag('--scope') || 'global'
 
 if (!originalId || !summary || !body) {
   console.log(JSON.stringify({

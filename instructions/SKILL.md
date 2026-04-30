@@ -86,10 +86,10 @@ node ~/.episodic-memory/scripts/em-store.mjs \
   --tags "<tag1,tag2>" \
   --summary "<one-line summary>" \
   --body "<detailed description>" \
-  --scope <local|global>
+  --scope <global|local>
 ```
 
-Use `--scope local` (default) for project-specific decisions. Use `--scope global` for cross-project decisions.
+Episodes go to the **global common store by default** (`~/.episodic-memory/`), making them available to all projects. Use `--scope local` only for decisions that are truly private to one project.
 
 ## Revise Workflow (Self-Correction)
 

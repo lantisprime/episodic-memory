@@ -26,7 +26,7 @@ You have access to a persistent episodic memory system for storing and recalling
 
 Store:
 ```bash
-node ~/.episodic-memory/scripts/em-store.mjs --project <name> --category <decision|discovery|milestone|context> --tags "<t1,t2>" --summary "<text>" --body "<text>" --scope <local|global>
+node ~/.episodic-memory/scripts/em-store.mjs --project <name> --category <decision|discovery|milestone|context> --tags "<t1,t2>" --summary "<text>" --body "<text>" --scope <global|local>
 ```
 
 Revise (self-correction):

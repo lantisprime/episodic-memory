@@ -38,7 +38,7 @@ node ~/.episodic-memory/scripts/em-store.mjs \
   --tags "<tag1,tag2>" \
   --summary "<one-line summary>" \
   --body "<detailed description>" \
-  --scope <local|global>
+  --scope <global|local>
 ```
 
 ### Revise (Self-Correction)
