@@ -1,0 +1,63 @@
+# `docs/rfcs/` — RFC Directory
+
+RFCs document proposed changes to the episodic-memory system. Every non-trivial change should go through an RFC before implementation.
+
+---
+
+## Active RFCs
+
+| RFC | Title | Status | Champion |
+|---|---|---|---|
+| RFC-001 | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, and Semantic Consolidation | accepted | Charlton Ho |
+
+---
+
+## Directory structure
+
+```
+docs/rfcs/
+  README.md       <- this file
+  TEMPLATE.md     <- copy this when creating a new RFC
+  archived/       <- closed RFCs (implemented, withdrawn, superseded)
+```
+
+---
+
+## RFC status vocabulary
+
+| Status | Meaning | Where the file lives |
+|---|---|---|
+| `draft` | Proposed; under active discussion | `rfcs/` root |
+| `accepted` | Design approved; ready for implementation | `rfcs/` root |
+| `deferred` | Valid idea; not the right time | `rfcs/` root |
+| `implemented` | Fully shipped | `rfcs/archived/` |
+| `withdrawn` | Abandoned | `rfcs/archived/` |
+| `superseded` | Replaced by a newer RFC | `rfcs/archived/` |
+
+---
+
+## RFC lifecycle
+
+1. **Draft** — Copy `TEMPLATE.md` to `RFC-NNN-<slug>.md`. Fill in the problem, proposal, and alternatives. Register in this README.
+2. **Second opinion** — Required before acceptance. Record findings in the RFC's `## Second opinion` section.
+3. **Accepted** — Design approved. Populate `## Implementation plan` with concrete PR/phase breakdown.
+4. **Implemented** — All phases shipped. Move to `archived/`.
+
+---
+
+## Naming convention
+
+```
+RFC-NNN-<slug>.md
+```
+
+Example: `RFC-001-memory-improvements.md`
+
+The RFC-NNN ID is assigned when the formal RFC file is created.
+
+---
+
+## Archive rules
+
+- `archived/` is stable, not immutable. Errata are permitted; substantive changes require a new RFC.
+- Deferred RFCs stay in `rfcs/` root (they may become active again).
