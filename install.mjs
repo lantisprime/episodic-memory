@@ -40,7 +40,7 @@ if (!tool) {
 Tools:
   claude-code  Install SKILL.md + plugin structure
   cursor       Install .cursor/rules/episodic-memory.mdc
-  codex        Install AGENTS.md (or append to existing)
+  codex        Install skill to .agents/skills/episodic-memory/
   windsurf     Install .windsurfrules (or append to existing)
   all          Install for all supported tools`)
   process.exit(1)
@@ -112,20 +112,14 @@ for (const t of tools) {
       break
     }
     case 'codex': {
-      const agentsFile = path.join(projectDir, 'AGENTS.md')
-      const instructions = fs.readFileSync(path.join(REPO_INSTRUCTIONS, 'AGENTS.md'), 'utf8')
-      if (fs.existsSync(agentsFile)) {
-        const existing = fs.readFileSync(agentsFile, 'utf8')
-        if (!existing.includes('episodic-memory')) {
-          fs.appendFileSync(agentsFile, '\n' + instructions)
-          console.log('Appended episodic-memory section to existing AGENTS.md')
-        } else {
-          console.log('AGENTS.md already contains episodic-memory instructions')
-        }
-      } else {
-        fs.writeFileSync(agentsFile, instructions)
-        console.log(`Created ${agentsFile}`)
-      }
+      // Install as a Codex skill in .agents/skills/
+      const skillDir = path.join(projectDir, '.agents', 'skills', 'episodic-memory')
+      fs.mkdirSync(skillDir, { recursive: true })
+      fs.copyFileSync(
+        path.join(REPO_INSTRUCTIONS, 'codex-skill.md'),
+        path.join(skillDir, 'episodic-memory.md')
+      )
+      console.log(`Installed Codex skill to ${skillDir}/episodic-memory.md`)
       break
     }
     case 'windsurf': {
