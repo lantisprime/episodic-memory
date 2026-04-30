@@ -1,0 +1,10 @@
+{
+  "name": "episodic-memory",
+  "version": "0.1.0",
+  "description": "Structured episodic memory for AI coding assistants — self-correcting decision storage with web research caching.",
+  "author": {
+    "name": "Charlton Ho"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "episodic", "context", "session", "recall", "decisions"]
+}

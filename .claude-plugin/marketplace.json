@@ -1,0 +1,17 @@
+{
+  "name": "episodic-memory-marketplace",
+  "owner": {
+    "name": "Charlton Ho"
+  },
+  "plugins": [
+    {
+      "name": "episodic-memory",
+      "description": "Self-correcting decision storage with web research caching — works across Claude Code, Cursor, Codex, and Windsurf.",
+      "author": {
+        "name": "Charlton Ho"
+      },
+      "source": "./plugins/episodic-memory",
+      "category": "productivity"
+    }
+  ]
+}
