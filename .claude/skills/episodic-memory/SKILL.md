@@ -59,9 +59,20 @@ When encountering a URL, check if stored research exists and is stale. At sessio
 node ~/.episodic-memory/scripts/em-check-stale.mjs [--days 30] [--project <name>]
 ```
 
+## Behavioral Patterns
+
+Global episodic memory stores behavioral patterns — reusable workflows that apply across all projects. Tag with `behavioral-pattern` and scope `global`.
+
+**Pattern promotion:** When a project-specific decision proves to be a best practice (confirmed across 2+ projects), promote it to global memory:
+```bash
+node ~/.episodic-memory/scripts/em-store.mjs --project global --category decision --tags "behavioral-pattern,<topic>" --summary "<pattern name>" --body "<pattern details>" --scope global
+```
+
+**Pattern detection at session end:** Before storing session episodes, check if any project-specific decisions are generalizable. If a pattern would benefit other projects, store it globally with tag `behavioral-pattern`.
+
 ## Session End
 
-Review session for 0-3 significant events, store them, then proceed with normal session handoff.
+Review session for 0-3 significant events, store them, then proceed with normal session handoff. Also examine project-specific decisions for potential promotion to global behavioral patterns.
 
 ## Maintenance
 
