@@ -6,7 +6,9 @@ Works with: **Claude Code**, **Cursor**, **Codex (OpenAI)**, **Windsurf / Contin
 
 ## How it works
 
-Episodes are markdown files with YAML frontmatter. A JSONL index enables fast filtering. The AI assistant stores significant events during sessions and recalls relevant episodes when starting work or when asked.
+**Storage is entirely file-based** — no database required. Episodes are plain markdown files (`.md`) with YAML frontmatter, stored on your local filesystem. A JSONL text file serves as a lightweight index for fast filtering. Zero external dependencies beyond Node.js.
+
+The AI assistant stores significant events during sessions and recalls relevant episodes when starting work or when asked.
 
 When a decision proves wrong, the system creates a **revision chain** — the original is marked superseded and a new corrected episode takes its place. Future searches show only the latest active version.
 
@@ -26,26 +28,26 @@ sequenceDiagram
     AI->>S: em-store.mjs --category decision ...
     S->>FS: Write episode .md + append index
     S-->>AI: { status: ok, id }
-    AI-->>U: Stored: "chose PostgreSQL over MongoDB"
+    AI-->>U: Stored: "chose Express over Fastify"
     end
 
     rect rgb(255, 240, 240)
     Note over U,FS: Self-Correction Flow
-    U->>AI: "That database choice was wrong"
-    AI->>R: em-search.mjs --query "database"
+    U->>AI: "That framework choice was wrong"
+    AI->>R: em-search.mjs --query "framework"
     R-->>AI: Original episode found
     AI->>S: em-revise.mjs --original <id> ...
     S->>FS: Mark original superseded + write revision
-    AI-->>U: Revised: now recommends MongoDB
+    AI-->>U: Revised: now recommends Fastify
     end
 
     rect rgb(255, 245, 230)
     Note over U,FS: Recall Flow
-    U->>AI: "What did we decide about the database?"
-    AI->>R: em-search.mjs --project X --query "database"
+    U->>AI: "What did we decide about the framework?"
+    AI->>R: em-search.mjs --project X --query "framework"
     R->>FS: Search index (superseded filtered out)
     R-->>AI: Latest active decision only
-    AI-->>U: "We revised to MongoDB because..."
+    AI-->>U: "We revised to Fastify because..."
     end
 ```
 
@@ -107,13 +109,13 @@ When a past decision proves wrong:
 
 ```bash
 # Find the original decision
-node ~/.episodic-memory/scripts/em-search.mjs --query "database choice" --full
+node ~/.episodic-memory/scripts/em-search.mjs --query "framework" --full
 
 # Create a revision (original is auto-marked superseded)
 node ~/.episodic-memory/scripts/em-revise.mjs \
   --original <episode-id> \
-  --summary "Switched from PostgreSQL to MongoDB" \
-  --body "Transaction requirements were overestimated..."
+  --summary "Switched from Express to Fastify" \
+  --body "Express middleware overhead became a bottleneck..."
 
 # View the full revision history
 node ~/.episodic-memory/scripts/em-search.mjs --history <episode-id> --full
