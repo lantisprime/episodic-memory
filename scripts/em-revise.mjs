@@ -120,8 +120,45 @@ const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g,
 const randSuffix = crypto.randomBytes(2).toString('hex')
 const id = `${ts}-${slug}-${randSuffix}`
 
-const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : []
+function normalizeTags(raw) {
+  if (!raw) return []
+  const arr = (Array.isArray(raw) ? raw : raw.split(','))
+    .map(t => t.trim().toLowerCase())
+    .filter(Boolean)
+  return [...new Set(arr)].sort()
+}
+
+function updateTagsIndex(dataDir, episodeId, tags) {
+  const tagsFile = path.join(dataDir, 'tags.json')
+  let index = {}
+  try {
+    index = JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+  } catch {}
+  for (const tag of tags) {
+    if (!index[tag]) index[tag] = []
+    if (!index[tag].includes(episodeId)) index[tag].push(episodeId)
+  }
+  const tmpFile = tagsFile + '.tmp'
+  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
+  fs.renameSync(tmpFile, tagsFile)
+}
+
+const tags = normalizeTags(tagsRaw)
 const resolvedProject = origProject || path.basename(process.cwd())
+
+// Inherit original episode's tags so merged tags appear in frontmatter, index, and tags.json
+const origLines = fs.readFileSync(path.join(original.dir, 'index.jsonl'), 'utf8').trim().split('\n').filter(Boolean)
+let origTags = []
+for (const line of origLines) {
+  try {
+    const entry = JSON.parse(line)
+    if (entry.id === originalId && Array.isArray(entry.tags)) {
+      origTags = entry.tags
+      break
+    }
+  } catch {}
+}
+const mergedTags = normalizeTags([...origTags, ...tags])
 
 const frontmatter = [
   '---',
@@ -132,7 +169,7 @@ const frontmatter = [
   `category: ${origCategory}`,
   `status: active`,
   `supersedes: ${originalId}`,
-  `tags: [${tags.join(', ')}]`,
+  `tags: [${mergedTags.join(', ')}]`,
   `summary: ${summary}`,
   '---',
 ].join('\n')
@@ -147,9 +184,16 @@ fs.writeFileSync(filePath, episodeContent, 'utf8')
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project: resolvedProject,
   category: origCategory, status: 'active', supersedes: originalId,
-  tags, summary
+  tags: mergedTags, summary
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
+
+// Update tags.json
+updateTagsIndex(dataDir, id, mergedTags)
+// If revision crosses scopes, also update original scope's tags.json
+if (original.dir !== dataDir) {
+  updateTagsIndex(original.dir, id, mergedTags)
+}
 
 console.log(JSON.stringify({
   status: 'ok', id, file: filePath,

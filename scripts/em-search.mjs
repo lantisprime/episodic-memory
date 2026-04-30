@@ -41,6 +41,23 @@ const full = argv.includes('--full')
 const includeSuperseded = argv.includes('--include-superseded')
 const historyId = flag('--history')
 
+function normalizeTags(raw) {
+  if (!raw) return []
+  const arr = (Array.isArray(raw) ? raw : raw.split(','))
+    .map(t => t.trim().toLowerCase())
+    .filter(Boolean)
+  return [...new Set(arr)].sort()
+}
+
+function loadTagsIndex(dataDir) {
+  const tagsFile = path.join(dataDir, 'tags.json')
+  try {
+    return JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Load index entries from a data directory
 // ---------------------------------------------------------------------------
@@ -139,8 +156,32 @@ if (!includeSuperseded) {
 if (project) {
   results = results.filter(e => e.project === project)
 }
+let searchWarning = null
 if (tag) {
-  results = results.filter(e => e.tags && e.tags.includes(tag))
+  const normalizedTag = normalizeTags(tag)[0]
+  if (normalizedTag) {
+    // Try tags.json from all active scopes
+    let tagIds = null
+    const dirs = []
+    if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
+    if (scope === 'global' || scope === 'all') dirs.push(GLOBAL_DIR)
+    for (const dir of dirs) {
+      const idx = loadTagsIndex(dir)
+      if (idx && idx[normalizedTag]) {
+        if (!tagIds) tagIds = new Set()
+        for (const id of idx[normalizedTag]) tagIds.add(id)
+      } else if (!idx) {
+        searchWarning = 'tags.json missing or corrupt. Run em-rebuild-index.mjs to regenerate.'
+      }
+    }
+    if (tagIds) {
+      results = results.filter(e => tagIds.has(e.id))
+    } else {
+      // Fallback: linear scan with normalized comparison
+      if (!searchWarning) searchWarning = 'tags.json missing or does not contain tag. Falling back to linear scan. Run em-rebuild-index.mjs to regenerate.'
+      results = results.filter(e => e.tags && e.tags.map(t => t.toLowerCase().trim()).includes(normalizedTag))
+    }
+  }
 }
 if (category) {
   results = results.filter(e => e.category === category)
@@ -181,4 +222,6 @@ const output = results.map(e => {
   return { ...rest, source: _source }
 })
 
-console.log(JSON.stringify({ status: 'ok', count: output.length, episodes: output }))
+const result = { status: 'ok', count: output.length, episodes: output }
+if (searchWarning) result.warning = searchWarning
+console.log(JSON.stringify(result))

@@ -25,6 +25,14 @@ function flag(name) {
 
 const scope = flag('--scope') || 'all'
 
+function normalizeTags(raw) {
+  if (!raw) return []
+  const arr = (Array.isArray(raw) ? raw : raw.split(','))
+    .map(t => t.trim().toLowerCase())
+    .filter(Boolean)
+  return [...new Set(arr)].sort()
+}
+
 /**
  * Parse YAML frontmatter from a markdown string.
  * Handles the simple subset we produce: scalar values and inline arrays.
@@ -63,10 +71,13 @@ function rebuildDir(dataDir, label) {
   const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort()
   const entries = []
 
+  const tagsIndex = {}
+
   for (const file of files) {
     const content = fs.readFileSync(path.join(episodesDir, file), 'utf8')
     const fm = parseFrontmatter(content)
     if (!fm || !fm.id) continue
+    const normalizedTags = normalizeTags(Array.isArray(fm.tags) ? fm.tags : [])
     entries.push(JSON.stringify({
       id: fm.id,
       date: fm.date,
@@ -75,15 +86,24 @@ function rebuildDir(dataDir, label) {
       category: fm.category,
       status: fm.status || 'active',
       supersedes: fm.supersedes || null,
-      tags: Array.isArray(fm.tags) ? fm.tags : [],
+      tags: normalizedTags,
       summary: fm.summary,
       ...(fm.url ? { url: fm.url, fetched: fm.fetched || fm.date } : {})
     }))
+    for (const tag of normalizedTags) {
+      if (!tagsIndex[tag]) tagsIndex[tag] = []
+      tagsIndex[tag].push(fm.id)
+    }
   }
 
   const tmpFile = indexFile + '.tmp'
   fs.writeFileSync(tmpFile, entries.join('\n') + (entries.length ? '\n' : ''), 'utf8')
   fs.renameSync(tmpFile, indexFile)
+
+  const tagsFile = path.join(dataDir, 'tags.json')
+  const tagsTmp = tagsFile + '.tmp'
+  fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
+  fs.renameSync(tagsTmp, tagsFile)
 
   return { scope: label, count: entries.length }
 }
