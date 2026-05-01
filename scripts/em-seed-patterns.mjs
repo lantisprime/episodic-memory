@@ -87,13 +87,23 @@ function normalizeTags(raw) {
   return [...new Set(arr)].sort()
 }
 
-function updateTagsIndex(episodeId, tags) {
+// Accumulate tag updates in memory, flush once at the end
+const pendingTagUpdates = []
+
+function queueTagsUpdate(episodeId, tags) {
+  pendingTagUpdates.push({ episodeId, tags })
+}
+
+function flushTagsIndex() {
+  if (pendingTagUpdates.length === 0) return
   const tagsFile = path.join(GLOBAL_DIR, 'tags.json')
   let idx = {}
   try { idx = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
-  for (const tag of tags) {
-    if (!idx[tag]) idx[tag] = []
-    if (!idx[tag].includes(episodeId)) idx[tag].push(episodeId)
+  for (const { episodeId, tags } of pendingTagUpdates) {
+    for (const tag of tags) {
+      if (!idx[tag]) idx[tag] = []
+      if (!idx[tag].includes(episodeId)) idx[tag].push(episodeId)
+    }
   }
   const tmpFile = tagsFile + '.tmp'
   fs.writeFileSync(tmpFile, JSON.stringify(idx, null, 2), 'utf8')
@@ -182,11 +192,14 @@ for (const entry of index.patterns || []) {
   })
   fs.appendFileSync(globalIndexFile, indexEntry + '\n', 'utf8')
 
-  // Update tags.json
-  updateTagsIndex(id, tags)
+  // Queue tags.json update
+  queueTagsUpdate(id, tags)
 
   seeded++
 }
+
+// Flush all tag updates in one atomic write
+flushTagsIndex()
 
 const total = (index.patterns || []).length
 console.log(JSON.stringify({
