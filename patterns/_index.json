@@ -4,9 +4,9 @@
       "pattern_id": "bp-001-implementation-workflow",
       "file": "implementation-workflow.md",
       "name": "Standard implementation workflow",
-      "tags": ["behavioral-pattern", "workflow", "sdlc", "testing", "code-review"],
+      "tags": ["behavioral-pattern", "workflow", "sdlc", "testing", "code-review", "enforcement"],
       "scope": "global",
-      "version": "1.0.0"
+      "version": "2.0.0"
     },
     {
       "pattern_id": "bp-002-proactive-milestone-storage",
@@ -75,7 +75,7 @@
     {
       "pattern_id": "bp-011-local-before-git",
       "file": "local-before-git.md",
-      "name": "Local files first, git only for reviewed content",
+      "name": "Local files first, external actions only after confirmation",
       "tags": ["behavioral-pattern", "workflow", "git", "review", "discipline"],
       "scope": "global",
       "version": "1.0.0"

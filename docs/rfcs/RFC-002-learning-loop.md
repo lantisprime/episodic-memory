@@ -2,7 +2,7 @@
 rfc_id: RFC-002
 slug: learning-loop
 title: "Learning Loop: Violation Tracking, Pattern Refinement, and Actionable Recall"
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-05-01
 last_modified: 2026-05-01
@@ -55,12 +55,8 @@ Three phases, dependency-ordered. Each phase is independently shippable.
 - Convenience wrapper around `em-store.mjs` for structured violation storage
 - Usage: `node em-violation.mjs --pattern <pattern_id> --summary "<what happened>" --body "<details>" [--sequence "<action1,action2>"] [--correct "<action1,action2>"]`
 - Validates that `--pattern` exists in `patterns/_index.json` (checks `pattern_id` field in each entry). `tags.json` is the wrong source — a new pattern with zero violations would not appear there. On validation failure, lists all known pattern IDs in the error message.
-- Auto-tags with: `violation`, `behavioral-pattern`, the pattern_id
+- Auto-tags with: `violation`, `behavioral-pattern`, `violated:<pattern_id>` (e.g., `violated:bp-006-push-after-verify`)
 - Outputs JSON: `{ status, id, violated_pattern, file }`
-
-**Instruction file updates:**
-- SKILL.md: add "Violation tracking" section with `em-violation.mjs` usage
-- Other instruction files: same
 
 **Files modified:**
 - `scripts/em-store.mjs` — add `violation` to `VALID_CATEGORIES`
@@ -68,6 +64,9 @@ Three phases, dependency-ordered. Each phase is independently shippable.
 **Files created:**
 - `scripts/em-violation.mjs`
 - `scripts/em-session-end-prompt.mjs` — SessionEnd hook script that prompts for violation flagging (so violations are capturable as soon as Phase 1 ships)
+
+**Files modified:**
+- `install.mjs` — copy `em-session-end-prompt.mjs` to `~/.episodic-memory/scripts/`. With `--install-hooks`: register as a `SessionEnd` hook in `~/.claude/settings.json` for Claude Code; document as manual step in instruction files for other tools. Hook registration requires explicit opt-in — installer never modifies `settings.json` without the flag.
 
 ### Phase 2: Pattern Refinement
 
@@ -161,7 +160,7 @@ Add a violation-aware recall pass:
 
 ### Instruction file updates
 
-After all phases ship, update instruction files:
+Update instruction files incrementally as each phase ships (do not batch to the end):
 - `instructions/SKILL.md` — violation tracking, pattern health, pre-flight recall
 - `instructions/cursor.mdc`
 - `instructions/AGENTS.md`
@@ -201,7 +200,7 @@ After all phases ship, update instruction files:
 - [ ] `em-violation.mjs` stores structured violation with pattern linkage via `violated:<pattern_id>` tag
 - [ ] `em-violation.mjs` validates pattern exists in `patterns/_index.json` (not `tags.json`)
 - [ ] `em-violation.mjs` rejects unknown pattern_id with error listing known patterns
-- [ ] `em-violation.mjs` auto-tags with `violation`, `behavioral-pattern`, and the pattern_id
+- [ ] `em-violation.mjs` auto-tags with `violation`, `behavioral-pattern`, and `violated:<pattern_id>`
 - [ ] Violation episodes searchable by `--category violation` and `--tag violated:<pattern_id>`
 - [ ] bp-009 updated to reference `em-violation.mjs` and structured fields
 - [ ] `em-session-end-prompt.mjs` hook script created and functional

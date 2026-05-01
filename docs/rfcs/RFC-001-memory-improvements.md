@@ -216,7 +216,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 **Files modified:** `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs`
 **Shipped:** PR #6, commit `0e45e4d`. Bugs #2–#5 found and fixed.
 
-### Phase 2: Relevance Decay + Access Tracking — IN PROGRESS
+### Phase 2: Relevance Decay + Access Tracking — SHIPPED
 
 **Files modified:**
 - `em-search.mjs` (~227→~340 lines) — scoring formula, `text_match` tiers (1.0 exact/0.7 substring/0.4 body-only), access tracking write-back with dual-scope handling (local + global `index.jsonl` independently), `--no-score`/`--no-track`/`--warn-time-ms`/`--warn-count` flags, performance health check
@@ -255,15 +255,15 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] rebuild recreates both `index.jsonl` and `tags.json`
 
 **Phase 2:**
-- [ ] search returns relevance scores by default (scoring is default-on)
-- [ ] `--no-score` suppresses relevance scores from output
-- [ ] access tracking increments `access_count` and updates `last_accessed` on search
-- [ ] `--no-track` disables access tracking write-back
-- [ ] `--history` and `--include-superseded` do not trigger access tracking
-- [ ] rebuild preserves `access_count` and `last_accessed` from old index
-- [ ] prune dry-run does not move files; outputs scores and counts
-- [ ] prune `--check` reports prunable count without details
-- [ ] performance warnings emitted when thresholds exceeded
+- [x] search returns relevance scores by default (scoring is default-on)
+- [x] `--no-score` suppresses relevance scores from output
+- [x] access tracking increments `access_count` and updates `last_accessed` on search
+- [x] `--no-track` disables access tracking write-back
+- [x] `--history` and `--include-superseded` do not trigger access tracking
+- [x] rebuild preserves `access_count` and `last_accessed` from old index
+- [x] prune dry-run does not move files; outputs scores and counts
+- [x] prune `--check` reports prunable count without details
+- [x] performance warnings emitted when thresholds exceeded
 
 **Phase 3:**
 - [ ] recall ranks `project`-field matches above incidental tag matches
@@ -313,6 +313,7 @@ graph TD
 | Phase | Files changed | Tests | Notes |
 |---|---|---|---|
 | Phase 1: Tag Normalization + Inverted Index | `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs` | 16 E2E scenarios passed | Shipped in PR #6, commit `0e45e4d`. Bugs: #2 (P1), #3 (P2), #4 (P3), #5 (P1) — all fixed. |
+| Phase 2: Relevance Decay + Access Tracking | `em-search.mjs`, `em-rebuild-index.mjs`, `em-prune.mjs` (new) | 24 Phase 2 tests + 15 existing = 39 passed | Shipped in PR #13. Scoring default-on, access tracking, pruning, performance health checks. BPs decoupled from user-preferences, bp-007 merged into bp-006, bp-011 added. |
 
 ---
 
