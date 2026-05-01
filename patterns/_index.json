@@ -1,0 +1,52 @@
+{
+  "patterns": [
+    {
+      "pattern_id": "bp-001-implementation-workflow",
+      "file": "implementation-workflow.md",
+      "name": "Standard implementation workflow",
+      "tags": ["behavioral-pattern", "workflow", "sdlc", "testing", "code-review"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-002-proactive-milestone-storage",
+      "file": "proactive-milestone-storage.md",
+      "name": "Proactive milestone storage",
+      "tags": ["behavioral-pattern", "episodic-memory", "milestone", "session-discipline"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-003-pattern-promotion",
+      "file": "pattern-promotion.md",
+      "name": "Promote project-specific best practices to global memory",
+      "tags": ["behavioral-pattern", "global-memory", "best-practice"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-004-machine-readable-index",
+      "file": "machine-readable-index.md",
+      "name": "Machine-readable index for token efficiency",
+      "tags": ["behavioral-pattern", "token-efficiency", "index"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-005-enforcement-as-templates",
+      "file": "enforcement-as-templates.md",
+      "name": "Enforcement lives in consuming repos, not rule repos",
+      "tags": ["behavioral-pattern", "enforcement", "ci", "templates"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-006-push-after-verify",
+      "file": "push-after-verify.md",
+      "name": "Push only after all verification steps complete",
+      "tags": ["behavioral-pattern", "workflow", "git", "discipline"],
+      "scope": "global",
+      "version": "1.0.0"
+    }
+  ]
+}
