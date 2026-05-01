@@ -222,7 +222,8 @@ Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required
 
 **Files modified:**
 - `scripts/em-recall.mjs` — add `.checkpoint-required` marker creation when bp-001 violations detected
-- `install.mjs` — register checkpoint-gate + SessionStart hooks with `--install-hooks`
+- `scripts/em-session-end-prompt.mjs` — extend with marker cleanup (all 4: `.checkpoint-required`, `.pre-checkpoint-done`, `.post-checkpoint-required`, `.post-checkpoint-done`)
+- `install.mjs` — register checkpoint-gate (PreToolUse) + SessionStart hooks with `--install-hooks`
 - `patterns/implementation-workflow.md` — add checkpoint-gate to bp-001 enforcement table (not a new pattern bp-012)
 
 **Depends on:** Phase 3 (violation-aware recall output)
@@ -307,7 +308,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] `install.mjs --install-hooks` registers checkpoint-gate + SessionStart hooks
 - [ ] Both plan-gate and checkpoint-gate active simultaneously — user sees two distinct error messages
 - [ ] `em-session-end-prompt.mjs` cleans up all markers at session end (extends Phase 1 script)
-- [ ] `.post-checkpoint-required` created when first code edit is allowed through pre-checkpoint gate
+- [ ] `.post-checkpoint-required` touched on every allowed write through pre-checkpoint gate (idempotent)
 - [ ] `git push` blocked when `.post-checkpoint-required` exists and `.post-checkpoint-done` absent/empty
 - [ ] Non-empty `.post-checkpoint-done` unblocks push
 - [ ] Empty `.post-checkpoint-done` does NOT unblock push
