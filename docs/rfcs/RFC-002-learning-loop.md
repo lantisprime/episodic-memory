@@ -228,6 +228,56 @@ Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required
 
 **Depends on:** Phase 3 (violation-aware recall output)
 
+### Phase 4: Positive Reinforcement
+
+**Motivation:** RFC-002 Phases 1-3b only track failures. Session 3 proved that compliance also produces actionable data — the successful light-scope doc update revealed that correct classification + plan-gate = clean execution. A system that only surfaces violations is punitive; one that also surfaces what worked is constructive and helps the AI replicate success conditions.
+
+**New script: `scripts/em-pattern-success.mjs` (~60 lines)**
+
+Convenience wrapper (like `em-violation.mjs`) for storing successful pattern compliance with context about what conditions led to success.
+
+- Usage: `node em-pattern-success.mjs --pattern <pattern_id> --summary "<what went right>" --body "<success factors>" [--factors "<factor1,factor2>"]`
+- Validates pattern exists in `patterns/_index.json` (same as `em-violation.mjs`)
+- Auto-tags: `compliance`, `behavioral-pattern`, `complied:<pattern_id>`
+- Structured body with `## What went right` and `## Success factors` sections
+- Shells out to `em-store.mjs` with `--category compliance`
+- Output: `{ status, id, pattern, file }`
+
+**New category: `compliance`**
+- Added to `VALID_CATEGORIES` in `em-store.mjs`
+
+**Extend `em-pattern-health.mjs` (Phase 2):**
+- Add compliance tracking alongside violation tracking
+- For each pattern: count `complied:<pattern_id>` tags in the same rolling window
+- New fields in health report: `compliance_count`, `compliance_rate`, `streak` (consecutive successes), `success_factors` (most common factors from episode bodies)
+- New recommendation: `healthy-with-data` (pattern has both violations and compliances — the data shows what works)
+
+**Extend `em-recall.mjs` (Phase 3) pre-flight:**
+- Surface both violations AND successes in pre-flight warnings:
+  ```json
+  {
+    "preflight_warnings": [
+      {
+        "pattern_id": "bp-001-implementation-workflow",
+        "violations_last_30d": 3,
+        "compliances_last_30d": 2,
+        "message": "bp-001: 3 violations (full scope), 2 successes (light scope + plan-gate). Compliance correlates with correct classification."
+      }
+    ]
+  }
+  ```
+- Success context is actionable: "last time this worked, you classified as light and the plan-gate was active"
+
+**Files created:**
+- `scripts/em-pattern-success.mjs`
+
+**Files modified:**
+- `scripts/em-store.mjs` — add `compliance` to `VALID_CATEGORIES`
+- `scripts/em-pattern-health.mjs` (Phase 2) — add compliance tracking fields
+- `scripts/em-recall.mjs` (Phase 3) — add compliance data to pre-flight output
+
+**Depends on:** Phase 2 (health report) + Phase 3 (recall pre-flight output)
+
 ### Instruction file updates
 
 Update instruction files incrementally as each phase ships (do not batch to the end):
@@ -238,7 +288,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 
 ### Scope
 
-- **In scope:** violation category, structured violation storage, pattern health reports, violation-aware recall, pre-flight warnings, checkpoint enforcement gate (mechanical hook blocking code edits until checkpoint printed), SessionStart hook for recall invocation, session-end violation prompt via `SessionEnd` hook, bp-009 reconciliation
+- **In scope:** violation category, structured violation storage, pattern health reports, violation-aware recall, pre-flight warnings, checkpoint enforcement gate (mechanical hook blocking code edits until checkpoint printed), SessionStart hook for recall invocation, session-end violation prompt via `SessionEnd` hook, bp-009 reconciliation, positive reinforcement (compliance tracking, success factors, balanced pre-flight)
 - **Out of scope:** automatic violation detection (AI cannot reliably self-detect — see Problem section), punishment/penalty mechanisms, cross-user violation sharing, violation severity levels, automated pattern rewriting
 
 ---
@@ -320,37 +370,52 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] Orphaned markers (e.g., `.post-checkpoint-required` alone) cleaned by SessionEnd
 - [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test)
 
+**Phase 4:**
+- [ ] `compliance` category accepted by `em-store.mjs`
+- [ ] `em-pattern-success.mjs` stores compliance with `complied:<pattern_id>` tag
+- [ ] `em-pattern-success.mjs` validates pattern exists in `patterns/_index.json`
+- [ ] `em-pattern-success.mjs` auto-tags with `compliance`, `behavioral-pattern`, `complied:<pattern_id>`
+- [ ] `--factors` stored in structured body section
+- [ ] `em-pattern-health.mjs` reports `compliance_count` and `compliance_rate` per pattern
+- [ ] `em-recall.mjs` pre-flight surfaces both violation and compliance counts
+- [ ] Pre-flight message includes success factors when compliance data exists
+- [ ] No compliance data does not break health report or pre-flight (graceful absence)
+
 ### Sequencing
 
 ```mermaid
 graph TD
     RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>SHIPPED]
-    P1[Phase 1: Violation Tracking]
+    P1[Phase 1: Violation Tracking<br/>SHIPPED]
     P2[Phase 2: Pattern Refinement]
     P3[Phase 3: Actionable Recall]
     P3b[Phase 3b: Checkpoint Enforcement Gate]
+    P4[Phase 4: Positive Reinforcement]
     INST[Instruction File Updates]
 
     P1 --> P2
     P1 --> P3
     RFC1P3 --> P3
     P3 --> P3b
-    P2 --> INST
+    P2 --> P4
+    P3 --> P4
     P3b --> INST
+    P4 --> INST
 
     classDef shipped fill:#c8e6c9
     classDef tier1 fill:#e1f5fe
     classDef tier2 fill:#fff9c4
     classDef tier3 fill:#e8f5e9
     classDef enforcement fill:#ffccbc
-    class RFC1P3 shipped
-    class P1 tier1
+    classDef positive fill:#e8f5e9,stroke:#4caf50
+    class RFC1P3,P1 shipped
     class P2,P3 tier2
     class P3b enforcement
+    class P4 positive
     class INST tier3
 ```
 
-> **Hard dependency:** Phase 3 extends `em-recall.mjs` (RFC-001 Phase 3, now shipped). Phase 3b depends on Phase 3's pre-flight output. Phases 1 and 2 have no external blockers.
+> **Dependencies:** Phase 3 extends `em-recall.mjs` (RFC-001 Phase 3, shipped). Phase 3b depends on Phase 3's pre-flight. Phase 4 depends on Phase 2 (health report) + Phase 3 (recall output). Phases 1 (shipped) and 2 have no external blockers.
 
 ---
 
