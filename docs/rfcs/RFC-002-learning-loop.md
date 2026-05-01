@@ -423,11 +423,11 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] "needs-enforcement" vs "needs-attention" distinction correct (attention + no enforcement = needs-enforcement)
 
 **Phase 3:**
-- [ ] Recall includes `preflight_warnings` when violations exist for task-relevant patterns
-- [ ] Pre-flight surfaces violation count and last violation date
-- [ ] No pre-flight when no violations exist or task type unclear (clean output)
-- [ ] `--task-type` flag for explicit task context
-- [ ] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
+- [x] Recall includes `preflight_warnings` when violations exist for task-relevant patterns
+- [x] Pre-flight surfaces violation count and last violation date
+- [x] No pre-flight when no violations exist or task type unclear (clean output)
+- [x] `--task-type` flag for explicit task context
+- [x] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
 - [ ] SessionEnd hook prompts user for violation flagging (not instruction-only); AI may prepare draft candidates in Phase 3c (clerk model — see OQ-6)
 - [ ] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
 
