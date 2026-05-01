@@ -196,14 +196,14 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 ### Acceptance tests (per phase)
 
 **Phase 1:**
-- [ ] `violation` category accepted by `em-store.mjs`
-- [ ] `em-violation.mjs` stores structured violation with pattern linkage via `violated:<pattern_id>` tag
-- [ ] `em-violation.mjs` validates pattern exists in `patterns/_index.json` (not `tags.json`)
-- [ ] `em-violation.mjs` rejects unknown pattern_id with error listing known patterns
-- [ ] `em-violation.mjs` auto-tags with `violation`, `behavioral-pattern`, and `violated:<pattern_id>`
-- [ ] Violation episodes searchable by `--category violation` and `--tag violated:<pattern_id>`
-- [ ] bp-009 updated to reference `em-violation.mjs` and structured fields
-- [ ] `em-session-end-prompt.mjs` hook script created and functional
+- [x] `violation` category accepted by `em-store.mjs`
+- [x] `em-violation.mjs` stores structured violation with pattern linkage via `violated:<pattern_id>` tag
+- [x] `em-violation.mjs` validates pattern exists in `patterns/_index.json` (not `tags.json`)
+- [x] `em-violation.mjs` rejects unknown pattern_id with error listing known patterns
+- [x] `em-violation.mjs` auto-tags with `violation`, `behavioral-pattern`, and `violated:<pattern_id>`
+- [x] Violation episodes searchable by `--category violation` and `--tag violated:<pattern_id>`
+- [x] bp-009 updated to reference `em-violation.mjs` and structured fields
+- [x] `em-session-end-prompt.mjs` hook script created and functional
 
 **Phase 2:**
 - [ ] `em-pattern-health.mjs` counts violations per pattern within rolling time window
@@ -260,7 +260,7 @@ graph TD
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| Phase 1: Violation Tracking | `em-store.mjs`, `em-violation.mjs` (new), `em-session-end-prompt.mjs` (new), `install.mjs`, bp-009 | 17 Phase 1 tests + 51 existing = 68 passed | Shells out to em-store (no SYNC copies). execFileSync for safety. Scope validation. Pattern validation with global fallback. Bugs: #19 (cmd injection), #20 (usage msg). |
 
 ---
 

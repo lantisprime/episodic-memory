@@ -62,7 +62,7 @@
       "name": "Store rule violations as evidence for enforcement",
       "tags": ["behavioral-pattern", "discipline", "learning", "enforcement"],
       "scope": "global",
-      "version": "1.0.0"
+      "version": "2.0.0"
     },
     {
       "pattern_id": "bp-010-habits-override-knowledge",
