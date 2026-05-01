@@ -89,7 +89,6 @@ Analyzes violation history per pattern and generates health reports.
       "pattern_id": "bp-006-push-after-verify",
       "violations": 3,
       "last_violated": "2026-05-01",
-      "days_since_created": 1,
       "has_enforcement": false,
       "recommendation": "needs-enforcement"
     }
@@ -99,16 +98,22 @@ Analyzes violation history per pattern and generates health reports.
 ```
 
 **Enforcement detection:**
-- Check if a pattern's `pattern_id` tag appears in any CI workflow file (`.github/workflows/*.yml`) or hook script (`~/.claude/hooks/*.sh`)
-- Grep-based detection with heuristic: for each line containing the pattern_id, strip leading whitespace — if the line starts with `#` (YAML/shell comment), skip it. This is best-effort with known limitations: inline shell comments after code (`echo ok # bp-006`) would false-positive, and YAML anchors starting with `*` could false-negative. These edge cases are acceptable — the `--has-enforcement` override is the escape hatch.
+- Check if a pattern's `pattern_id` appears in any of these enforcement locations:
+  - `~/.claude/hooks/*.sh` — global Claude Code hooks
+  - `<project>/.claude/hooks/*.sh` — project-local Claude Code hooks
+  - `<project>/.git/hooks/*` — git hooks (no extension required; `.sample` stubs skipped)
+  - `<project>/.github/workflows/*.{yml,yaml}` — GitHub Actions workflows
+- Match uses a strict word-boundary regex around the pattern_id (negative lookaround on `[\w-]`) to avoid prefix false-positives — e.g. `bp-001-implementation-workflow` must not match inside `bp-001-implementation-workflow-v2`.
+- Heuristic: for each line containing the pattern_id, strip leading whitespace — if the line starts with `#` (YAML/shell comment), skip it. This is best-effort with known limitations: inline shell comments after code (`echo ok # bp-006`) would false-positive, and YAML anchors starting with `*` could false-negative. These edge cases are acceptable — the `--has-enforcement` override is the escape hatch.
 - `has_enforcement: true` if found in at least one enforcement file in a code context
 - Detection is best-effort — false negatives are acceptable (user can override with `--has-enforcement <pattern_id>`)
 
 **Modes:**
-- `--check` — exit 0 if all healthy, exit 1 if any need attention (for CI/hooks)
+- `--check` — exit 0 if all healthy, exit 1 if any need attention (for CI/hooks). Combine with `--pattern` to narrow the check to one pattern.
 - `--pattern <id>` — report on a single pattern
-- `--json` — full JSON output (default)
+- `--json` — full JSON output (default); mutually exclusive with `--summary`
 - `--summary` — one-line summary only
+- `--scope local|global|all` — which episode store(s) to count violations from (default `all`, matching `em-search.mjs`)
 
 **Files created:**
 - `scripts/em-pattern-health.mjs`
@@ -350,15 +355,15 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] `em-session-end-prompt.mjs` hook script created and functional
 
 **Phase 2:**
-- [ ] `em-pattern-health.mjs` counts violations per pattern within rolling time window
-- [ ] `em-pattern-health.mjs` flags patterns with 3+ violations in last 30 days (configurable)
-- [ ] `em-pattern-health.mjs` detects enforcement presence (skips comment lines starting with `#`)
-- [ ] `--check` exits 1 when patterns need attention
-- [ ] `--pattern <id>` reports on single pattern
-- [ ] `--window-days` and `--min-violations` override defaults
-- [ ] `--summary` outputs one-line summary
-- [ ] `--has-enforcement <pattern_id>` override marks pattern as enforced regardless of detection
-- [ ] "needs-enforcement" vs "needs-attention" distinction correct (attention + no enforcement = needs-enforcement)
+- [x] `em-pattern-health.mjs` counts violations per pattern within rolling time window
+- [x] `em-pattern-health.mjs` flags patterns with 3+ violations in last 30 days (configurable)
+- [x] `em-pattern-health.mjs` detects enforcement presence (skips comment lines starting with `#`)
+- [x] `--check` exits 1 when patterns need attention
+- [x] `--pattern <id>` reports on single pattern
+- [x] `--window-days` and `--min-violations` override defaults
+- [x] `--summary` outputs one-line summary
+- [x] `--has-enforcement <pattern_id>` override marks pattern as enforced regardless of detection
+- [x] "needs-enforcement" vs "needs-attention" distinction correct (attention + no enforcement = needs-enforcement)
 
 **Phase 3:**
 - [ ] Recall includes `preflight_warnings` when violations exist for task-relevant patterns
@@ -415,7 +420,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 graph TD
     RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>SHIPPED]
     P1[Phase 1: Violation Tracking<br/>SHIPPED]
-    P2[Phase 2: Pattern Refinement]
+    P2[Phase 2: Pattern Refinement<br/>SHIPPED]
     P3[Phase 3: Actionable Recall]
     P3b[Phase 3b: Checkpoint Enforcement Gate]
     P4[Phase 4: Positive Reinforcement]
@@ -436,8 +441,8 @@ graph TD
     classDef tier3 fill:#e8f5e9
     classDef enforcement fill:#ffccbc
     classDef positive fill:#e8f5e9,stroke:#4caf50
-    class RFC1P3,P1 shipped
-    class P2,P3 tier2
+    class RFC1P3,P1,P2 shipped
+    class P3 tier2
     class P3b enforcement
     class P4 positive
     class INST tier3
@@ -454,6 +459,7 @@ graph TD
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
 | Phase 1: Violation Tracking | `em-store.mjs`, `em-violation.mjs` (new), `em-session-end-prompt.mjs` (new), `install.mjs`, bp-009 | 17 Phase 1 tests + 51 existing = 68 passed | Shells out to em-store (no SYNC copies). execFileSync for safety. Scope validation. Pattern validation with global fallback. Bugs: #19 (cmd injection), #20 (usage msg). |
+| Phase 2: Pattern Refinement | `em-pattern-health.mjs` (new), RFC-002 (enforcement-paths spec amendment) | 31 Phase 2 tests + 83 existing = 114 passed | Drops `days_since_created` (fabricated). Mirrors `em-search.mjs` for tags.json fallback + local-priority dedup. Strict word-boundary regex (negative lookaround on `[\w-]`). Expanded enforcement search to 4 paths: `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/` (skip `.sample`), `<project>/.github/workflows/*.{yml,yaml}`. New flags: `--scope`, `--has-enforcement` (repeatable). `--summary`/`--json` mutually exclusive. CLI value-validation rejects `--flag --next-flag` patterns. `parseDateMs` rejects garbage tails. Race-window doc note added. Bugs: #26 (skipped 2nd opinion), #27 (E2E before review), #28 (Phase 3b coverage gap), #29 (date semantics), #30 (B2 rejected), #31 (false post-checkpoint), #32 (CLI value-stealing), #33 (parseDateMs garbage tail). |
 
 ---
 

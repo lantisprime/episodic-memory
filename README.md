@@ -176,7 +176,7 @@ Episodic-memory and user-preferences are fully independent — install either or
 | RFC | Title | Status |
 |-----|-------|--------|
 | [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted (Phases 1-3 shipped) |
-| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phase 1 shipped) |
+| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-2 shipped) |
 
 ## Scripts Reference
 
@@ -249,6 +249,29 @@ node ~/.episodic-memory/scripts/em-violation.mjs \
   --sequence "plan,code,push" \
   --correct "plan,checkpoint,code,review,push"
 ```
+
+### Pattern Health
+```bash
+# Full report — per-pattern violation counts + classification
+node ~/.episodic-memory/scripts/em-pattern-health.mjs
+
+# CI/hook gate — exit 1 if any pattern needs attention
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --check
+
+# Single pattern
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --pattern bp-001-implementation-workflow
+
+# One-line summary
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --summary
+
+# Tighter window + threshold (default: 30 days, 3 violations)
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --window-days 7 --min-violations 2
+
+# Manual override when enforcement detection misses a hook
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --has-enforcement bp-006-push-after-verify
+```
+
+Searches `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/`, and `<project>/.github/workflows/` for `pattern_id` references to detect mechanical enforcement. Patterns flagged `needs-enforcement` are violated repeatedly with no hook to stop them; `needs-attention` means an enforcement file exists but violations still occur (escalate to a human).
 
 ### Session End Prompt
 ```bash
