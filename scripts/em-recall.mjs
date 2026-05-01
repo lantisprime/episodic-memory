@@ -345,6 +345,30 @@ if (taskType) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3b activation hook (RFC-002 Phase 3 / T7): when a bp-001 violation
+// surfaces, touch .claude/.checkpoint-required in cwd. Phase 3b's
+// checkpoint-gate.sh reads this marker to gate write tools. Best-effort
+// atomic create — no locking, failure is non-fatal. Phase 3b's full SessionEnd
+// sweep will own the four-marker lifecycle; until then,
+// em-session-end-prompt.mjs sweeps this marker so it doesn't persist between
+// sessions when the gate isn't active.
+// ---------------------------------------------------------------------------
+const bp001Surfaced = preflight_warnings.some(w =>
+  w && w.type === 'violation' && w.pattern_id === 'bp-001-implementation-workflow'
+)
+if (bp001Surfaced) {
+  try {
+    const claudeDir = path.join(process.cwd(), '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    const markerPath = path.join(claudeDir, '.checkpoint-required')
+    if (!fs.existsSync(markerPath)) fs.writeFileSync(markerPath, '')
+  } catch {
+    // Best-effort: marker creation failure leaves Phase 3b gate inactive
+    // for this session. Surfacing the warning to the user is what matters.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1: Project match
 // ---------------------------------------------------------------------------
 const pass1 = new Map()

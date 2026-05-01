@@ -33,6 +33,15 @@ function loadPatternsIndex() {
   return []
 }
 
+// Best-effort cleanup of Phase 3b activation marker created by em-recall.mjs.
+// Phase 3b will own the full four-marker SessionEnd sweep; until then this
+// stops .checkpoint-required from persisting across sessions when the gate
+// isn't active. Failure is silent — marker may not exist or .claude/ may be
+// missing in some workflows.
+try {
+  fs.unlinkSync(path.join(process.cwd(), '.claude', '.checkpoint-required'))
+} catch {}
+
 const patterns = loadPatternsIndex()
 
 const knownPatterns = patterns.map(p => ({

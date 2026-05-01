@@ -429,7 +429,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] `--task-type` flag for explicit task context
 - [x] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
 - [ ] SessionEnd hook prompts user for violation flagging (not instruction-only); AI may prepare draft candidates in Phase 3c (clerk model — see OQ-6)
-- [ ] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
+- [x] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
 
 **Phase 3b:**
 - [ ] `checkpoint-gate.sh` blocks all write tools when `.checkpoint-required` exists and `.pre-checkpoint-done` is absent or empty

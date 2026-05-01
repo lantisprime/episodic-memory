@@ -4,16 +4,18 @@
  *
  * Usage: node tests/test-rfc002-phase3.mjs
  *
- * Covers acceptance tests T1-T5 for Phase 3 (commit 1):
+ * Covers acceptance tests T1-T5 + T7 for Phase 3:
  *   T1: Recall includes preflight_warnings when violations exist for task-relevant patterns
  *   T2: Pre-flight surfaces violation count and last violation date
  *   T3: No pre-flight when no violations exist or task type unclear (clean output)
  *   T4: --task-type flag for explicit task context
  *   T5: Keyword inference from git branch name as fallback
+ *   T7: em-recall.mjs touches .claude/.checkpoint-required when bp-001 violations
+ *       are surfaced via task-type-driven pre-flight; em-session-end-prompt.mjs
+ *       sweeps the marker at session end (best-effort pre-Phase-3b cleanup).
  *
  * T6 (SessionEnd hook prompt) is covered by Phase 1's shipped infrastructure
  * (em-session-end-prompt.mjs + install.mjs --install-hooks).
- * T7 (.checkpoint-required marker) ships in commit 2.
  */
 
 import fs from 'fs'
@@ -26,6 +28,7 @@ const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..',
 const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
 const VIOLATION = path.join(SCRIPTS, 'em-violation.mjs')
 const REBUILD = path.join(SCRIPTS, 'em-rebuild-index.mjs')
+const SESSION_END = path.join(SCRIPTS, 'em-session-end-prompt.mjs')
 const REPO_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..')
 
 let passed = 0
@@ -117,6 +120,16 @@ function clearStore() {
 
 function setBranch(name) {
   execSync(`git checkout -q -B ${name}`, { cwd: tmpProject })
+}
+
+const markerPath = path.join(tmpProject, '.claude', '.checkpoint-required')
+
+function clearMarker() {
+  try { fs.unlinkSync(markerPath) } catch {}
+}
+
+function sessionEnd() {
+  return execSync(`node "${SESSION_END}"`, { encoding: 'utf8', cwd: tmpProject, env })
 }
 
 // ===========================================================================
@@ -262,6 +275,66 @@ test('T5d. Explicit --task-type overrides branch inference', () => {
   assert.strictEqual(r.context.task_type, 'push')
   const ids = r.preflight_warnings.filter(w => w.type === 'violation').map(w => w.pattern_id)
   assert.deepStrictEqual(ids, ['bp-006-push-after-verify'])
+})
+
+test('T7a. Recall touches .claude/.checkpoint-required when bp-001 violation surfaces', () => {
+  clearStore()
+  clearMarker()
+  for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
+  rebuild()
+  recall('--task-type implementation --no-track')
+  assert.ok(fs.existsSync(markerPath), '.checkpoint-required should exist after bp-001 surfaces')
+})
+
+test('T7b. No marker when only non-bp-001 violations surface', () => {
+  clearStore()
+  clearMarker()
+  // Only bp-006 violations; --task-type push only surfaces bp-006, not bp-001
+  for (let d = 1; d <= 3; d++) seedViolation('bp-006-push-after-verify', d)
+  rebuild()
+  recall('--task-type push --no-track')
+  assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist when bp-001 is not surfaced')
+})
+
+test('T7c. No marker when task type is unclear (no pre-flight runs)', () => {
+  clearStore()
+  clearMarker()
+  for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
+  rebuild()
+  setBranch('main') // no keyword match
+  recall('--no-track')
+  assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist when task type unknown')
+})
+
+test('T7d. Marker creation is idempotent (re-recall does not error)', () => {
+  clearStore()
+  clearMarker()
+  for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
+  rebuild()
+  recall('--task-type implementation --no-track')
+  assert.ok(fs.existsSync(markerPath))
+  // Second recall should not throw
+  recall('--task-type implementation --no-track')
+  assert.ok(fs.existsSync(markerPath))
+})
+
+test('T7e. em-session-end-prompt.mjs sweeps the marker at session end', () => {
+  clearStore()
+  clearMarker()
+  for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
+  rebuild()
+  recall('--task-type implementation --no-track')
+  assert.ok(fs.existsSync(markerPath), 'precondition: marker should exist')
+  sessionEnd()
+  assert.ok(!fs.existsSync(markerPath), 'marker should be removed by session-end script')
+})
+
+test('T7f. SessionEnd cleanup is silent when marker does not exist', () => {
+  clearStore()
+  clearMarker()
+  // Should not throw even with no marker present
+  sessionEnd()
+  assert.ok(!fs.existsSync(markerPath))
 })
 
 // ===========================================================================
