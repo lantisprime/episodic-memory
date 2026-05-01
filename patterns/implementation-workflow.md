@@ -104,6 +104,7 @@ The planning-to-implementation transition is where violations cluster. After com
 
 ## Violation History (6 total; 5 most recent shown)
 
+- 2026-05-01 (session 3): Phase 3 implementation — skipped pre/post checkpoints, E2E testing, and bug logging; only corrected after user caught it
 - 2026-05-01 (session 2): RFC-002 status changed to accepted without review step
 - 2026-05-01 (session 2): RFC-002 text fixes (F1-F4) applied without final plan
 - 2026-05-01 (session 2): P3 fixes implemented without tests or code review

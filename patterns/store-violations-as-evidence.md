@@ -4,20 +4,25 @@ name: "Store rule violations as evidence for enforcement"
 category: decision
 tags: [behavioral-pattern, bp-009-store-violations-as-evidence, discipline, learning, enforcement]
 scope: global
-version: 1.0.0
+version: 2.0.0
 ---
 
 # Store Rule Violations as Evidence for Enforcement
 
-When a rule is violated, store the violation in episodic memory as a discovery. The violation is data — it proves the rule needs mechanical enforcement, documents the failure pattern, and prevents the same mistake in future sessions.
+When a rule is violated, store the violation using `em-violation.mjs` (category: `violation`). The violation is data — it proves the rule needs mechanical enforcement, documents the failure pattern, and prevents the same mistake in future sessions.
 
-## What to store
+## How to store
 
-- Which rule was violated
-- The exact sequence of actions that led to the violation
-- Why the violation happened (flow state, urgency, forgot, didn't apply)
-- What the correct sequence should have been
-- Whether mechanical enforcement exists and whether it would have caught this
+```bash
+node ~/.episodic-memory/scripts/em-violation.mjs \
+  --pattern <pattern_id> \
+  --summary "<what happened>" \
+  --body "<why it happened, context>" \
+  --sequence "<action1,action2,...>" \
+  --correct "<action1,action2,...>"
+```
+
+The script auto-tags with `violation`, `behavioral-pattern`, and `violated:<pattern_id>`, validates the pattern exists, and builds a structured body with "What happened", "Violation sequence", and "Correct sequence" sections.
 
 ## Why this matters
 
@@ -38,4 +43,4 @@ When a rule is violated, store the violation in episodic memory as a discovery. 
 
 ## Scope
 
-All projects, all AI tools. Store as global episodes with tags: violated rule name, `violation`, `learning`.
+All projects, all AI tools. Store as global episodes. Auto-tagged: `violation`, `behavioral-pattern`, `violated:<pattern_id>` (e.g., `violated:bp-006-push-after-verify`).

@@ -37,15 +37,15 @@ const body = flag('--body')
 const url = flag('--url')
 const scope = flag('--scope') || 'global'
 
+const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation']
+
 if (!project || !category || !summary || !body) {
   console.log(JSON.stringify({
     status: 'error',
-    message: 'Missing required args. Usage: --project <name> --category <decision|discovery|milestone|context> --tags <t1,t2> --summary <text> --body <text> [--scope local|global]'
+    message: `Missing required args. Usage: --project <name> --category <${VALID_CATEGORIES.join('|')}> --tags <t1,t2> --summary <text> --body <text> [--scope local|global]`
   }))
   process.exit(1)
 }
-
-const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson']
 if (!VALID_CATEGORIES.includes(category)) {
   console.log(JSON.stringify({
     status: 'error',

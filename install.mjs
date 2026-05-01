@@ -34,6 +34,7 @@ function flag(name) {
 
 const tool = flag('--tool')
 const projectDir = flag('--project') || process.cwd()
+const installHooks = argv.includes('--install-hooks')
 
 if (!tool) {
   console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|windsurf|all> [--project <path>]
@@ -67,6 +68,15 @@ for (const file of scriptFiles) {
   fs.chmodSync(dst, 0o755)
 }
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
+
+// 1b. Copy patterns/_index.json for global pattern validation
+const globalPatternsDir = path.join(GLOBAL_DIR, 'patterns')
+const repoPatternsIndex = path.join(REPO_DIR, 'patterns', '_index.json')
+if (fs.existsSync(repoPatternsIndex)) {
+  fs.mkdirSync(globalPatternsDir, { recursive: true })
+  fs.copyFileSync(repoPatternsIndex, path.join(globalPatternsDir, '_index.json'))
+  console.log(`Installed patterns/_index.json to ${globalPatternsDir}`)
+}
 
 // ---------------------------------------------------------------------------
 // 2. Create local .episodic-memory in target project
@@ -160,6 +170,37 @@ if (fs.existsSync(seedScript) && fs.existsSync(repoPatternsDir)) {
     }
   } catch {
     console.log('Note: behavioral pattern seeding skipped (non-fatal)')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Optional: install SessionEnd hook for violation prompting
+// ---------------------------------------------------------------------------
+if (installHooks) {
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
+  try {
+    let settings = {}
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    }
+    if (!settings.hooks) settings.hooks = {}
+    if (!settings.hooks.SessionEnd) settings.hooks.SessionEnd = []
+
+    const hookCmd = `node ${path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs')}`
+    const alreadyInstalled = settings.hooks.SessionEnd.some(h => h.command && h.command.includes('em-session-end-prompt'))
+
+    if (!alreadyInstalled) {
+      settings.hooks.SessionEnd.push({
+        command: hookCmd,
+        description: 'Prompt for behavioral pattern violations at session end'
+      })
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
+      console.log('Installed SessionEnd hook for violation prompting')
+    } else {
+      console.log('SessionEnd hook already installed')
+    }
+  } catch (e) {
+    console.log(`Note: could not install SessionEnd hook: ${e.message}`)
   }
 }
 
