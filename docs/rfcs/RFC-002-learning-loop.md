@@ -246,10 +246,25 @@ Convenience wrapper (like `em-violation.mjs`) for storing successful pattern com
 **New category: `compliance`**
 - Added to `VALID_CATEGORIES` in `em-store.mjs`
 
+**Structured success counts in `patterns/_index.json`:**
+- `em-pattern-success.mjs` and `em-violation.mjs` increment persistent counters in `_index.json` on each store:
+  ```json
+  {
+    "pattern_id": "bp-001-implementation-workflow",
+    "compliance_count": 2,
+    "violation_count": 8,
+    "last_compliance": "2026-05-01",
+    "last_violation": "2026-05-01"
+  }
+  ```
+- All-time totals — always accurate, no scanning needed
+- Atomic update (read → increment → write with temp+rename), same pattern as `access_count` in `index.jsonl`
+- `em-rebuild-index.mjs` can recompute counts from episodes if `_index.json` drifts
+
 **Extend `em-pattern-health.mjs` (Phase 2):**
-- Add compliance tracking alongside violation tracking
-- For each pattern: count `complied:<pattern_id>` tags in the same rolling window
-- New fields in health report: `compliance_count`, `compliance_rate`, `streak` (consecutive successes), `success_factors` (most common factors from episode bodies)
+- Read persistent counts from `_index.json` for all-time totals (fast, no scan)
+- Scan episodes for rolling-window counts (30-day violations/compliances)
+- New fields in health report: `compliance_count` (all-time), `compliance_count_window` (30-day), `compliance_rate`, `streak` (consecutive successes), `success_factors` (most common factors from episode bodies)
 - New recommendation: `healthy-with-data` (pattern has both violations and compliances — the data shows what works)
 
 **Extend `em-recall.mjs` (Phase 3) pre-flight:**
@@ -273,8 +288,12 @@ Convenience wrapper (like `em-violation.mjs`) for storing successful pattern com
 
 **Files modified:**
 - `scripts/em-store.mjs` — add `compliance` to `VALID_CATEGORIES`
-- `scripts/em-pattern-health.mjs` (Phase 2) — add compliance tracking fields
+- `scripts/em-violation.mjs` — increment `violation_count` in `_index.json` on store
+- `scripts/em-pattern-success.mjs` — increment `compliance_count` in `_index.json` on store
+- `scripts/em-pattern-health.mjs` (Phase 2) — read persistent counts + rolling window scan
 - `scripts/em-recall.mjs` (Phase 3) — add compliance data to pre-flight output
+- `scripts/em-rebuild-index.mjs` — recompute compliance/violation counts from episodes
+- `patterns/_index.json` — add `compliance_count`, `violation_count`, `last_compliance`, `last_violation` fields
 
 **Depends on:** Phase 2 (health report) + Phase 3 (recall pre-flight output)
 
@@ -380,6 +399,10 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] `em-recall.mjs` pre-flight surfaces both violation and compliance counts
 - [ ] Pre-flight message includes success factors when compliance data exists
 - [ ] No compliance data does not break health report or pre-flight (graceful absence)
+- [ ] `em-pattern-success.mjs` increments `compliance_count` in `_index.json` atomically
+- [ ] `em-violation.mjs` increments `violation_count` in `_index.json` atomically
+- [ ] `_index.json` counts survive rebuild (recomputed from episodes)
+- [ ] Health report shows both all-time counts (from `_index.json`) and 30-day windowed counts (from scan)
 
 ### Sequencing
 
