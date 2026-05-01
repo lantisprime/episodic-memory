@@ -521,6 +521,25 @@ node ~/.episodic-memory/scripts/em-search.mjs --category violation
 node ~/.episodic-memory/scripts/em-search.mjs --tag "violated:bp-001-implementation-workflow"
 ```
 
+### "Which patterns are being violated repeatedly?"
+
+`em-pattern-health.mjs` aggregates violation episodes by pattern within a rolling window (default 30 days) and reports which behavioral patterns are healthy, which need attention (violated despite enforcement), and which need enforcement (violated and have no hook stopping them):
+
+```bash
+# Full report
+node ~/.episodic-memory/scripts/em-pattern-health.mjs
+
+# One-line summary
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --summary
+
+# Use as a CI / SessionStart gate — exit 1 if anything needs attention
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --check
+```
+
+A pattern flagged `needs-enforcement` is being violated repeatedly *and* the script found no mechanical hook (in `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/`, or `<project>/.github/workflows/`) referencing the pattern. That's a signal to write or install a hook. `needs-attention` means a hook exists but violations are still happening — escalate to a human.
+
+If detection misses a hook (e.g., enforcement lives in an unusual file), pass `--has-enforcement <pattern_id>` to override; repeat the flag for multiple patterns.
+
 ### "I want to start fresh"
 
 ```bash
