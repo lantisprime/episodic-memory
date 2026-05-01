@@ -233,10 +233,11 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 
 **Detailed plan:** `docs/rfcs/RFC-001-phase2-plan.md`
 
-### Phase 3: Proactive Recall — NOT STARTED
+### Phase 3: Proactive Recall — IN PROGRESS
 
-**Files created:** `em-recall.mjs` (~100 lines) — multi-pass retrieval (project match, tag match, recent cross-project), output as `{ "preflight_warnings": [], "episodes": [...] }` object wrapper (designed for RFC-002 Phase 3 extension)
+**Files created:** `em-recall.mjs` (~260 lines) — multi-pass retrieval (project match, tag match, recent cross-project), output as `{ "preflight_warnings": [], "episodes": [...] }` object wrapper (designed for RFC-002 Phase 3 extension)
 **Depends on:** Phase 2 (scoring + access tracking)
+**Detailed plan:** `docs/rfcs/RFC-001-phase3-plan.md`
 
 ### Phase 4: Semantic Consolidation — NOT STARTED
 
@@ -266,10 +267,10 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] performance warnings emitted when thresholds exceeded
 
 **Phase 3:**
-- [ ] recall ranks `project`-field matches above incidental tag matches
-- [ ] recall excludes short/generic tokens from tag matching
-- [ ] recall falls back gracefully when `package.json`, git, or cwd is unavailable
-- [ ] recall updates access tracking for surfaced episodes
+- [x] recall ranks `project`-field matches above incidental tag matches
+- [x] recall excludes short/generic tokens from tag matching
+- [x] recall falls back gracefully when `package.json`, git, or cwd is unavailable
+- [x] recall updates access tracking for surfaced episodes
 
 **Phase 4:**
 - [ ] consolidate `--auto` with ≤3 clusters exits 0 silently, no lessons written
@@ -314,6 +315,7 @@ graph TD
 |---|---|---|---|
 | Phase 1: Tag Normalization + Inverted Index | `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs` | 16 E2E scenarios passed | Shipped in PR #6, commit `0e45e4d`. Bugs: #2 (P1), #3 (P2), #4 (P3), #5 (P1) — all fixed. |
 | Phase 2: Relevance Decay + Access Tracking | `em-search.mjs`, `em-rebuild-index.mjs`, `em-prune.mjs` (new) | 24 Phase 2 tests + 15 existing = 39 passed | Shipped in PR #13. Scoring default-on, access tracking, pruning, performance health checks. BPs decoupled from user-preferences, bp-007 merged into bp-006, bp-011 added. |
+| Phase 3: Proactive Recall | `em-recall.mjs` (new) | 20 Phase 3 tests + 31 existing = 51 passed | Multi-pass retrieval (project, tag, recent cross-project). Context inference from package.json, git remote, git branch, cwd. Drift detection for inlined functions. 2nd opinion review applied (8 findings). |
 
 ---
 
