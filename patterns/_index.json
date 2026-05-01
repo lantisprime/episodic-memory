@@ -47,6 +47,38 @@
       "tags": ["behavioral-pattern", "workflow", "git", "discipline"],
       "scope": "global",
       "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-007-verify-before-push",
+      "file": "verify-before-push.md",
+      "name": "Self-check Rule 18 compliance before every push",
+      "tags": ["behavioral-pattern", "workflow", "discipline", "prevention"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-008-redo-over-patch",
+      "file": "redo-over-patch.md",
+      "name": "Redo properly instead of patching retroactively",
+      "tags": ["behavioral-pattern", "discipline", "quality", "git"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-009-store-violations-as-evidence",
+      "file": "store-violations-as-evidence.md",
+      "name": "Store rule violations as evidence for enforcement",
+      "tags": ["behavioral-pattern", "discipline", "learning", "enforcement"],
+      "scope": "global",
+      "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-010-habits-override-knowledge",
+      "file": "habits-override-knowledge.md",
+      "name": "Habits override knowledge — always add mechanical enforcement",
+      "tags": ["behavioral-pattern", "discipline", "enforcement", "cognitive-bias"],
+      "scope": "global",
+      "version": "1.0.0"
     }
   ]
 }
