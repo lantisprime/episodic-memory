@@ -37,6 +37,12 @@ const summary = flag('--summary')
 const body = flag('--body')
 const scope = flag('--scope') || 'global'
 
+const VALID_SCOPES_REVISE = ['local', 'global']
+if (!VALID_SCOPES_REVISE.includes(scope)) {
+  console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES_REVISE.join(', ')}` }))
+  process.exit(1)
+}
+
 if (!originalId || !summary || !body) {
   console.log(JSON.stringify({
     status: 'error',
@@ -70,23 +76,30 @@ if (!original) {
 // ---------------------------------------------------------------------------
 let originalContent = fs.readFileSync(original.filePath, 'utf8')
 originalContent = originalContent.replace(/^status: active$/m, 'status: superseded')
-fs.writeFileSync(original.filePath, originalContent, 'utf8')
+const origTmpFile = original.filePath + '.tmp'
+fs.writeFileSync(origTmpFile, originalContent, 'utf8')
+fs.renameSync(origTmpFile, original.filePath)
 
-// Update the index entry for the original
+// Update the index entry for the original + capture origTags in one pass
 const originalIndexFile = path.join(original.dir, 'index.jsonl')
+let origTagsFromIndex = []
 if (fs.existsSync(originalIndexFile)) {
   const lines = fs.readFileSync(originalIndexFile, 'utf8').trim().split('\n').filter(Boolean)
   const updated = lines.map(line => {
     try {
       const entry = JSON.parse(line)
       if (entry.id === originalId) {
+        if (Array.isArray(entry.tags)) origTagsFromIndex = entry.tags
         entry.status = 'superseded'
         return JSON.stringify(entry)
       }
       return line
     } catch { return line }
   })
-  fs.writeFileSync(originalIndexFile, updated.join('\n') + '\n', 'utf8')
+  // Atomic write — best-effort file integrity, not full concurrency protection
+  const idxTmpFile = originalIndexFile + '.tmp'
+  fs.writeFileSync(idxTmpFile, updated.join('\n') + '\n', 'utf8')
+  fs.renameSync(idxTmpFile, originalIndexFile)
 }
 
 // ---------------------------------------------------------------------------
@@ -146,19 +159,8 @@ function updateTagsIndex(dataDir, episodeId, tags) {
 const tags = normalizeTags(tagsRaw)
 const resolvedProject = origProject || path.basename(process.cwd())
 
-// Inherit original episode's tags so merged tags appear in frontmatter, index, and tags.json
-const origLines = fs.readFileSync(path.join(original.dir, 'index.jsonl'), 'utf8').trim().split('\n').filter(Boolean)
-let origTags = []
-for (const line of origLines) {
-  try {
-    const entry = JSON.parse(line)
-    if (entry.id === originalId && Array.isArray(entry.tags)) {
-      origTags = entry.tags
-      break
-    }
-  } catch {}
-}
-const mergedTags = normalizeTags([...origTags, ...tags])
+// Inherit original episode's tags (captured during first index pass above)
+const mergedTags = normalizeTags([...origTagsFromIndex, ...tags])
 
 const frontmatter = [
   '---',

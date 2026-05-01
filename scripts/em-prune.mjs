@@ -36,6 +36,11 @@ function flag(name) {
 }
 
 const scope = flag('--scope') || 'all'
+const VALID_SCOPES_PRUNE = ['local', 'global', 'all']
+if (!VALID_SCOPES_PRUNE.includes(scope)) {
+  console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES_PRUNE.join(', ')}` }))
+  process.exit(1)
+}
 const threshold = parseFloat(flag('--threshold') || '0.15')
 const dryRun = argv.includes('--dry-run')
 const checkOnly = argv.includes('--check')
