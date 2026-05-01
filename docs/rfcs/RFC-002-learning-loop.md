@@ -175,9 +175,9 @@ Add a violation-aware recall pass:
 - Allowlist: commands writing to `.pre-checkpoint-done` pass through the gate (prevents deadlock — same pattern as plan-gate.sh's `rm` allowlist)
 - Error message is distinct from plan-gate.sh: "Checkpoint required. Print the Rule 18 pre-implementation checkpoint block to proceed."
 
-**Cleanup:**
-- `SessionEnd` hook removes both `.checkpoint-required` and `.pre-checkpoint-done`
-- Hook also detects `git push` or `gh pr create` in Bash commands and triggers cleanup (task completed)
+**Cleanup (two mechanisms):**
+- `SessionEnd` hook removes both `.checkpoint-required` and `.pre-checkpoint-done` (end-of-session sweep). Extends `em-session-end-prompt.mjs` from Phase 1 (single script, two responsibilities: violation prompt + marker cleanup).
+- `checkpoint-gate.sh` itself (PreToolUse) detects `git push` or `gh pr create` in Bash commands and removes both markers before allowing the command through (mid-session cleanup on task completion). This is the same hook that does the gating — no additional PostToolUse hook needed.
 
 **Interaction with plan-gate.sh:**
 - Two independent PreToolUse hooks, compose correctly (both block independently)
@@ -191,12 +191,13 @@ Add a violation-aware recall pass:
 - Registered via `install.mjs --install-hooks` (same opt-in pattern as SessionEnd)
 
 **Files created:**
-- `checkpoint-gate.sh` — PreToolUse hook
-- SessionStart hook script (or extension of existing hook)
+- `checkpoint-gate.sh` — PreToolUse hook (gating + push-triggered cleanup)
+- `em-session-start-recall.mjs` — SessionStart hook script invoking `em-recall.mjs`
 
 **Files modified:**
 - `scripts/em-recall.mjs` — add `.checkpoint-required` marker creation when bp-001 violations detected
-- `install.mjs` — register checkpoint-gate + SessionStart hooks with `--install-hooks`
+- `scripts/em-session-end-prompt.mjs` — extend with marker cleanup (`.checkpoint-required` + `.pre-checkpoint-done`)
+- `install.mjs` — register checkpoint-gate (PreToolUse) + SessionStart hooks with `--install-hooks`
 - `patterns/implementation-workflow.md` — add checkpoint-gate to bp-001 enforcement table (not a new pattern bp-012)
 
 **Depends on:** Phase 3 (violation-aware recall output)
@@ -279,6 +280,9 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] Error message distinguishable from plan-gate.sh
 - [ ] SessionStart hook invokes `em-recall.mjs` mechanically
 - [ ] bp-001 enforcement table updated with checkpoint-gate
+- [ ] `install.mjs --install-hooks` registers checkpoint-gate + SessionStart hooks
+- [ ] Both plan-gate and checkpoint-gate active simultaneously — user sees two distinct error messages
+- [ ] `em-session-end-prompt.mjs` cleans up markers at session end (extends Phase 1 script)
 
 ### Sequencing
 
