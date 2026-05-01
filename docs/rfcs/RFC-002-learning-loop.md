@@ -160,7 +160,7 @@ Add a violation-aware recall pass:
 
 ### Phase 3b: Checkpoint Enforcement Gate
 
-**Motivation:** Across 3+ sessions, bp-001 was violated 4+ times despite documentation in CLAUDE.md, bp-001 v2.0.0, MEMORY.md, and session handoffs. The only mechanism that ever prevented a violation was `plan-gate.sh` (a PreToolUse hook). Documentation-based enforcement fails under momentum — only mechanical gates work (bp-010).
+**Motivation:** Across 3+ sessions, bp-001 was violated 6+ times despite documentation in CLAUDE.md, bp-001 v2.0.0, MEMORY.md, and session handoffs. The only mechanism that ever prevented a violation was `plan-gate.sh` (a PreToolUse hook). Documentation-based enforcement fails under momentum — only mechanical gates work (bp-010). Two distinct failure modes observed: (1) skipping the pre-implementation checkpoint before coding starts, and (2) skipping E2E testing + bug logging before pushing — steps 8 and 9 are skipped 100% of the time because they come after the work "feels done."
 
 **New hook: `checkpoint-gate.sh`** — PreToolUse hook, follows `plan-gate.sh` architecture.
 
@@ -175,9 +175,20 @@ Add a violation-aware recall pass:
 - Allowlist: commands writing to `.pre-checkpoint-done` pass through the gate (prevents deadlock — same pattern as plan-gate.sh's `rm` allowlist)
 - Error message is distinct from plan-gate.sh: "Checkpoint required. Print the Rule 18 pre-implementation checkpoint block to proceed."
 
+**Push gate (post-implementation enforcement):**
+
+Evidence from session 3: steps 8 (E2E) and 9 (bug logging) are skipped 100% of the time because they come **after the work feels done** — momentum carries the AI from "fix findings" straight to "commit and push." The checkpoint-gate catches the start of a task; the push-gate catches the end.
+
+- `checkpoint-gate.sh` also blocks `git push` and `gh pr create` Bash commands when `.claude/.post-checkpoint-required` exists AND `.claude/.post-checkpoint-done` does not exist (or is empty)
+- `.post-checkpoint-required` is touched by `checkpoint-gate.sh` when it allows through the first code edit (the pre-checkpoint passed → implementation started → post-checkpoint will be needed)
+- `.post-checkpoint-done` must be **non-empty** — AI writes the Rule 18 post-implementation checkpoint into it
+- Allowlist: commands writing to `.post-checkpoint-done` pass through
+- Error message: "Post-implementation checkpoint required. Complete E2E testing and bug logging, then print the Rule 18 post-implementation checkpoint block to proceed."
+- This enforces bp-006 (push-after-verify) mechanically — no push until E2E + bug logging + post-checkpoint are done
+
 **Cleanup (two mechanisms):**
-- `SessionEnd` hook removes both `.checkpoint-required` and `.pre-checkpoint-done` (end-of-session sweep). Extends `em-session-end-prompt.mjs` from Phase 1 (single script, two responsibilities: violation prompt + marker cleanup).
-- `checkpoint-gate.sh` itself (PreToolUse) detects `git push` or `gh pr create` in Bash commands and removes both markers before allowing the command through (mid-session cleanup on task completion). This is the same hook that does the gating — no additional PostToolUse hook needed.
+- `SessionEnd` hook removes all markers (`.checkpoint-required`, `.pre-checkpoint-done`, `.post-checkpoint-required`, `.post-checkpoint-done`) as end-of-session sweep. Extends `em-session-end-prompt.mjs` from Phase 1 (single script, multiple responsibilities: violation prompt + marker cleanup).
+- `checkpoint-gate.sh` itself (PreToolUse) cleans up all markers when it detects and allows through a `git push` or `gh pr create` command (task completed). This is the same hook that does the gating — no additional PostToolUse hook needed.
 
 **Interaction with plan-gate.sh:**
 - Two independent PreToolUse hooks, compose correctly (both block independently)
@@ -274,15 +285,21 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] Non-empty `.pre-checkpoint-done` unblocks writes
 - [ ] Empty `.pre-checkpoint-done` (just `touch`) does NOT unblock
 - [ ] Write command to `.pre-checkpoint-done` allowed through (no deadlock)
-- [ ] SessionEnd hook cleans up both markers
-- [ ] `git push` / `gh pr create` in Bash triggers marker cleanup
+- [ ] SessionEnd hook cleans up all 4 markers
 - [ ] No gate when `.checkpoint-required` absent
 - [ ] Error message distinguishable from plan-gate.sh
 - [ ] SessionStart hook invokes `em-recall.mjs` mechanically
 - [ ] bp-001 enforcement table updated with checkpoint-gate
 - [ ] `install.mjs --install-hooks` registers checkpoint-gate + SessionStart hooks
 - [ ] Both plan-gate and checkpoint-gate active simultaneously — user sees two distinct error messages
-- [ ] `em-session-end-prompt.mjs` cleans up markers at session end (extends Phase 1 script)
+- [ ] `em-session-end-prompt.mjs` cleans up all markers at session end (extends Phase 1 script)
+- [ ] `.post-checkpoint-required` created when first code edit is allowed through pre-checkpoint gate
+- [ ] `git push` blocked when `.post-checkpoint-required` exists and `.post-checkpoint-done` absent/empty
+- [ ] Non-empty `.post-checkpoint-done` unblocks push
+- [ ] Empty `.post-checkpoint-done` does NOT unblock push
+- [ ] Write command to `.post-checkpoint-done` allowed through (no deadlock)
+- [ ] `git push` / `gh pr create` allowed through cleans up all 4 markers
+- [ ] Push-gate error message: mentions E2E, bug logging, and post-implementation checkpoint
 
 ### Sequencing
 
