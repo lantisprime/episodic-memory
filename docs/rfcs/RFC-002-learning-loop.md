@@ -283,6 +283,11 @@ Convenience wrapper (like `em-violation.mjs`) for storing successful pattern com
   ```
 - Success context is actionable: "last time this worked, you classified as light and the plan-gate was active"
 
+**Extend bp-001 with mid-task reclassification guidance:**
+- When a mid-task addition introduces new schema fields, new files to modify, or new acceptance tests beyond the original plan — pause and reclassify
+- If the task has grown from light to full, stop and run the missing steps (2nd opinion, approval, etc.) before continuing
+- This is a classification refinement, not a new pattern — add to bp-001's Scope Tiers section as a "Mid-task scope change" subsection
+
 **Files created:**
 - `scripts/em-pattern-success.mjs`
 
