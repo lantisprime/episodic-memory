@@ -180,11 +180,26 @@ Add a violation-aware recall pass:
 Evidence from session 3: steps 8 (E2E) and 9 (bug logging) are skipped 100% of the time because they come **after the work feels done** — momentum carries the AI from "fix findings" straight to "commit and push." The checkpoint-gate catches the start of a task; the push-gate catches the end.
 
 - `checkpoint-gate.sh` also blocks `git push` and `gh pr create` Bash commands when `.claude/.post-checkpoint-required` exists AND `.claude/.post-checkpoint-done` does not exist (or is empty)
-- `.post-checkpoint-required` is touched by `checkpoint-gate.sh` when it allows through the first code edit (the pre-checkpoint passed → implementation started → post-checkpoint will be needed)
+- `.post-checkpoint-required` is touched by `checkpoint-gate.sh` on every allowed write (idempotent `touch`) — no "first edit" tracking needed. The marker's existence is what matters, not creation count.
 - `.post-checkpoint-done` must be **non-empty** — AI writes the Rule 18 post-implementation checkpoint into it
 - Allowlist: commands writing to `.post-checkpoint-done` pass through
 - Error message: "Post-implementation checkpoint required. Complete E2E testing and bug logging, then print the Rule 18 post-implementation checkpoint block to proceed."
+- Command matching for `git push` / `gh pr create`: match anywhere in the command string (not just start), since these are unlikely false positives in compound statements like `git push origin main && echo done`
 - This enforces bp-006 (push-after-verify) mechanically — no push until E2E + bug logging + post-checkpoint are done
+
+**Limitations:**
+- The push-gate only works within Claude Code sessions (PreToolUse hook). Pushing from a separate terminal, Git GUI, or outside the session bypasses it. If true enforcement is needed, escalate to a Git pre-push hook or CI check — consistent with bp-010 philosophy.
+- If `git push` fails after markers are cleaned (cleanup happens before push executes in PreToolUse), the gate is disarmed for the rest of the session. Accepted as pragmatic trade-off — push failure is rare and the alternative (PostToolUse cleanup) adds significant complexity for minimal benefit.
+
+**State machine (4 markers):**
+```
+idle → .checkpoint-required (em-recall detects violations)
+     → .pre-checkpoint-done (AI prints pre-checkpoint)
+       + .post-checkpoint-required (touched on every allowed write)
+     → .post-checkpoint-done (AI prints post-checkpoint)
+     → idle (push allowed, all markers cleaned)
+```
+Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required`) are cleaned by SessionEnd sweep.
 
 **Cleanup (two mechanisms):**
 - `SessionEnd` hook removes all markers (`.checkpoint-required`, `.pre-checkpoint-done`, `.post-checkpoint-required`, `.post-checkpoint-done`) as end-of-session sweep. Extends `em-session-end-prompt.mjs` from Phase 1 (single script, multiple responsibilities: violation prompt + marker cleanup).
@@ -300,6 +315,10 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] Write command to `.post-checkpoint-done` allowed through (no deadlock)
 - [ ] `git push` / `gh pr create` allowed through cleans up all 4 markers
 - [ ] Push-gate error message: mentions E2E, bug logging, and post-implementation checkpoint
+- [ ] `gh pr create` also blocked by push-gate (not just `git push`)
+- [ ] Push failure after marker cleanup does not re-engage gate (documented limitation)
+- [ ] Orphaned markers (e.g., `.post-checkpoint-required` alone) cleaned by SessionEnd
+- [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test)
 
 ### Sequencing
 
