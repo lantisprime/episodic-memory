@@ -273,6 +273,26 @@ node ~/.episodic-memory/scripts/em-pattern-health.mjs --has-enforcement bp-006-p
 
 Searches `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/`, and `<project>/.github/workflows/` for `pattern_id` references to detect mechanical enforcement. Patterns flagged `needs-enforcement` are violated repeatedly with no hook to stop them; `needs-attention` means an enforcement file exists but violations still occur (escalate to a human).
 
+### Codex Watcher
+```bash
+# Poll project-local memory for new Codex replies (default scope: local)
+node ~/.episodic-memory/scripts/em-watch-codex.mjs
+
+# Both stores with independent cursors
+node ~/.episodic-memory/scripts/em-watch-codex.mjs --scope all
+
+# Preview without advancing the cursor
+node ~/.episodic-memory/scripts/em-watch-codex.mjs --no-update
+
+# Replay from a specific episode id
+node ~/.episodic-memory/scripts/em-watch-codex.mjs --since 20260501-073215-codex-review-of-em-watch-codex-mjs-plan-5420
+
+# Override the project root (otherwise walks up from cwd to nearest .episodic-memory/index.jsonl)
+node ~/.episodic-memory/scripts/em-watch-codex.mjs --project-root /path/to/repo
+```
+
+Returns Codex-authored episodes (tag `codex`, `codex-review`, or `codex-reply`) newer than the last seen id. Cursor lives at `<store>/state/codex-watcher.json` with independent per-scope keys. Episode ids are total-ordered (`YYYYMMDD-HHMMSS-<slug>-<hash>`), so the cursor is immune to clock skew across tools. Cursor advances only to the max id of *returned* episodes — partial-line writes during concurrent `em-store` appends are skipped and re-read on the next invocation.
+
 ### Session End Prompt
 ```bash
 node ~/.episodic-memory/scripts/em-session-end-prompt.mjs
