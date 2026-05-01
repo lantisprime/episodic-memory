@@ -1,6 +1,6 @@
 # RFC-001 Phase 3: Proactive Recall — Implementation Plan
 
-**Status:** Awaiting review (2nd opinion + Codex)
+**Status:** Revised after 2nd opinion review, awaiting Codex
 **Depends on:** Phase 2 (shipped in PR #13, #15)
 **Branch:** `feat/rfc001-phase3-proactive-recall`
 
@@ -14,28 +14,35 @@ New script `scripts/em-recall.mjs` (~120 lines) — multi-pass retrieval trigger
 
 ### Input: Context Inference (no CLI args required)
 
-Sources (all optional, graceful fallback):
-1. `package.json` → `name` field, `keywords` array
-2. `git branch --show-current` → branch name tokens (split on `/`, `-`, `_`)
+Sources for **project name** (first match wins, all optional):
+1. `package.json` → `name` field
+2. `git remote get-url origin` → parse repo name from URL (handles SSH `git@...:org/repo.git` and HTTPS `https://.../repo.git`)
 3. `basename(cwd)` → directory name
-4. Falls back to empty context if all sources unavailable
+
+Sources for **context tokens** (all merged, all optional):
+4. `package.json` → `keywords` array → fed into pass 2 tag matching (after stopword filtering)
+5. `git branch --show-current` → branch name tokens (split on `/`, `-`, `_`)
+6. Falls back to empty context if all sources unavailable (detached HEAD, bare repo, no .git → empty branch tokens)
 
 ### Processing: Three Independent Passes
 
-Each pass scores independently. Results merged by highest score (not additive).
+Indexes loaded **once** at startup (not per-pass). Each pass filters/scores the shared in-memory array independently. Results deduplicated by episode ID (highest score wins), then sorted and limited.
 
-| Pass | Source | Match type | Base weight |
+| Pass | Source | Match type | Base weight (as `textMatchScore`) |
 |------|--------|-----------|-------------|
 | 1. Project match | `project` field in `index.jsonl` | Exact match on inferred project name | 1.0 (highest) |
-| 2. Tag match | `tags.json` inverted index | Overlap with inferred context tokens | 0.7 |
-| 3. Recent cross-project | All episodes from last 7 days | Date filter only | 0.5 |
+| 2. Tag match | `tags.json` inverted index | Overlap with effective tokens (branch + keywords, stopword-filtered) | 0.7 |
+| 3. Recent cross-project | All episodes from last 7 days | Date filter, scored by `computeScore(entry, 0.5)` | 0.5 |
+
+All three passes feed their base weight into `computeScore(entry, baseWeight)` so time decay and access boost apply uniformly (per RFC: "Uses Phase 2 scoring to rank results").
 
 ### Token Collision Handling
 
 Stopword list for tag matching (pass 2):
 ```
 fix, feat, feature, bug, test, app, src, lib, dev, main, master, release,
-hotfix, docs, chore, refactor, style, ci, cd, build, user, data, add, update, new
+hotfix, docs, chore, refactor, style, ci, cd, build, user, data, add, update, new,
+phase, merge, pr, push, implement, wip, draft, rule, enforce, pattern
 ```
 
 Rules:
@@ -60,11 +67,11 @@ Rules:
 }
 ```
 
-- `preflight_warnings`: array of strings (performance, missing index, etc.)
-- `prune_suggestion`: string if prunable episodes detected, null otherwise
+- `preflight_warnings`: array of strings (performance, missing index, etc.). RFC-002 Phase 3 will extend these to structured objects with `pattern_id`, `violations_last_30d`, `last_violation`, `message`. Current string format is forward-compatible (consumers should handle both).
+- `prune_suggestion`: string if prunable episodes detected, null otherwise. Kept as separate top-level field (not inside `preflight_warnings`) — prune suggestions are operational, not behavioral warnings.
 - `context`: shows inferred context for transparency/debugging
 - Episodes include `source` and `score` fields (same as em-search)
-- Output wrapper designed for RFC-002 Phase 3 extension
+- **Reserved extension points (RFC-002):** `--task-type` CLI flag, structured `preflight_warnings`, violation-aware pre-flight pass
 
 ### CLI Flags
 
@@ -87,9 +94,11 @@ From `em-search.mjs`, inline into `em-recall.mjs` (zero-dep convention):
 - `writeBackAccessTracking()`
 - `loadIndex()`
 
+Each inlined function gets a `// SYNC: em-search.mjs:<functionName> — update both on change` comment. A drift-detection test in `test-phase3.mjs` extracts function bodies from both files and asserts they are identical.
+
 ### Prune Suggestion
 
-After collecting results, scan all loaded entries for scores below prune threshold (0.15). If any found:
+After collecting results, scan all loaded entries using `computeScore(entry, 1.0)` (query-independent, matching `em-prune.mjs` behavior) for scores below prune threshold (0.15). If any found:
 ```
 "prune_suggestion": "12 episodes below threshold. Run em-prune.mjs --dry-run to review."
 ```
@@ -99,7 +108,7 @@ After collecting results, scan all loaded entries for scores below prune thresho
 | Action | File | Lines | Description |
 |--------|------|-------|-------------|
 | CREATE | `scripts/em-recall.mjs` | ~120 | Multi-pass proactive recall |
-| CREATE | `tests/test-phase3.mjs` | ~250 | Unit tests for all acceptance criteria |
+| CREATE | `tests/test-phase3.mjs` | ~350 | Unit tests for all 20 acceptance criteria |
 | MODIFY | `docs/rfcs/RFC-001-memory-improvements.md` | ~5 | Mark Phase 3 status, update implementation table |
 
 ## Acceptance Tests (from RFC)
@@ -116,9 +125,17 @@ After collecting results, scan all loaded entries for scores below prune thresho
 7. `--project` override bypasses auto-inference
 8. Pass 3 (recent cross-project) respects `--days` window
 9. Stopword tokens filtered from branch name tokens
-10. Prune suggestion appears when low-score episodes exist
+10. Prune suggestion appears when low-score episodes exist (uses query-independent score)
 11. Performance warnings emitted when thresholds exceeded
 12. Scope validation rejects invalid values
+13. Deduplication: episode matching in multiple passes appears once with highest score
+14. `--limit` applied after merging and deduplicating all three passes
+15. `--days 0` returns no cross-project results without error
+16. Detached HEAD (empty branch output) — graceful fallback to empty branch tokens
+17. No `.git` directory — git commands fail silently, context still works from package.json/cwd
+18. `package.json` with no `name` field or `name: ""` — falls back to git remote / basename
+19. `package.json` keywords fed into pass 2 effective tokens (after stopword filtering)
+20. Inlined function drift detection: function bodies match between em-recall.mjs and em-search.mjs
 
 ## Implementation Order
 
