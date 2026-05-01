@@ -221,7 +221,8 @@ test('10. Prune suggestion for low-score episodes', () => {
 
 test('11. Performance warnings with low thresholds', () => {
   const r = recall('--project project --no-track --warn-count 1')
-  const hasCountWarning = r.preflight_warnings.some(w => w.includes('episodes in index'))
+  // RFC-002 Phase 3: preflight_warnings entries are objects { type, message, ... }
+  const hasCountWarning = r.preflight_warnings.some(w => w && w.type === 'system' && w.message && w.message.includes('episodes in index'))
   assert.ok(hasCountWarning, 'Should warn about episode count')
 })
 

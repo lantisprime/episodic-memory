@@ -194,6 +194,7 @@ if (installHooks) {
         command: hookCmd,
         description: 'Prompt for behavioral pattern violations at session end'
       })
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
       fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
       console.log('Installed SessionEnd hook for violation prompting')
     } else {

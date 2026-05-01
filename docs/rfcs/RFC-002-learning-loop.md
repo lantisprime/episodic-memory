@@ -233,6 +233,63 @@ Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required
 
 **Depends on:** Phase 3 (violation-aware recall output)
 
+### Phase 3c: Hybrid Violation Reporting (clerk model)
+
+**Motivation:** Phase 3's user-flagged-only SessionEnd prompt places high cognitive load on the user — they must remember every behavioral pattern (currently bp-001 through bp-012) and recall every micro-violation across multi-hour sessions. Empirical evidence (session 5, 2026-05-01: bp-010 P4 self-caught at rule-18 step 6, violation episode `20260501-105506`) shows AI self-flagging already works at code-review checkpoints. But self-reporting bias is real enough that AI-detected violations cannot become authoritative without human adjudication. Codex review of OQ-6 (reply `20260501-112318`) recommends a clerk model: **AI drafts candidate violations for human adjudication; only confirmed items are stored.** Do not call this auto-detection — AI is clerk, not judge.
+
+**Candidate proposal schema (NOT a change to `em-violation.mjs` storage; only the SessionEnd flow):**
+
+Each candidate has:
+- `pattern_id` — which BP was potentially violated
+- `confidence` — band: `high` / `medium` / `low` (not numeric, prevents false precision)
+- `evidence_ref` — link or reference to the specific tool calls / messages that show the violation
+- `sequence` — what AI did (draft for `em-violation --sequence`)
+- `correct_sequence` — what AI should have done (draft for `em-violation --correct`)
+- `why_it_might_be_wrong` — explicit uncertainty / counter-evidence the AI considered (epistemic humility built into the schema; mitigates self-reporting bias)
+
+**SessionEnd flow (Phase 3c):**
+
+1. AI scans session transcript → builds candidate list against `patterns/_index.json`
+2. SessionEnd hook prompts: "AI has drafted N candidate violations. Review?"
+3. For each candidate, user can: **confirm** (store as-is via `em-violation.mjs`), **edit** (modify any field, then store), **reject** (discard)
+4. **Backstop prompt** after candidate review: "Any I missed?" — user can flag violations AI didn't propose (preserves user as authoritative source)
+5. Only confirmed/edited candidates flow to `em-violation.mjs --pattern ... --sequence ... --correct ...`
+6. If candidate list is empty: backstop prompt still fires (Phase 3 baseline)
+
+**Optional: rejected-proposal telemetry**
+
+If user opts in (via flag or config), rejected candidates are stored in a separate non-violation telemetry stream (e.g., `.episodic-memory/rejected-proposals.jsonl`) for future calibration analysis — useful for measuring AI false-positive rate over time. Default: rejected candidates are discarded.
+
+**Out of scope for Phase 3c (deferred):**
+
+- **In-session detection at every rule-18 checkpoint.** Invasive, requires hooks at multiple points; defer to a future Phase 3d if SessionEnd-only proves insufficient.
+- **Auto-storage without user confirmation.** Explicitly rejected by Codex; clerk model is the contract.
+- **Numeric confidence scores.** Bands (high/medium/low) only — false precision risk.
+
+**Files created:**
+
+- `scripts/em-violation-candidates.mjs` (~80 lines) — scans session transcript for likely violations against `patterns/_index.json`, outputs candidate JSON
+
+**Files modified:**
+
+- `scripts/em-session-end-prompt.mjs` — extend with candidate-proposal flow (review → confirm/edit/reject → backstop → store confirmed via `em-violation.mjs`)
+
+**Acceptance tests:**
+
+- [ ] AI proposes candidates with all 6 schema fields populated (`pattern_id`, `confidence`, `evidence_ref`, `sequence`, `correct_sequence`, `why_it_might_be_wrong`)
+- [ ] Confirm flow stores candidate via `em-violation.mjs` unchanged
+- [ ] Edit flow lets user modify any field before storage
+- [ ] Reject flow discards candidate by default (no storage)
+- [ ] Backstop prompt fires after candidate review (every session, even with empty candidate list)
+- [ ] Confidence bands restricted to `high`/`medium`/`low` (no numeric scores)
+- [ ] User-added violations from backstop prompt also flow through `em-violation.mjs`
+- [ ] Optional telemetry opt-in writes to separate stream, never to main violation index
+- [ ] Rejected-with-telemetry flow does not create violation episode (preserves index integrity)
+
+**Depends on:** Phase 3 (user-flagged baseline must exist; Phase 3c is an upgrade, not a replacement). Independent of Phase 3b — can ship before or after the checkpoint-gate.
+
+**Sequencing:** Ship Phase 3 with user-flagged baseline first. Phase 3c is post-Phase-3. Could ship before or after Phase 4.
+
 ### Phase 4: Positive Reinforcement
 
 **Motivation:** RFC-002 Phases 1-3b only track failures. Session 3 proved that compliance also produces actionable data — the successful light-scope doc update revealed that correct classification + plan-gate = clean execution. A system that only surfaces violations is punitive; one that also surfaces what worked is constructive and helps the AI replicate success conditions.
@@ -366,13 +423,13 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] "needs-enforcement" vs "needs-attention" distinction correct (attention + no enforcement = needs-enforcement)
 
 **Phase 3:**
-- [ ] Recall includes `preflight_warnings` when violations exist for task-relevant patterns
-- [ ] Pre-flight surfaces violation count and last violation date
-- [ ] No pre-flight when no violations exist or task type unclear (clean output)
-- [ ] `--task-type` flag for explicit task context
-- [ ] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
-- [ ] SessionEnd hook prompts user for violation flagging (not instruction-only)
-- [ ] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
+- [x] Recall includes `preflight_warnings` when violations exist for task-relevant patterns
+- [x] Pre-flight surfaces violation count and last violation date
+- [x] No pre-flight when no violations exist or task type unclear (clean output)
+- [x] `--task-type` flag for explicit task context
+- [x] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
+- [x] SessionEnd hook prompts user for violation flagging (not instruction-only); AI may prepare draft candidates in Phase 3c (clerk model — see OQ-6)
+- [x] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
 
 **Phase 3b:**
 - [ ] `checkpoint-gate.sh` blocks all write tools when `.checkpoint-required` exists and `.pre-checkpoint-done` is absent or empty
@@ -536,6 +593,7 @@ P3s deferred to implementation (stored in episodic memory): F-9 (error UX), F-10
 | OQ-3 | How should `violated_pattern` be stored? Tags vs frontmatter field. | — | resolved — tag-based (e.g., `violated:bp-006-push-after-verify`); queryable via existing `tags.json`, no schema extension needed; structured fields like `violation_sequence` stored as markdown sections in episode body |
 | OQ-4 | Should pre-flight warnings be suppressible? Deferred to after Phase 3 ships — implement without `--no-preflight` first, gather user feedback, add flag in a follow-up if needed. | — | open (deferred) |
 | OQ-5 | Should the `SessionEnd` hook for violation prompting be part of the episodic-memory installer, or part of the user-preferences installer? | — | resolved — episodic-memory installer; the hook calls `em-violation.mjs` which is an episodic-memory script; aligns with bp-005 (enforcement lives in consuming repos) |
+| OQ-6 | Should violation reporting be user-flagged (current Phase 3 spec) or hybrid AI-flagged + user-confirmed? Cognitive load on user is high; AI self-flagging already works in practice (session 5, 2026-05-01: bp-010 P4 self-caught at rule-18 step 6 without user prompting). Proposed hybrid: AI scans session → presents structured list with confidence/reasoning → user confirms/edits/rejects → backstop prompt for AI-missed violations. Mechanics (em-violation.mjs, marker activation, acceptance tests) unchanged; only the SessionEnd prompt flow changes. | — | resolved with amendment — Codex verdict (reply `20260501-112318-codex-review-rfc-002-oq-6-hybrid-violati-a940`): cognitive-load concern is real; self-reporting bias is also real. Adopt **clerk model** (AI drafts candidates with `pattern_id`/`confidence`/`evidence_ref`/`sequence`/`correct_sequence`/`why_it_might_be_wrong`; user confirms/edits/rejects; backstop prompt for missed items). Ship Phase 3 with user-flagged baseline; clerk model in Phase 3c (specced below). Don't call it "auto-detection" — AI is clerk, not judge. |
 
 ---
 

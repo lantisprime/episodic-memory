@@ -41,10 +41,17 @@ const days = parseInt(flag('--days') || '7', 10)
 const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
 const warnCount = parseInt(flag('--warn-count') || '500', 10)
+const taskTypeFlag = flag('--task-type')
 
 const VALID_SCOPES = ['local', 'global', 'all']
 if (!VALID_SCOPES.includes(scope)) {
   console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES.join(', ')}` }))
+  process.exit(1)
+}
+
+const VALID_TASK_TYPES = ['implementation', 'push', 'rule', 'general']
+if (taskTypeFlag !== undefined && !VALID_TASK_TYPES.includes(taskTypeFlag)) {
+  console.log(JSON.stringify({ status: 'error', message: `Invalid --task-type "${taskTypeFlag}". Must be one of: ${VALID_TASK_TYPES.join(', ')}` }))
   process.exit(1)
 }
 
@@ -134,6 +141,96 @@ function writeBackAccessTracking(results) {
       // Access tracking is best-effort — skip silently on failure
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Task-type → relevant pattern_ids (RFC-002 Phase 3)
+// Pre-flight surfaces violations of these patterns when task type is known.
+// Empty list means no violation pre-flight runs (e.g. task-type=general).
+// ---------------------------------------------------------------------------
+const TASK_TYPE_PATTERNS = {
+  implementation: ['bp-001-implementation-workflow', 'bp-006-push-after-verify'],
+  push: ['bp-006-push-after-verify'],
+  rule: ['bp-010-habits-override-knowledge'],
+  general: []
+}
+
+// ---------------------------------------------------------------------------
+// Branch token → task type keyword inference. First match wins. No match
+// means task type stays unknown and no pre-flight runs.
+// ---------------------------------------------------------------------------
+const BRANCH_TYPE_KEYWORDS = {
+  implementation: ['implement', 'build', 'feature', 'phase', 'feat'],
+  push: ['push', 'merge', 'pr', 'release'],
+  rule: ['rule', 'enforce', 'pattern']
+}
+
+function inferTaskType(branchTokens) {
+  if (!branchTokens || branchTokens.length === 0) return null
+  for (const type of ['implementation', 'push', 'rule']) {
+    const keywords = BRANCH_TYPE_KEYWORDS[type]
+    if (branchTokens.some(t => keywords.includes(t))) return type
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Load patterns/_index.json (project-local first, then global install).
+// Mirrors em-violation.mjs:loadPatternsIndex.
+// ---------------------------------------------------------------------------
+function loadPatternsIndex() {
+  const candidates = [
+    path.join(process.cwd(), 'patterns', '_index.json'),
+    path.join(os.homedir(), '.episodic-memory', 'patterns', '_index.json')
+  ]
+  for (const p of candidates) {
+    try {
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'))
+      if (data.patterns && Array.isArray(data.patterns)) return data.patterns
+    } catch {}
+  }
+  return []
+}
+
+// ---------------------------------------------------------------------------
+// Violation pre-flight: scan activeEntries for violations of patterns
+// relevant to the task type within the last 30 days. Returns warning objects.
+// ---------------------------------------------------------------------------
+function runViolationPreflight(activeEntries, taskType, patterns) {
+  if (!taskType) return []
+  const relevantIds = TASK_TYPE_PATTERNS[taskType] || []
+  if (relevantIds.length === 0) return []
+
+  const validIds = new Set(patterns.map(p => p.pattern_id))
+  const filterIds = relevantIds.filter(id => validIds.has(id))
+  if (filterIds.length === 0) return []
+
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - 30)
+  const cutoffStr = cutoff.toISOString().slice(0, 10)
+
+  const warnings = []
+  for (const patternId of filterIds) {
+    const violationTag = `violated:${patternId}`
+    const matching = activeEntries.filter(e =>
+      e.category === 'violation' &&
+      Array.isArray(e.tags) &&
+      e.tags.includes(violationTag) &&
+      typeof e.date === 'string' &&
+      e.date >= cutoffStr
+    )
+    if (matching.length === 0) continue
+    matching.sort((a, b) => b.date.localeCompare(a.date))
+    const last = matching[0].date
+    warnings.push({
+      type: 'violation',
+      pattern_id: patternId,
+      violations_last_30d: matching.length,
+      last_violation: last,
+      message: `${patternId} violated ${matching.length} time${matching.length === 1 ? '' : 's'} in last 30 days (last: ${last}). Remember to follow this pattern before proceeding.`
+    })
+  }
+  return warnings
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +330,45 @@ const context = inferContext()
 const preflight_warnings = []
 
 // ---------------------------------------------------------------------------
+// Task type: explicit flag wins; otherwise infer from branch tokens.
+// `null` means task type is unclear → no violation pre-flight runs (T3).
+// ---------------------------------------------------------------------------
+const taskType = taskTypeFlag || inferTaskType(context.branch_tokens)
+
+// ---------------------------------------------------------------------------
+// Violation pre-flight (RFC-002 Phase 3 / T1-T5)
+// ---------------------------------------------------------------------------
+if (taskType) {
+  const patterns = loadPatternsIndex()
+  const violationWarnings = runViolationPreflight(activeEntries, taskType, patterns)
+  preflight_warnings.push(...violationWarnings)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b activation hook (RFC-002 Phase 3 / T7): when a bp-001 violation
+// surfaces, touch .claude/.checkpoint-required in cwd. Phase 3b's
+// checkpoint-gate.sh reads this marker to gate write tools. Best-effort
+// atomic create — no locking, failure is non-fatal. Phase 3b's full SessionEnd
+// sweep will own the four-marker lifecycle; until then,
+// em-session-end-prompt.mjs sweeps this marker so it doesn't persist between
+// sessions when the gate isn't active.
+// ---------------------------------------------------------------------------
+const bp001Surfaced = preflight_warnings.some(w =>
+  w && w.type === 'violation' && w.pattern_id === 'bp-001-implementation-workflow'
+)
+if (bp001Surfaced) {
+  try {
+    const claudeDir = path.join(process.cwd(), '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    const markerPath = path.join(claudeDir, '.checkpoint-required')
+    if (!fs.existsSync(markerPath)) fs.writeFileSync(markerPath, '')
+  } catch {
+    // Best-effort: marker creation failure leaves Phase 3b gate inactive
+    // for this session. Surfacing the warning to the user is what matters.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Pass 1: Project match
 // ---------------------------------------------------------------------------
 const pass1 = new Map()
@@ -275,7 +411,7 @@ if (context.effective_tokens.length > 0) {
 
   if (tagsIndexMissing) {
     // Fallback: linear scan
-    preflight_warnings.push('tags.json missing or corrupt in one or more stores. Run em-rebuild-index.mjs to regenerate.')
+    preflight_warnings.push({ type: 'system', message: 'tags.json missing or corrupt in one or more stores. Run em-rebuild-index.mjs to regenerate.' })
     for (const e of activeEntries) {
       if (e.tags) {
         const eTags = e.tags.map(t => t.toLowerCase().trim())
@@ -362,7 +498,8 @@ const result = {
   context: {
     project: context.project,
     branch_tokens: context.branch_tokens,
-    effective_tokens: context.effective_tokens
+    effective_tokens: context.effective_tokens,
+    task_type: taskType
   },
   count: episodes.length,
   episodes,
@@ -373,10 +510,10 @@ const result = {
 // Performance health check
 const elapsed = Date.now() - recallStart
 if (elapsed > warnTimeMs) {
-  preflight_warnings.push(`Recall took ${elapsed}ms across ${totalEpisodeCount} episodes. Consider running em-prune.mjs to archive stale episodes.`)
+  preflight_warnings.push({ type: 'system', message: `Recall took ${elapsed}ms across ${totalEpisodeCount} episodes. Consider running em-prune.mjs to archive stale episodes.` })
 }
 if (totalEpisodeCount > warnCount) {
-  preflight_warnings.push(`${totalEpisodeCount} episodes in index. Performance may degrade. Run em-prune.mjs --dry-run to check for prunable episodes.`)
+  preflight_warnings.push({ type: 'system', message: `${totalEpisodeCount} episodes in index. Performance may degrade. Run em-prune.mjs --dry-run to check for prunable episodes.` })
 }
 
 console.log(JSON.stringify(result))
