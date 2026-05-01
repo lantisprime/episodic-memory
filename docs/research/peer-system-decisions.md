@@ -45,7 +45,7 @@ One-liner each. All survived no further review.
 **Acceptance shape (sketch):**
 - Smoke baseline (before Phase 4): ~10-20 synthetic episodes + queries with ground-truth relevance, precision@k for em-recall, "do not regress" CI step.
 - Full benchmark (after Phase 4): expanded corpus, recall@k, regression CI gate.
-**GH issue:** Filed as tracking issue — implementation deferred but baseline must land before Phase 4.
+**GH issue:** [#55](https://github.com/lantisprime/episodic-memory/issues/55) — implementation deferred but baseline must land before Phase 4.
 
 ### 2. Staleness detection — adopt-later
 
@@ -60,16 +60,16 @@ One-liner each. All survived no further review.
 **Source:** MemPalace, agentmemory, Supermemory, doobidoo, memento-mcp, memorix all converge on MCP.
 **Status:** Real residual gap, not vibes (Codex 2026-05-01 sharpened the framing). Phase 3b's SessionStart only closes start-of-session recall for *Claude-hooked* installs — it does NOT close (i) mid-conversation recall, (ii) Codex/Cursor/Windsurf first-class tool discovery, (iii) cross-tool handoff friction. See [pending-analysis.md](../rfcs/pending-analysis.md#mcp-surface-vs-file-based-install--convergent-peer-signal-vs-design-differentiator) for the full discussion.
 **Direction:** Keep full MCP rewrite deferred (high cost, weak observed need at that scale). File instrument-first issue NOW: telemetry on em-recall invocations to detect "would-have-helped" misses, plus thin-MCP-wrapper exploration around existing em-* scripts. Codex's identity take: a thin wrapper preserves the enforcement-loop differentiation; a full rewrite would blur it.
-**GH issue:** Filed as tracking issue (instrument + spike thin wrapper).
+**GH issue:** [#56](https://github.com/lantisprime/episodic-memory/issues/56) — instrument + spike thin wrapper.
 
 ## GH issues filed
 
 **Two**, both tracking with deferred implementation (Codex 2026-05-01 outside-objection: "zero GH issues makes adopt-later easy to forget — file lightweight tracking even if implementation deferred"):
 
-1. Retrieval-quality smoke baseline before Phase 4 — corpus, precision@k harness, "do not regress" CI step.
-2. MCP surface instrument-first + thin-wrapper exploration — em-recall invocation telemetry; spike thin stdio MCP wrapper around em-recall/em-store/em-violation; decide after data.
+1. [#55](https://github.com/lantisprime/episodic-memory/issues/55) — Retrieval-quality smoke baseline before Phase 4 (corpus, precision@k harness, "do not regress" CI step).
+2. [#56](https://github.com/lantisprime/episodic-memory/issues/56) — MCP surface instrument-first + thin-wrapper exploration (em-recall invocation telemetry; spike thin stdio MCP wrapper around em-recall/em-store/em-violation; decide after data).
 
-Issue numbers added once filed.
+Plus separately filed during this work: [#57](https://github.com/lantisprime/episodic-memory/issues/57) — em-* scripts silently target wrong `.episodic-memory/` from worktree cwd (caught as bp-010 violation mid-synthesis).
 
 ## Cheap instrumentations (Codex follow-up, 2026-05-01)
 
