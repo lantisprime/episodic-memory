@@ -5,7 +5,8 @@
  * Usage:
  *   node em-rebuild-index.mjs [--scope local|global|all]
  *
- * Reads all .md files, extracts frontmatter, writes fresh index.jsonl.
+ * Reads all .md files in episodes/ (ignores archived/), extracts frontmatter,
+ * writes fresh index.jsonl. Preserves access_count and last_accessed from old index.
  * Outputs JSON: { status, rebuilt: [{ scope, count }] }
  */
 
@@ -58,7 +59,27 @@ function parseFrontmatter(content) {
   return data
 }
 
+/**
+ * Load old index.jsonl into a map keyed by episode ID.
+ * Used to carry forward access_count and last_accessed during rebuild.
+ */
+function loadOldIndex(dataDir) {
+  const indexFile = path.join(dataDir, 'index.jsonl')
+  const map = new Map()
+  try {
+    const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line)
+        if (entry.id) map.set(entry.id, entry)
+      } catch {}
+    }
+  } catch {}
+  return map
+}
+
 function rebuildDir(dataDir, label) {
+  // Scans episodes/ only — archived/ is intentionally ignored
   const episodesDir = path.join(dataDir, 'episodes')
   const indexFile = path.join(dataDir, 'index.jsonl')
 
@@ -67,6 +88,9 @@ function rebuildDir(dataDir, label) {
     fs.writeFileSync(indexFile, '', 'utf8')
     return { scope: label, count: 0 }
   }
+
+  // Load old index to preserve access metadata
+  const oldIndex = loadOldIndex(dataDir)
 
   const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort()
   const entries = []
@@ -78,6 +102,12 @@ function rebuildDir(dataDir, label) {
     const fm = parseFrontmatter(content)
     if (!fm || !fm.id) continue
     const normalizedTags = normalizeTags(Array.isArray(fm.tags) ? fm.tags : [])
+
+    // Carry forward access metadata from old index, default to 0/null for new entries
+    const old = oldIndex.get(fm.id)
+    const accessCount = old ? (old.access_count || 0) : 0
+    const lastAccessed = old ? (old.last_accessed || null) : null
+
     entries.push(JSON.stringify({
       id: fm.id,
       date: fm.date,
@@ -88,6 +118,8 @@ function rebuildDir(dataDir, label) {
       supersedes: fm.supersedes || null,
       tags: normalizedTags,
       summary: fm.summary,
+      access_count: accessCount,
+      last_accessed: lastAccessed,
       ...(fm.url ? { url: fm.url, fetched: fm.fetched || fm.date } : {})
     }))
     for (const tag of normalizedTags) {

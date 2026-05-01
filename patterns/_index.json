@@ -71,6 +71,14 @@
       "tags": ["behavioral-pattern", "discipline", "enforcement", "cognitive-bias"],
       "scope": "global",
       "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-011-local-before-git",
+      "file": "local-before-git.md",
+      "name": "Local files first, git only for reviewed content",
+      "tags": ["behavioral-pattern", "workflow", "git", "review", "discipline"],
+      "scope": "global",
+      "version": "1.0.0"
     }
   ]
 }

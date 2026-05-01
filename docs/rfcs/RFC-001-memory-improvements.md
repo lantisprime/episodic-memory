@@ -211,7 +211,39 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 
 ## Implementation plan
 
-> Populate this section when the RFC moves to `accepted`. Use phase sub-headings with concrete file changes, before/after sketches, and dependency notes.
+### Phase 1: Tag Normalization + Inverted Index — SHIPPED
+
+**Files modified:** `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs`
+**Shipped:** PR #6, commit `0e45e4d`. Bugs #2–#5 found and fixed.
+
+### Phase 2: Relevance Decay + Access Tracking — IN PROGRESS
+
+**Files modified:**
+- `em-search.mjs` (~227→~340 lines) — scoring formula, `text_match` tiers (1.0 exact/0.7 substring/0.4 body-only), access tracking write-back with dual-scope handling (local + global `index.jsonl` independently), `--no-score`/`--no-track`/`--warn-time-ms`/`--warn-count` flags, performance health check
+- `em-rebuild-index.mjs` (~115→~140 lines) — load old index before rebuild, carry forward `access_count`/`last_accessed` for known IDs, default `0`/`null` for new
+
+**Files created:**
+- `em-prune.mjs` (~120 lines) — query-independent prune score, `--scope`/`--threshold`/`--dry-run`/`--check` flags, append to `archived-index.jsonl`, move `.md` to `archived/`
+
+**Key design decisions:**
+- `computeScore` defaults missing `access_count` to 0 (no `em-store.mjs` change needed)
+- Write-back re-reads `index.jsonl` before writing to narrow race window with concurrent appends; documented as best-effort
+- Score ALL results before applying `limit` (replaces date-based sort)
+- Health check for `em-recall.mjs` deferred to Phase 3 (script doesn't exist yet)
+
+**Detailed plan:** `docs/rfcs/RFC-001-phase2-plan.md`
+
+### Phase 3: Proactive Recall — NOT STARTED
+
+**Files created:** `em-recall.mjs` (~100 lines) — multi-pass retrieval (project match, tag match, recent cross-project), output as `{ "preflight_warnings": [], "episodes": [...] }` object wrapper (designed for RFC-002 Phase 3 extension)
+**Depends on:** Phase 2 (scoring + access tracking)
+
+### Phase 4: Semantic Consolidation — NOT STARTED
+
+**Files created:** `em-consolidate.mjs` (~150 lines) — Jaccard clustering, `lesson` category, `--auto`/`--dry-run`/`--max-episodes` modes
+**Files modified:** `em-store.mjs` (add `lesson` to VALID_CATEGORIES — coordinate with RFC-002 `violation` addition)
+**Depends on:** Phase 2 (scoring for cluster ranking)
+**Deferred details:** Hook/config/instruction integration to be specified when Phase 4 begins
 
 ### Acceptance tests (per phase)
 
@@ -286,7 +318,7 @@ graph TD
 
 ## Related RFCs
 
-- _none — this is the first RFC for the episodic-memory project_
+- RFC-002 — Learning Loop (Phase 3 extends `em-recall.mjs` built in this RFC's Phase 3)
 
 ---
 
