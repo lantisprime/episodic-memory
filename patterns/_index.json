@@ -31,6 +31,14 @@
       "tags": ["behavioral-pattern", "token-efficiency", "index"],
       "scope": "global",
       "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-005-enforcement-as-templates",
+      "file": "enforcement-as-templates.md",
+      "name": "Enforcement lives in consuming repos, not rule repos",
+      "tags": ["behavioral-pattern", "enforcement", "ci", "templates"],
+      "scope": "global",
+      "version": "1.0.0"
     }
   ]
 }
