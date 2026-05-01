@@ -146,6 +146,16 @@ The system ships with behavioral patterns — reusable lessons learned from real
 
 Patterns are seeded into the global episode store via `em-seed-patterns.mjs` so they surface during normal search and recall. See `patterns/TEMPLATE.md` to create new ones.
 
+### Enforcement
+
+Behavioral patterns are documentation — they tell AI assistants **what** to follow, but don't mechanically **prevent** violations. For mechanical enforcement (hooks, CI checks, PR templates), see [user-preferences](https://github.com/lantisprime/user-preferences) as an optional companion. It provides:
+
+- **Pre-tool hooks** (e.g., `plan-gate.sh`) that block writes during the planning phase
+- **CI workflow templates** for status checks that enforce the implementation workflow
+- **PR templates** with checklists mapped to behavioral patterns
+
+Episodic-memory and user-preferences are fully independent — install either or both.
+
 ## RFCs
 
 | RFC | Title | Status |
