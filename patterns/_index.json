@@ -44,17 +44,9 @@
       "pattern_id": "bp-006-push-after-verify",
       "file": "push-after-verify.md",
       "name": "Push only after all verification steps complete",
-      "tags": ["behavioral-pattern", "workflow", "git", "discipline"],
+      "tags": ["behavioral-pattern", "workflow", "git", "discipline", "prevention"],
       "scope": "global",
-      "version": "1.0.0"
-    },
-    {
-      "pattern_id": "bp-007-verify-before-push",
-      "file": "verify-before-push.md",
-      "name": "Self-check Rule 18 compliance before every push",
-      "tags": ["behavioral-pattern", "workflow", "discipline", "prevention"],
-      "scope": "global",
-      "version": "1.0.0"
+      "version": "1.1.0"
     },
     {
       "pattern_id": "bp-008-redo-over-patch",

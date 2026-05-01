@@ -9,14 +9,14 @@ version: 1.0.0
 
 # Enforcement Lives in Consuming Repos
 
-When a rule repo (like user-preferences) defines behavioral rules, the enforcement mechanisms (CI workflows, hooks, PR templates) should ship as **copyable templates**, not as forced installations. Each consuming repo decides what to adopt.
+When a shared rule source defines behavioral rules, the enforcement mechanisms (CI workflows, hooks, PR templates) should ship as **copyable templates**, not as forced installations. Each consuming repo decides what to adopt.
 
 ## The split
 
 | Layer | Where | What |
 |-------|-------|------|
-| Rule definition | Rule repo (user-preferences) | The rule text and rationale |
-| Reference templates | Rule repo (user-preferences) | CI workflow, PR template, hook scripts — as templates |
+| Rule definition | Rule source | The rule text and rationale |
+| Reference templates | Rule source | CI workflow, PR template, hook scripts — as templates |
 | Actual enforcement | Consuming repo | Each project copies and adapts the templates it needs |
 
 ## Why

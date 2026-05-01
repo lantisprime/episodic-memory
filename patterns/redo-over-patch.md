@@ -39,4 +39,4 @@ All projects, all AI tools. Applies to process violations, not code bugs. Code b
 
 ## Origin
 
-PR #7 was patched retroactively. PR #9 was redone properly. PR #9 was cleaner: single commit, no fix-up chain, full Rule 18 compliance.
+PR #7 was patched retroactively. PR #9 was redone properly. PR #9 was cleaner: single commit, no fix-up chain, full implementation workflow compliance (bp-001).

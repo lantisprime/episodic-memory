@@ -23,7 +23,7 @@ When a rule is violated, store the violation in episodic memory as a discovery. 
 
 - A rule that is only documented but never enforced will be violated. The violation proves enforcement is needed.
 - Future sessions can search for past violations of the same rule and preemptively avoid them.
-- Patterns of violations across sessions reveal systemic issues (e.g., "Rule 18 is always violated on the first implementation after planning" → add a checkpoint between planning and implementation).
+- Patterns of violations across sessions reveal systemic issues (e.g., "The implementation workflow (bp-001) is always violated on the first implementation after planning" → add a checkpoint between planning and implementation).
 
 ## Detection triggers
 
@@ -33,7 +33,7 @@ When a rule is violated, store the violation in episodic memory as a discovery. 
 
 ## What NOT to store
 
-- Intentional exemptions (e.g., `[skip-rule18]` for docs-only changes)
+- Intentional exemptions (e.g., `[skip-bp-001]` for docs-only changes)
 - Rules that were followed correctly (that's normal, not noteworthy)
 
 ## Scope

@@ -94,11 +94,18 @@ The installer:
 ~/.episodic-memory/           # Global (cross-project)
 ├── scripts/                  # Installed scripts
 ├── episodes/                 # Global episode .md files
-└── index.jsonl               # Global index
+├── index.jsonl               # Global index
+└── tags.json                 # Inverted tag index
 
 <project>/.episodic-memory/   # Per-project (local)
 ├── episodes/                 # Project-local episode .md files
-└── index.jsonl               # Project-local index
+├── index.jsonl               # Project-local index
+└── tags.json                 # Inverted tag index
+
+patterns/                     # Behavioral patterns (shipped with repo)
+├── _index.json               # Machine-readable pattern registry
+├── TEMPLATE.md               # Template for new patterns
+└── *.md                      # Individual pattern files
 ```
 
 All episodes go to the **global common store by default**, making them available across all projects. Use `--scope local` for decisions private to one project. Scripts search **both local and global** by default.
@@ -120,6 +127,31 @@ node ~/.episodic-memory/scripts/em-revise.mjs \
 # View the full revision history
 node ~/.episodic-memory/scripts/em-search.mjs --history <episode-id> --full
 ```
+
+## Behavioral Patterns
+
+The system ships with behavioral patterns — reusable lessons learned from real sessions that AI assistants can recall proactively.
+
+| ID | Pattern |
+|----|---------|
+| bp-001 | Standard implementation workflow |
+| bp-002 | Proactive milestone storage |
+| bp-003 | Promote project-specific best practices to global memory |
+| bp-004 | Machine-readable index for token efficiency |
+| bp-005 | Enforcement lives in consuming repos, not rule repos |
+| bp-006 | Push only after all verification steps complete |
+| bp-008 | Redo properly instead of patching retroactively |
+| bp-009 | Store rule violations as evidence for enforcement |
+| bp-010 | Habits override knowledge — always add mechanical enforcement |
+
+Patterns are seeded into the global episode store via `em-seed-patterns.mjs` so they surface during normal search and recall. See `patterns/TEMPLATE.md` to create new ones.
+
+## RFCs
+
+| RFC | Title | Status |
+|-----|-------|--------|
+| [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted |
+| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Draft |
 
 ## Scripts Reference
 
@@ -157,6 +189,16 @@ node ~/.episodic-memory/scripts/em-search.mjs --include-superseded
 ### List
 ```bash
 node ~/.episodic-memory/scripts/em-list.mjs --project my-project --limit 5
+```
+
+### Check Stale
+```bash
+node ~/.episodic-memory/scripts/em-check-stale.mjs --project my-project
+```
+
+### Seed Patterns
+```bash
+node ~/.episodic-memory/scripts/em-seed-patterns.mjs
 ```
 
 ### Rebuild Index

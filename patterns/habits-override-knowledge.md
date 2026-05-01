@@ -14,7 +14,7 @@ When a rule is important enough to define, add a mechanical enforcement mechanis
 ## The evidence
 
 On 2026-05-01, an AI agent:
-- Wrote Rule 18 (implementation workflow)
+- Wrote the implementation workflow pattern (bp-001)
 - Got it reviewed by two independent AIs
 - Stored it as a behavioral pattern
 - Started building CI enforcement for it
@@ -28,9 +28,9 @@ For every documented rule, ask: "What mechanically prevents this from being viol
 
 | Enforcement type | Strength | Example |
 |------------------|----------|---------|
-| Documentation only | Weak — skipped under pressure | AGENT-RULES.md |
+| Documentation only | Weak — skipped under pressure | Docs-only rule definitions |
 | Behavioral pattern in memory | Medium — surfaced at session start but can be ignored | bp-001 in episodic memory |
-| PR template checklist | Medium — visible but not blocking | Rule 18 checklist |
+| PR template checklist | Medium — visible but not blocking | bp-001 checklist |
 | CI status check | Strong — blocks merge | rule18-check.yml |
 | Pre-commit/pre-push hook | Strong — blocks locally | plan-gate.sh |
 
@@ -40,7 +40,7 @@ Always aim for at least one "strong" enforcement for important rules.
 
 - Writing a new rule in documentation
 - Saying "from now on, always do X" — that needs enforcement, not just a note
-- Reviewing AGENT-RULES and finding rules with no CI or hook backing them
+- Reviewing documented rules and finding ones with no CI or hook backing them
 
 ## Scope
 
