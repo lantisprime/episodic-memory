@@ -7,8 +7,11 @@
  *                      [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>]
  *                      [--scope local|global|all] [--include-superseded]
  *                      [--history <id>] [--full]
+ *                      [--no-score] [--no-track]
+ *                      [--warn-time-ms <n>] [--warn-count <n>]
  *
- * By default, searches local then global (scope=all) and hides superseded episodes.
+ * By default, searches local then global (scope=all), hides superseded episodes,
+ * scores results by relevance, and tracks access.
  * Outputs JSON: { status, count, episodes: [...] }
  */
 
@@ -40,6 +43,12 @@ const scope = flag('--scope') || 'all'
 const full = argv.includes('--full')
 const includeSuperseded = argv.includes('--include-superseded')
 const historyId = flag('--history')
+const noScore = argv.includes('--no-score')
+const noTrack = argv.includes('--no-track')
+const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
+const warnCount = parseInt(flag('--warn-count') || '500', 10)
+
+const searchStart = Date.now()
 
 function normalizeTags(raw) {
   if (!raw) return []
@@ -55,6 +64,58 @@ function loadTagsIndex(dataDir) {
     return JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
   } catch {
     return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Relevance scoring
+// ---------------------------------------------------------------------------
+function computeScore(entry, textMatchScore) {
+  const accessCount = entry.access_count || 0
+  // Use new Date(entry.date) for decay — sub-day precision unnecessary
+  const created = new Date(entry.date)
+  const daysSince = Math.max(0, (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24))
+  const timeFactor = Math.max(0.1, 1 - (daysSince / 365))
+  const accessFactor = 1 + Math.log1p(accessCount) * 0.1
+  return textMatchScore * timeFactor * accessFactor
+}
+
+// ---------------------------------------------------------------------------
+// Access tracking write-back
+// ---------------------------------------------------------------------------
+function writeBackAccessTracking(results) {
+  // Group results by source data directory
+  const byDir = new Map()
+  for (const e of results) {
+    if (!e._dataDir) continue
+    if (!byDir.has(e._dataDir)) byDir.set(e._dataDir, new Set())
+    byDir.get(e._dataDir).add(e.id)
+  }
+
+  const now = new Date().toISOString().slice(0, 19) + 'Z'
+
+  for (const [dataDir, ids] of byDir) {
+    const indexFile = path.join(dataDir, 'index.jsonl')
+    try {
+      // Re-read just before writing to narrow race window with concurrent em-store appends.
+      // This is best-effort — last-writer-wins for concurrent searches is acceptable.
+      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+      const updated = lines.map(line => {
+        try {
+          const entry = JSON.parse(line)
+          if (ids.has(entry.id)) {
+            entry.access_count = (entry.access_count || 0) + 1
+            entry.last_accessed = now
+          }
+          return JSON.stringify(entry)
+        } catch { return line }
+      })
+      const tmpFile = indexFile + '.tmp'
+      fs.writeFileSync(tmpFile, updated.join('\n') + '\n', 'utf8')
+      fs.renameSync(tmpFile, indexFile)
+    } catch {
+      // Access tracking is best-effort — skip silently on failure
+    }
   }
 }
 
@@ -85,6 +146,8 @@ if (scope === 'local' || scope === 'all') {
 if (scope === 'global' || scope === 'all') {
   results.push(...loadIndex(GLOBAL_DIR, 'global'))
 }
+
+const totalEpisodeCount = results.length
 
 // Dedupe by id (local takes priority)
 const seen = new Set()
@@ -143,6 +206,7 @@ if (historyId) {
     return rest
   })
 
+  // No access tracking for history queries (investigative, not usage signals)
   console.log(JSON.stringify({ status: 'ok', count: output.length, chain: output }))
   process.exit(0)
 }
@@ -190,38 +254,84 @@ if (since) {
   results = results.filter(e => e.date >= since)
 }
 
-// Full-text search in episode bodies
+// Full-text search in episode bodies + compute text_match scores
+const queryLower = query ? query.toLowerCase() : null
 if (query) {
-  const queryLower = query.toLowerCase()
   results = results.filter(e => {
-    if (e.summary.toLowerCase().includes(queryLower)) return true
+    const summaryLower = (e.summary || '').toLowerCase()
+    if (summaryLower.includes(queryLower)) {
+      e._textMatch = summaryLower === queryLower ? 1.0 : 0.7
+      return true
+    }
     const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
     if (fs.existsSync(filePath)) {
-      return fs.readFileSync(filePath, 'utf8').toLowerCase().includes(queryLower)
+      if (fs.readFileSync(filePath, 'utf8').toLowerCase().includes(queryLower)) {
+        e._textMatch = 0.4
+        return true
+      }
     }
     return false
   })
 }
 
-// Sort by date descending, apply limit
-results.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time))
+// ---------------------------------------------------------------------------
+// Score and sort
+// ---------------------------------------------------------------------------
+if (!noScore) {
+  for (const e of results) {
+    const textMatch = e._textMatch || 1.0
+    e._score = computeScore(e, textMatch)
+  }
+  results.sort((a, b) => b._score - a._score)
+} else {
+  // No scoring — keep date-based sort
+  results.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time))
+}
+
+// Apply limit AFTER scoring/sorting
 results = results.slice(0, limit)
 
-// Optionally include full body, clean internal fields
+// ---------------------------------------------------------------------------
+// Access tracking write-back
+// Skip for: --no-track, --include-superseded (investigative queries)
+// ---------------------------------------------------------------------------
+if (!noTrack && !includeSuperseded) {
+  writeBackAccessTracking(results)
+}
+
+// ---------------------------------------------------------------------------
+// Build output
+// ---------------------------------------------------------------------------
 const output = results.map(e => {
-  const { _dataDir, _source, ...rest } = e
+  const { _dataDir, _source, _textMatch, _score, ...rest } = e
+  const entry = { ...rest, source: _source }
+  if (!noScore && _score !== undefined) {
+    entry.score = Math.round(_score * 1000) / 1000
+  }
   if (full) {
     const filePath = path.join(_dataDir, 'episodes', `${e.id}.md`)
     if (fs.existsSync(filePath)) {
       const content = fs.readFileSync(filePath, 'utf8')
       const parts = content.split('---')
       const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
-      return { ...rest, body, source: _source }
+      entry.body = body
     }
   }
-  return { ...rest, source: _source }
+  return entry
 })
 
 const result = { status: 'ok', count: output.length, episodes: output }
-if (searchWarning) result.warning = searchWarning
+
+// Performance health check
+const elapsed = Date.now() - searchStart
+const warnings = []
+if (searchWarning) warnings.push(searchWarning)
+if (elapsed > warnTimeMs) {
+  warnings.push(`Search took ${elapsed}ms across ${totalEpisodeCount} episodes. Consider running em-prune.mjs to archive stale episodes.`)
+}
+if (totalEpisodeCount > warnCount) {
+  warnings.push(`${totalEpisodeCount} episodes in index. Performance may degrade. Run em-prune.mjs --dry-run to check for prunable episodes.`)
+}
+if (warnings.length) result.warning = warnings.join(' | ')
+
 console.log(JSON.stringify(result))
