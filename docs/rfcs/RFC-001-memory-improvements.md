@@ -216,11 +216,11 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 ### Acceptance tests (per phase)
 
 **Phase 1:**
-- [ ] store/revise normalize tags (case, trim, dedup, sort) and update `tags.json`
-- [ ] search `--tag` uses `tags.json` for lookup; normalizes input
-- [ ] search falls back to linear scan when `tags.json` is missing or invalid JSON
-- [ ] `tags.json` includes superseded episode IDs; filtering happens post-lookup
-- [ ] rebuild recreates both `index.jsonl` and `tags.json`
+- [x] store/revise normalize tags (case, trim, dedup, sort) and update `tags.json`
+- [x] search `--tag` uses `tags.json` for lookup; normalizes input
+- [x] search falls back to linear scan when `tags.json` is missing or invalid JSON
+- [x] `tags.json` includes superseded episode IDs; filtering happens post-lookup
+- [x] rebuild recreates both `index.jsonl` and `tags.json`
 
 **Phase 2:**
 - [ ] search returns relevance scores by default (scoring is default-on)
@@ -280,7 +280,7 @@ graph TD
 
 | Phase | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| Phase 1: Tag Normalization + Inverted Index | `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs` | 16 E2E scenarios passed | Shipped in PR #6, commit `0e45e4d`. Bugs: #2 (P1), #3 (P2), #4 (P3), #5 (P1) — all fixed. |
 
 ---
 
