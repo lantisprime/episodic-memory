@@ -30,16 +30,27 @@ const LOCAL_DIR = path.join(CWD, '.episodic-memory')
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 
+// Reject `--something` as a value for another flag — protects against
+// `--has-enforcement --check` silently registering "--check" as a pattern.
+function isFlagToken(s) {
+  return typeof s === 'string' && s.startsWith('--')
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1 || i + 1 >= argv.length) return undefined
-  return argv[i + 1]
+  const v = argv[i + 1]
+  if (isFlagToken(v)) return undefined
+  return v
 }
 
 function multiFlag(name) {
   const out = []
   for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i] === name) out.push(argv[i + 1])
+    if (argv[i] === name) {
+      const v = argv[i + 1]
+      if (!isFlagToken(v)) out.push(v)
+    }
   }
   return out
 }
@@ -106,6 +117,11 @@ const SCOPE_DIRS = []
 if (scope === 'local' || scope === 'all') SCOPE_DIRS.push({ dir: LOCAL_DIR, source: 'local' })
 if (scope === 'global' || scope === 'all') SCOPE_DIRS.push({ dir: GLOBAL_DIR, source: 'global' })
 
+// Concurrent em-store appends are NOT atomic: a partial last line can appear
+// if em-pattern-health reads while em-store is mid-write. Malformed lines are
+// silently skipped — counts may undercount the most recent violation by one
+// during a write race. Acceptable per the read-only contract; the next
+// invocation picks up the now-complete entry.
 function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
   if (!fs.existsSync(indexFile)) return []
@@ -187,7 +203,10 @@ const cutoffMs = Date.parse(
 
 function parseDateMs(s) {
   if (!s || typeof s !== 'string') return null
-  if (!/^\d{4}-\d{2}-\d{2}/.test(s)) return null
+  // Accept exactly `YYYY-MM-DD` (em-store output) or a full ISO timestamp
+  // beginning with `YYYY-MM-DDT...`. Reject garbage tails like
+  // `2026-05-01-draft` that the prefix-only regex would let through.
+  if (!/^\d{4}-\d{2}-\d{2}($|T)/.test(s)) return null
   const ms = Date.parse(s.slice(0, 10) + 'T00:00:00Z')
   return Number.isNaN(ms) ? null : ms
 }

@@ -447,6 +447,64 @@ test('25. .git/hooks/pre-commit.local (non-.sample with extension) is included',
   assert.strictEqual(r.patterns[0].has_enforcement, true, 'non-.sample git hooks with custom extensions should be searched')
 })
 
+test('26. CLI value validation: --has-enforcement followed by --next-flag does not consume it (S-NEW-1)', () => {
+  clearStore()
+  clearEnforcement()
+  for (let d = 1; d <= 3; d++) seedViolation('bp-006-push-after-verify', d)
+  rebuild()
+  // `--has-enforcement` has no value; should NOT silently grab `--check`
+  const r = healthExit('--has-enforcement --check')
+  // Without a real override, bp-006 still has no enforcement → exit 1
+  assert.strictEqual(r.code, 1, 'should still treat bp-006 as needs-enforcement (no real override consumed)')
+  assert.strictEqual(r.json.patterns.find(p => p.pattern_id === 'bp-006-push-after-verify').has_enforcement, false)
+})
+
+test('27. CLI value validation: --pattern followed by --json does not silently lookup "--json" (S-NEW-1)', () => {
+  // --pattern with no value should be treated as missing, not consume --json
+  // Result: full report (no narrowing), --json behaves as default (JSON output)
+  const r = healthExit('--pattern --json')
+  assert.strictEqual(r.code, 0, 'no error when --pattern is value-less; full report runs')
+  assert.ok(r.json && r.json.status === 'ok')
+  assert.ok(r.json.patterns.length > 1, 'should not have narrowed to a single pattern')
+})
+
+test('28. parseDateMs rejects garbage tail: 2026-05-01-draft does not parse (S-NEW-2)', () => {
+  clearStore()
+  for (let d = 1; d <= 3; d++) seedViolation('bp-008-redo-over-patch', d)
+  rebuild()
+  // Corrupt entries with date-prefix-plus-tail; previous regex would silently parse
+  const ix = path.join(tmpHome, '.episodic-memory', 'index.jsonl')
+  const lines = fs.readFileSync(ix, 'utf8').split('\n').filter(Boolean).map(line => {
+    const e = JSON.parse(line)
+    if (e.tags && e.tags.includes('violated:bp-008-redo-over-patch')) {
+      e.date = '2026-05-01-draft'
+    }
+    return JSON.stringify(e)
+  })
+  fs.writeFileSync(ix, lines.join('\n') + '\n', 'utf8')
+  const r = health('--pattern bp-008-redo-over-patch').json
+  assert.strictEqual(r.patterns[0].violations, 0, 'date with garbage tail must be rejected')
+})
+
+test('29. parseDateMs accepts full ISO timestamp YYYY-MM-DDTHH:MM:SSZ', () => {
+  clearStore()
+  seedViolation('bp-001-implementation-workflow', 1)
+  rebuild()
+  // Replace YYYY-MM-DD with full ISO — Date contract should still parse
+  const today = new Date().toISOString().slice(0, 10)
+  const ix = path.join(tmpHome, '.episodic-memory', 'index.jsonl')
+  const lines = fs.readFileSync(ix, 'utf8').split('\n').filter(Boolean).map(line => {
+    const e = JSON.parse(line)
+    if (e.tags && e.tags.includes('violated:bp-001-implementation-workflow')) {
+      e.date = today + 'T12:00:00Z'
+    }
+    return JSON.stringify(e)
+  })
+  fs.writeFileSync(ix, lines.join('\n') + '\n', 'utf8')
+  const r = health('--pattern bp-001-implementation-workflow').json
+  assert.strictEqual(r.patterns[0].violations, 1, 'full ISO timestamp must be accepted')
+})
+
 // ===========================================================================
 // Summary
 // ===========================================================================
