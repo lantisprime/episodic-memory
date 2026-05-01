@@ -4,18 +4,18 @@
  *
  * Usage: node tests/test-rfc002-phase3.mjs
  *
- * Covers acceptance tests T1-T5 + T7 for Phase 3:
+ * Covers acceptance tests T1-T7 for Phase 3:
  *   T1: Recall includes preflight_warnings when violations exist for task-relevant patterns
  *   T2: Pre-flight surfaces violation count and last violation date
  *   T3: No pre-flight when no violations exist or task type unclear (clean output)
  *   T4: --task-type flag for explicit task context
  *   T5: Keyword inference from git branch name as fallback
+ *   T6: SessionEnd hook prompts user for violation flagging — verifies both the
+ *       script prompt content and that install.mjs --install-hooks registers
+ *       the script as a SessionEnd hook (not instruction-only)
  *   T7: em-recall.mjs touches .claude/.checkpoint-required when bp-001 violations
  *       are surfaced via task-type-driven pre-flight; em-session-end-prompt.mjs
  *       sweeps the marker at session end (best-effort pre-Phase-3b cleanup).
- *
- * T6 (SessionEnd hook prompt) is covered by Phase 1's shipped infrastructure
- * (em-session-end-prompt.mjs + install.mjs --install-hooks).
  */
 
 import fs from 'fs'
@@ -29,6 +29,7 @@ const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
 const VIOLATION = path.join(SCRIPTS, 'em-violation.mjs')
 const REBUILD = path.join(SCRIPTS, 'em-rebuild-index.mjs')
 const SESSION_END = path.join(SCRIPTS, 'em-session-end-prompt.mjs')
+const INSTALL = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'install.mjs')
 const REPO_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..')
 
 let passed = 0
@@ -335,6 +336,38 @@ test('T7f. SessionEnd cleanup is silent when marker does not exist', () => {
   // Should not throw even with no marker present
   sessionEnd()
   assert.ok(!fs.existsSync(markerPath))
+})
+
+test('T6a. em-session-end-prompt.mjs outputs a violation-flagging prompt with known patterns', () => {
+  const out = sessionEnd()
+  const data = JSON.parse(out)
+  assert.ok(data.prompt && /violated|behavioral pattern/i.test(data.prompt), `prompt should ask about violations; got: ${data.prompt}`)
+  assert.ok(Array.isArray(data.known_patterns), 'known_patterns must be present')
+  assert.ok(data.known_patterns.length > 0, 'known_patterns must be populated from patterns/_index.json')
+  assert.ok(data.known_patterns.every(p => p.pattern_id && p.name), 'each pattern must have pattern_id + name')
+  assert.ok(data.store_command && data.store_command.includes('em-violation.mjs'), 'store_command must reference em-violation.mjs')
+})
+
+test('T6b. install.mjs --install-hooks registers em-session-end-prompt.mjs as a SessionEnd hook (not instruction-only)', () => {
+  // Isolated HOME so we don't touch the real user settings
+  const installHome = fs.mkdtempSync(path.join(os.tmpdir(), 'em-rfc002-p3-install-'))
+  const installEnv = { ...process.env, HOME: installHome }
+  const installProject = path.join(installHome, 'target')
+  fs.mkdirSync(installProject, { recursive: true })
+
+  try {
+    execSync(`node "${INSTALL}" --tool claude-code --project "${installProject}" --install-hooks`, {
+      encoding: 'utf8', env: installEnv, stdio: ['pipe', 'pipe', 'pipe']
+    })
+    const settingsPath = path.join(installHome, '.claude', 'settings.json')
+    assert.ok(fs.existsSync(settingsPath), '~/.claude/settings.json must exist after --install-hooks')
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    assert.ok(settings.hooks && Array.isArray(settings.hooks.SessionEnd), 'SessionEnd hooks array must exist')
+    const registered = settings.hooks.SessionEnd.some(h => h.command && h.command.includes('em-session-end-prompt'))
+    assert.ok(registered, 'em-session-end-prompt must be registered as a SessionEnd hook command')
+  } finally {
+    fs.rmSync(installHome, { recursive: true, force: true })
+  }
 })
 
 // ===========================================================================
