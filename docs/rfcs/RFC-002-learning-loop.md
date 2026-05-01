@@ -156,7 +156,151 @@ Add a violation-aware recall pass:
 - This is NOT instruction-level behavior alone — a `SessionEnd` hook ensures the prompt happens mechanically, not by AI memory
 
 **Files modified:**
-- `scripts/em-recall.mjs` (when built in RFC-001 Phase 3) — add pre-flight pass
+- `scripts/em-recall.mjs` (RFC-001 Phase 3, shipped) — add pre-flight violation pass; automatically touch `.claude/.checkpoint-required` when bp-001 violations are detected (Phase 3b activation)
+
+### Phase 3b: Checkpoint Enforcement Gate
+
+**Motivation:** Across 3+ sessions, bp-001 was violated 6+ times despite documentation in CLAUDE.md, bp-001 v2.0.0, MEMORY.md, and session handoffs. The only mechanism that ever prevented a violation was `plan-gate.sh` (a PreToolUse hook). Documentation-based enforcement fails under momentum — only mechanical gates work (bp-010). Two distinct failure modes observed: (1) skipping the pre-implementation checkpoint before coding starts, and (2) skipping E2E testing + bug logging before pushing — steps 8 and 9 are skipped 100% of the time because they come after the work "feels done."
+
+**New hook: `checkpoint-gate.sh`** — PreToolUse hook, follows `plan-gate.sh` architecture.
+
+**Activation (mechanical, no AI judgment in activation path):**
+- `em-recall.mjs` (Phase 3) detects recent bp-001 violations in pre-flight → automatically touches `.claude/.checkpoint-required`
+- `em-recall.mjs` invoked mechanically via **SessionStart hook** (not instructions, not AI memory) to close the race condition where recall is never called
+- Activation is fully script-driven — the AI does not decide whether to create the marker
+
+**Gate behavior:**
+- Blocks ALL write tools (Edit, Write, Bash) when `.checkpoint-required` exists AND `.pre-checkpoint-done` does NOT exist (or is empty)
+- `.pre-checkpoint-done` must be **non-empty** (`[ -s "$MARKER" ]`) — the AI writes the Rule 18 checkpoint text into it, not just `touch`
+- Allowlist: commands writing to `.pre-checkpoint-done` pass through the gate (prevents deadlock — same pattern as plan-gate.sh's `rm` allowlist)
+- Error message is distinct from plan-gate.sh: "Checkpoint required. Print the Rule 18 pre-implementation checkpoint block to proceed."
+
+**Push gate (post-implementation enforcement):**
+
+Evidence from session 3: steps 8 (E2E) and 9 (bug logging) are skipped 100% of the time because they come **after the work feels done** — momentum carries the AI from "fix findings" straight to "commit and push." The checkpoint-gate catches the start of a task; the push-gate catches the end.
+
+- `checkpoint-gate.sh` also blocks `git push` and `gh pr create` Bash commands when `.claude/.post-checkpoint-required` exists AND `.claude/.post-checkpoint-done` does not exist (or is empty)
+- `.post-checkpoint-required` is touched by `checkpoint-gate.sh` on every allowed write (idempotent `touch`) — no "first edit" tracking needed. The marker's existence is what matters, not creation count.
+- `.post-checkpoint-done` must be **non-empty** — AI writes the Rule 18 post-implementation checkpoint into it
+- Allowlist: commands writing to `.post-checkpoint-done` pass through
+- Error message: "Post-implementation checkpoint required. Complete E2E testing and bug logging, then print the Rule 18 post-implementation checkpoint block to proceed."
+- Command matching for `git push` / `gh pr create`: match anywhere in the command string (not just start), since these are unlikely false positives in compound statements like `git push origin main && echo done`
+- This enforces bp-006 (push-after-verify) mechanically — no push until E2E + bug logging + post-checkpoint are done
+
+**Limitations:**
+- The push-gate only works within Claude Code sessions (PreToolUse hook). Pushing from a separate terminal, Git GUI, or outside the session bypasses it. If true enforcement is needed, escalate to a Git pre-push hook or CI check — consistent with bp-010 philosophy.
+- If `git push` fails after markers are cleaned (cleanup happens before push executes in PreToolUse), the gate is disarmed for the rest of the session. Accepted as pragmatic trade-off — push failure is rare and the alternative (PostToolUse cleanup) adds significant complexity for minimal benefit.
+
+**State machine (4 markers):**
+```
+idle → .checkpoint-required (em-recall detects violations)
+     → .pre-checkpoint-done (AI prints pre-checkpoint)
+       + .post-checkpoint-required (touched on every allowed write)
+     → .post-checkpoint-done (AI prints post-checkpoint)
+     → idle (push allowed, all markers cleaned)
+```
+Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required`) are cleaned by SessionEnd sweep.
+
+**Cleanup (two mechanisms):**
+- `SessionEnd` hook removes all markers (`.checkpoint-required`, `.pre-checkpoint-done`, `.post-checkpoint-required`, `.post-checkpoint-done`) as end-of-session sweep. Extends `em-session-end-prompt.mjs` from Phase 1 (single script, multiple responsibilities: violation prompt + marker cleanup).
+- `checkpoint-gate.sh` itself (PreToolUse) cleans up all markers when it detects and allows through a `git push` or `gh pr create` command (task completed). This is the same hook that does the gating — no additional PostToolUse hook needed.
+
+**Interaction with plan-gate.sh:**
+- Two independent PreToolUse hooks, compose correctly (both block independently)
+- If both markers exist, user sees two distinct error messages
+- Implementation may evaluate merging into a single `write-gate.sh` (F-10) — decide during implementation, document the rationale either way
+
+**SessionStart hook for em-recall:**
+- New or extended SessionStart hook: `node ~/.episodic-memory/scripts/em-recall.mjs --project <inferred> --limit 5`
+- Output displayed to AI at session start — pre-flight warnings surface immediately
+- If pre-flight detects bp-001 violations → `.checkpoint-required` created before any user interaction
+- Registered via `install.mjs --install-hooks` (same opt-in pattern as SessionEnd)
+
+**Files created:**
+- `checkpoint-gate.sh` — PreToolUse hook
+- SessionStart hook script (or extension of existing hook)
+
+**Files modified:**
+- `scripts/em-recall.mjs` — add `.checkpoint-required` marker creation when bp-001 violations detected
+- `scripts/em-session-end-prompt.mjs` — extend with marker cleanup (all 4: `.checkpoint-required`, `.pre-checkpoint-done`, `.post-checkpoint-required`, `.post-checkpoint-done`)
+- `install.mjs` — register checkpoint-gate (PreToolUse) + SessionStart hooks with `--install-hooks`
+- `patterns/implementation-workflow.md` — add checkpoint-gate to bp-001 enforcement table (not a new pattern bp-012)
+
+**Depends on:** Phase 3 (violation-aware recall output)
+
+### Phase 4: Positive Reinforcement
+
+**Motivation:** RFC-002 Phases 1-3b only track failures. Session 3 proved that compliance also produces actionable data — the successful light-scope doc update revealed that correct classification + plan-gate = clean execution. A system that only surfaces violations is punitive; one that also surfaces what worked is constructive and helps the AI replicate success conditions.
+
+**New script: `scripts/em-pattern-success.mjs` (~60 lines)**
+
+Convenience wrapper (like `em-violation.mjs`) for storing successful pattern compliance with context about what conditions led to success.
+
+- Usage: `node em-pattern-success.mjs --pattern <pattern_id> --summary "<what went right>" --body "<success factors>" [--factors "<factor1,factor2>"]`
+- Validates pattern exists in `patterns/_index.json` (same as `em-violation.mjs`)
+- Auto-tags: `compliance`, `behavioral-pattern`, `complied:<pattern_id>`
+- Structured body with `## What went right` and `## Success factors` sections
+- Shells out to `em-store.mjs` with `--category compliance`
+- Output: `{ status, id, pattern, file }`
+
+**New category: `compliance`**
+- Added to `VALID_CATEGORIES` in `em-store.mjs`
+
+**Structured success counts in `patterns/_index.json`:**
+- `em-pattern-success.mjs` and `em-violation.mjs` increment persistent counters in `_index.json` on each store:
+  ```json
+  {
+    "pattern_id": "bp-001-implementation-workflow",
+    "compliance_count": 2,
+    "violation_count": 8,
+    "last_compliance": "2026-05-01",
+    "last_violation": "2026-05-01"
+  }
+  ```
+- All-time totals — always accurate, no scanning needed
+- Atomic update (read → increment → write with temp+rename), same pattern as `access_count` in `index.jsonl`
+- `em-rebuild-index.mjs` can recompute counts from episodes if `_index.json` drifts
+
+**Extend `em-pattern-health.mjs` (Phase 2):**
+- Read persistent counts from `_index.json` for all-time totals (fast, no scan)
+- Scan episodes for rolling-window counts (30-day violations/compliances)
+- New fields in health report: `compliance_count` (all-time), `compliance_count_window` (30-day), `compliance_rate`, `streak` (consecutive successes), `success_factors` (most common factors from episode bodies)
+- New recommendation: `healthy-with-data` (pattern has both violations and compliances — the data shows what works)
+
+**Extend `em-recall.mjs` (Phase 3) pre-flight:**
+- Surface both violations AND successes in pre-flight warnings:
+  ```json
+  {
+    "preflight_warnings": [
+      {
+        "pattern_id": "bp-001-implementation-workflow",
+        "violations_last_30d": 3,
+        "compliances_last_30d": 2,
+        "message": "bp-001: 3 violations (full scope), 2 successes (light scope + plan-gate). Compliance correlates with correct classification."
+      }
+    ]
+  }
+  ```
+- Success context is actionable: "last time this worked, you classified as light and the plan-gate was active"
+
+**Extend bp-001 with mid-task reclassification guidance:**
+- When a mid-task addition introduces new schema fields, new files to modify, or new acceptance tests beyond the original plan — pause and reclassify
+- If the task has grown from light to full, stop and run the missing steps (2nd opinion, approval, etc.) before continuing
+- This is a classification refinement, not a new pattern — add to bp-001's Scope Tiers section as a "Mid-task scope change" subsection
+
+**Files created:**
+- `scripts/em-pattern-success.mjs`
+
+**Files modified:**
+- `scripts/em-store.mjs` — add `compliance` to `VALID_CATEGORIES`
+- `scripts/em-violation.mjs` — increment `violation_count` in `_index.json` on store
+- `scripts/em-pattern-success.mjs` — increment `compliance_count` in `_index.json` on store
+- `scripts/em-pattern-health.mjs` (Phase 2) — read persistent counts + rolling window scan
+- `scripts/em-recall.mjs` (Phase 3) — add compliance data to pre-flight output
+- `scripts/em-rebuild-index.mjs` — recompute compliance/violation counts from episodes
+- `patterns/_index.json` — add `compliance_count`, `violation_count`, `last_compliance`, `last_violation` fields
+
+**Depends on:** Phase 2 (health report) + Phase 3 (recall pre-flight output)
 
 ### Instruction file updates
 
@@ -168,7 +312,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 
 ### Scope
 
-- **In scope:** violation category, structured violation storage, pattern health reports, violation-aware recall, pre-flight warnings, session-end violation prompt via `SessionEnd` hook, bp-009 reconciliation
+- **In scope:** violation category, structured violation storage, pattern health reports, violation-aware recall, pre-flight warnings, checkpoint enforcement gate (mechanical hook blocking code edits until checkpoint printed), SessionStart hook for recall invocation, session-end violation prompt via `SessionEnd` hook, bp-009 reconciliation, positive reinforcement (compliance tracking, success factors, balanced pre-flight)
 - **Out of scope:** automatic violation detection (AI cannot reliably self-detect — see Problem section), punishment/penalty mechanisms, cross-user violation sharing, violation severity levels, automated pattern rewriting
 
 ---
@@ -223,34 +367,83 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] `--task-type` flag for explicit task context
 - [ ] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
 - [ ] SessionEnd hook prompts user for violation flagging (not instruction-only)
+- [ ] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
+
+**Phase 3b:**
+- [ ] `checkpoint-gate.sh` blocks all write tools when `.checkpoint-required` exists and `.pre-checkpoint-done` is absent or empty
+- [ ] Non-empty `.pre-checkpoint-done` unblocks writes
+- [ ] Empty `.pre-checkpoint-done` (just `touch`) does NOT unblock
+- [ ] Write command to `.pre-checkpoint-done` allowed through (no deadlock)
+- [ ] SessionEnd hook cleans up all 4 markers
+- [ ] No gate when `.checkpoint-required` absent
+- [ ] Error message distinguishable from plan-gate.sh
+- [ ] SessionStart hook invokes `em-recall.mjs` mechanically
+- [ ] bp-001 enforcement table updated with checkpoint-gate
+- [ ] `install.mjs --install-hooks` registers checkpoint-gate + SessionStart hooks
+- [ ] Both plan-gate and checkpoint-gate active simultaneously — user sees two distinct error messages
+- [ ] `em-session-end-prompt.mjs` cleans up all markers at session end (extends Phase 1 script)
+- [ ] `.post-checkpoint-required` touched on every allowed write through pre-checkpoint gate (idempotent)
+- [ ] `git push` blocked when `.post-checkpoint-required` exists and `.post-checkpoint-done` absent/empty
+- [ ] Non-empty `.post-checkpoint-done` unblocks push
+- [ ] Empty `.post-checkpoint-done` does NOT unblock push
+- [ ] Write command to `.post-checkpoint-done` allowed through (no deadlock)
+- [ ] `git push` / `gh pr create` allowed through cleans up all 4 markers
+- [ ] Push-gate error message: mentions E2E, bug logging, and post-implementation checkpoint
+- [ ] `gh pr create` also blocked by push-gate (not just `git push`)
+- [ ] Push failure after marker cleanup does not re-engage gate (documented limitation)
+- [ ] Orphaned markers (e.g., `.post-checkpoint-required` alone) cleaned by SessionEnd
+- [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test)
+
+**Phase 4:**
+- [ ] `compliance` category accepted by `em-store.mjs`
+- [ ] `em-pattern-success.mjs` stores compliance with `complied:<pattern_id>` tag
+- [ ] `em-pattern-success.mjs` validates pattern exists in `patterns/_index.json`
+- [ ] `em-pattern-success.mjs` auto-tags with `compliance`, `behavioral-pattern`, `complied:<pattern_id>`
+- [ ] `--factors` stored in structured body section
+- [ ] `em-pattern-health.mjs` reports `compliance_count` and `compliance_rate` per pattern
+- [ ] `em-recall.mjs` pre-flight surfaces both violation and compliance counts
+- [ ] Pre-flight message includes success factors when compliance data exists
+- [ ] No compliance data does not break health report or pre-flight (graceful absence)
+- [ ] `em-pattern-success.mjs` increments `compliance_count` in `_index.json` atomically
+- [ ] `em-violation.mjs` increments `violation_count` in `_index.json` atomically
+- [ ] `_index.json` counts survive rebuild (recomputed from episodes)
+- [ ] Health report shows both all-time counts (from `_index.json`) and 30-day windowed counts (from scan)
 
 ### Sequencing
 
 ```mermaid
 graph TD
-    RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>HARD BLOCKER — must ship first]
-    P1[Phase 1: Violation Tracking]
+    RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>SHIPPED]
+    P1[Phase 1: Violation Tracking<br/>SHIPPED]
     P2[Phase 2: Pattern Refinement]
     P3[Phase 3: Actionable Recall]
+    P3b[Phase 3b: Checkpoint Enforcement Gate]
+    P4[Phase 4: Positive Reinforcement]
     INST[Instruction File Updates]
 
     P1 --> P2
     P1 --> P3
     RFC1P3 --> P3
-    P2 --> INST
-    P3 --> INST
+    P3 --> P3b
+    P2 --> P4
+    P3 --> P4
+    P3b --> INST
+    P4 --> INST
 
-    classDef blocker fill:#ffcdd2
+    classDef shipped fill:#c8e6c9
     classDef tier1 fill:#e1f5fe
     classDef tier2 fill:#fff9c4
     classDef tier3 fill:#e8f5e9
-    class RFC1P3 blocker
-    class P1 tier1
+    classDef enforcement fill:#ffccbc
+    classDef positive fill:#e8f5e9,stroke:#4caf50
+    class RFC1P3,P1 shipped
     class P2,P3 tier2
+    class P3b enforcement
+    class P4 positive
     class INST tier3
 ```
 
-> **Hard dependency:** Phase 3 of this RFC extends `em-recall.mjs`, which is built in RFC-001 Phase 3. RFC-001 Phase 3 must ship before RFC-002 Phase 3 can begin. Phases 1 and 2 of this RFC have no external blockers.
+> **Dependencies:** Phase 3 extends `em-recall.mjs` (RFC-001 Phase 3, shipped). Phase 3b depends on Phase 3's pre-flight. Phase 4 depends on Phase 2 (health report) + Phase 3 (recall output). Phases 1 (shipped) and 2 have no external blockers.
 
 ---
 
@@ -306,6 +499,24 @@ graph TD
 P3s deferred to implementation (stored in episodic memory): F-9 (error UX), F-10 (markdown template), F-11 (data-driven task mapping), F-13 (dependency phrasing)
 **AI-slop flag:** "current file context" in task inference was vague for a CLI script — replaced with git branch keyword inference only
 **AI-slop check:** clean after revision
+**Decision:** proceed (after revision applied)
+
+### Review 3 — Claude Opus 4.6 (Phase 3b amendment)
+**Reviewer:** Claude Opus 4.6 (Plan subagent, independent context)
+**Date:** 2026-05-01
+**Scope:** Phase 3b checkpoint-gate amendment review
+**Findings:** Ten findings (3 P1, 5 P2, 2 P3). All P1s and P2s addressed in amendment:
+1. (P1) Does not belong in Phase 3 proper — restructured as Phase 3b with own acceptance tests
+2. (P1) Race condition if em-recall not invoked — added SessionStart hook for mechanical invocation
+3. (P1) Marker creation must be script-driven not AI-driven — em-recall.mjs touches marker automatically
+4. (P2) Hardcoded extensions miss .yml/.json — gate all write tools (like plan-gate)
+5. (P2) Empty marker allows shortcutting — require non-empty `.pre-checkpoint-done`
+6. (P2) Two hooks need distinct error messages — documented, distinct messages specified
+7. (P2) Cleanup timing unspecified — SessionEnd + push-triggered cleanup
+8. (P2) Deadlock risk — allowlist pattern from plan-gate.sh
+9. (P3) Not a new pattern bp-012 — added to bp-001 enforcement table instead
+10. (P3) Consider merging into single write-gate.sh — evaluate during implementation
+**AI-slop check:** clean
 **Decision:** proceed (after revision applied)
 
 ---

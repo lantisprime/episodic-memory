@@ -17,6 +17,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 8: Switching Between Tools](#scenario-8-switching-between-tools)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
+- [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
 - [What Gets Stored and What Doesn't](#what-gets-stored-and-what-doesnt)
 - [Browsing Your Memories](#browsing-your-memories)
 - [Troubleshooting](#troubleshooting)
@@ -330,6 +331,38 @@ AI:   Heads up — I recall from a past session that parallel tests
 
 ---
 
+## Scenario 11: Tracking Rule Violations
+
+**What happens:** The AI skips a step in its workflow. You catch it and the system records the violation structurally — linking it to the specific rule that was broken.
+
+```
+You:  Did you follow the implementation workflow?
+
+AI:   No — I skipped the E2E testing step before pushing. That's a
+      violation of bp-001 (implementation workflow).
+
+      Stored violation: "Skipped E2E testing before push"
+      — Pattern: bp-001-implementation-workflow
+      — What happened: jumped from code review fixes to commit
+      — Correct sequence: code review → fix → E2E → bug logging → push
+```
+
+**In a future session:**
+
+```
+You:  Let's implement the new feature.
+
+AI:   ⚠️ Pre-flight warning: bp-001 (implementation workflow) was
+      violated 3 times in the last 30 days. Last violation: yesterday.
+
+      I'll make sure to follow all 9 steps this time, including
+      E2E testing and bug logging before pushing.
+```
+
+**What happened:** Violations are stored with the pattern ID, the wrong sequence, and the correct sequence. The system aggregates them and surfaces warnings when you start similar work. Over time, this drives enforcement improvements — if a rule is violated repeatedly, it gets a mechanical gate (hook) instead of relying on documentation.
+
+---
+
 ## What Gets Stored and What Doesn't
 
 ### Stored automatically
@@ -340,6 +373,8 @@ AI:   Heads up — I recall from a past session that parallel tests
 | **Discoveries** | Bug root causes, undocumented behaviors, performance insights |
 | **Milestones** | Feature shipped, migration completed, major refactor done |
 | **Context** | Environment quirks, client constraints, deployment details |
+| **Research** | Web research distilled for future reference (avoids re-fetching) |
+| **Violations** | When the AI broke a workflow rule — tracked structurally for pattern improvement |
 
 ### Never stored
 
@@ -475,6 +510,15 @@ Rebuild it — this regenerates the index from the actual episode files:
 
 ```bash
 node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
+```
+
+### "How do I track violations?"
+
+The AI can track rule violations automatically when you point them out. Just say "that was a violation of [rule name]" and the AI stores it with structured details. You can search for all violations:
+
+```bash
+node ~/.episodic-memory/scripts/em-search.mjs --category violation
+node ~/.episodic-memory/scripts/em-search.mjs --tag "violated:bp-001-implementation-workflow"
 ```
 
 ### "I want to start fresh"

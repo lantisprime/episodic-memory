@@ -67,8 +67,10 @@ node install.mjs --tool all --project /path/to/my-project
 
 The installer:
 1. Copies scripts to `~/.episodic-memory/scripts/`
-2. Creates `.episodic-memory/` in the target project for local episodes
-3. Copies the appropriate instruction file for your tool
+2. Copies `patterns/_index.json` to `~/.episodic-memory/patterns/` for global pattern validation
+3. Creates `.episodic-memory/` in the target project for local episodes
+4. Copies the appropriate instruction file for your tool
+5. With `--install-hooks`: registers SessionEnd + SessionStart hooks in `~/.claude/settings.json` (Claude Code only, opt-in)
 
 ## Supported Tools
 
@@ -87,6 +89,9 @@ The installer:
 | `discovery` | Bug root causes, undocumented behavior, insights |
 | `milestone` | Features shipped, migrations completed |
 | `context` | Constraints, dependencies, environment quirks |
+| `research` | Web research distilled for future reference |
+| `lesson` | Consolidated lessons from multiple episodes |
+| `violation` | Behavioral pattern violations with structured sequences |
 
 ## Data Locations
 
@@ -94,6 +99,7 @@ The installer:
 ~/.episodic-memory/           # Global (cross-project)
 ├── scripts/                  # Installed scripts
 ├── episodes/                 # Global episode .md files
+├── patterns/                 # Pattern registry (_index.json)
 ├── index.jsonl               # Global index
 └── tags.json                 # Inverted tag index
 
@@ -143,15 +149,24 @@ The system ships with behavioral patterns — reusable lessons learned from real
 | bp-008 | Redo properly instead of patching retroactively |
 | bp-009 | Store rule violations as evidence for enforcement |
 | bp-010 | Habits override knowledge — always add mechanical enforcement |
+| bp-011 | Local files first, external actions only after confirmation |
+| bp-012 | Complete session wrap-up — episodic memory, changes, handoff |
 
 Patterns are seeded into the global episode store via `em-seed-patterns.mjs` so they surface during normal search and recall. See `patterns/TEMPLATE.md` to create new ones.
 
 ### Enforcement
 
-Behavioral patterns are documentation — they tell AI assistants **what** to follow, but don't mechanically **prevent** violations. For mechanical enforcement (hooks, CI checks, PR templates), see [user-preferences](https://github.com/lantisprime/user-preferences) as an optional companion. It provides:
+Behavioral patterns are documentation — they tell AI assistants **what** to follow, but don't mechanically **prevent** violations. The system provides two layers of enforcement:
 
+**Built-in (episodic-memory):**
+- **Violation tracking** (`em-violation.mjs`) — structured storage with pattern linkage, searchable by `--category violation` and `--tag violated:<pattern_id>`
+- **Session-end prompt** (`em-session-end-prompt.mjs`) — SessionEnd hook that asks about violations
+- **Proactive recall** (`em-recall.mjs`) — surfaces past violations at session start as pre-flight warnings
+- **Checkpoint enforcement gate** (RFC-002 Phase 3b, coming) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done
+
+**External ([user-preferences](https://github.com/lantisprime/user-preferences)):**
 - **Pre-tool hooks** (e.g., `plan-gate.sh`) that block writes during the planning phase
-- **CI workflow templates** for status checks that enforce the implementation workflow
+- **CI workflow templates** for status checks
 - **PR templates** with checklists mapped to behavioral patterns
 
 Episodic-memory and user-preferences are fully independent — install either or both.
@@ -160,8 +175,8 @@ Episodic-memory and user-preferences are fully independent — install either or
 
 | RFC | Title | Status |
 |-----|-------|--------|
-| [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted |
-| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Draft |
+| [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted (Phases 1-3 shipped) |
+| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phase 1 shipped) |
 
 ## Scripts Reference
 
@@ -209,6 +224,35 @@ node ~/.episodic-memory/scripts/em-check-stale.mjs --project my-project
 ### Seed Patterns
 ```bash
 node ~/.episodic-memory/scripts/em-seed-patterns.mjs
+```
+
+### Recall (Proactive)
+```bash
+node ~/.episodic-memory/scripts/em-recall.mjs
+node ~/.episodic-memory/scripts/em-recall.mjs --project my-project --limit 5
+node ~/.episodic-memory/scripts/em-recall.mjs --days 14 --no-track
+```
+
+### Prune (Archive Stale Episodes)
+```bash
+node ~/.episodic-memory/scripts/em-prune.mjs --dry-run
+node ~/.episodic-memory/scripts/em-prune.mjs --scope global --threshold 0.15
+node ~/.episodic-memory/scripts/em-prune.mjs --check  # exit 1 if prunable episodes exist
+```
+
+### Violation Tracking
+```bash
+node ~/.episodic-memory/scripts/em-violation.mjs \
+  --pattern bp-001-implementation-workflow \
+  --summary "Skipped checkpoints" \
+  --body "Details..." \
+  --sequence "plan,code,push" \
+  --correct "plan,checkpoint,code,review,push"
+```
+
+### Session End Prompt
+```bash
+node ~/.episodic-memory/scripts/em-session-end-prompt.mjs
 ```
 
 ### Rebuild Index

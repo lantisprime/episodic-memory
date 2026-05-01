@@ -79,6 +79,14 @@
       "tags": ["behavioral-pattern", "workflow", "git", "review", "discipline"],
       "scope": "global",
       "version": "1.0.0"
+    },
+    {
+      "pattern_id": "bp-012-complete-session-wrap-up",
+      "file": "complete-session-wrap-up.md",
+      "name": "Complete session wrap-up — episodic memory, changes, handoff",
+      "tags": ["behavioral-pattern", "session-discipline", "episodic-memory", "completeness"],
+      "scope": "global",
+      "version": "1.0.0"
     }
   ]
 }
