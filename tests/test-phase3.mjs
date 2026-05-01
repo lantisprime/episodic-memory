@@ -231,8 +231,9 @@ test('12. Scope validation rejects invalid values', () => {
     assert.fail('Should have thrown')
   } catch (e) {
     if (e.message === 'Should have thrown') throw e
-    // execSync throws on non-zero exit — expected
-    assert.ok(e.stderr?.includes('Invalid --scope') || e.stdout?.includes('Invalid --scope') || true)
+    // execSync throws on non-zero exit — verify error message
+    const output = (e.stdout || '') + (e.stderr || '') + (e.message || '')
+    assert.ok(output.includes('Invalid --scope'), 'Error should mention invalid scope')
   }
 })
 
