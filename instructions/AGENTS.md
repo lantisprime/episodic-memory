@@ -16,8 +16,8 @@ You have access to a persistent episodic memory system for storing and recalling
 - User says "remember this"
 
 **Recall** episodes when:
-- Starting work — proactively search for this project's episodes (limit 5)
-- User asks "what did we decide about X"
+- Starting work — proactively `em-recall.mjs` with `--task-type` for the upcoming work (surfaces episodes + violation pre-flight; RFC-002 Phase 3)
+- User asks "what did we decide about X" — `em-search.mjs`
 - Before making a decision that might contradict a past one
 
 **Revise** when a prior decision proves wrong — don't delete, create a revision chain.
@@ -34,7 +34,13 @@ Revise (self-correction):
 node ~/.episodic-memory/scripts/em-revise.mjs --original <episode-id> --summary "<text>" --body "<text>" --tags "<t1,t2>"
 ```
 
-Search:
+Recall (session-start, proactive — surfaces episodes + violation pre-flight):
+```bash
+node ~/.episodic-memory/scripts/em-recall.mjs --project <name> [--task-type <implementation|push|rule|general>] [--limit 5]
+```
+Use `--task-type implementation` before code work to surface recent bp-001/bp-006 violations from the last 30 days. Pass `general` (or omit) for ad-hoc recall without violation pre-flight.
+
+Search (ad-hoc):
 ```bash
 node ~/.episodic-memory/scripts/em-search.mjs --project <name> [--query <text>] [--category <cat>] [--full]
 node ~/.episodic-memory/scripts/em-search.mjs --history <episode-id> --full
