@@ -143,6 +143,26 @@ for (const t of tools) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 4. Seed behavioral patterns
+// ---------------------------------------------------------------------------
+const seedScript = path.join(SCRIPTS_DIR, 'em-seed-patterns.mjs')
+const repoPatternsDir = path.join(REPO_DIR, 'patterns')
+if (fs.existsSync(seedScript) && fs.existsSync(repoPatternsDir)) {
+  try {
+    const { execSync } = await import('child_process')
+    const result = execSync(`node "${seedScript}" --dir "${repoPatternsDir}"`, { encoding: 'utf8' })
+    const parsed = JSON.parse(result.trim())
+    if (parsed.seeded > 0) {
+      console.log(`Seeded ${parsed.seeded} behavioral patterns (${parsed.skipped} already existed)`)
+    } else {
+      console.log(`All ${parsed.total} behavioral patterns already seeded`)
+    }
+  } catch {
+    console.log('Note: behavioral pattern seeding skipped (non-fatal)')
+  }
+}
+
 console.log('\nDone! Episodic memory is ready.')
 console.log(`Global data:  ${GLOBAL_DIR}/`)
 console.log(`Local data:   ${localDir}/`)
