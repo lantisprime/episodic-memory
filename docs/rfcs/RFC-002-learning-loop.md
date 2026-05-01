@@ -156,7 +156,50 @@ Add a violation-aware recall pass:
 - This is NOT instruction-level behavior alone — a `SessionEnd` hook ensures the prompt happens mechanically, not by AI memory
 
 **Files modified:**
-- `scripts/em-recall.mjs` (when built in RFC-001 Phase 3) — add pre-flight pass
+- `scripts/em-recall.mjs` (RFC-001 Phase 3, shipped) — add pre-flight violation pass; automatically touch `.claude/.checkpoint-required` when bp-001 violations are detected (Phase 3b activation)
+
+### Phase 3b: Checkpoint Enforcement Gate
+
+**Motivation:** Across 3+ sessions, bp-001 was violated 4+ times despite documentation in CLAUDE.md, bp-001 v2.0.0, MEMORY.md, and session handoffs. The only mechanism that ever prevented a violation was `plan-gate.sh` (a PreToolUse hook). Documentation-based enforcement fails under momentum — only mechanical gates work (bp-010).
+
+**New hook: `checkpoint-gate.sh`** — PreToolUse hook, follows `plan-gate.sh` architecture.
+
+**Activation (mechanical, no AI judgment in activation path):**
+- `em-recall.mjs` (Phase 3) detects recent bp-001 violations in pre-flight → automatically touches `.claude/.checkpoint-required`
+- `em-recall.mjs` invoked mechanically via **SessionStart hook** (not instructions, not AI memory) to close the race condition where recall is never called
+- Activation is fully script-driven — the AI does not decide whether to create the marker
+
+**Gate behavior:**
+- Blocks ALL write tools (Edit, Write, Bash) when `.checkpoint-required` exists AND `.pre-checkpoint-done` does NOT exist (or is empty)
+- `.pre-checkpoint-done` must be **non-empty** (`[ -s "$MARKER" ]`) — the AI writes the Rule 18 checkpoint text into it, not just `touch`
+- Allowlist: commands writing to `.pre-checkpoint-done` pass through the gate (prevents deadlock — same pattern as plan-gate.sh's `rm` allowlist)
+- Error message is distinct from plan-gate.sh: "Checkpoint required. Print the Rule 18 pre-implementation checkpoint block to proceed."
+
+**Cleanup:**
+- `SessionEnd` hook removes both `.checkpoint-required` and `.pre-checkpoint-done`
+- Hook also detects `git push` or `gh pr create` in Bash commands and triggers cleanup (task completed)
+
+**Interaction with plan-gate.sh:**
+- Two independent PreToolUse hooks, compose correctly (both block independently)
+- If both markers exist, user sees two distinct error messages
+- Implementation may evaluate merging into a single `write-gate.sh` (F-10) — decide during implementation, document the rationale either way
+
+**SessionStart hook for em-recall:**
+- New or extended SessionStart hook: `node ~/.episodic-memory/scripts/em-recall.mjs --project <inferred> --limit 5`
+- Output displayed to AI at session start — pre-flight warnings surface immediately
+- If pre-flight detects bp-001 violations → `.checkpoint-required` created before any user interaction
+- Registered via `install.mjs --install-hooks` (same opt-in pattern as SessionEnd)
+
+**Files created:**
+- `checkpoint-gate.sh` — PreToolUse hook
+- SessionStart hook script (or extension of existing hook)
+
+**Files modified:**
+- `scripts/em-recall.mjs` — add `.checkpoint-required` marker creation when bp-001 violations detected
+- `install.mjs` — register checkpoint-gate + SessionStart hooks with `--install-hooks`
+- `patterns/implementation-workflow.md` — add checkpoint-gate to bp-001 enforcement table (not a new pattern bp-012)
+
+**Depends on:** Phase 3 (violation-aware recall output)
 
 ### Instruction file updates
 
@@ -168,7 +211,7 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 
 ### Scope
 
-- **In scope:** violation category, structured violation storage, pattern health reports, violation-aware recall, pre-flight warnings, session-end violation prompt via `SessionEnd` hook, bp-009 reconciliation
+- **In scope:** violation category, structured violation storage, pattern health reports, violation-aware recall, pre-flight warnings, checkpoint enforcement gate (mechanical hook blocking code edits until checkpoint printed), SessionStart hook for recall invocation, session-end violation prompt via `SessionEnd` hook, bp-009 reconciliation
 - **Out of scope:** automatic violation detection (AI cannot reliably self-detect — see Problem section), punishment/penalty mechanisms, cross-user violation sharing, violation severity levels, automated pattern rewriting
 
 ---
@@ -223,34 +266,51 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] `--task-type` flag for explicit task context
 - [ ] Keyword inference from git branch name as fallback (not "current file context" — CLI has no IDE context)
 - [ ] SessionEnd hook prompts user for violation flagging (not instruction-only)
+- [ ] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
+
+**Phase 3b:**
+- [ ] `checkpoint-gate.sh` blocks all write tools when `.checkpoint-required` exists and `.pre-checkpoint-done` is absent or empty
+- [ ] Non-empty `.pre-checkpoint-done` unblocks writes
+- [ ] Empty `.pre-checkpoint-done` (just `touch`) does NOT unblock
+- [ ] Write command to `.pre-checkpoint-done` allowed through (no deadlock)
+- [ ] SessionEnd hook cleans up both markers
+- [ ] `git push` / `gh pr create` in Bash triggers marker cleanup
+- [ ] No gate when `.checkpoint-required` absent
+- [ ] Error message distinguishable from plan-gate.sh
+- [ ] SessionStart hook invokes `em-recall.mjs` mechanically
+- [ ] bp-001 enforcement table updated with checkpoint-gate
 
 ### Sequencing
 
 ```mermaid
 graph TD
-    RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>HARD BLOCKER — must ship first]
+    RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>SHIPPED]
     P1[Phase 1: Violation Tracking]
     P2[Phase 2: Pattern Refinement]
     P3[Phase 3: Actionable Recall]
+    P3b[Phase 3b: Checkpoint Enforcement Gate]
     INST[Instruction File Updates]
 
     P1 --> P2
     P1 --> P3
     RFC1P3 --> P3
+    P3 --> P3b
     P2 --> INST
-    P3 --> INST
+    P3b --> INST
 
-    classDef blocker fill:#ffcdd2
+    classDef shipped fill:#c8e6c9
     classDef tier1 fill:#e1f5fe
     classDef tier2 fill:#fff9c4
     classDef tier3 fill:#e8f5e9
-    class RFC1P3 blocker
+    classDef enforcement fill:#ffccbc
+    class RFC1P3 shipped
     class P1 tier1
     class P2,P3 tier2
+    class P3b enforcement
     class INST tier3
 ```
 
-> **Hard dependency:** Phase 3 of this RFC extends `em-recall.mjs`, which is built in RFC-001 Phase 3. RFC-001 Phase 3 must ship before RFC-002 Phase 3 can begin. Phases 1 and 2 of this RFC have no external blockers.
+> **Hard dependency:** Phase 3 extends `em-recall.mjs` (RFC-001 Phase 3, now shipped). Phase 3b depends on Phase 3's pre-flight output. Phases 1 and 2 have no external blockers.
 
 ---
 
@@ -306,6 +366,24 @@ graph TD
 P3s deferred to implementation (stored in episodic memory): F-9 (error UX), F-10 (markdown template), F-11 (data-driven task mapping), F-13 (dependency phrasing)
 **AI-slop flag:** "current file context" in task inference was vague for a CLI script — replaced with git branch keyword inference only
 **AI-slop check:** clean after revision
+**Decision:** proceed (after revision applied)
+
+### Review 3 — Claude Opus 4.6 (Phase 3b amendment)
+**Reviewer:** Claude Opus 4.6 (Plan subagent, independent context)
+**Date:** 2026-05-01
+**Scope:** Phase 3b checkpoint-gate amendment review
+**Findings:** Ten findings (3 P1, 5 P2, 2 P3). All P1s and P2s addressed in amendment:
+1. (P1) Does not belong in Phase 3 proper — restructured as Phase 3b with own acceptance tests
+2. (P1) Race condition if em-recall not invoked — added SessionStart hook for mechanical invocation
+3. (P1) Marker creation must be script-driven not AI-driven — em-recall.mjs touches marker automatically
+4. (P2) Hardcoded extensions miss .yml/.json — gate all write tools (like plan-gate)
+5. (P2) Empty marker allows shortcutting — require non-empty `.pre-checkpoint-done`
+6. (P2) Two hooks need distinct error messages — documented, distinct messages specified
+7. (P2) Cleanup timing unspecified — SessionEnd + push-triggered cleanup
+8. (P2) Deadlock risk — allowlist pattern from plan-gate.sh
+9. (P3) Not a new pattern bp-012 — added to bp-001 enforcement table instead
+10. (P3) Consider merging into single write-gate.sh — evaluate during implementation
+**AI-slop check:** clean
 **Decision:** proceed (after revision applied)
 
 ---
