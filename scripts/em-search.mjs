@@ -48,6 +48,12 @@ const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
 const warnCount = parseInt(flag('--warn-count') || '500', 10)
 
+const VALID_SCOPES_SEARCH = ['local', 'global', 'all']
+if (!VALID_SCOPES_SEARCH.includes(scope)) {
+  console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES_SEARCH.join(', ')}` }))
+  process.exit(1)
+}
+
 const searchStart = Date.now()
 
 function normalizeTags(raw) {
@@ -265,8 +271,10 @@ if (query) {
     }
     const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
     if (fs.existsSync(filePath)) {
-      if (fs.readFileSync(filePath, 'utf8').toLowerCase().includes(queryLower)) {
+      const content = fs.readFileSync(filePath, 'utf8')
+      if (content.toLowerCase().includes(queryLower)) {
         e._textMatch = 0.4
+        if (full) e._body = content
         return true
       }
     }
@@ -303,15 +311,17 @@ if (!noTrack && !includeSuperseded) {
 // Build output
 // ---------------------------------------------------------------------------
 const output = results.map(e => {
-  const { _dataDir, _source, _textMatch, _score, ...rest } = e
+  const { _dataDir, _source, _textMatch, _score, _body, ...rest } = e
   const entry = { ...rest, source: _source }
   if (!noScore && _score !== undefined) {
     entry.score = Math.round(_score * 1000) / 1000
   }
   if (full) {
-    const filePath = path.join(_dataDir, 'episodes', `${e.id}.md`)
-    if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, 'utf8')
+    const content = _body || (() => {
+      const filePath = path.join(_dataDir, 'episodes', `${e.id}.md`)
+      try { return fs.readFileSync(filePath, 'utf8') } catch { return null }
+    })()
+    if (content) {
       const parts = content.split('---')
       const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
       entry.body = body
