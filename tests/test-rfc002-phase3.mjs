@@ -420,8 +420,17 @@ test('T6b. install.mjs --install-hooks registers em-session-end-prompt.mjs as a 
     assert.ok(fs.existsSync(settingsPath), '~/.claude/settings.json must exist after --install-hooks')
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
     assert.ok(settings.hooks && Array.isArray(settings.hooks.SessionEnd), 'SessionEnd hooks array must exist')
-    const registered = settings.hooks.SessionEnd.some(h => h.command && h.command.includes('em-session-end-prompt'))
-    assert.ok(registered, 'em-session-end-prompt must be registered as a SessionEnd hook command')
+    // Per Codex review (PR-B): assert canonical nested hook entry shape.
+    // Earlier flat-only check `entry.command.includes(...)` passed against
+    // the malformed `{command, description}` shape that Claude Code never
+    // executed; left a false-passing assertion in the suite. This now
+    // requires entry.hooks[] with type=command and a command containing
+    // em-session-end-prompt — the shape Claude Code actually runs.
+    const registered = settings.hooks.SessionEnd.some(entry =>
+      Array.isArray(entry.hooks) &&
+      entry.hooks.some(h => h && h.type === 'command' && typeof h.command === 'string' && h.command.includes('em-session-end-prompt'))
+    )
+    assert.ok(registered, 'em-session-end-prompt must be registered as a nested SessionEnd hook entry { hooks: [{ type: "command", command, ... }] }')
   } finally {
     fs.rmSync(installHome, { recursive: true, force: true })
   }
