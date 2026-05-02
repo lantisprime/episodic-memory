@@ -369,6 +369,87 @@ sec=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-
 assert_eq "T12b both em-session-end-prompt entries coexist (canonical + stale)" "2" "$sec"
 
 # ---------------------------------------------------------------------------
+echo "[T13] Codex post-PR review: HOME with spaces — registered commands must be shell-safe"
+# Reproduces the failure Codex demonstrated against PR-B v1: HOME containing
+# spaces produced unquoted command strings that the shell split at the first
+# space, silently failing to invoke the hook. Fixed by shellQuote() helper.
+# ---------------------------------------------------------------------------
+cleanup
+TEST_HOME=$(mktemp -d -t "em hooks ")
+TEST_PROJECT=$(mktemp -d -t "em proj ")
+case "$TEST_HOME" in
+  *" "*) ;;
+  *) echo "  ⚠ T13 skipped: mktemp template did not yield space-bearing path on this platform"; ((passed++)); ;;
+esac
+
+if [[ "$TEST_HOME" == *" "* ]]; then
+  run_installer --install-hooks
+
+  cg_cmd=$(jq -r '.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate")) | .command' "$TEST_HOME/.claude/settings.json")
+  case "$cg_cmd" in
+    "'"*"'") r=true ;;
+    *) r=false ;;
+  esac
+  assert_eq "T13a checkpoint-gate command is shell-quoted (single quotes)" "true" "$r"
+
+  # Each registered hook command must execute under sh -c without
+  # 'no such file or directory' (this is the failure mode Codex reproduced).
+  cg_err=$(sh -c "$cg_cmd </dev/null 2>&1" || true)
+  if echo "$cg_err" | grep -q "No such file"; then r=true; else r=false; fi
+  assert_eq "T13b checkpoint-gate command resolves under sh -c (no 'No such file')" "false" "$r"
+
+  ss_cmd=$(jq -r '.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart")) | .command' "$TEST_HOME/.claude/settings.json")
+  ss_err=$(sh -c "$ss_cmd </dev/null 2>&1" || true)
+  if echo "$ss_err" | grep -q "No such file"; then r=true; else r=false; fi
+  assert_eq "T13c sessionstart command resolves under sh -c" "false" "$r"
+
+  se_cmd=$(jq -r '.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt")) | .command' "$TEST_HOME/.claude/settings.json")
+  # Extract the quoted path arg (everything after `node `) and verify the file exists.
+  se_path=$(echo "$se_cmd" | sed -E "s/^node //; s/^'(.*)'\$/\1/")
+  [ -f "$se_path" ] && r=true || r=false
+  assert_eq "T13d sessionend node-arg path actually exists at the resolved location" "true" "$r"
+fi
+
+# ---------------------------------------------------------------------------
+echo "[T14] Codex post-PR review: v1→v2 upgrade idempotence on spaced paths"
+# A user who installed PR-B v1 has an UNQUOTED command in settings.json. PR-B
+# v2 produces a QUOTED command for the same canonical path. normalizeCommand()
+# treats them as the same; re-install must NOT add a duplicate.
+# ---------------------------------------------------------------------------
+if [[ "$TEST_HOME" == *" "* ]]; then
+  # Hand-craft a v1-style unquoted entry.
+  legacy_cmd="$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
+  cleanup
+  TEST_HOME=$(mktemp -d -t "em hooks ")
+  TEST_PROJECT=$(mktemp -d -t "em proj ")
+  legacy_cmd="$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
+  mkdir -p "$TEST_HOME/.claude/hooks"
+  # First place a copy of the canonical hook so installHookFile reports
+  # 'unchanged' (file install eligibility succeeds) — so addHookEntry's
+  # idempotence check is what determines whether we duplicate.
+  cp "$REPO_ROOT/hooks/checkpoint-gate.sh" "$legacy_cmd"
+  chmod +x "$legacy_cmd"
+  cat > "$TEST_HOME/.claude/settings.json" <<JSON
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Bash|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "$legacy_cmd", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}
+JSON
+  run_installer --install-hooks
+
+  cg_total=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+  assert_eq "T14 v1 unquoted entry is recognized as canonical; no duplicate added" "1" "$cg_total"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

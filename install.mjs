@@ -217,6 +217,22 @@ if (fs.existsSync(seedScript) && fs.existsSync(repoPatternsDir)) {
 // cannot corrupt user settings.
 // ---------------------------------------------------------------------------
 
+// POSIX shell-quote a path for safe inclusion in a hook command string.
+// Conditional quoting: if the path contains only POSIX-safe characters
+// (alphanumerics, underscore, dash, dot, slash, colon, equals, comma) we
+// return it unchanged — matches what `printf '%q'` does for safe strings
+// and avoids needless churn on existing installs whose paths don't need
+// quoting. Otherwise wrap in single quotes and escape internal quotes.
+//
+// Codex post-PR review of #78 reproduced a path-with-spaces failure: an
+// install at HOME=/private/tmp/em\ home\ with\ spaces produced commands
+// that the shell split at the first space, and the registered hook never
+// executed. shellQuote() makes the registered command shell-safe.
+function shellQuote(s) {
+  if (/^[A-Za-z0-9_\-./:=,]+$/.test(s)) return s
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
 function writeJSONAtomic(filePath, obj) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
   const tmp = filePath + '.tmp'
@@ -232,10 +248,26 @@ function entryReferencesSubstring(entry, substring) {
   return false
 }
 
+// Normalize a command string by stripping POSIX shell single-quoting so that
+// idempotence checks survive the v1→v2 PR-B upgrade on installs with spaced
+// paths: a v1-installed unquoted entry and a v2-installed quoted entry refer
+// to the same canonical command. Strips quotes around the whole string or
+// around a trailing single-quoted argument (the `node '<path>'` shape).
+function normalizeCommand(s) {
+  if (typeof s !== 'string') return s
+  if (s.length > 1 && s.startsWith("'") && s.endsWith("'")) {
+    return s.slice(1, -1).replace(/'\\''/g, "'")
+  }
+  const m = s.match(/^(.*\s)'((?:[^']|'\\'')+)'$/)
+  if (m) return m[1] + m[2].replace(/'\\''/g, "'")
+  return s
+}
+
 function entryHasExactCommand(entry, command) {
-  if (entry.command === command) return true
+  const target = normalizeCommand(command)
+  if (entry.command && normalizeCommand(entry.command) === target) return true
   if (Array.isArray(entry.hooks)) {
-    return entry.hooks.some(h => h && h.command === command)
+    return entry.hooks.some(h => h && normalizeCommand(h.command) === target)
   }
   return false
 }
@@ -391,7 +423,7 @@ if (installHooks) {
     const eligibleForReg = new Set(['copied', 'unchanged', 'forced'])
 
     for (const spec of hookSpecs) {
-      const canonicalCmd = path.join(userHooksDir, spec.file)
+      const canonicalCmd = shellQuote(path.join(userHooksDir, spec.file))
       if (!eligibleForReg.has(fileResults[spec.file])) {
         const alreadyRegistered = (settings.hooks[spec.event] || []).some(e =>
           entryHasExactCommand(e, canonicalCmd))
@@ -410,7 +442,7 @@ if (installHooks) {
     }
 
     // SessionEnd em-session-end-prompt.mjs (Phase 1; canonical at SCRIPTS_DIR).
-    const seCmd = `node ${path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs')}`
+    const seCmd = `node ${shellQuote(path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'))}`
     const seResult = addHookEntry(settings.hooks, 'SessionEnd', seCmd, { timeout: 10 })
     console.log(`SessionEnd em-session-end-prompt.mjs: ${seResult}`)
     if (seResult === 'added') touched.settings.push('SessionEnd → em-session-end-prompt.mjs')
