@@ -377,10 +377,9 @@ echo "[T13] Codex post-PR review: HOME with spaces — registered commands must 
 cleanup
 TEST_HOME=$(mktemp -d -t "em hooks ")
 TEST_PROJECT=$(mktemp -d -t "em proj ")
-case "$TEST_HOME" in
-  *" "*) ;;
-  *) echo "  ⚠ T13 skipped: mktemp template did not yield space-bearing path on this platform"; ((passed++)); ;;
-esac
+if [[ "$TEST_HOME" != *" "* ]]; then
+  echo "  ⚠ T13/T14 skipped: mktemp template did not yield space-bearing path on this platform (no counter bumped)"
+fi
 
 if [[ "$TEST_HOME" == *" "* ]]; then
   run_installer --install-hooks
