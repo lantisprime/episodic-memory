@@ -73,8 +73,20 @@ assert_eq "T1a checkpoint-gate.sh installed and executable" "true" "$r"
 [ -x "$TEST_HOME/.claude/hooks/em-recall-sessionstart.sh" ] && r=true || r=false
 assert_eq "T1b em-recall-sessionstart.sh installed and executable" "true" "$r"
 
+# Issue #86 PR-A: plan-gate.sh canonicalized into repo + deployed by installer.
+[ -x "$TEST_HOME/.claude/hooks/plan-gate.sh" ] && r=true || r=false
+assert_eq "T1b2 plan-gate.sh installed and executable (#86 PR-A)" "true" "$r"
+
 cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T1c PreToolUse contains exactly one checkpoint-gate entry" "1" "$cg_count"
+
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T1c2 PreToolUse contains exactly one plan-gate entry (#86 PR-A)" "1" "$pg_count"
+
+# plan-gate.sh registers with NO matcher (per design — must run on every
+# PreToolUse so the tool-name allowlist is the sole filter).
+pg_matcher=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("plan-gate")) | .matcher // "<none>"' "$TEST_HOME/.claude/settings.json")
+assert_eq "T1c3 plan-gate registered with no matcher (runs on every PreToolUse)" "<none>" "$pg_matcher"
 
 ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T1d SessionStart contains exactly one em-recall-sessionstart entry" "1" "$ss_count"
@@ -98,6 +110,9 @@ assert_eq "T2a checkpoint-gate.sh unchanged after re-run" "$sha_before" "$sha_af
 
 cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T2b still exactly one checkpoint-gate entry after re-run" "1" "$cg_count"
+
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T2b2 still exactly one plan-gate entry after re-run (#86 PR-A)" "1" "$pg_count"
 
 ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T2c still exactly one em-recall-sessionstart entry after re-run" "1" "$ss_count"
@@ -163,13 +178,24 @@ cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-run_installer --install-hooks
+output=$(run_installer_capture --install-hooks)
 
 pre_total=$(jq '.hooks.PreToolUse | length' "$TEST_HOME/.claude/settings.json")
-assert_eq "T4a PreToolUse now has 2 entries (existing + checkpoint-gate)" "2" "$pre_total"
+# Post #86 PR-A: existing /some/user/plan-gate.sh + canonical checkpoint-gate
+# + canonical plan-gate = 3 entries. The stale /some/user/plan-gate.sh is
+# preserved verbatim (T4b) and the canonical is registered separately (T4b3).
+assert_eq "T4a PreToolUse now has 3 entries (existing plan-gate + canonical checkpoint-gate + canonical plan-gate)" "3" "$pre_total"
 
-plan_gate_intact=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
-assert_eq "T4b existing plan-gate.sh entry preserved" "1" "$plan_gate_intact"
+plan_gate_existing=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command == "/some/user/plan-gate.sh")] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T4b existing /some/user/plan-gate.sh entry preserved verbatim" "1" "$plan_gate_existing"
+
+plan_gate_canonical_path="$TEST_HOME/.claude/hooks/plan-gate.sh"
+plan_gate_canonical=$(jq --arg p "$plan_gate_canonical_path" '[.hooks.PreToolUse[]?.hooks[]? | select(.command == $p)] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T4b2 canonical plan-gate.sh registered at exact installed path (#86 PR-A)" "1" "$plan_gate_canonical"
+
+# Stale-canonical warning surfaced by detectStaleCanonicalEntries.
+if echo "$output" | grep -q "stale PreToolUse entry for plan-gate.sh"; then r=true; else r=false; fi
+assert_eq "T4b3 stale-canonical warning printed for non-canonical /some/user/plan-gate.sh" "true" "$r"
 
 ss_total=$(jq '.hooks.SessionStart | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T4c SessionStart now has 2 entries (existing + em-recall-sessionstart)" "2" "$ss_total"
@@ -447,6 +473,77 @@ JSON
   cg_total=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
   assert_eq "T14 v1 unquoted entry is recognized as canonical; no duplicate added" "1" "$cg_total"
 fi
+
+# ---------------------------------------------------------------------------
+echo "[T15] Issue #86 PR-A: divergent local plan-gate.sh — skipped + reg withheld"
+# Mirrors T5/T5a-T5d for checkpoint-gate. plan-gate.sh canonicalized into the
+# repo per #86 PR-A; the same conservative install behavior applies — we must
+# not point Claude at unreviewed custom content.
+# ---------------------------------------------------------------------------
+reset_state
+mkdir -p "$TEST_HOME/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/plan-gate.sh"
+echo "# user-customized plan-gate" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
+chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
+sha_before=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
+
+output=$(run_installer_capture --install-hooks)
+sha_after=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
+assert_eq "T15a divergent plan-gate.sh not overwritten" "$sha_before" "$sha_after"
+
+if echo "$output" | grep -q "Skipped (divergent local edit).*plan-gate.sh"; then r=true; else r=false; fi
+assert_eq "T15b warning printed for divergent plan-gate" "true" "$r"
+
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T15c new plan-gate registration WITHHELD when file install skipped" "0" "$pg_count"
+
+# T15d: divergent plan-gate + prior canonical registration → preserved.
+reset_state
+mkdir -p "$TEST_HOME/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/plan-gate.sh"
+echo "# user-customized" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
+chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
+canon_pg_path="$TEST_HOME/.claude/hooks/plan-gate.sh"
+cat > "$TEST_HOME/.claude/settings.json" <<JSON
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$canon_pg_path", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}
+JSON
+output=$(run_installer_capture --install-hooks)
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T15d prior plan-gate registration preserved when file install skipped" "1" "$pg_count"
+
+# P2 (code review): assert the user-visible "existing registration preserved"
+# message actually printed for plan-gate. Without this, a branch flip in
+# install.mjs:installHooks (eligibleForReg → preserved/withheld) could regress
+# silently while the count assertion still passes.
+if echo "$output" | grep -q "PreToolUse plan-gate.sh: existing registration preserved"; then r=true; else r=false; fi
+assert_eq "T15e explicit 'existing registration preserved' message printed for plan-gate" "true" "$r"
+
+# ---------------------------------------------------------------------------
+echo "[T16] Issue #86 PR-A: --install-hooks-force overwrites divergent plan-gate AND registers"
+# ---------------------------------------------------------------------------
+reset_state
+mkdir -p "$TEST_HOME/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/plan-gate.sh"
+echo "# user-customized" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
+chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
+run_installer --install-hooks --install-hooks-force
+
+sha_repo=$(shasum "$REPO_ROOT/hooks/plan-gate.sh" | awk '{print $1}')
+sha_dest=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
+assert_eq "T16a --install-hooks-force overwrites divergent plan-gate with repo version" "$sha_repo" "$sha_dest"
+
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T16b --install-hooks-force registers plan-gate after overwrite" "1" "$pg_count"
 
 # ---------------------------------------------------------------------------
 # Summary

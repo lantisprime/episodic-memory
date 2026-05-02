@@ -3,11 +3,21 @@
 #
 # Usage: bash tests/test-plan-gate.sh
 #
-# Tests the hook by piping mock JSON and checking exit codes + output.
+# Tests the repo source at $REPO/hooks/plan-gate.sh (issue #86 PR-A:
+# canonicalized into the repo). Fails fast if absent — CI must verify the
+# checked-in hook content, not whatever a maintainer happened to install
+# locally.
 
 set -uo pipefail
 
-HOOK="$HOME/.claude/hooks/plan-gate.sh"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HOOK="$REPO_ROOT/hooks/plan-gate.sh"
+
+if [ ! -f "$HOOK" ]; then
+  echo "FAIL: $HOOK not found in repo. Issue #86 PR-A canonicalizes plan-gate.sh into hooks/."
+  exit 1
+fi
+
 TEST_DIR=$(mktemp -d)
 MARKER="$TEST_DIR/.claude/.plan-approval-pending"
 passed=0
@@ -75,6 +85,22 @@ assert_allowed "1b. Glob tool allowed with marker" \
 assert_allowed "1c. Agent tool allowed with marker" \
   "$(mock_json 'Agent')"
 
+# Issue #86 PR-A: NotebookRead and ToolSearch added to read-only allowlist.
+assert_allowed "1d. NotebookRead allowed with marker (#86 PR-A)" \
+  "$(mock_json 'NotebookRead')"
+
+assert_allowed "1e. ToolSearch allowed with marker (#86 PR-A)" \
+  "$(mock_json 'ToolSearch')"
+
+assert_allowed "1f. Skill allowed with marker" \
+  "$(mock_json 'Skill')"
+
+assert_allowed "1g. WebFetch allowed with marker" \
+  "$(mock_json 'WebFetch')"
+
+assert_allowed "1h. mcp__ prefix allowed with marker" \
+  "$(mock_json 'mcp__some_server__some_tool')"
+
 assert_blocked "2. Edit blocked with marker" \
   "$(mock_json 'Edit')"
 
@@ -93,8 +119,20 @@ assert_blocked "6. rm without marker name blocked" \
 assert_blocked "7. Write tool blocked with marker" \
   "$(mock_json 'Write')"
 
-assert_blocked "7b. Bash read-only command also blocked with marker (hook blocks all Bash)" \
+# Issue #86 PR-B (deferred): plan-gate still blocks all read-only Bash. PR-A
+# does NOT introduce a Bash command-level allowlist. This guard ensures PR-B's
+# scope stays scoped — if PR-A inadvertently lets ls through, the test fails.
+assert_blocked "7b. Bash read-only command also blocked with marker (PR-B owns this)" \
   "$(mock_json 'Bash' 'ls -la')"
+
+# Issue #86 PR-A regression guard: BashOutput / KillBash deliberately NOT on
+# the allowlist (Codex review feedback — KillBash mutates process state; both
+# pending follow-up evaluation).
+assert_blocked "7c. BashOutput blocked with marker (deferred per Codex review)" \
+  "$(mock_json 'BashOutput')"
+
+assert_blocked "7d. KillBash blocked with marker (mutates process state)" \
+  "$(mock_json 'KillBash')"
 
 # ===========================================================================
 echo ""
