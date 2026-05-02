@@ -558,29 +558,35 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] `em-recall.mjs` automatically touches `.claude/.checkpoint-required` when bp-001 violations detected
 
 **Phase 3b:**
-- [ ] `checkpoint-gate.sh` blocks all write tools when `.checkpoint-required` exists and `.pre-checkpoint-done` is absent or empty
-- [ ] Non-empty `.pre-checkpoint-done` unblocks writes
-- [ ] Empty `.pre-checkpoint-done` (just `touch`) does NOT unblock
-- [ ] Write command to `.pre-checkpoint-done` allowed through (no deadlock)
-- [ ] SessionEnd hook cleans up all 4 markers
-- [ ] No gate when `.checkpoint-required` absent
-- [ ] Error message distinguishable from plan-gate.sh
-- [ ] SessionStart hook invokes `em-recall.mjs` mechanically
-- [ ] bp-001 enforcement table updated with checkpoint-gate
-- [ ] `install.mjs --install-hooks` registers checkpoint-gate + SessionStart hooks
-- [ ] Both plan-gate and checkpoint-gate active simultaneously — user sees two distinct error messages
-- [ ] `em-session-end-prompt.mjs` cleans up all markers at session end (extends Phase 1 script)
-- [ ] `.post-checkpoint-required` touched on every allowed write through pre-checkpoint gate (idempotent)
-- [ ] `git push` blocked when `.post-checkpoint-required` exists and `.post-checkpoint-done` absent/empty
-- [ ] Non-empty `.post-checkpoint-done` unblocks push
-- [ ] Empty `.post-checkpoint-done` does NOT unblock push
-- [ ] Write command to `.post-checkpoint-done` allowed through (no deadlock)
-- [ ] `git push` / `gh pr create` allowed through cleans up all 4 markers
-- [ ] Push-gate error message: mentions E2E, bug logging, and post-implementation checkpoint
-- [ ] `gh pr create` also blocked by push-gate (not just `git push`)
-- [ ] Push failure after marker cleanup does not re-engage gate (documented limitation)
-- [ ] Orphaned markers (e.g., `.post-checkpoint-required` alone) cleaned by SessionEnd
-- [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test)
+- [x] `checkpoint-gate.sh` blocks all write tools when `.checkpoint-required` exists and `.pre-checkpoint-done` is absent or empty
+- [x] Non-empty `.pre-checkpoint-done` unblocks writes
+- [x] Empty `.pre-checkpoint-done` (just `touch`) does NOT unblock
+- [x] Write command to `.pre-checkpoint-done` allowed through (no deadlock)
+- [x] SessionEnd hook cleans up all 4 markers
+- [x] No gate when `.checkpoint-required` absent
+- [x] Error message distinguishable from plan-gate.sh
+- [x] SessionStart hook invokes `em-recall.mjs` mechanically
+- [x] bp-001 enforcement table updated with checkpoint-gate
+- [x] `install.mjs --install-hooks` registers checkpoint-gate + SessionStart hooks
+- [x] Both plan-gate and checkpoint-gate active simultaneously — user sees two distinct error messages
+- [x] `em-session-end-prompt.mjs` cleans up all markers at session end (extends Phase 1 script)
+- [x] `.post-checkpoint-required` touched on every allowed write through pre-checkpoint gate (idempotent)
+- [x] `git push` blocked when `.post-checkpoint-required` exists and `.post-checkpoint-done` absent/empty
+- [x] Non-empty `.post-checkpoint-done` unblocks push
+- [x] Empty `.post-checkpoint-done` does NOT unblock push
+- [x] Write command to `.post-checkpoint-done` allowed through (no deadlock)
+- [x] `git push` / `gh pr create` allowed through cleans up all 4 markers
+- [x] Push-gate error message: mentions E2E, bug logging, and post-implementation checkpoint
+- [x] `gh pr create` also blocked by push-gate (not just `git push`)
+- [x] Push failure after marker cleanup does not re-engage gate (documented limitation per line 197)
+- [x] Orphaned markers (e.g., `.post-checkpoint-required` alone) cleaned by SessionEnd
+- [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test) — left unchecked: no automated end-to-end test exercises the full SessionStart → em-recall activator → marker chain; covered manually in PR-B verification but not regression-guarded.
+
+**Push-gate bypass tradeoffs (documented, not gated):**
+
+The PreToolUse push-gate fires only inside Claude Code sessions. Pushes from a separate terminal, Git GUI, IDE integration, or CI bypass it entirely. If true cross-context enforcement is needed, escalate to a `.git/hooks/pre-push` script (or a CI gate) — consistent with bp-010 (mechanical enforcement at the action site, not the actor) and the existing limitation noted on line 197. PR-B does not ship that escalation; it's a tracked follow-up if the in-session gate proves insufficient.
+
+The SessionStart hook (`em-recall-sessionstart.sh`) invokes `em-recall.mjs` mechanically before any user interaction — but its stdout is currently suppressed (issue #61), so violation warnings produced by the activator do not surface to the AI as `additionalContext`. The marker side effects do fire (the activator touches `.checkpoint-required` when bp-001 violations are present), so checkpoint-gate.sh still blocks correctly. The output-surfacing fix is a separate concern from PR-B's deploy scope.
 
 **Phase 3b hardening follow-ups:**
 - [ ] Claude adapter manifest declares hook side effects, ownership IDs, checksums, and uninstall/backout actions
