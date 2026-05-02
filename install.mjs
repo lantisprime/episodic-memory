@@ -38,6 +38,13 @@ const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
 const REPO_HOOKS = path.join(REPO_DIR, 'hooks')
 
+// P2 (code review): warn if --install-hooks-force passed without --install-hooks.
+// Without the base flag, the entire hook-install block is skipped; a force flag
+// alone silently no-ops and a user might think their settings were updated.
+if (installHooksForce && !installHooks) {
+  console.log('Warning: --install-hooks-force has no effect without --install-hooks; ignoring.')
+}
+
 if (!tool) {
   console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|windsurf|all> [--project <path>] [--install-hooks] [--install-hooks-force]
 
@@ -269,6 +276,34 @@ function migrateMalformedEntries(hooks) {
   return migrated
 }
 
+// P2 (code review): after migrating malformed entries we preserve the
+// pre-existing command verbatim. If that command points at a canonical hook
+// basename (em-session-end-prompt.mjs / checkpoint-gate.sh / em-recall-
+// sessionstart.sh) but at a different path than where this installer puts the
+// canonical version, the user ends up with both registered: the canonical one
+// (newly registered) and the migrated stale one (will fail silently at runtime
+// because the path likely doesn't exist on this machine). Surface this so the
+// user can clean up; we deliberately don't auto-rewrite their pointer.
+function detectStaleCanonicalEntries(hooks, canonicalByBasename) {
+  const stale = []
+  for (const event of Object.keys(hooks)) {
+    const arr = hooks[event]
+    if (!Array.isArray(arr)) continue
+    for (const entry of arr) {
+      if (!Array.isArray(entry.hooks)) continue
+      for (const h of entry.hooks) {
+        if (!h || typeof h.command !== 'string') continue
+        for (const [basename, canonicalPath] of Object.entries(canonicalByBasename)) {
+          if (h.command.includes(basename) && !h.command.includes(canonicalPath)) {
+            stale.push({ event, basename, command: h.command })
+          }
+        }
+      }
+    }
+  }
+  return stale
+}
+
 function installHookFile(repoFile, destFile, force) {
   if (!fs.existsSync(repoFile)) return 'missing-source'
   if (!fs.existsSync(destFile)) {
@@ -379,6 +414,18 @@ if (installHooks) {
     const seResult = addHookEntry(settings.hooks, 'SessionEnd', seCmd, { timeout: 10 })
     console.log(`SessionEnd em-session-end-prompt.mjs: ${seResult}`)
     if (seResult === 'added') touched.settings.push('SessionEnd → em-session-end-prompt.mjs')
+
+    // P2 (code review): warn about stale canonical-named entries left behind
+    // by migration so the user can prune them. Run AFTER all registrations.
+    const canonicalByBasename = {
+      'em-session-end-prompt.mjs': path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'),
+      'checkpoint-gate.sh': path.join(userHooksDir, 'checkpoint-gate.sh'),
+      'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh')
+    }
+    const staleEntries = detectStaleCanonicalEntries(settings.hooks, canonicalByBasename)
+    for (const { event, basename, command } of staleEntries) {
+      console.log(`Warning: stale ${event} entry for ${basename} at ${command} — canonical also registered; remove the stale entry manually if it never resolves.`)
+    }
 
     writeJSONAtomic(settingsPath, settings)
     if (touched.settings.length > 0) touched.hooks.push(settingsPath)

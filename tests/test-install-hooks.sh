@@ -330,6 +330,45 @@ canon_count=$(jq --arg p "$canonical_path" '[.hooks.PreToolUse[]?.hooks[]? | sel
 assert_eq "T10c canonical checkpoint-gate.sh registered at exact installed path" "1" "$canon_count"
 
 # ---------------------------------------------------------------------------
+echo "[T11] Code-review P2: --install-hooks-force without --install-hooks warns + no-ops"
+# ---------------------------------------------------------------------------
+reset_state
+output=$(run_installer_capture --install-hooks-force)
+if echo "$output" | grep -q "Warning: --install-hooks-force has no effect without --install-hooks"; then r=true; else r=false; fi
+assert_eq "T11a warning printed when force flag passed alone" "true" "$r"
+
+[ -f "$TEST_HOME/.claude/settings.json" ] && r=true || r=false
+assert_eq "T11b no settings.json created (hook block was correctly skipped)" "false" "$r"
+
+# ---------------------------------------------------------------------------
+echo "[T12] Code-review P2: stale-canonical detection after migration"
+# A pre-existing flat-shape entry pointing at a non-canonical em-session-end-
+# prompt.mjs path is migrated verbatim. The canonical SCRIPTS_DIR registration
+# is added separately. Installer must warn about the resulting stale entry.
+# ---------------------------------------------------------------------------
+reset_state
+mkdir -p "$TEST_HOME/.claude"
+cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "command": "node /old/bogus/path/em-session-end-prompt.mjs",
+        "description": "stale"
+      }
+    ]
+  }
+}
+JSON
+output=$(run_installer_capture --install-hooks)
+if echo "$output" | grep -q "stale SessionEnd entry for em-session-end-prompt.mjs"; then r=true; else r=false; fi
+assert_eq "T12a stale-canonical warning printed for migrated /old/bogus/path/" "true" "$r"
+
+# Both entries coexist: canonical (newly registered) + stale (migrated, preserved verbatim).
+sec=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T12b both em-session-end-prompt entries coexist (canonical + stale)" "2" "$sec"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
