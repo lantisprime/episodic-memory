@@ -338,6 +338,35 @@ test('T7f. SessionEnd cleanup is silent when marker does not exist', () => {
   assert.ok(!fs.existsSync(markerPath))
 })
 
+test('T7g. SessionEnd sweeps all four Phase 3b markers (full state machine)', () => {
+  // Phase 3b spec line 210: SessionEnd removes all four checkpoint markers
+  // so they don't persist into the next session.
+  const claudeDir = path.join(tmpProject, '.claude')
+  fs.mkdirSync(claudeDir, { recursive: true })
+  const markers = [
+    '.checkpoint-required',
+    '.pre-checkpoint-done',
+    '.post-checkpoint-required',
+    '.post-checkpoint-done'
+  ].map(m => path.join(claudeDir, m))
+  for (const m of markers) fs.writeFileSync(m, 'sentinel')
+  for (const m of markers) assert.ok(fs.existsSync(m), `precondition: ${path.basename(m)} should exist`)
+  sessionEnd()
+  for (const m of markers) {
+    assert.ok(!fs.existsSync(m), `${path.basename(m)} should be removed by SessionEnd`)
+  }
+})
+
+test('T7h. SessionEnd cleans orphaned markers (e.g. post-required without checkpoint-required)', () => {
+  // Spec line 207: orphaned states cleaned by SessionEnd sweep.
+  const claudeDir = path.join(tmpProject, '.claude')
+  fs.mkdirSync(claudeDir, { recursive: true })
+  const orphan = path.join(claudeDir, '.post-checkpoint-required')
+  fs.writeFileSync(orphan, '')
+  sessionEnd()
+  assert.ok(!fs.existsSync(orphan), 'orphaned post-checkpoint-required should be cleaned')
+})
+
 test('T6a. em-session-end-prompt.mjs outputs a violation-flagging prompt with known patterns', () => {
   const out = sessionEnd()
   const data = JSON.parse(out)
