@@ -39,11 +39,14 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-# Allowlist: Bash referencing checkpoint-done markers (deadlock prevention).
-# AI must be able to write Rule 18 checkpoint text into these markers.
+# Allowlist: Bash redirecting (>, >>, or tee) into a checkpoint-done marker.
+# Tightened from substring match per #65 — pathological commands that merely
+# mention the marker name (e.g. `cat /etc/passwd; echo .pre-checkpoint-done`)
+# no longer bypass the gate. AI is expected to write checkpoint text via
+# echo/cat heredoc/printf into the marker.
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  if echo "$COMMAND" | grep -qE '\.(pre|post)-checkpoint-done'; then
+  if echo "$COMMAND" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done'; then
     exit 0
   fi
 fi

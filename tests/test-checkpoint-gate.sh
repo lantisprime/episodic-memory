@@ -266,6 +266,53 @@ assert_allowed "44. Hook does not crash when .claude/ missing" "$(mock_json 'Edi
 
 # ============================================================================
 echo ""
+echo "--- #65 R1: tightened allowlist — mention without write does NOT bypass ---"
+# ============================================================================
+reset_state
+touch "$PRE_REQ"
+
+# Pathological cases: command mentions marker name but doesn't write to it.
+# Pre-tightening these would have bypassed the gate; post-tightening they block.
+assert_blocked "45. Bash 'cat etc; echo .pre-checkpoint-done' blocked (no redirect)" \
+  "$(mock_json 'Bash' "cat /etc/passwd; echo .pre-checkpoint-done")" "Checkpoint required"
+assert_blocked "46. Bash echo of marker name without redirect blocked" \
+  "$(mock_json 'Bash' "echo .post-checkpoint-done")" "Checkpoint required"
+assert_blocked "47. Bash heredoc body containing marker name blocked when no redirect to it" \
+  "$(mock_json 'Bash' "cat <<EOF\n.pre-checkpoint-done\nEOF")" "Checkpoint required"
+
+# Legitimate writes still pass the tightened allowlist
+assert_allowed "48. Bash '> .pre-checkpoint-done' allowed (redirect)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE")"
+assert_allowed "49. Bash '>> .post-checkpoint-done' allowed (append)" \
+  "$(mock_json 'Bash' "echo content >> $POST_DONE")"
+assert_allowed "50. Bash 'tee .post-checkpoint-done' allowed" \
+  "$(mock_json 'Bash' "echo content | tee $POST_DONE")"
+
+# ============================================================================
+echo ""
+echo "--- #65 R2: push-gate boundary characters — quoted strings do NOT trigger ---"
+# ============================================================================
+reset_state
+touch "$PRE_REQ"
+echo "pre done" > "$PRE_DONE"
+touch "$POST_REQ"
+
+# The push-gate regex requires a boundary character ([[:space:]&;|()]) before
+# `git push` / `gh pr create`. Quote characters are NOT in the boundary set,
+# so `echo "git push"` and similar quoted mentions are NOT blocked. This is
+# correct behavior — original R2 concern was unfounded; documenting the
+# actual semantics with a regression guard.
+assert_allowed "51. Bash echo of quoted 'git push' to other file NOT blocked" \
+  "$(mock_json 'Bash' 'echo "git push origin main" > /tmp/note')"
+assert_allowed "52. Bash printf with quoted 'gh pr create' NOT blocked" \
+  "$(mock_json 'Bash' "printf 'gh pr create\\n' > /tmp/note")"
+
+# But unquoted shell-tokenized git push IS blocked (correct)
+assert_blocked "53. Bash with unquoted 'git push' (separate token) IS blocked" \
+  "$(mock_json 'Bash' "git status && git push origin main")" "Post-implementation checkpoint required"
+
+# ============================================================================
+echo ""
 echo "--- Result ---"
 # ============================================================================
 echo ""
