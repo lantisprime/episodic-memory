@@ -234,6 +234,45 @@ function runViolationPreflight(activeEntries, taskType, patterns) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3b activation predicate: returns true iff there exists at least one
+// active (non-superseded) episode within the 30-day cutoff that is a
+// bp-001-implementation-workflow violation. Decoupled from task_type so the
+// SessionStart hook can arm the checkpoint marker even when branch/task-type
+// inference returns null. Pure function — testable in isolation and stable
+// for #80's later validator-backed gate to swap.
+// ---------------------------------------------------------------------------
+function shouldArmBp001Checkpoint(activeEntries, now) {
+  const cutoff = new Date(now)
+  cutoff.setDate(cutoff.getDate() - 30)
+  const cutoffStr = cutoff.toISOString().slice(0, 10)
+  const tag = 'violated:bp-001-implementation-workflow'
+  return activeEntries.some(e =>
+    e &&
+    e.category === 'violation' &&
+    Array.isArray(e.tags) &&
+    e.tags.includes(tag) &&
+    typeof e.date === 'string' &&
+    e.date >= cutoffStr
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent marker arming. Best-effort — failures are swallowed so a
+// non-writable .claude dir doesn't take down the whole recall.
+// ---------------------------------------------------------------------------
+function armCheckpointMarker(cwd) {
+  try {
+    const claudeDir = path.join(cwd, '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    const markerPath = path.join(claudeDir, '.checkpoint-required')
+    if (!fs.existsSync(markerPath)) fs.writeFileSync(markerPath, '')
+  } catch {
+    // Best-effort: marker creation failure leaves Phase 3b gate inactive
+    // for this session.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SYNC: em-search.mjs:loadIndex — update both on change
 // ---------------------------------------------------------------------------
 function loadIndex(dataDir, source) {
@@ -330,42 +369,34 @@ const context = inferContext()
 const preflight_warnings = []
 
 // ---------------------------------------------------------------------------
+// Phase 3b activation (RFC-002 Phase 3 / T7): arm the checkpoint marker
+// whenever a recent bp-001-implementation-workflow violation exists,
+// regardless of task_type. The SessionStart hook
+// (hooks/em-recall-sessionstart.sh) does not pass --task-type, so a
+// task-type-conditional arming path was inert in real sessions despite
+// Phase 3b being deployed. bp-001 is workflow discipline that applies to
+// any session that ends up writing files; checkpoint-gate itself only
+// blocks write tools, so the false-positive surface is bounded.
+// ---------------------------------------------------------------------------
+if (shouldArmBp001Checkpoint(activeEntries, new Date())) {
+  armCheckpointMarker(process.cwd())
+}
+
+// ---------------------------------------------------------------------------
 // Task type: explicit flag wins; otherwise infer from branch tokens.
-// `null` means task type is unclear → no violation pre-flight runs (T3).
+// `null` means task type is unclear → no task-type-scoped pre-flight runs
+// (T3). Marker arming above is independent.
 // ---------------------------------------------------------------------------
 const taskType = taskTypeFlag || inferTaskType(context.branch_tokens)
 
 // ---------------------------------------------------------------------------
-// Violation pre-flight (RFC-002 Phase 3 / T1-T5)
+// Violation pre-flight (RFC-002 Phase 3 / T1-T5) — task-type-scoped
+// warnings for ranking and user-facing messaging.
 // ---------------------------------------------------------------------------
 if (taskType) {
   const patterns = loadPatternsIndex()
   const violationWarnings = runViolationPreflight(activeEntries, taskType, patterns)
   preflight_warnings.push(...violationWarnings)
-}
-
-// ---------------------------------------------------------------------------
-// Phase 3b activation hook (RFC-002 Phase 3 / T7): when a bp-001 violation
-// surfaces, touch .claude/.checkpoint-required in cwd. Phase 3b's
-// checkpoint-gate.sh reads this marker to gate write tools. Best-effort
-// atomic create — no locking, failure is non-fatal. Phase 3b's full SessionEnd
-// sweep will own the four-marker lifecycle; until then,
-// em-session-end-prompt.mjs sweeps this marker so it doesn't persist between
-// sessions when the gate isn't active.
-// ---------------------------------------------------------------------------
-const bp001Surfaced = preflight_warnings.some(w =>
-  w && w.type === 'violation' && w.pattern_id === 'bp-001-implementation-workflow'
-)
-if (bp001Surfaced) {
-  try {
-    const claudeDir = path.join(process.cwd(), '.claude')
-    fs.mkdirSync(claudeDir, { recursive: true })
-    const markerPath = path.join(claudeDir, '.checkpoint-required')
-    if (!fs.existsSync(markerPath)) fs.writeFileSync(markerPath, '')
-  } catch {
-    // Best-effort: marker creation failure leaves Phase 3b gate inactive
-    // for this session. Surfacing the warning to the user is what matters.
-  }
 }
 
 // ---------------------------------------------------------------------------
