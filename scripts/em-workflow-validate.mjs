@@ -477,24 +477,32 @@ function validateChain(events, errors, gateArg, headArg) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-let allEntries = []
-if (scope === 'local' || scope === 'all') allEntries.push(...loadIndex(LOCAL_DIR, 'local'))
-if (scope === 'global' || scope === 'all') allEntries.push(...loadIndex(GLOBAL_DIR, 'global'))
+// Caller --scope governs which scopes are searched for the lifecycle chain
+// itself (the workflowEntries below). Episode reference resolution is a
+// separate concern: a lifecycle chain may legitimately cite a global witness
+// even when --scope=local (and vice versa). So we build indexById from BOTH
+// local and global unconditionally, while workflowEntries respects --scope.
+// Without this split, a local chain that cites a global log would fail with
+// "not found (checked local + global)" — the exact behavior Codex reproduced
+// in the PR #98 re-review (#98 finding 2 follow-up).
+const localEntries = loadIndex(LOCAL_DIR, 'local')
+const globalEntries = loadIndex(GLOBAL_DIR, 'global')
 
-// Dedupe (local takes priority, same as em-recall)
+// Resolver index: every id from both scopes, local takes priority on collision.
+const indexById = new Map()
+for (const e of globalEntries) indexById.set(e.id, e)
+for (const e of localEntries) indexById.set(e.id, e) // local wins
+
+// Lifecycle chain entries respect --scope.
+let allEntries = []
+if (scope === 'local' || scope === 'all') allEntries.push(...localEntries)
+if (scope === 'global' || scope === 'all') allEntries.push(...globalEntries)
 const seen = new Set()
 allEntries = allEntries.filter(e => {
   if (seen.has(e.id)) return false
   seen.add(e.id)
   return true
 })
-
-// Index by id for episode ref resolution. Includes ALL episodes (any category,
-// any status) — the resolver handles status/timestamp/category checks itself.
-// resolveEpisodeRef ignores caller's --scope: a lifecycle chain may legitimately
-// cite a global witness, and vice versa (#98 finding 2 / Codex MINOR 7).
-const indexById = new Map()
-for (const e of allEntries) indexById.set(e.id, e)
 
 // Filter to active workflow.lifecycle episodes
 const workflowEntries = allEntries.filter(e =>

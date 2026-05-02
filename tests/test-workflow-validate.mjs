@@ -21,9 +21,15 @@ const VALIDATE = path.join(SCRIPTS, 'em-workflow-validate.mjs')
 // Isolated HOME for the test session
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'em-validate-test-'))
 const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'em-validate-cwd-'))
-const dataDir = path.join(tmpHome, '.episodic-memory')
+const dataDir = path.join(tmpHome, '.episodic-memory')           // global ($HOME)
 const episodesDir = path.join(dataDir, 'episodes')
 const indexFile = path.join(dataDir, 'index.jsonl')
+// Local store under tmpCwd for tests that need to verify the scope/resolver
+// split — a local lifecycle chain citing a global witness must resolve
+// regardless of --scope.
+const localDataDir = path.join(tmpCwd, '.episodic-memory')
+const localEpisodesDir = path.join(localDataDir, 'episodes')
+const localIndexFile = path.join(localDataDir, 'index.jsonl')
 
 let passed = 0
 let failed = 0
@@ -33,8 +39,11 @@ function test(name, fn) {
   try {
     // Reset between tests
     fs.rmSync(dataDir, { recursive: true, force: true })
+    fs.rmSync(localDataDir, { recursive: true, force: true })
     fs.mkdirSync(episodesDir, { recursive: true })
     fs.writeFileSync(indexFile, '')
+    fs.mkdirSync(localEpisodesDir, { recursive: true })
+    fs.writeFileSync(localIndexFile, '')
     fn()
     console.log(`  ✓ ${name}`)
     passed++
@@ -689,6 +698,54 @@ test('T33 pre_checkpoint_ref splicing: refs different chain pre-checkpoint fails
   assert.strictEqual(r.json.valid, false)
   assert.ok(r.json.errors.some(e => e.includes('chain splicing rejected') || e.includes('pre_checkpoint_ref')),
     `expected splicing rejection, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T36 cross-scope resolution: local chain citing global witness resolves under --scope local', () => {
+  // Codex re-review P2: indexById was built from --scope-filtered entries,
+  // so a local chain citing a global witness failed with "not found (checked
+  // local + global)" — contradicting docs/comments. Fix: build resolver index
+  // from BOTH scopes regardless of --scope.
+  // Witness lives in global ($HOME .episodic-memory).
+  counter++
+  const witnessId = `20260502-1100${String(counter).padStart(2, '0')}-global-witness-${counter.toString(16).padStart(4, '0')}`
+  const witnessFm = `---\nid: ${witnessId}\ndate: 2026-05-02\ntime: "11:00"\nproject: test\ncategory: discovery\nstatus: active\ntags: []\nsummary: global witness\n---\n`
+  fs.writeFileSync(path.join(episodesDir, `${witnessId}.md`), witnessFm + '\n# global witness\n')
+  fs.appendFileSync(indexFile, JSON.stringify({
+    id: witnessId, date: '2026-05-02', time: '11:00', project: 'test',
+    category: 'discovery', status: 'active', supersedes: null, tags: [], summary: 'global witness'
+  }) + '\n')
+  // Lifecycle chain lives in local (tmpCwd .episodic-memory).
+  const writeLocalLifecycle = (event, extra) => {
+    counter++
+    const id = `20260502-1200${String(counter).padStart(2, '0')}-${event}-${counter.toString(16).padStart(4, '0')}`
+    const payload = {
+      event, pattern_id: 'bp-001-implementation-workflow', task: 'TEST',
+      context: { worktree: tmpCwd, branch: 'main', head: 'abc1234' },
+      ...extra
+    }
+    const fm = `---\nid: ${id}\ndate: 2026-05-02\ntime: "12:00"\nproject: test\ncategory: workflow.lifecycle\nstatus: active\ntags: []\nsummary: ${event}\n---\n`
+    const body = `# ${event}\n\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`\n`
+    fs.writeFileSync(path.join(localEpisodesDir, `${id}.md`), fm + '\n' + body)
+    fs.appendFileSync(localIndexFile, JSON.stringify({
+      id, date: '2026-05-02', time: '12:00', project: 'test',
+      category: 'workflow.lifecycle', status: 'active', supersedes: null, tags: [], summary: event
+    }) + '\n')
+    return id
+  }
+  const planId = writeLocalLifecycle('plan-approved', { plan_ref: 'p.md' })
+  const preId = writeLocalLifecycle('pre-checkpoint', { plan_ref: 'p.md', approval_ref: `episode:${planId}` })
+  writeLocalLifecycle('post-checkpoint', {
+    pre_checkpoint_ref: `episode:${preId}`,
+    evidence: {
+      tests: [{ command: 'x', status: 'passed', log_ref: `episode:${witnessId}` }],
+      code_review: { status: 'done', reply_ref: `episode:${witnessId}` },
+      e2e: { status: 'passed', log_ref: `episode:${witnessId}` },
+      bug_logging: { status: 'done', issues: [] }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint', '--scope', 'local'])
+  assert.strictEqual(r.json.valid, true,
+    `expected valid with cross-scope resolution; errors: ${JSON.stringify(r.json.errors)}`)
 })
 
 test('T34 push-allowed gate without --head is rejected as usage error', () => {

@@ -171,12 +171,16 @@ with a usage error if it is omitted.
 
 ## Schema versioning
 
-Validator-backed gates (PR-D Plan Gate v2, PR-E checkpoint-gate) accept
-only `schema_version: 1` workflow.lifecycle chains. Pre-PR-C lifecycle
-episodes (if any) without `pre_checkpoint_ref` will not satisfy the gates;
-since PR-C is not yet hook-wired, no migration is required — chains are
-authored fresh under the new schema. Older non-lifecycle episodes are
-unaffected.
+Payloads do not carry an explicit `schema_version` field today. The shape
+defined by this document is informally **schema v1**; validator-backed gates
+(PR-D Plan Gate v2, PR-E checkpoint-gate) accept only this shape. Pre-PR-C
+lifecycle episodes (if any) without `pre_checkpoint_ref` on `post-checkpoint`
+will not satisfy the gates; since PR-C is not yet hook-wired, no migration is
+required — chains are authored fresh under the new shape. Older non-lifecycle
+episodes are unaffected.
+
+A future PR may add a literal `schema_version` field (and start rejecting
+payloads with unknown versions) once we have a second shape to switch on.
 
 ## Episode reference resolution (RFC-002:327)
 
