@@ -63,7 +63,7 @@ This RFC inherits and applies the principles in [PRINCIPLES.md](../../PRINCIPLES
 - **P5 Cross-platform with honest capability labels** — capability matrix is the source of truth on per-tool tier
 - **P6 Tokens are the budget; bounded background work** — `fs.watch` over polling; lifecycle-gated sweeps over timers
 - **P7 State changes are episodes** — request lifecycle transitions recorded as episodes
-- **P8 Messages carry their context** — review-class envelopes require `worktree+branch+head`
+- **P8 Messages carry their context and recipient** — review-class envelopes require `worktree+branch+head` and `recipient`
 - **P9 Core never imports adapters** — one-way dependency
 - **P10 Consent and reversibility** — install/uninstall driven by side-effect manifest
 - **P11 Portable core contract** — decision logic in core; adapters translate
