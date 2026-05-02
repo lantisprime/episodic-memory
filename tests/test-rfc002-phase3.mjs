@@ -21,7 +21,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { execSync } from 'child_process'
+import { execSync, spawnSync } from 'child_process'
 import assert from 'assert'
 
 const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts')
@@ -313,14 +313,40 @@ test('T7b. No marker when only non-bp-001 violations surface', () => {
   assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist when bp-001 is not surfaced')
 })
 
-test('T7c. No marker when task type is unclear (no pre-flight runs)', () => {
+test('T7c. Marker arms when bp-001 violations exist even if task type is unclear', () => {
+  // Phase 3b activation fix: the SessionStart hook does not pass --task-type,
+  // and branch inference can return null. Marker arming is now decoupled from
+  // task_type — bp-001 violations alone are sufficient. Without this, the
+  // gate was inert in real sessions despite being deployed.
   clearStore()
   clearMarker()
   for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
   rebuild()
-  setBranch('main') // no keyword match
+  setBranch('main') // no keyword match → inferTaskType returns null
   recall('--no-track')
-  assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist when task type unknown')
+  assert.ok(fs.existsSync(markerPath), '.checkpoint-required must exist when bp-001 violations recent, regardless of task_type')
+})
+
+test('T7c2. No marker when there are no recent bp-001 violations (regardless of task type)', () => {
+  clearStore()
+  clearMarker()
+  // Seed only non-bp-001 violations
+  for (let d = 1; d <= 3; d++) seedViolation('bp-006-push-after-verify', d)
+  rebuild()
+  setBranch('main')
+  recall('--no-track')
+  assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist without bp-001 violations')
+})
+
+test('T7c3. No marker when bp-001 violations are older than 30-day cutoff', () => {
+  clearStore()
+  clearMarker()
+  // Seed bp-001 violations 31 and 60 days ago — outside cutoff
+  seedViolation('bp-001-implementation-workflow', 31)
+  seedViolation('bp-001-implementation-workflow', 60)
+  rebuild()
+  recall('--no-track')
+  assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist for stale (>30d) violations')
 })
 
 test('T7d. Marker creation is idempotent (re-recall does not error)', () => {
@@ -434,6 +460,66 @@ test('T6b. install.mjs --install-hooks registers em-session-end-prompt.mjs as a 
   } finally {
     fs.rmSync(installHome, { recursive: true, force: true })
   }
+})
+
+test('T7j. End-to-end: real SessionStart hook arms marker without --task-type (Phase 3b activation E2E)', () => {
+  // Closes the 23rd unchecked RFC-002 Phase 3b acceptance criterion: no E2E
+  // test had previously exercised the SessionStart -> em-recall -> marker
+  // chain with the real hook script and a real em-recall. This is the bug
+  // class that left Phase 3b inert in production despite all unit tests
+  // passing — the hook does not pass --task-type, but the unit tests did.
+  const sessionHome = fs.mkdtempSync(path.join(os.tmpdir(), 'em-rfc002-p3-sshook-'))
+  const sessionProject = path.join(sessionHome, 'project')
+  fs.mkdirSync(sessionProject, { recursive: true })
+  execSync('git init -q', { cwd: sessionProject })
+  execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: sessionProject })
+  // Branch with no task-type keywords so inferTaskType returns null —
+  // exercises the activation path that ignores task_type.
+  execSync('git checkout -q -B main', { cwd: sessionProject })
+
+  // Install patterns + real em-recall under the test HOME, mirroring how
+  // install.mjs lays out scripts.
+  const sessionPatterns = path.join(sessionProject, 'patterns')
+  fs.mkdirSync(sessionPatterns, { recursive: true })
+  fs.copyFileSync(srcIndex, path.join(sessionPatterns, '_index.json'))
+
+  const sessionScripts = path.join(sessionHome, '.episodic-memory', 'scripts')
+  fs.mkdirSync(sessionScripts, { recursive: true })
+  // Copy every script the recall path may execSync into (em-track-recall.mjs
+  // is invoked unless --no-track is passed; the hook runs without --no-track).
+  const SCRIPTS_DIR = path.join(REPO_ROOT, 'scripts')
+  for (const f of fs.readdirSync(SCRIPTS_DIR)) {
+    if (f.endsWith('.mjs')) {
+      fs.copyFileSync(path.join(SCRIPTS_DIR, f), path.join(sessionScripts, f))
+    }
+  }
+
+  // Seed a recent bp-001 violation in the project's local store using
+  // the same env/HOME the hook will run under.
+  const sessionEnv = { ...process.env, HOME: sessionHome }
+  execSync(`node "${VIOLATION}" --pattern bp-001-implementation-workflow --summary "seeded e2e" --body "test" --scope local`, {
+    cwd: sessionProject, env: sessionEnv, encoding: 'utf8'
+  })
+  // Backdate to today (already today) and rebuild index just in case.
+  execSync(`node "${REBUILD}" --scope all`, { cwd: sessionProject, env: sessionEnv })
+
+  const hookPath = path.join(REPO_ROOT, 'hooks', 'em-recall-sessionstart.sh')
+  const markerOut = path.join(sessionProject, '.claude', '.checkpoint-required')
+  assert.ok(!fs.existsSync(markerOut), 'precondition: marker should not exist')
+
+  const stdin = JSON.stringify({ cwd: sessionProject })
+  // Run the hook EXACTLY the way Claude Code would: stdin JSON, HOME pointing
+  // at the user's installed em-recall, no --task-type passed. Use spawnSync
+  // with input rather than echo+pipe so tmpdir paths containing quotes
+  // can't corrupt the JSON.
+  spawnSync('bash', [hookPath], {
+    input: stdin, env: sessionEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
+  })
+
+  assert.ok(fs.existsSync(markerOut),
+    '.checkpoint-required must be armed by the real SessionStart hook with no --task-type — Phase 3b activation E2E')
+
+  fs.rmSync(sessionHome, { recursive: true, force: true })
 })
 
 // ===========================================================================

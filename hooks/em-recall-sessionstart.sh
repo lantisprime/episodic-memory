@@ -3,15 +3,17 @@ set -e
 
 # em-recall-sessionstart.sh — RFC-002 Phase 3b SessionStart hook
 #
-# Mechanically invokes em-recall at session start. The only effective side
-# effect today is the marker activation: if bp-001 surfaces in pre-flight,
-# em-recall.mjs:347-369 touches $CWD/.claude/.checkpoint-required, which
-# arms checkpoint-gate.sh.
+# Mechanically invokes em-recall at session start. The effective side effect
+# is the marker activation: em-recall.mjs's shouldArmBp001Checkpoint
+# predicate runs unconditionally on session start (decoupled from
+# --task-type), and arms $CWD/.claude/.checkpoint-required whenever a recent
+# bp-001-implementation-workflow violation exists, which in turn arms
+# checkpoint-gate.sh.
 #
-# Known limitation (#65, #61): em-recall stdout is redirected to /dev/null,
-# so violation warnings do NOT surface to the AI yet. Spec line 220 calls
-# for surfacing via SessionStart additionalContext JSON; the protocol work
-# was deferred so the runtime gate could land first.
+# Known limitation (#61): em-recall stdout is redirected to /dev/null, so
+# violation warnings do NOT surface to the AI yet. Spec line 220 calls for
+# surfacing via SessionStart additionalContext JSON; the protocol work is
+# tracked under #61.
 #
 # Per Codex review: parse cwd from stdin, cd to it, then run em-recall with
 # no project arg so cwd/git inference owns project resolution. This keeps
