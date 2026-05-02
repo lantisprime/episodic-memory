@@ -22,11 +22,16 @@ Phase 3b (RFC-002) introduces user-level hooks that need to be installed into `~
 
 ## Installation
 
-`install.mjs --install-hooks` (when extended in PR-B per #59) copies these files into `~/.claude/hooks/`, registers them in `~/.claude/settings.json`, and chmods them executable. Until that lands, manual install is required for the runtime gate to actually fire.
+Until PR-B (per #59) lands its conservative installer, users must install hooks manually. The PR-B `install.mjs --install-hooks` will:
+
+- Compare each repo file against the user-installed copy at `~/.claude/hooks/`
+- **Skip with a warning** when they differ (preserving local edits)
+- Only overwrite under explicit `--install-hooks-force`
+- Register hooks in `~/.claude/settings.json` and chmod them executable
 
 ## Editing rules
 
-**Edit here, not the installed copy.** `install.mjs` overwrites `~/.claude/hooks/*.sh` on each `--install-hooks` run (with conservative skip-on-modified once #59 PR-B lands). Changes made directly to `~/.claude/hooks/` will be lost on the next install.
+**Edit here as the canonical source**, but local edits to `~/.claude/hooks/*.sh` are also fine in the meantime — PR-B's installer will diff them against the repo source rather than silently overwriting. If you choose to edit the installed copy directly, expect to either re-apply that edit here on next sync or use `--install-hooks-force` to overwrite when you're done.
 
 ## Related
 
