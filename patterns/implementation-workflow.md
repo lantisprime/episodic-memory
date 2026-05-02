@@ -90,6 +90,7 @@ Required before push/PR for Full tasks. References bp-006 pre-push checklist:
 | Mechanism | Strength | Scope |
 |-----------|----------|-------|
 | `plan-gate.sh` (Rule 8) | Strong | Claude Code only |
+| `checkpoint-gate.sh` (RFC-002 Phase 3b) | Strong | Claude Code only |
 | Pre-implementation checkpoint block | Medium | All tools |
 | bp-006 pre-push checklist | Strong | All tools |
 | Violation escalation via em-recall | Medium | All tools (when RFC-002 Phase 3 ships) |
