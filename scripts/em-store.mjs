@@ -37,7 +37,7 @@ const body = flag('--body')
 const url = flag('--url')
 const scope = flag('--scope') || 'global'
 
-const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation']
+const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation', 'workflow.lifecycle']
 
 if (!project || !category || !summary || !body) {
   console.log(JSON.stringify({
