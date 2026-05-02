@@ -346,6 +346,106 @@ assert_blocked "53. Bash with unquoted 'git push' (separate token) IS blocked" \
 
 # ============================================================================
 echo ""
+echo "--- Hook composition with plan-gate.sh (RFC-002:215) ---"
+# ============================================================================
+# Spec requires both hooks compose correctly when registered together as
+# PreToolUse hooks: each runs independently, blocks independently, and
+# does not interfere with the other's marker state.
+#
+# This test exercises both hooks sequentially against a shared cwd to
+# verify no cross-hook marker contamination and that error messages are
+# distinguishable.
+PLAN_GATE_SRC="$REPO_ROOT/../plan-gate.sh"
+PLAN_GATE_USER="$HOME/.claude/hooks/plan-gate.sh"
+# Prefer a repo-staged copy if one ever lands; otherwise fall back to the
+# installed user hook (same convention as tests/test-plan-gate.sh:10).
+if [ -x "$PLAN_GATE_USER" ]; then
+  PLAN_GATE="$PLAN_GATE_USER"
+elif [ -x "$PLAN_GATE_SRC" ]; then
+  PLAN_GATE="$PLAN_GATE_SRC"
+else
+  PLAN_GATE=""
+fi
+
+if [ -z "$PLAN_GATE" ]; then
+  echo "  ⊘ Skipping composition tests — plan-gate.sh not found at $PLAN_GATE_USER"
+else
+  reset_state
+  PLAN_MARKER="$TEST_DIR/.claude/.plan-approval-pending"
+  touch "$PRE_REQ"
+  touch "$PLAN_MARKER"
+
+  # Both gates active: each fires its own block reason
+  json=$(mock_json 'Edit')
+  plan_out=$(echo "$json" | HOME="$TEST_HOME" bash "$PLAN_GATE" 2>/dev/null || true)
+  if echo "$plan_out" | grep -q "Plan approval pending"; then
+    echo "  ✓ 58. plan-gate blocks Edit when .plan-approval-pending exists"
+    ((passed++))
+  else
+    echo "  ✗ 58. plan-gate did not block (output=$plan_out)"
+    ((failed++))
+  fi
+
+  cp_out=$(echo "$json" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null || true)
+  if echo "$cp_out" | grep -q "Checkpoint required"; then
+    echo "  ✓ 59. checkpoint-gate blocks Edit when .checkpoint-required exists"
+    ((passed++))
+  else
+    echo "  ✗ 59. checkpoint-gate did not block (output=$cp_out)"
+    ((failed++))
+  fi
+
+  # Distinct error messages — block reasons must be distinguishable
+  if [ "$plan_out" != "$cp_out" ]; then
+    echo "  ✓ 60. plan-gate and checkpoint-gate produce distinct block messages"
+    ((passed++))
+  else
+    echo "  ✗ 60. block messages are identical"
+    ((failed++))
+  fi
+
+  # No marker contamination — neither hook touched the other's marker
+  if [ -f "$PLAN_MARKER" ] && [ -f "$PRE_REQ" ]; then
+    echo "  ✓ 61. Both markers preserved after both hooks run (no cross-contamination)"
+    ((passed++))
+  else
+    echo "  ✗ 61. Marker missing after composition (plan=$([ -f "$PLAN_MARKER" ] && echo Y || echo N) cp=$([ -f "$PRE_REQ" ] && echo Y || echo N))"
+    ((failed++))
+  fi
+
+  # Clear plan marker — checkpoint-gate still blocks independently
+  rm -f "$PLAN_MARKER"
+  plan_out2=$(echo "$json" | HOME="$TEST_HOME" bash "$PLAN_GATE" 2>/dev/null || true)
+  cp_out2=$(echo "$json" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null || true)
+  if [ -z "$plan_out2" ] && echo "$cp_out2" | grep -q "Checkpoint required"; then
+    echo "  ✓ 62. checkpoint-gate continues to block after plan-gate marker cleared"
+    ((passed++))
+  else
+    echo "  ✗ 62. independent operation broke (plan_out2=$plan_out2 cp_out2=$cp_out2)"
+    ((failed++))
+  fi
+fi
+
+# ============================================================================
+echo ""
+echo "--- A8: hook does not pollute REPO_ROOT outside TEST_DIR ---"
+# ============================================================================
+# Regression guard mirroring test-em-recall-sessionstart.sh test 7. Snapshot
+# REPO_ROOT contents before/after a hook invocation; assert no new entries.
+REPO_ROOT_BEFORE=$(ls -A "$REPO_ROOT" | sort)
+echo "$(mock_json 'Edit')" | HOME="$TEST_HOME" bash "$HOOK" >/dev/null 2>&1 || true
+REPO_ROOT_AFTER=$(ls -A "$REPO_ROOT" | sort)
+if [ "$REPO_ROOT_BEFORE" = "$REPO_ROOT_AFTER" ]; then
+  echo "  ✓ 63. checkpoint-gate.sh does not pollute REPO_ROOT"
+  ((passed++))
+else
+  echo "  ✗ 63. checkpoint-gate.sh polluted REPO_ROOT:"
+  diff <(echo "$REPO_ROOT_BEFORE") <(echo "$REPO_ROOT_AFTER")
+  ((failed++))
+fi
+
+# ============================================================================
+echo ""
 echo "--- Result ---"
 # ============================================================================
 echo ""
