@@ -83,6 +83,35 @@ function mkEpisode({ event, task = 'TEST', patternId = 'bp-001-implementation-wo
   return id
 }
 
+// Seed a non-lifecycle witness episode (e.g. test log, code review reply).
+// Used for evidence refs (log_ref, reply_ref) that must resolve against the
+// index per #98 finding 2. Date/time are 11:00 so they precede the 12:00
+// lifecycle fixtures (resolver requires ref timestamp <= citing timestamp).
+function mkWitness({ category = 'discovery', summary = 'witness', status = 'active', date = '2026-05-02', time = '11:00' } = {}) {
+  counter++
+  const id = `20260502-1100${String(counter).padStart(2, '0')}-witness-${counter.toString(16).padStart(4, '0')}`
+  const fm = [
+    '---',
+    `id: ${id}`,
+    `date: ${date}`,
+    `time: "${time}"`,
+    'project: test',
+    `category: ${category}`,
+    `status: ${status}`,
+    'tags: []',
+    `summary: ${summary}`,
+    '---',
+    ''
+  ].join('\n')
+  const body = `# witness\n\nplain witness episode for evidence refs.\n`
+  fs.writeFileSync(path.join(episodesDir, `${id}.md`), fm + '\n' + body)
+  fs.appendFileSync(indexFile, JSON.stringify({
+    id, date, time, project: 'test', category, status,
+    supersedes: null, tags: [], summary
+  }) + '\n')
+  return id
+}
+
 function runValidate(args) {
   try {
     const out = execFileSync('node', [VALIDATE, ...args], {
@@ -173,16 +202,19 @@ test('T7 task isolation: different task is filtered out', () => {
   assert.deepStrictEqual(r.json.missing, ['plan-approved', 'pre-checkpoint'])
 })
 
-test('T8 happy: post-checkpoint gate with full evidence', () => {
+test('T8 happy: post-checkpoint gate with full evidence (real witness episodes)', () => {
+  const logId = mkWitness({ summary: 'test log' })
+  const reviewId = mkWitness({ summary: 'code review' })
+  const e2eId = mkWitness({ summary: 'e2e log' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
   mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
     event: 'post-checkpoint',
     extra: {
       evidence: {
-        tests: [{ command: 'node tests/test-x.mjs', status: 'passed', log_ref: 'episode:test-log-id' }],
-        code_review: { status: 'done', reply_ref: 'episode:review-id' },
-        e2e: { status: 'passed', log_ref: 'episode:e2e-id' },
+        tests: [{ command: 'node tests/test-x.mjs', status: 'passed', log_ref: `episode:${logId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${reviewId}` },
+        e2e: { status: 'passed', log_ref: `episode:${e2eId}` },
         bug_logging: { status: 'done', issues: [] }
       }
     }
@@ -192,6 +224,8 @@ test('T8 happy: post-checkpoint gate with full evidence', () => {
 })
 
 test('T9 evidence: empty tests array is rejected', () => {
+  const r2 = mkWitness({ summary: 'review' })
+  const e2 = mkWitness({ summary: 'e2e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
   mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
@@ -199,8 +233,8 @@ test('T9 evidence: empty tests array is rejected', () => {
     extra: {
       evidence: {
         tests: [],
-        code_review: { status: 'done', reply_ref: 'episode:review-id' },
-        e2e: { status: 'passed', log_ref: 'episode:e2e-id' },
+        code_review: { status: 'done', reply_ref: `episode:${r2}` },
+        e2e: { status: 'passed', log_ref: `episode:${e2}` },
         bug_logging: { status: 'done', issues: [] }
       }
     }
@@ -211,15 +245,17 @@ test('T9 evidence: empty tests array is rejected', () => {
 })
 
 test('T10 evidence: code_review.status=done without reply_ref is rejected', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const eId = mkWitness({ summary: 'e2e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
   mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
     event: 'post-checkpoint',
     extra: {
       evidence: {
-        tests: [{ command: 'x', status: 'passed', log_ref: 'episode:l' }],
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
         code_review: { status: 'done', reply_ref: '' },
-        e2e: { status: 'passed', log_ref: 'episode:e' },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
         bug_logging: { status: 'done', issues: [] }
       }
     }
@@ -230,15 +266,18 @@ test('T10 evidence: code_review.status=done without reply_ref is rejected', () =
 })
 
 test('T11 push-allowed: requires post_checkpoint_ref pointing to actual episode', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'review' })
+  const eId = mkWitness({ summary: 'e2e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
   mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   const postId = mkEpisode({
     event: 'post-checkpoint',
     extra: {
       evidence: {
-        tests: [{ command: 'x', status: 'passed', log_ref: 'episode:l' }],
-        code_review: { status: 'done', reply_ref: 'episode:r' },
-        e2e: { status: 'passed', log_ref: 'episode:e' },
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
         bug_logging: { status: 'done', issues: [] }
       }
     }
@@ -249,15 +288,18 @@ test('T11 push-allowed: requires post_checkpoint_ref pointing to actual episode'
 })
 
 test('T12 push-allowed: orphaned post_checkpoint_ref is rejected', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'review' })
+  const eId = mkWitness({ summary: 'e2e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
   mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
     event: 'post-checkpoint',
     extra: {
       evidence: {
-        tests: [{ command: 'x', status: 'passed', log_ref: 'episode:l' }],
-        code_review: { status: 'done', reply_ref: 'episode:r' },
-        e2e: { status: 'passed', log_ref: 'episode:e' },
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
         bug_logging: { status: 'done', issues: [] }
       }
     }
@@ -341,6 +383,195 @@ test('T19 head mismatch with --head flag is an error', () => {
   const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'newsha2'])
   assert.strictEqual(r.json.valid, false)
   assert.ok(r.json.errors.some(e => e.includes('context.head')))
+})
+
+// ---------------------------------------------------------------------------
+// #98 finding 2 — episode reference resolution & forge-resistance.
+// ---------------------------------------------------------------------------
+
+test('T20 evidence ref must resolve: bogus log_ref id is rejected', () => {
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: 'episode:does-not-exist-9999' }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('evidence.tests[0].log_ref') && e.includes('not found')),
+    `expected log_ref not-found error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T21 evidence ref to superseded episode is rejected', () => {
+  const supersededId = mkWitness({ summary: 'old log', status: 'superseded' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${supersededId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('superseded')),
+    `expected superseded error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T22 evidence ref to future-dated episode is rejected (chain temporal order)', () => {
+  // citing episode is at 12:00; a witness at 13:00 is "after" the chain.
+  const futureId = mkWitness({ summary: 'future log', time: '13:00' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${futureId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('temporally ordered') || e.includes('after citing')),
+    `expected timestamp ordering error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T23 chain-link ref to non-lifecycle category is rejected', () => {
+  // approval_ref pointing to a discovery episode (not workflow.lifecycle)
+  // should fail the expectedCategory check.
+  const fakePlanId = mkWitness({ summary: 'fake plan', category: 'discovery' })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${fakePlanId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && (e.includes('category') || e.includes('not a plan-approved'))),
+    `expected category mismatch, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T24 bug_logging.issues[]: free-form string rejected', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: ['fix this thing later'] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('bug_logging.issues[0]')),
+    `expected issue shape error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T25 bug_logging.issues[]: gh:owner/repo#n short form accepted', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: ['gh:lantisprime/episodic-memory#42'] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T26 bug_logging.issues[]: GitHub URL accepted', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: ['https://github.com/lantisprime/episodic-memory/issues/98'] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T27 self-witness: real id pointing to citing episode is rejected', () => {
+  // Build a post-checkpoint whose log_ref points to itself. To do this we
+  // need to know the next id mkEpisode will assign. Counter is shared, so we
+  // peek ahead by computing it.
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  // Predict the next id format used by mkEpisode (counter+1 suffix and event=post-checkpoint)
+  // Easier: pass log_ref to a known prior id (lId is fine for non-self) — we test
+  // self-witness by having post-checkpoint cite its OWN id. Since mkEpisode uses
+  // a deterministic counter, we just resolve via filesystem after creation.
+  // Workaround: write the post-checkpoint via direct fixture so we control the id.
+  const selfId = `20260502-120099-self-witness-test-9999`
+  const payload = {
+    event: 'post-checkpoint',
+    pattern_id: 'bp-001-implementation-workflow',
+    task: 'TEST',
+    context: { worktree: tmpCwd, branch: 'main', head: 'abc1234' },
+    evidence: {
+      tests: [{ command: 'x', status: 'passed', log_ref: `episode:${selfId}` }],
+      code_review: { status: 'done', reply_ref: `episode:${rId}` },
+      e2e: { status: 'passed', log_ref: `episode:${eId}` },
+      bug_logging: { status: 'done', issues: [] }
+    }
+  }
+  const fm = `---\nid: ${selfId}\ndate: 2026-05-02\ntime: "12:00"\nproject: test\ncategory: workflow.lifecycle\nstatus: active\ntags: []\nsummary: post-checkpoint\n---\n`
+  const body = `# x\n\n\`\`\`json\n${JSON.stringify(payload)}\n\`\`\`\n`
+  fs.writeFileSync(path.join(episodesDir, `${selfId}.md`), fm + '\n' + body)
+  fs.appendFileSync(indexFile, JSON.stringify({
+    id: selfId, date: '2026-05-02', time: '12:00', project: 'test',
+    category: 'workflow.lifecycle', status: 'active', supersedes: null, tags: [], summary: 'self'
+  }) + '\n')
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('self-witness')),
+    `expected self-witness error, got: ${JSON.stringify(r.json.errors)}`)
 })
 
 // ---------------------------------------------------------------------------

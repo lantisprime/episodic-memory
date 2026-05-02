@@ -144,7 +144,20 @@ function isPlaceholder(v) {
   return false
 }
 
-function validatePayload(payload, entry, errors, warnings) {
+// Resolve every `episode:<id>`-shaped value in a list of (label, value) pairs.
+// Non-episode-shaped values (file paths, URLs, etc.) pass through unchanged.
+// Errors are pushed into the shared array.
+function checkEpisodeRefs(pairs, entry, indexById, errors, opts = {}) {
+  for (const [label, value] of pairs) {
+    if (typeof value !== 'string') continue
+    if (!value.startsWith('episode:')) continue
+    if (isPlaceholder(value)) continue // already errored upstream
+    const r = resolveEpisodeRef(value, indexById, entry, opts)
+    if (r.error) errors.push(`episode:${entry.id}: ${label} ${r.error}`)
+  }
+}
+
+function validatePayload(payload, entry, errors, warnings, indexById) {
   const fp = `episode:${entry.id}`
   if (payload.event && !EVENT_ORDER.includes(payload.event)) {
     errors.push(`${fp}: unknown event "${payload.event}". Must be one of: ${EVENT_ORDER.join(', ')}`)
@@ -190,16 +203,32 @@ function validatePayload(payload, entry, errors, warnings) {
     case 'pre-checkpoint':
       if (isPlaceholder(payload.plan_ref)) errors.push(`${fp}: pre-checkpoint.plan_ref missing or placeholder`)
       if (isPlaceholder(payload.approval_ref)) errors.push(`${fp}: pre-checkpoint.approval_ref missing or placeholder`)
+      // approval_ref must resolve to a workflow.lifecycle plan-approved episode.
+      // The category check is done here; the event check happens in validateChain
+      // since events[] has already extracted payloads.
+      checkEpisodeRefs(
+        [['approval_ref', payload.approval_ref]],
+        entry, indexById, errors,
+        { expectedCategory: 'workflow.lifecycle' }
+      )
+      // plan_ref MAY be an episode ref (e.g. an inline RFC excerpt episode)
+      // or a file path / URL. If episode-shaped, resolve it.
+      checkEpisodeRefs([['plan_ref', payload.plan_ref]], entry, indexById, errors)
       if (payload.second_opinion) {
         const so = payload.second_opinion
         if (!so.status || isPlaceholder(so.status)) errors.push(`${fp}: pre-checkpoint.second_opinion.status missing`)
         if (so.status === 'done' && isPlaceholder(so.reply_ref)) errors.push(`${fp}: pre-checkpoint.second_opinion.reply_ref required when status=done`)
+        if (so.reply_ref) checkEpisodeRefs([['second_opinion.reply_ref', so.reply_ref]], entry, indexById, errors)
       }
       break
     case 'review-done':
       if (isPlaceholder(payload.reply_ref) && isPlaceholder(payload.evidence_ref)) {
         errors.push(`${fp}: review-done requires reply_ref or evidence_ref (external witness)`)
       }
+      checkEpisodeRefs(
+        [['reply_ref', payload.reply_ref], ['evidence_ref', payload.evidence_ref]],
+        entry, indexById, errors
+      )
       break
     case 'post-checkpoint':
       const ev = payload.evidence
@@ -230,26 +259,81 @@ function validatePayload(payload, entry, errors, warnings) {
       if (ev.bug_logging && ev.bug_logging.status === 'done' && !Array.isArray(ev.bug_logging.issues)) {
         errors.push(`${fp}: evidence.bug_logging.issues must be an array when status=done`)
       }
+      // Resolve all episode-shaped evidence refs (#98 finding 2).
+      if (Array.isArray(ev.tests)) {
+        ev.tests.forEach((t, i) => {
+          if (t) checkEpisodeRefs([[`evidence.tests[${i}].log_ref`, t.log_ref]], entry, indexById, errors)
+        })
+      }
+      if (ev.code_review) checkEpisodeRefs([['evidence.code_review.reply_ref', ev.code_review.reply_ref]], entry, indexById, errors)
+      if (ev.e2e) checkEpisodeRefs([['evidence.e2e.log_ref', ev.e2e.log_ref]], entry, indexById, errors)
+      // bug_logging.issues[] shape: empty array OR strings of shape
+      // https://github.com/<owner>/<repo>/issues/<n> | gh:<owner>/<repo>#<n>.
+      // Free-form strings rejected (was previously unvalidated — #98 finding 2).
+      if (ev.bug_logging && Array.isArray(ev.bug_logging.issues)) {
+        ev.bug_logging.issues.forEach((iss, i) => {
+          if (typeof iss !== 'string' || !ISSUE_REF_RE.test(iss)) {
+            errors.push(`${fp}: evidence.bug_logging.issues[${i}] must be GitHub issue URL (https://github.com/owner/repo/issues/N) or gh:owner/repo#N, got "${iss}"`)
+          }
+        })
+      }
       break
     case 'push-allowed':
       if (isPlaceholder(payload.post_checkpoint_ref)) {
         errors.push(`${fp}: push-allowed requires post_checkpoint_ref pointing to the post-checkpoint episode`)
       }
+      checkEpisodeRefs(
+        [['post_checkpoint_ref', payload.post_checkpoint_ref]],
+        entry, indexById, errors,
+        { expectedCategory: 'workflow.lifecycle' }
+      )
       break
   }
 }
 
 // ---------------------------------------------------------------------------
-// Approval-ref / post-checkpoint-ref continuity: pre-checkpoint must reference
-// a plan-approved episode for the same task; push-allowed must reference a
-// post-checkpoint episode for the same task. This is the chain integrity
-// check that prevents replay of unrelated episodes.
+// Episode reference resolution. RFC-002:327 requires references to point to
+// real artifacts. Resolution checks (a) the id exists in the index, (b) the
+// episode is active (not superseded), (c) the ref is not self-witness, and
+// (d) the referenced episode's timestamp is <= the citing episode's. Optional
+// `expectedCategory` enforces kind for chain-link refs (e.g. approval_ref
+// must point to a workflow.lifecycle episode).
 // ---------------------------------------------------------------------------
 function refTarget(ref) {
   if (typeof ref !== 'string') return null
   const m = ref.match(/^episode:(.+)$/)
   return m ? m[1].trim() : null
 }
+
+function resolveEpisodeRef(ref, indexById, currentEpisode, opts = {}) {
+  const id = refTarget(ref)
+  if (!id) return { error: `not an episode reference (expected episode:<id>): "${ref}"` }
+  if (id === currentEpisode.id) {
+    return { error: `episode:${id} self-witness: ref points to its own episode id` }
+  }
+  const entry = indexById.get(id)
+  if (!entry) return { error: `episode:${id} not found (checked local + global)` }
+  if (entry.status === 'superseded') return { error: `episode:${id} is superseded` }
+  if (entry.status && entry.status !== 'active') {
+    return { error: `episode:${id} is not active (status=${entry.status})` }
+  }
+  const refTime = `${entry.date} ${entry.time}`
+  const curTime = `${currentEpisode.date} ${currentEpisode.time}`
+  if (refTime > curTime) {
+    return { error: `episode:${id} timestamp ${refTime} is after citing episode ${curTime} (chain must be temporally ordered)` }
+  }
+  if (opts.expectedCategory && entry.category !== opts.expectedCategory) {
+    return { error: `episode:${id} category "${entry.category}" != expected "${opts.expectedCategory}"` }
+  }
+  return { entry, source: entry._source }
+}
+
+// `bug_logging.issues[]` element shape per workflow-lifecycle.md:
+// empty array (checked, no bugs), or strings of shape
+//   https://github.com/<owner>/<repo>/issues/<n>
+//   gh:<owner>/<repo>#<n>
+// Free-form strings are rejected (was previously unvalidated — #98 finding 2).
+const ISSUE_REF_RE = /^(https:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/issues\/\d+|gh:[^\/\s]+\/[^\/\s#]+#\d+)$/
 
 function validateChain(events, errors) {
   const byEvent = {}
@@ -266,7 +350,7 @@ function validateChain(events, errors) {
     }
     const matching = (byEvent['plan-approved'] || []).find(e => e.entry.id === targetId)
     if (!matching) {
-      errors.push(`episode:${pre.entry.id}: approval_ref episode:${targetId} not found among plan-approved episodes for task`)
+      errors.push(`episode:${pre.entry.id}: approval_ref episode:${targetId} not a plan-approved episode for this task (chain link must be same-task plan-approved, not arbitrary episode)`)
     }
   }
   // push-allowed.post_checkpoint_ref must point to a post-checkpoint episode
@@ -278,7 +362,7 @@ function validateChain(events, errors) {
     }
     const matching = (byEvent['post-checkpoint'] || []).find(e => e.entry.id === targetId)
     if (!matching) {
-      errors.push(`episode:${pa.entry.id}: post_checkpoint_ref episode:${targetId} not found among post-checkpoint episodes for task`)
+      errors.push(`episode:${pa.entry.id}: post_checkpoint_ref episode:${targetId} not a post-checkpoint episode for this task (chain link must be same-task post-checkpoint, not arbitrary episode)`)
     }
   }
 }
@@ -297,6 +381,13 @@ allEntries = allEntries.filter(e => {
   seen.add(e.id)
   return true
 })
+
+// Index by id for episode ref resolution. Includes ALL episodes (any category,
+// any status) — the resolver handles status/timestamp/category checks itself.
+// resolveEpisodeRef ignores caller's --scope: a lifecycle chain may legitimately
+// cite a global witness, and vice versa (#98 finding 2 / Codex MINOR 7).
+const indexById = new Map()
+for (const e of allEntries) indexById.set(e.id, e)
 
 // Filter to active workflow.lifecycle episodes
 const workflowEntries = allEntries.filter(e =>
@@ -322,7 +413,7 @@ for (const entry of workflowEntries) {
   }
   // Pre-filter: must be the same task + pattern
   if (payload.task !== task || payload.pattern_id !== patternId) continue
-  validatePayload(payload, entry, errors, warnings)
+  validatePayload(payload, entry, errors, warnings, indexById)
   events.push({ entry, payload })
 }
 

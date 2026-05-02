@@ -120,6 +120,10 @@ At least one of `reply_ref` or `evidence_ref` is required (external witness).
 - `code_review.reply_ref` required when `status === "done"`.
 - `e2e.log_ref` required when `status === "passed"`.
 - `bug_logging.issues` MUST be an array when `status === "done"` (empty array means "checked, no bugs").
+- `bug_logging.issues[]` element shape: each non-empty entry MUST be either a
+  GitHub issue URL `https://github.com/<owner>/<repo>/issues/<n>` or the
+  short form `gh:<owner>/<repo>#<n>`. Free-form strings are rejected. Live
+  existence of the issue is **not** checked by this validator (deferred).
 
 ### `push-allowed`
 
@@ -130,6 +134,29 @@ At least one of `reply_ref` or `evidence_ref` is required (external witness).
 ```
 
 Validator rejects `push-allowed` whose `post_checkpoint_ref` does not resolve to a `post-checkpoint` episode for the same task.
+
+## Episode reference resolution (RFC-002:327)
+
+Every value of shape `episode:<id>` in any of the fields below must resolve
+against the local + global episode index (regardless of `--scope`). The
+validator rejects:
+
+- references to non-existent ids
+- references to superseded or non-active episodes
+- self-witness (a ref pointing to its own episode id)
+- references whose timestamp is **after** the citing episode (chain links must
+  be temporally ordered)
+- chain-link refs (`approval_ref`, `post_checkpoint_ref`) whose target
+  category is not `workflow.lifecycle`
+
+Fields resolved: `pre-checkpoint.approval_ref`, `pre-checkpoint.plan_ref`
+(when episode-shaped), `pre-checkpoint.second_opinion.reply_ref`,
+`review-done.reply_ref`, `review-done.evidence_ref`,
+`evidence.tests[].log_ref`, `evidence.code_review.reply_ref`,
+`evidence.e2e.log_ref`, `push-allowed.post_checkpoint_ref`.
+
+Non-episode-shaped values (file paths, URLs, GitHub issue refs) pass through
+unchanged.
 
 ## Placeholder rejection (RFC-002:327)
 
