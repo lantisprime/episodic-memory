@@ -4,6 +4,8 @@ A **shared memory layer for AI coding agents**. Different agentic AI platforms �
 
 Works with: **Claude Code**, **Cursor**, **Codex (OpenAI)**, **Windsurf / Continue**
 
+The design principles guiding the system are documented in [PRINCIPLES.md](PRINCIPLES.md).
+
 ## Capabilities
 
 - **Cross-tool memory sharing** — A decision Claude Code made yesterday surfaces when Cursor or Codex starts working on the same project today. All four agents read/write the same episode files; no tool is siloed.
@@ -175,7 +177,7 @@ Behavioral patterns are documentation — they tell AI assistants **what** to fo
 - **Violation tracking** (`em-violation.mjs`) — structured storage with pattern linkage, searchable by `--category violation` and `--tag violated:<pattern_id>`
 - **Session-end prompt** (`em-session-end-prompt.mjs`) — SessionEnd hook that asks about violations
 - **Proactive recall** (`em-recall.mjs`) — surfaces past violations at session start as pre-flight warnings
-- **Checkpoint enforcement gate** (RFC-002 Phase 3b, coming) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done
+- **Checkpoint enforcement gate** (RFC-002 Phase 3b, shipped + activated 2026-05-02 via [#78](https://github.com/lantisprime/episodic-memory/pull/78) and [#84](https://github.com/lantisprime/episodic-memory/pull/84)) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done. Opt-in via `node install.mjs --tool claude-code --install-hooks --project <path>`; registers SessionStart + PreToolUse + SessionEnd hooks in `~/.claude/settings.json`.
 
 **External ([user-preferences](https://github.com/lantisprime/user-preferences)):**
 - **Pre-tool hooks** (e.g., `plan-gate.sh`) that block writes during the planning phase
@@ -189,7 +191,8 @@ Episodic-memory and user-preferences are fully independent — install either or
 | RFC | Title | Status |
 |-----|-------|--------|
 | [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted (Phases 1-3 shipped) |
-| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-2 shipped) |
+| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-3 + 3b shipped + runtime-deployed) |
+| [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
 
 ## Scripts Reference
 

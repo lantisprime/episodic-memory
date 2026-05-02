@@ -18,6 +18,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
+- [Scenario 12: The Checkpoint Gate Stopped the AI](#scenario-12-the-checkpoint-gate-stopped-the-ai)
 - [What Gets Stored and What Doesn't](#what-gets-stored-and-what-doesnt)
 - [Browsing Your Memories](#browsing-your-memories)
 - [Troubleshooting](#troubleshooting)
@@ -34,6 +35,9 @@ node ~/episodic-memory/install.mjs --tool cursor --project /path/to/my-project
 
 # For Claude Code
 node ~/episodic-memory/install.mjs --tool claude-code --project /path/to/my-project
+
+# For Claude Code with checkpoint enforcement hooks (opt-in, recommended)
+node ~/episodic-memory/install.mjs --tool claude-code --install-hooks --project /path/to/my-project
 
 # For Codex
 node ~/episodic-memory/install.mjs --tool codex --project /path/to/my-project
@@ -270,6 +274,8 @@ AI:   I see from a previous session that you chose Tailwind CSS
 
 **How it works:** Both tools read from and write to `~/.episodic-memory/`. The instruction files are different per tool, but the data is shared.
 
+**Cross-tool messaging via Codex watcher.** When Codex writes review feedback as episodes (tagged `codex`, `codex-review`, or `codex-reply`), Claude Code or Cursor can poll for new replies with `em-watch-codex.mjs` — episodes act as a lightweight message bus between tools, with per-scope cursors so nothing is read twice.
+
 ---
 
 ## Scenario 9: Explicitly Asking to Remember
@@ -360,6 +366,38 @@ AI:   ⚠️ Pre-flight warning: bp-001 (implementation workflow) was
 ```
 
 **What happened:** Violations are stored with the pattern ID, the wrong sequence, and the correct sequence. The system aggregates them and surfaces warnings when you start similar work. Over time, this drives enforcement improvements — if a rule is violated repeatedly, it gets a mechanical gate (hook) instead of relying on documentation.
+
+---
+
+## Scenario 12: The Checkpoint Gate Stopped the AI
+
+**What happens:** You installed Claude Code with `--install-hooks`. The AI tries to edit a file or run a command and is blocked with a message about a "checkpoint required."
+
+```
+AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
+
+      "Checkpoint required. Write the Rule 18 pre-implementation
+      checkpoint block to .claude/.pre-checkpoint-done before write
+      tools are unblocked."
+
+      I'll print my implementation plan, get your approval, then
+      write the checkpoint marker before continuing.
+```
+
+**Why this exists:** The checkpoint enforcement gate (RFC-002 Phase 3b) is a PreToolUse hook that prevents the AI from skipping the plan → review → approval steps of the implementation workflow (bp-001). It's the mechanical version of the rules described in Scenario 11 — instead of relying on the AI to remember, the hook physically blocks edits until a checkpoint is recorded.
+
+**Two gates:**
+- **Pre-checkpoint** — blocks `Edit`/`Write`/`Bash` until `.claude/.pre-checkpoint-done` exists with the plan summary.
+- **Push-gate** — blocks `git push` until E2E testing and bug-logging steps are complete.
+
+**To clear the gate (intentionally):**
+
+```bash
+# After the AI has shown its plan and you've approved it:
+echo "ok" > .claude/.pre-checkpoint-done
+```
+
+**To opt out entirely:** Don't pass `--install-hooks` during install, or remove the hook entries from `~/.claude/settings.json`.
 
 ---
 
@@ -539,6 +577,16 @@ node ~/.episodic-memory/scripts/em-pattern-health.mjs --check
 A pattern flagged `needs-enforcement` is being violated repeatedly *and* the script found no mechanical hook (in `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/`, or `<project>/.github/workflows/`) referencing the pattern. That's a signal to write or install a hook. `needs-attention` means a hook exists but violations are still happening — escalate to a human.
 
 If detection misses a hook (e.g., enforcement lives in an unusual file), pass `--has-enforcement <pattern_id>` to override; repeat the flag for multiple patterns.
+
+### "I want to archive old memories"
+
+`em-prune.mjs` archives episodes that score below a relevance threshold. Use `--dry-run` first to preview, and `--check` as a CI gate that exits 1 when prunable episodes exist:
+
+```bash
+node ~/.episodic-memory/scripts/em-prune.mjs --dry-run
+node ~/.episodic-memory/scripts/em-prune.mjs --scope global --threshold 0.15
+node ~/.episodic-memory/scripts/em-prune.mjs --check
+```
 
 ### "I want to start fresh"
 
