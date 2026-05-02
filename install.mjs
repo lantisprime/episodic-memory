@@ -57,9 +57,10 @@ Tools:
 
 Hook flags (claude-code / Phase 3b):
   --install-hooks         Copy hooks/*.sh into ~/.claude/hooks/ and register
-                          checkpoint-gate (PreToolUse), em-recall-sessionstart
-                          (SessionStart), em-session-end-prompt (SessionEnd)
-                          in ~/.claude/settings.json. Skips divergent local
+                          checkpoint-gate + plan-gate (PreToolUse),
+                          em-recall-sessionstart (SessionStart), and
+                          em-session-end-prompt (SessionEnd) in
+                          ~/.claude/settings.json. Skips divergent local
                           hook files AND withholds new settings registration
                           for them (re-run with --install-hooks-force to
                           accept). Atomic settings.json write (temp+rename).
@@ -368,6 +369,16 @@ if (installHooks) {
         matcher: 'Edit|Write|MultiEdit|Bash|NotebookEdit',
         timeout: 5
       },
+      // plan-gate.sh: no matcher — must run on every PreToolUse so the
+      // tool-name allowlist (read-only tools) is the sole filter for what
+      // bypasses the marker. Issue #86 (PR-A): canonicalized into the repo
+      // and registered by the installer; Bash command-level allowlisting
+      // is deferred to PR-B.
+      {
+        file: 'plan-gate.sh',
+        event: 'PreToolUse',
+        timeout: 5
+      },
       {
         file: 'em-recall-sessionstart.sh',
         event: 'SessionStart',
@@ -452,6 +463,7 @@ if (installHooks) {
     const canonicalByBasename = {
       'em-session-end-prompt.mjs': path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'),
       'checkpoint-gate.sh': path.join(userHooksDir, 'checkpoint-gate.sh'),
+      'plan-gate.sh': path.join(userHooksDir, 'plan-gate.sh'),
       'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh')
     }
     const staleEntries = detectStaleCanonicalEntries(settings.hooks, canonicalByBasename)
