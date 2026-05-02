@@ -44,7 +44,7 @@ case "$TOOL_NAME" in
 esac
 
 # Allowlist: Bash redirecting (>, >>, or tee) into a checkpoint-done marker.
-# Two-step tightening:
+# Three-step tightening history:
 #   #65: require redirect operator before marker name (no longer just a
 #        substring match) — blocked `cat /etc/passwd; echo .pre-checkpoint-done`.
 #   #66: only check the part of the command BEFORE the first `<<` (heredoc /
@@ -55,16 +55,32 @@ esac
 #          echo > .pre-checkpoint-done
 #          EOF
 #        Pre-<< portion is `cat > readme.md `; no marker redirect → blocks.
-#        Legitimate `cat > .pre-checkpoint-done <<EOF` has the redirect in
-#        the pre-<< portion → still allows. AI is expected to write checkpoint
-#        text via echo/cat heredoc/printf with the redirect to marker.
-# Known residual: quoted strings and command substitution can still embed
-# the redirect-to-marker pattern as text. Accepted (low-risk: AI doesn't
-# bypass intentionally; broader Phase 3b push-gate catches eventual push).
+#   #68: anchor the pattern to end-of-COMMAND_HEAD ([[:space:]]*$) so a
+#        chained command after the marker write doesn't ride through the
+#        allowlist. Pre-fix: `echo X > .pre-checkpoint-done; rm -rf /tmp`
+#        passed the allowlist and the rm ran. Post-fix: trailing `;` (or
+#        `&&`/`||`/`|`/`&`) after the marker filename means no match —
+#        falls through to the gates' normal block path.
+#
+# Legitimate single-statement marker-writes still pass:
+#   echo "..." > .pre-checkpoint-done
+#   cat > .pre-checkpoint-done <<EOF\n...\nEOF
+#   tee .post-checkpoint-done <<<"text"
+#   printf "..." > .pre-checkpoint-done
+#
+# Known residuals (accepted): quoted strings and command substitution can
+# still embed the redirect-to-marker pattern as text (#67); heredoc body
+# followed by a chained command after EOF still bypasses (because the `<<`
+# truncation drops everything from the heredoc onward).
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
   COMMAND_HEAD="${COMMAND%%<<*}"
-  if echo "$COMMAND_HEAD" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done'; then
+  # Flatten newlines to spaces (#72): grep -E evaluates line-by-line and `$`
+  # matches end-of-line, so without flattening, `echo > marker\n; rm` would
+  # match line 1 and bypass the allowlist. Flattening makes the whole
+  # COMMAND_HEAD a single line so `$` matches end-of-string.
+  COMMAND_HEAD_FLAT="${COMMAND_HEAD//$'\n'/ }"
+  if echo "$COMMAND_HEAD_FLAT" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done[[:space:]]*$'; then
     exit 0
   fi
 fi
@@ -76,9 +92,15 @@ if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
 fi
 
 # Push gate
+# Match `git push` (with optional global flags between git and push) or
+# `gh pr create`. Tightened from `git[[:space:]]+([^&;|]*[[:space:]])?push`
+# per #69 — that allowed arbitrary tokens (including non-push subcommands
+# like `commit -m push` or `branch push`) to ride between `git` and `push`,
+# producing false positives that blocked legitimate non-push git commands.
+# New form only allows global flag tokens: `-X`, `--long-flag`, `-X arg`.
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  if echo "$COMMAND" | grep -qE '(^|[[:space:]&;|()])(git[[:space:]]+([^&;|]*[[:space:]])?push|gh[[:space:]]+pr[[:space:]]+create)([[:space:]&;|()]|$)'; then
+  if echo "$COMMAND" | grep -qE '(^|[[:space:]&;|()])(git[[:space:]]+(-[^[:space:]]+[[:space:]]+([^-][^[:space:]]*[[:space:]]+)?)*push|gh[[:space:]]+pr[[:space:]]+create)([[:space:]&;|()]|$)'; then
     if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
       echo '{"decision": "block", "reason": "Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty) before pushing. Hook: checkpoint-gate.sh."}'
       exit 0

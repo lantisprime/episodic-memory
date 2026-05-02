@@ -346,6 +346,83 @@ assert_blocked "53. Bash with unquoted 'git push' (separate token) IS blocked" \
 
 # ============================================================================
 echo ""
+echo "--- #68 F1: chained marker-write does NOT bypass gate ---"
+# ============================================================================
+# Pre-fix: `echo X > .pre-checkpoint-done; rm -rf /` passed the allowlist
+# because the regex matched the redirect to the marker without anchoring
+# end-of-HEAD. Post-fix: any control operator after the marker filename
+# means no allowlist match → falls through to pre-gate block.
+reset_state
+touch "$PRE_REQ"
+
+assert_blocked "64. marker-write THEN ; chained command — blocks (no bypass)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+assert_blocked "65. marker-write THEN && chained command — blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+assert_blocked "66. marker-write THEN || chained command — blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+assert_blocked "67. marker-write THEN | piped command — blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")" "Checkpoint required"
+# Newline-chained variant (#72): grep -E line-by-line evaluation would
+# otherwise let line 1 (the marker write) match alone.
+assert_blocked "67b. marker-write THEN newline + ; chained — blocks (#72)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE
+; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+
+# Push-gate variant: chained post-marker-write THEN git push must block
+echo "pre done" > "$PRE_DONE"
+touch "$POST_REQ"
+assert_blocked "68. post-marker-write THEN ; git push — blocks (no bypass)" \
+  "$(mock_json 'Bash' "echo post > $POST_DONE; git push origin main")" "Post-implementation checkpoint required"
+
+# Legitimate single-statement marker-writes still pass (regression check)
+reset_state
+touch "$PRE_REQ"
+assert_allowed "69. Pure echo > marker still allowed (regression)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE")"
+assert_allowed "70. Pure cat > marker <<EOF still allowed (regression)" \
+  "$(mock_json 'Bash' "cat > $PRE_DONE <<EOF\nRule 18\nEOF")"
+assert_allowed "71. Pure tee marker <<<text still allowed (regression)" \
+  "$(mock_json 'Bash' "tee $PRE_DONE <<<\"checkpoint\"")"
+# Trailing whitespace after marker should still pass (legitimate noise)
+assert_allowed "72. echo > marker followed only by whitespace still allowed" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE   ")"
+
+# ============================================================================
+echo ""
+echo "--- #69 F2: push regex no longer matches non-push git subcommands ---"
+# ============================================================================
+# Pre-fix: `git[[:space:]]+([^&;|]*[[:space:]])?push` allowed any tokens
+# between `git` and `push`, so `git commit -m push` and `git branch push`
+# were false-positive blocked. Post-fix: only -X / --long / -X arg flag
+# patterns allowed between git and push.
+reset_state
+touch "$PRE_REQ"
+echo "pre done" > "$PRE_DONE"
+touch "$POST_REQ"
+
+# False positives that should now be allowed (no real git push)
+assert_allowed "73. 'git commit -m push' NOT blocked (commit message contains 'push')" \
+  "$(mock_json 'Bash' "git commit -m push")"
+assert_allowed "74. 'git branch push' NOT blocked (branch named push)" \
+  "$(mock_json 'Bash' "git branch push")"
+assert_allowed "75. 'git stash push' NOT blocked (stash subcommand takes 'push')" \
+  "$(mock_json 'Bash' "git stash push")"
+assert_allowed "76. 'git tag push' NOT blocked (tag named push)" \
+  "$(mock_json 'Bash' "git tag push")"
+
+# Real git push commands STILL blocked (regression check)
+assert_blocked "77. 'git push' IS blocked (regression)" \
+  "$(mock_json 'Bash' "git push origin main")" "Post-implementation checkpoint required"
+assert_blocked "78. 'git -C /path push' IS blocked (global flag with arg)" \
+  "$(mock_json 'Bash' "git -C /tmp/repo push")" "Post-implementation checkpoint required"
+assert_blocked "79. 'git --no-pager push' IS blocked (long flag)" \
+  "$(mock_json 'Bash' "git --no-pager push")" "Post-implementation checkpoint required"
+assert_blocked "80. 'gh pr create' IS blocked (regression)" \
+  "$(mock_json 'Bash' "gh pr create --title x --body y")" "Post-implementation checkpoint required"
+
+# ============================================================================
+echo ""
 echo "--- Hook composition with plan-gate.sh (RFC-002:215) ---"
 # ============================================================================
 # Spec requires both hooks compose correctly when registered together as
