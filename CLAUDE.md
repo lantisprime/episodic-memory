@@ -9,9 +9,12 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - `.claude-plugin/plugin.json` — Claude Code plugin manifest
 - `skills/episodic-memory/` — Claude Code skill (symlinks to instructions/ and scripts/)
 
+
 ## Data locations
 - Global: `~/.episodic-memory/` (scripts, episodes, index)
 - Per-project: `.episodic-memory/` (local episodes + index)
+- `docs/rfcs/` — contains the RFC to be used in implementation when the status is ACCEPTED
+- `PRINCIPLES.md` — when planning, designing, and implementing requirements, Claude Code must read this and follow
 
 ## Development conventions
 - Scripts are `.mjs` (ESM) with zero external dependencies
@@ -19,6 +22,8 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - Scripts handle missing data directories gracefully (create on first use)
 - Episode IDs are immutable; decisions are corrected via revision chains, not edits
 - Use atomic write (temp + rename) for index rebuilds
+- You must not do mental tracing always use the actual files or data
+- You must do code review and use the actual files
 
 ## Testing
 ```bash
