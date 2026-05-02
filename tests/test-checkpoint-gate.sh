@@ -290,6 +290,39 @@ assert_allowed "50. Bash 'tee .post-checkpoint-done' allowed" \
 
 # ============================================================================
 echo ""
+echo "--- #66: heredoc-body bypass blocked (pre-<< check) ---"
+# ============================================================================
+reset_state
+touch "$PRE_REQ"
+
+# Bypass attempt: command writes to readme.md, but heredoc body mentions
+# `> .pre-checkpoint-done`. Pre-fix this would bypass the gate.
+# Post-fix: only the pre-<< portion is checked → no marker redirect → block.
+heredoc_bypass='cat > readme.md <<EOF
+echo > .pre-checkpoint-done
+EOF'
+assert_blocked "54. Heredoc body mentioning marker redirect does NOT bypass" \
+  "$(mock_json 'Bash' "$heredoc_bypass")" "Checkpoint required"
+
+# Legitimate heredoc TO the marker: redirect target is in pre-<< portion → allow.
+heredoc_legit='cat > '"$PRE_DONE"' <<EOF
+Rule 18 checkpoint
+EOF'
+assert_allowed "55. Heredoc TO marker still allowed (redirect in pre-<< portion)" \
+  "$(mock_json 'Bash' "$heredoc_legit")"
+
+# Here-string to marker still allowed
+herestring_legit='tee '"$POST_DONE"' <<<"checkpoint text"'
+assert_allowed "56. Here-string TO marker still allowed" \
+  "$(mock_json 'Bash' "$herestring_legit")"
+
+# Bypass attempt with here-string: < but no redirect to marker in pre-<<<
+herestring_bypass='cat > readme.md <<<"echo > .pre-checkpoint-done"'
+assert_blocked "57. Here-string body mentioning marker does NOT bypass" \
+  "$(mock_json 'Bash' "$herestring_bypass")" "Checkpoint required"
+
+# ============================================================================
+echo ""
 echo "--- #65 R2: push-gate boundary characters — quoted strings do NOT trigger ---"
 # ============================================================================
 reset_state

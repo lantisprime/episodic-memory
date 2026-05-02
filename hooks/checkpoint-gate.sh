@@ -40,13 +40,27 @@ case "$TOOL_NAME" in
 esac
 
 # Allowlist: Bash redirecting (>, >>, or tee) into a checkpoint-done marker.
-# Tightened from substring match per #65 — pathological commands that merely
-# mention the marker name (e.g. `cat /etc/passwd; echo .pre-checkpoint-done`)
-# no longer bypass the gate. AI is expected to write checkpoint text via
-# echo/cat heredoc/printf into the marker.
+# Two-step tightening:
+#   #65: require redirect operator before marker name (no longer just a
+#        substring match) — blocked `cat /etc/passwd; echo .pre-checkpoint-done`.
+#   #66: only check the part of the command BEFORE the first `<<` (heredoc /
+#        here-string introducer). Heredoc bodies are text, not commands; a
+#        redirect mentioned inside a heredoc body must not bypass the gate.
+#        Example bypass that this addresses:
+#          cat > readme.md <<EOF
+#          echo > .pre-checkpoint-done
+#          EOF
+#        Pre-<< portion is `cat > readme.md `; no marker redirect → blocks.
+#        Legitimate `cat > .pre-checkpoint-done <<EOF` has the redirect in
+#        the pre-<< portion → still allows. AI is expected to write checkpoint
+#        text via echo/cat heredoc/printf with the redirect to marker.
+# Known residual: quoted strings and command substitution can still embed
+# the redirect-to-marker pattern as text. Accepted (low-risk: AI doesn't
+# bypass intentionally; broader Phase 3b push-gate catches eventual push).
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  if echo "$COMMAND" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done'; then
+  COMMAND_HEAD="${COMMAND%%<<*}"
+  if echo "$COMMAND_HEAD" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done'; then
     exit 0
   fi
 fi
