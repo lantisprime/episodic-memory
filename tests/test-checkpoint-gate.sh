@@ -478,6 +478,46 @@ assert_allowed "86. Pure heredoc + trailing whitespace — still allowed" \
 
 # ============================================================================
 echo ""
+echo "--- #75: extended terminator forms also caught ---"
+# ============================================================================
+# Per Step-6 adversarial probe of #73 fix: <<\EOF (backslash-escaped) and
+# <<123 (digit-start) terminators were valid bash forms my initial sed regex
+# didn't extract, leaving the bypass open. Fix: more permissive terminator
+# class allowing any non-whitespace non-special chars + optional leading \.
+
+# <<\EOF (backslash-escaped) with post-EOF chain — should block
+heredoc_backslash='cat > '"$PRE_DONE"' <<\EOF
+rule18
+EOF
+rm -rf /tmp/IMPORTANT'
+assert_blocked "87. <<\\EOF backslash-escaped terminator + chain — blocks (#75)" \
+  "$(mock_json 'Bash' "$heredoc_backslash")" "Checkpoint required"
+
+# <<123 (numeric-only terminator) with post chain
+heredoc_numeric='cat > '"$PRE_DONE"' <<123
+rule18
+123
+rm -rf /tmp/IMPORTANT'
+assert_blocked "88. <<123 numeric-only terminator + chain — blocks (#75)" \
+  "$(mock_json 'Bash' "$heredoc_numeric")" "Checkpoint required"
+
+# <<==EOF== (special chars in terminator) — bash valid
+heredoc_special='cat > '"$PRE_DONE"' <<==EOF==
+rule18
+==EOF==
+rm -rf /tmp/IMPORTANT'
+assert_blocked "89. <<==EOF== special-char terminator + chain — blocks (#75)" \
+  "$(mock_json 'Bash' "$heredoc_special")" "Checkpoint required"
+
+# Regression: <<\EOF without post-EOF content still allowed
+heredoc_backslash_pure='cat > '"$PRE_DONE"' <<\EOF
+literal $stuff
+EOF'
+assert_allowed "90. <<\\EOF without chain — still allowed (regression)" \
+  "$(mock_json 'Bash' "$heredoc_backslash_pure")"
+
+# ============================================================================
+echo ""
 echo "--- Hook composition with plan-gate.sh (RFC-002:215) ---"
 # ============================================================================
 # Spec requires both hooks compose correctly when registered together as

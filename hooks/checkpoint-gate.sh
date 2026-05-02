@@ -81,14 +81,20 @@ if [ "$TOOL_NAME" = "Bash" ]; then
   # COMMAND_HEAD a single line so `$` matches end-of-string.
   COMMAND_HEAD_FLAT="${COMMAND_HEAD//$'\n'/ }"
 
-  # #73: detect post-heredoc-EOF chained commands. If COMMAND has `<<TERM`,
-  # find the terminator line and check for non-whitespace content after it.
-  # If found, the allowlist must NOT match — heredoc body legitimately writes
-  # the marker, but a chained command after EOF runs unchecked.
+  # #73 / #75: detect post-heredoc-EOF chained commands. If COMMAND has
+  # `<<TERM`, find the terminator line and check for non-whitespace content
+  # after it. If found, the allowlist must NOT match — heredoc body
+  # legitimately writes the marker, but a chained command after EOF runs
+  # unchecked.
   POST_HEREDOC_HAS_CONTENT=0
   if [ "$COMMAND_HEAD" != "$COMMAND" ]; then
-    # Extract terminator from first <<. Handles <<EOF, <<-EOF, <<'EOF', <<"EOF".
-    TERM=$(printf '%s' "$COMMAND" | sed -nE "s/^[^<]*<<-?[[:space:]]*['\"]?([A-Za-z_][A-Za-z0-9_]*).*/\1/p" | head -1)
+    # Extract terminator from first <<. Handles bash heredoc forms:
+    #   <<EOF, <<-EOF, <<'EOF', <<"EOF" (#73 initial coverage)
+    #   <<\EOF (backslash-escaped, #75)
+    #   <<123, <<==EOF==, etc. (any non-whitespace non-special term, #75)
+    # Terminator class: non-whitespace, non-redirect, non-pipe-special,
+    # non-quote chars. Optional leading `\` per bash quote-removal rules.
+    TERM=$(printf '%s' "$COMMAND" | sed -nE "s/^[^<]*<<-?[[:space:]]*['\"]?\\\\?([^[:space:]<>|&;'\"]+).*/\1/p" | head -1)
     if [ -n "$TERM" ]; then
       # Find lines AFTER the first occurrence of the terminator-only line.
       # `<<-` form allows leading tabs on the terminator; awk strips them
