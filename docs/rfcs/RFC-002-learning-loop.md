@@ -233,98 +233,131 @@ Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required
 
 **Depends on:** Phase 3 (violation-aware recall output)
 
-### Phase 3b+ Hardening Recommendations for BP-001
+### Phase 3b+ Principles-Aligned Hardening Recommendations for BP-001
 
-**Recommendation:** Treat Phase 3b/PR-A as the baseline hook primitive, not the complete BP-001 solution. Non-empty marker files are not sufficient evidence of BP-001 compliance. They prove only that the AI wrote something to a file; they do not prove that planning, review, E2E testing, bug logging, or scope control actually happened.
+**Recommendation:** Treat Phase 3b/PR-A as the Claude hook primitive, not the complete BP-001 solution. Non-empty marker files are not sufficient evidence of BP-001 compliance. They prove only that the AI wrote something to a file; they do not prove that planning, review, E2E testing, bug logging, or scope control actually happened.
+
+The hardening path must follow `PRINCIPLES.md`:
+
+- **P1 / P7:** Durable workflow state is stored as append-only episodes. Local gate files are adapter-owned cache, not the source of truth.
+- **P2 / P11:** Workflow definitions and request schemas are JSON; interpretation belongs in core `.mjs` validators.
+- **P3 / P10:** Hook activation is explicit, consent-based, and reversible through adapter manifests.
+- **P5:** Enforcement strength is labeled honestly per tool. Claude Code can be `STRONG`; tools without PreToolUse hooks are lower-tier.
+- **P6:** No heartbeat, polling loop, timer, or silent daemon. Checks are lifecycle-gated: session start, user-turn boundary, pre-write, pre-push/PR, and session end.
+- **P8:** Review and checkpoint messages carry context: worktree, branch, head, recipient, and inspected files where applicable.
+- **P9:** Core never imports adapters. Claude hooks call core validators; they do not own BP-001 policy.
 
 Split the remaining enforcement work into small follow-up phases so Claude can implement them without turning Phase 3b into one large blob:
 
-1. **Phase 3b baseline: installer-owned activation**
-   - `install.mjs --install-hooks` installs and registers `checkpoint-gate.sh` and the SessionStart recall hook.
-   - `rules-check.sh` verifies expected hook names, paths, and versions/checksums.
+1. **Phase 3b baseline: explicit adapter activation**
+   - `install.mjs --install-hooks` detects Claude capability and offers the Claude adapter; it must not silently write `~/.claude/settings.json`.
+   - `adapters/claude/manifest.json` declares side effects: files copied, settings modified, hook names, ownership IDs, checksums, and backout actions.
+   - `rules-check.sh` or its adapter equivalent verifies expected hook names, paths, and versions/checksums.
    - Installer behavior must be consent-based and reversible: do not overwrite user-modified hooks unless `--force` is explicitly passed.
-   - README, RFC acceptance status, and `patterns/implementation-workflow.md` must reflect whether the hooks are merely available in source or actually installed.
+   - README, RFC acceptance status, and `patterns/implementation-workflow.md` must distinguish "source available" from "adapter installed and active."
 
-2. **Phase 3b-H1 hardening: structured checkpoint artifacts**
-   - Replace "non-empty marker means done" with validated JSON artifacts.
-   - Suggested files:
-     - `.claude/em-gates/pre-checkpoint.json`
-     - `.claude/em-gates/review-done.json`
-     - `.claude/em-gates/post-checkpoint.json`
-   - `checkpoint-gate.sh` should call a validator script instead of checking only `[ -s "$MARKER" ]`.
-   - Push/PR creation remains blocked until the post-checkpoint artifact validates.
+2. **Phase 3b-H1 hardening: lifecycle episodes plus validated gate cache**
+   - Replace "non-empty marker means done" with append-only workflow lifecycle episodes validated through core scripts.
+   - Suggested episode category: `workflow.lifecycle`.
+   - Suggested lifecycle events: `classified`, `plan-approved`, `pre-checkpoint`, `review-done`, `post-checkpoint`, `scope-change`, `push-allowed`.
+   - Adapter cache files may exist under `.claude/em-gates/` for fast hook checks, but they must reference episode IDs and can be rebuilt from memory.
+   - `checkpoint-gate.sh` should call a core validator such as `scripts/em-workflow-validate.mjs` instead of checking only `[ -s "$MARKER" ]`.
+   - Push/PR creation remains blocked until the validator confirms the relevant post-checkpoint episode and evidence chain.
 
-   Minimal pre-checkpoint schema:
+   Minimal pre-checkpoint lifecycle payload:
 
    ```json
    {
+     "category": "workflow.lifecycle",
+     "event": "pre-checkpoint",
+     "pattern_id": "bp-001-implementation-workflow",
      "task": "Implement Phase 3 installer wiring",
      "classification": "full",
+     "context": {
+       "worktree": "/path/to/worktree",
+       "branch": "claude/phase3b-runtime",
+       "head": "abc1234"
+     },
      "plan_ref": "docs/rfcs/RFC-002-learning-loop.md#phase-3b",
-     "approval_ref": "user approved 2026-05-02",
+     "approval_ref": "episode:20260502-example-approval",
      "second_opinion": {
        "status": "done",
-       "reviewer": "codex",
-       "artifact_ref": "memory/session_summaries/phase3b-review.md"
+       "recipient": "codex",
+       "reply_ref": "episode:20260502-example-review"
      }
    }
    ```
 
-   Minimal post-checkpoint schema:
+   Minimal post-checkpoint lifecycle payload:
 
    ```json
    {
-     "tests": [
-       {
-         "command": "npm test",
+     "category": "workflow.lifecycle",
+     "event": "post-checkpoint",
+     "pattern_id": "bp-001-implementation-workflow",
+     "context": {
+       "worktree": "/path/to/worktree",
+       "branch": "claude/phase3b-runtime",
+       "head": "def5678"
+     },
+     "evidence": {
+       "tests": [
+         {
+           "command": "npm test",
+           "status": "passed",
+           "log_ref": "episode:20260502-example-test-log"
+         }
+       ],
+       "code_review": {
+         "status": "done",
+         "reply_ref": "episode:20260502-example-code-review"
+       },
+       "e2e": {
          "status": "passed",
-         "artifact_ref": "test-output/phase3b.txt"
+         "log_ref": "episode:20260502-example-e2e"
+       },
+       "bug_logging": {
+         "status": "done",
+         "issues": []
        }
-     ],
-     "code_review": {
-       "status": "done",
-       "artifact_ref": "memory/session_summaries/phase3b-code-review.md"
-     },
-     "e2e": {
-       "status": "passed",
-       "artifact_ref": "test-output/phase3b-e2e.txt"
-     },
-     "bug_logging": {
-       "status": "done",
-       "issues": []
      }
    }
    ```
 
-   The validator must reject missing required fields, empty arrays where evidence is required, and placeholder values that do not reference a command, file, log, or issue ID.
+   The validator must reject missing required fields, stale `head` values, mismatched worktrees, empty evidence arrays where evidence is required, and placeholder values that do not reference a command, episode, log, file, or issue ID.
 
-3. **Phase 3b-H2 scope control: scope manifest and scope-change gate**
-   - Create an approved-scope artifact during the pre-checkpoint.
-   - Suggested file: `.claude/em-gates/scope.json`.
-   - The artifact records approved files/areas, explicit out-of-scope areas, and whether scope changes require user approval.
-   - Writes outside the approved scope should require a `.claude/em-gates/scope-change.json` artifact with the user approval reference.
+3. **Phase 3b-H2 scope control: scope lifecycle and scope-change gate**
+   - Record approved scope as a lifecycle episode, not only as a local file.
+   - Adapter cache may mirror it as `.claude/em-gates/scope.json` for fast hook checks.
+   - Scope records include approved files/areas, explicit out-of-scope areas, worktree, branch, head, and whether scope changes require user approval.
+   - Writes outside approved scope require a `scope-change` lifecycle episode with approval evidence.
    - This addresses bp-001 violations where the AI added extra work after approval without re-confirming.
 
-4. **Outside-Claude enforcement: future Git/CI gate**
+4. **Outside-Claude enforcement: future Git/CI adapter**
    - Claude PreToolUse hooks only protect actions taken through Claude Code.
-   - If true push enforcement is needed outside Claude, add a separate Git pre-push hook or CI check after the Claude hook path is stable.
-   - Do not block Phase 3b baseline on Git/CI enforcement.
+   - If true push enforcement is needed outside Claude, implement it as a separate adapter capability such as Git pre-push or CI.
+   - Label those capabilities honestly in the matrix and do not block Phase 3b baseline on them.
 
 **Definition of done for the hardening path:**
 
-- `install.mjs --install-hooks` installs and registers Phase 3b hooks from canonical repo sources.
-- `rules-check.sh` reports missing, stale, or modified hooks.
-- Pre-checkpoint, review, post-checkpoint, and scope artifacts are structured JSON and validated mechanically.
-- Push/PR creation is blocked unless the post-checkpoint artifact validates.
-- Test, review, E2E, and bug-log evidence references concrete commands, logs, files, or issue IDs.
-- Scope changes require an explicit scope-change artifact with approval evidence.
+- Claude adapter manifest declares hook side effects, ownership IDs, checksums, and uninstall/backout actions.
+- `install.mjs --install-hooks` asks for consent before installing or modifying hooks/settings.
+- `rules-check.sh` reports missing, stale, or modified hooks without silently repairing them.
+- BP-001 workflow transitions are stored as append-only `workflow.lifecycle` episodes.
+- `.claude/em-gates/*` files are treated as adapter cache and reference episode IDs.
+- Core validator scripts decide whether pre-write and pre-push gates pass; adapters only translate hook input and present results.
+- Push/PR creation is blocked unless the post-checkpoint lifecycle episode validates.
+- Test, review, E2E, and bug-log evidence references concrete commands, logs, files, episodes, or issue IDs.
+- Scope changes require an explicit lifecycle episode with approval evidence.
+- No timer heartbeat, polling loop, or silent daemon is introduced.
 
 **Recommended implementation sequence:**
 
-1. **PR-B:** installer wiring, rules-check verification, README/RFC/pattern status updates.
-2. **PR-C:** Plan Gate v2 / review artifact requirement before clearing the plan gate.
-3. **PR-D:** Phase 3b-H1 structured checkpoint artifacts and validator-backed push gate.
-4. **PR-E:** Phase 3b-H2 scope manifest and scope-change gate.
+1. **PR-B:** Claude adapter manifest, explicit installer activation, rules-check verification, README/RFC/pattern status updates.
+2. **PR-C:** Core workflow lifecycle schema and `em-workflow-validate.mjs` for BP-001 transitions.
+3. **PR-D:** Plan Gate v2 / review lifecycle requirement before clearing the plan gate.
+4. **PR-E:** Phase 3b-H1 validator-backed pre-write and pre-push gates using lifecycle episodes plus adapter cache.
+5. **PR-F:** Phase 3b-H2 scope lifecycle and scope-change gate.
 
 ### Phase 3c: Hybrid Violation Reporting (clerk model)
 
@@ -550,15 +583,20 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test)
 
 **Phase 3b hardening follow-ups:**
-- [ ] `rules-check.sh` verifies expected Phase 3b hook names, paths, and versions/checksums
+- [ ] Claude adapter manifest declares hook side effects, ownership IDs, checksums, and uninstall/backout actions
+- [ ] `install.mjs --install-hooks` asks for consent before modifying Claude settings or installing hooks
 - [ ] Installer refuses to overwrite user-modified hooks unless `--force` is explicitly passed
-- [ ] Non-empty marker files are replaced or supplemented by validator-backed JSON artifacts
-- [ ] Pre-checkpoint artifact validates task, classification, plan reference, approval reference, and second-opinion/review status
-- [ ] Post-checkpoint artifact validates test, code review, E2E, and bug-log evidence references
-- [ ] Push/PR creation remains blocked when post-checkpoint evidence is missing, placeholder-only, or invalid
-- [ ] Scope manifest records approved files/areas before implementation begins
-- [ ] Writes outside approved scope require a scope-change artifact with approval evidence
-- [ ] Git pre-push/CI enforcement is documented as outside-Claude future work, not a Phase 3b baseline blocker
+- [ ] `rules-check.sh` verifies expected Phase 3b hook names, paths, and versions/checksums
+- [ ] BP-001 transitions are stored as append-only `workflow.lifecycle` episodes
+- [ ] `.claude/em-gates/*` files are treated as adapter cache and reference lifecycle episode IDs
+- [ ] Core validator rejects missing fields, stale `head`, mismatched worktree, placeholder evidence, or missing evidence references
+- [ ] Pre-checkpoint lifecycle validates task, classification, context, plan reference, approval reference, and second-opinion/review status
+- [ ] Post-checkpoint lifecycle validates test, code review, E2E, and bug-log evidence references
+- [ ] Push/PR creation remains blocked when post-checkpoint evidence is missing, placeholder-only, stale, or invalid
+- [ ] Scope lifecycle records approved files/areas before implementation begins
+- [ ] Writes outside approved scope require a scope-change lifecycle episode with approval evidence
+- [ ] Git pre-push/CI enforcement is documented as a future adapter capability, not a Phase 3b baseline blocker
+- [ ] No timer heartbeat, polling loop, or silent daemon is introduced
 
 **Phase 4:**
 - [ ] `compliance` category accepted by `em-store.mjs`
