@@ -13,7 +13,7 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 ## Data locations
 - Global: `~/.episodic-memory/` (scripts, episodes, index)
 - Per-project: `.episodic-memory/` (local episodes + index)
-- `docs/rfc/` — contains the RFC to be used in implementation when the status is ACCEPTED
+- `docs/rfcs/` — contains the RFC to be used in implementation when the status is ACCEPTED
 - `PRINCIPLES.md` — when planning, designing, and implementing requirements, Claude Code must read this and follow
 
 ## Development conventions
