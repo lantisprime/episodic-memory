@@ -3,6 +3,10 @@ set -e
 
 # checkpoint-gate.sh — RFC-002 Phase 3b PreToolUse hook
 #
+# Dependencies: bash, jq, grep. Same as plan-gate.sh — if any are missing
+# the hook will fail under set -e; behavior in that case is whatever Claude
+# Code does with a hook exit code != 0 (not redocumented here).
+#
 # Two gates with shared marker state in $CWD/.claude/:
 #
 #   pre-checkpoint:
