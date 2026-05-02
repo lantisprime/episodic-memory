@@ -108,6 +108,47 @@ fi
 
 # ============================================================================
 echo ""
+echo "--- #70 F3: invalid cwd → exit 0 without invoking em-recall ---"
+# ============================================================================
+# Pre-fix: `cd "$CWD" 2>/dev/null || true` silently fell back to whatever
+# directory the hook process started in if $CWD was invalid. em-recall would
+# then run in that wrong dir and could touch .checkpoint-required in an
+# unrelated project. Post-fix: invalid cwd → exit 0 cleanly without
+# invoking em-recall at all.
+# Clear sentinels in any dir the mock might write to. If F3 fix is broken,
+# the mock em-recall would write `.em-recall-ran` at its `process.cwd()` —
+# which is the inherited cwd of the hook subprocess (typically REPO_ROOT).
+# Checking only TEST_DIR misses that case; check the three likely targets.
+rm -f "$TEST_DIR/.em-recall-ran" "$TEST_HOME/.em-recall-ran" "$REPO_ROOT/.em-recall-ran"
+
+exit_code=0
+HOME="$TEST_HOME" bash -c "echo '{\"cwd\":\"/nonexistent/path/that/does/not/exist\"}' | bash '$HOOK'" 2>/dev/null || exit_code=$?
+
+if [ $exit_code -eq 0 ]; then
+  echo "  ✓ 8. Hook exits 0 with invalid cwd"
+  ((passed++))
+else
+  echo "  ✗ 8. Hook failed with non-zero exit ($exit_code) on invalid cwd"
+  ((failed++))
+fi
+
+# em-recall must NOT have run anywhere. Check the three plausible targets:
+# the inherited cwd (REPO_ROOT), the test dir, and the test HOME.
+if [ ! -f "$TEST_DIR/.em-recall-ran" ] \
+  && [ ! -f "$TEST_HOME/.em-recall-ran" ] \
+  && [ ! -f "$REPO_ROOT/.em-recall-ran" ]; then
+  echo "  ✓ 9. em-recall NOT invoked when cwd invalid (no sentinel anywhere)"
+  ((passed++))
+else
+  echo "  ✗ 9. mock em-recall sentinel found — invocation proceeded with invalid cwd"
+  echo "    TEST_DIR: $([ -f "$TEST_DIR/.em-recall-ran" ] && echo present || echo absent)"
+  echo "    TEST_HOME: $([ -f "$TEST_HOME/.em-recall-ran" ] && echo present || echo absent)"
+  echo "    REPO_ROOT: $([ -f "$REPO_ROOT/.em-recall-ran" ] && echo present || echo absent)"
+  ((failed++))
+fi
+
+# ============================================================================
+echo ""
 echo "--- Regression guard for #63 (no pollution outside TEST_DIR/TEST_HOME) ---"
 # ============================================================================
 REPO_ROOT_BEFORE=$(ls -A "$REPO_ROOT" | sort)

@@ -33,7 +33,14 @@ if [ ! -f "$EM_RECALL" ]; then
   exit 0
 fi
 
-cd "$CWD" 2>/dev/null || true
+# If $CWD is invalid (nonexistent / unreadable), fail soft instead of running
+# em-recall in whatever directory the hook process inherited from. Per #70:
+# without this guard, em-recall.mjs:347-369 could touch .checkpoint-required
+# in an unrelated project, causing checkpoint-gate.sh to fire spuriously
+# in the next session of that wrong project.
+if ! cd "$CWD" 2>/dev/null; then
+  exit 0
+fi
 node "$EM_RECALL" --limit 5 >/dev/null 2>&1 || true
 
 exit 0
