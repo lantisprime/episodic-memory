@@ -125,8 +125,24 @@ function setBranch(name) {
 
 const markerPath = path.join(tmpProject, '.claude', '.checkpoint-required')
 
+const ALL_PHASE3B_MARKERS = [
+  '.checkpoint-required',
+  '.pre-checkpoint-done',
+  '.post-checkpoint-required',
+  '.post-checkpoint-done'
+]
+
 function clearMarker() {
   try { fs.unlinkSync(markerPath) } catch {}
+}
+
+// Clear all 4 Phase 3b markers — used by tests that exercise the full
+// state machine, so subsequent tests start from a known-clean .claude/
+// regardless of what state the previous test left behind.
+function clearAllMarkers() {
+  for (const m of ALL_PHASE3B_MARKERS) {
+    try { fs.unlinkSync(path.join(tmpProject, '.claude', m)) } catch {}
+  }
 }
 
 function sessionEnd() {
@@ -336,6 +352,47 @@ test('T7f. SessionEnd cleanup is silent when marker does not exist', () => {
   // Should not throw even with no marker present
   sessionEnd()
   assert.ok(!fs.existsSync(markerPath))
+})
+
+test('T7g. SessionEnd sweeps all four Phase 3b markers (full state machine)', () => {
+  // Phase 3b spec line 210: SessionEnd removes all four checkpoint markers
+  // so they don't persist into the next session.
+  clearAllMarkers()
+  const claudeDir = path.join(tmpProject, '.claude')
+  fs.mkdirSync(claudeDir, { recursive: true })
+  const markers = ALL_PHASE3B_MARKERS.map(m => path.join(claudeDir, m))
+  for (const m of markers) fs.writeFileSync(m, 'sentinel')
+  for (const m of markers) assert.ok(fs.existsSync(m), `precondition: ${path.basename(m)} should exist`)
+  sessionEnd()
+  for (const m of markers) {
+    assert.ok(!fs.existsSync(m), `${path.basename(m)} should be removed by SessionEnd`)
+  }
+})
+
+test('T7h. SessionEnd cleans orphaned markers (e.g. post-required without checkpoint-required)', () => {
+  // Spec line 207: orphaned states cleaned by SessionEnd sweep.
+  clearAllMarkers()
+  const claudeDir = path.join(tmpProject, '.claude')
+  fs.mkdirSync(claudeDir, { recursive: true })
+  const orphan = path.join(claudeDir, '.post-checkpoint-required')
+  fs.writeFileSync(orphan, '')
+  sessionEnd()
+  assert.ok(!fs.existsSync(orphan), 'orphaned post-checkpoint-required should be cleaned')
+})
+
+test('T7i. clearAllMarkers helper produces clean state for subsequent tests', () => {
+  // Defensive guard for the helper itself — A4 audit finding.
+  // Seed all 4 markers, call helper, verify all gone.
+  const claudeDir = path.join(tmpProject, '.claude')
+  fs.mkdirSync(claudeDir, { recursive: true })
+  for (const m of ALL_PHASE3B_MARKERS) {
+    fs.writeFileSync(path.join(claudeDir, m), 'sentinel')
+  }
+  clearAllMarkers()
+  for (const m of ALL_PHASE3B_MARKERS) {
+    assert.ok(!fs.existsSync(path.join(claudeDir, m)),
+      `${m} should be cleared by clearAllMarkers helper`)
+  }
 })
 
 test('T6a. em-session-end-prompt.mjs outputs a violation-flagging prompt with known patterns', () => {
