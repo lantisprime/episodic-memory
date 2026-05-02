@@ -92,12 +92,34 @@ fi
 echo ""
 echo "--- Missing cwd in stdin: hook soft-falls back to pwd ---"
 # ============================================================================
-HOME="$TEST_HOME" bash -c "echo '{}' | bash '$HOOK'" 2>/dev/null
-if [ $? -eq 0 ]; then
+# Run from inside TEST_DIR so the hook's `[ -z "$CWD" ] && CWD="$(pwd)"`
+# fallback resolves to TEST_DIR (which the EXIT trap cleans up), not the
+# test runner's working directory. Without the cd, mock em-recall would
+# write its .em-recall-ran sentinel into wherever bash was invoked from.
+exit_code=0
+(cd "$TEST_DIR" && HOME="$TEST_HOME" bash -c "echo '{}' | bash '$HOOK'") 2>/dev/null || exit_code=$?
+if [ $exit_code -eq 0 ]; then
   echo "  ✓ 6. Hook exits 0 when cwd missing from stdin"
   ((passed++))
 else
   echo "  ✗ 6. Hook failed when cwd missing from stdin"
+  ((failed++))
+fi
+
+# ============================================================================
+echo ""
+echo "--- Regression guard for #63 (no pollution outside TEST_DIR/TEST_HOME) ---"
+# ============================================================================
+REPO_ROOT_BEFORE=$(ls -A "$REPO_ROOT" | sort)
+# Re-run the full hook one more time inside TEST_DIR with empty stdin
+(cd "$TEST_DIR" && HOME="$TEST_HOME" bash -c "echo '{}' | bash '$HOOK'") 2>/dev/null || true
+REPO_ROOT_AFTER=$(ls -A "$REPO_ROOT" | sort)
+if [ "$REPO_ROOT_BEFORE" = "$REPO_ROOT_AFTER" ]; then
+  echo "  ✓ 7. Hook does not create files outside TEST_DIR (#63 regression guard)"
+  ((passed++))
+else
+  echo "  ✗ 7. Hook polluted REPO_ROOT (regression of #63):"
+  echo "    diff: $(diff <(echo "$REPO_ROOT_BEFORE") <(echo "$REPO_ROOT_AFTER"))"
   ((failed++))
 fi
 
