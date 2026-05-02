@@ -233,6 +233,99 @@ Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required
 
 **Depends on:** Phase 3 (violation-aware recall output)
 
+### Phase 3b+ Hardening Recommendations for BP-001
+
+**Recommendation:** Treat Phase 3b/PR-A as the baseline hook primitive, not the complete BP-001 solution. Non-empty marker files are not sufficient evidence of BP-001 compliance. They prove only that the AI wrote something to a file; they do not prove that planning, review, E2E testing, bug logging, or scope control actually happened.
+
+Split the remaining enforcement work into small follow-up phases so Claude can implement them without turning Phase 3b into one large blob:
+
+1. **Phase 3b baseline: installer-owned activation**
+   - `install.mjs --install-hooks` installs and registers `checkpoint-gate.sh` and the SessionStart recall hook.
+   - `rules-check.sh` verifies expected hook names, paths, and versions/checksums.
+   - Installer behavior must be consent-based and reversible: do not overwrite user-modified hooks unless `--force` is explicitly passed.
+   - README, RFC acceptance status, and `patterns/implementation-workflow.md` must reflect whether the hooks are merely available in source or actually installed.
+
+2. **Phase 3b-H1 hardening: structured checkpoint artifacts**
+   - Replace "non-empty marker means done" with validated JSON artifacts.
+   - Suggested files:
+     - `.claude/em-gates/pre-checkpoint.json`
+     - `.claude/em-gates/review-done.json`
+     - `.claude/em-gates/post-checkpoint.json`
+   - `checkpoint-gate.sh` should call a validator script instead of checking only `[ -s "$MARKER" ]`.
+   - Push/PR creation remains blocked until the post-checkpoint artifact validates.
+
+   Minimal pre-checkpoint schema:
+
+   ```json
+   {
+     "task": "Implement Phase 3 installer wiring",
+     "classification": "full",
+     "plan_ref": "docs/rfcs/RFC-002-learning-loop.md#phase-3b",
+     "approval_ref": "user approved 2026-05-02",
+     "second_opinion": {
+       "status": "done",
+       "reviewer": "codex",
+       "artifact_ref": "memory/session_summaries/phase3b-review.md"
+     }
+   }
+   ```
+
+   Minimal post-checkpoint schema:
+
+   ```json
+   {
+     "tests": [
+       {
+         "command": "npm test",
+         "status": "passed",
+         "artifact_ref": "test-output/phase3b.txt"
+       }
+     ],
+     "code_review": {
+       "status": "done",
+       "artifact_ref": "memory/session_summaries/phase3b-code-review.md"
+     },
+     "e2e": {
+       "status": "passed",
+       "artifact_ref": "test-output/phase3b-e2e.txt"
+     },
+     "bug_logging": {
+       "status": "done",
+       "issues": []
+     }
+   }
+   ```
+
+   The validator must reject missing required fields, empty arrays where evidence is required, and placeholder values that do not reference a command, file, log, or issue ID.
+
+3. **Phase 3b-H2 scope control: scope manifest and scope-change gate**
+   - Create an approved-scope artifact during the pre-checkpoint.
+   - Suggested file: `.claude/em-gates/scope.json`.
+   - The artifact records approved files/areas, explicit out-of-scope areas, and whether scope changes require user approval.
+   - Writes outside the approved scope should require a `.claude/em-gates/scope-change.json` artifact with the user approval reference.
+   - This addresses bp-001 violations where the AI added extra work after approval without re-confirming.
+
+4. **Outside-Claude enforcement: future Git/CI gate**
+   - Claude PreToolUse hooks only protect actions taken through Claude Code.
+   - If true push enforcement is needed outside Claude, add a separate Git pre-push hook or CI check after the Claude hook path is stable.
+   - Do not block Phase 3b baseline on Git/CI enforcement.
+
+**Definition of done for the hardening path:**
+
+- `install.mjs --install-hooks` installs and registers Phase 3b hooks from canonical repo sources.
+- `rules-check.sh` reports missing, stale, or modified hooks.
+- Pre-checkpoint, review, post-checkpoint, and scope artifacts are structured JSON and validated mechanically.
+- Push/PR creation is blocked unless the post-checkpoint artifact validates.
+- Test, review, E2E, and bug-log evidence references concrete commands, logs, files, or issue IDs.
+- Scope changes require an explicit scope-change artifact with approval evidence.
+
+**Recommended implementation sequence:**
+
+1. **PR-B:** installer wiring, rules-check verification, README/RFC/pattern status updates.
+2. **PR-C:** Plan Gate v2 / review artifact requirement before clearing the plan gate.
+3. **PR-D:** Phase 3b-H1 structured checkpoint artifacts and validator-backed push gate.
+4. **PR-E:** Phase 3b-H2 scope manifest and scope-change gate.
+
 ### Phase 3c: Hybrid Violation Reporting (clerk model)
 
 **Motivation:** Phase 3's user-flagged-only SessionEnd prompt places high cognitive load on the user — they must remember every behavioral pattern (currently bp-001 through bp-012) and recall every micro-violation across multi-hour sessions. Empirical evidence (session 5, 2026-05-01: bp-010 P4 self-caught at rule-18 step 6, violation episode `20260501-105506`) shows AI self-flagging already works at code-review checkpoints. But self-reporting bias is real enough that AI-detected violations cannot become authoritative without human adjudication. Codex review of OQ-6 (reply `20260501-112318`) recommends a clerk model: **AI drafts candidate violations for human adjudication; only confirmed items are stored.** Do not call this auto-detection — AI is clerk, not judge.
@@ -455,6 +548,17 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [ ] Push failure after marker cleanup does not re-engage gate (documented limitation)
 - [ ] Orphaned markers (e.g., `.post-checkpoint-required` alone) cleaned by SessionEnd
 - [ ] SessionStart hook produces `.checkpoint-required` before any user interaction (flow test)
+
+**Phase 3b hardening follow-ups:**
+- [ ] `rules-check.sh` verifies expected Phase 3b hook names, paths, and versions/checksums
+- [ ] Installer refuses to overwrite user-modified hooks unless `--force` is explicitly passed
+- [ ] Non-empty marker files are replaced or supplemented by validator-backed JSON artifacts
+- [ ] Pre-checkpoint artifact validates task, classification, plan reference, approval reference, and second-opinion/review status
+- [ ] Post-checkpoint artifact validates test, code review, E2E, and bug-log evidence references
+- [ ] Push/PR creation remains blocked when post-checkpoint evidence is missing, placeholder-only, or invalid
+- [ ] Scope manifest records approved files/areas before implementation begins
+- [ ] Writes outside approved scope require a scope-change artifact with approval evidence
+- [ ] Git pre-push/CI enforcement is documented as outside-Claude future work, not a Phase 3b baseline blocker
 
 **Phase 4:**
 - [ ] `compliance` category accepted by `em-store.mjs`
