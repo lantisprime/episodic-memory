@@ -80,8 +80,33 @@ if [ "$TOOL_NAME" = "Bash" ]; then
   # match line 1 and bypass the allowlist. Flattening makes the whole
   # COMMAND_HEAD a single line so `$` matches end-of-string.
   COMMAND_HEAD_FLAT="${COMMAND_HEAD//$'\n'/ }"
-  if echo "$COMMAND_HEAD_FLAT" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done[[:space:]]*$'; then
-    exit 0
+
+  # #73: detect post-heredoc-EOF chained commands. If COMMAND has `<<TERM`,
+  # find the terminator line and check for non-whitespace content after it.
+  # If found, the allowlist must NOT match — heredoc body legitimately writes
+  # the marker, but a chained command after EOF runs unchecked.
+  POST_HEREDOC_HAS_CONTENT=0
+  if [ "$COMMAND_HEAD" != "$COMMAND" ]; then
+    # Extract terminator from first <<. Handles <<EOF, <<-EOF, <<'EOF', <<"EOF".
+    TERM=$(printf '%s' "$COMMAND" | sed -nE "s/^[^<]*<<-?[[:space:]]*['\"]?([A-Za-z_][A-Za-z0-9_]*).*/\1/p" | head -1)
+    if [ -n "$TERM" ]; then
+      # Find lines AFTER the first occurrence of the terminator-only line.
+      # `<<-` form allows leading tabs on the terminator; awk strips them
+      # before comparing.
+      POST=$(printf '%s' "$COMMAND" | awk -v t="$TERM" '
+        f { print; next }
+        { line=$0; sub(/^\t+/, "", line); if (line==t) f=1 }
+      ')
+      if printf '%s' "$POST" | grep -qE '[^[:space:]]'; then
+        POST_HEREDOC_HAS_CONTENT=1
+      fi
+    fi
+  fi
+
+  if [ "$POST_HEREDOC_HAS_CONTENT" = "0" ]; then
+    if echo "$COMMAND_HEAD_FLAT" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done[[:space:]]*$'; then
+      exit 0
+    fi
   fi
 fi
 

@@ -423,6 +423,61 @@ assert_blocked "80. 'gh pr create' IS blocked (regression)" \
 
 # ============================================================================
 echo ""
+echo "--- #73: heredoc + post-EOF chained command does NOT bypass ---"
+# ============================================================================
+# Pre-fix: cat > marker <<EOF\n...\nEOF\nrm -rf / had pre-<< portion that
+# matched allowlist (`cat > marker `), and the post-EOF chained command
+# (rm) ran unchecked. Post-fix: scan for non-whitespace content after the
+# heredoc terminator line; if found, the allowlist won't match.
+reset_state
+touch "$PRE_REQ"
+
+# Bypass attempts that should now block
+heredoc_chain1="cat > $PRE_DONE <<EOF
+rule18
+EOF
+rm -rf /tmp/IMPORTANT"
+assert_blocked "81. heredoc + post-EOF ; chain — blocks (#73)" \
+  "$(mock_json 'Bash' "$heredoc_chain1")" "Checkpoint required"
+
+heredoc_chain2="cat > $PRE_DONE <<EOF
+rule18
+EOF
+&& git push origin main"
+assert_blocked "82. heredoc + post-EOF && chain — blocks" \
+  "$(mock_json 'Bash' "$heredoc_chain2")" "Checkpoint required"
+
+# <<- form (leading tabs allowed on terminator) with post content
+heredoc_dash=$(printf 'cat > %s <<-EOF\n\tcontent\n\tEOF\necho leak' "$PRE_DONE")
+assert_blocked "83. <<-EOF form with post-EOF content — blocks" \
+  "$(mock_json 'Bash' "$heredoc_dash")" "Checkpoint required"
+
+# Quoted terminator <<'EOF'
+heredoc_quoted="cat > $PRE_DONE <<'EOF'
+literal text
+EOF
+echo leak"
+assert_blocked "84. <<'EOF' quoted-terminator form with post content — blocks" \
+  "$(mock_json 'Bash' "$heredoc_quoted")" "Checkpoint required"
+
+# Pure heredoc (regression): no post-EOF content → still allowed
+pure_heredoc="cat > $PRE_DONE <<EOF
+rule18 checkpoint
+EOF"
+assert_allowed "85. Pure heredoc to marker (regression) — still allowed" \
+  "$(mock_json 'Bash' "$pure_heredoc")"
+
+# Pure heredoc with trailing whitespace/newline after EOF — still allowed
+pure_heredoc_ws="cat > $PRE_DONE <<EOF
+rule18
+EOF
+
+"
+assert_allowed "86. Pure heredoc + trailing whitespace — still allowed" \
+  "$(mock_json 'Bash' "$pure_heredoc_ws")"
+
+# ============================================================================
+echo ""
 echo "--- Hook composition with plan-gate.sh (RFC-002:215) ---"
 # ============================================================================
 # Spec requires both hooks compose correctly when registered together as
