@@ -9,7 +9,7 @@ Phase 3b (RFC-002) introduces user-level hooks that need to be installed into `~
 ## Conventions
 
 - **One hook per file.** Each script handles a single hook event (PreToolUse, SessionStart, etc.).
-- **POSIX bash + jq + grep.** No Node, no other runtime dependencies.
+- **Hooks are bash + jq + grep.** Some hooks (e.g. `em-recall-sessionstart.sh`) delegate to Node scripts living elsewhere; the hook *script itself* stays bash so install + diagnosis don't depend on Node being available before any tool runs.
 - **`set -e` and JSON via stdin.** Claude Code passes hook input as JSON on stdin; emit a `{"decision": "block", "reason": "..."}` JSON to block.
 - **Test against the repo source.** Tests in `tests/test-*.sh` invoke `$REPO/hooks/<name>.sh` directly with a temp `cwd` and `HOME`, not the installed copy at `~/.claude/hooks/`. This means PR diffs verify the actual checked-in hook content, not whatever a maintainer happened to install locally. Exception: hook *composition* tests must reference an installed peer hook (e.g. `plan-gate.sh`), since that hook is currently user-maintained outside this repo. Such tests gracefully skip if the peer is absent.
 

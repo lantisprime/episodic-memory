@@ -355,20 +355,23 @@ echo "--- Hook composition with plan-gate.sh (RFC-002:215) ---"
 # This test exercises both hooks sequentially against a shared cwd to
 # verify no cross-hook marker contamination and that error messages are
 # distinguishable.
-PLAN_GATE_SRC="$REPO_ROOT/../plan-gate.sh"
+PLAN_GATE_REPO="$REPO_ROOT/hooks/plan-gate.sh"
 PLAN_GATE_USER="$HOME/.claude/hooks/plan-gate.sh"
-# Prefer a repo-staged copy if one ever lands; otherwise fall back to the
-# installed user hook (same convention as tests/test-plan-gate.sh:10).
-if [ -x "$PLAN_GATE_USER" ]; then
+# Prefer a repo-staged copy if one ever lands at hooks/plan-gate.sh; otherwise
+# fall back to the user-installed hook (same convention as tests/test-plan-gate.sh:10).
+# Pre-fix this path was $REPO_ROOT/../plan-gate.sh — pointing at the
+# worktrees parent dir, not the repo's hooks/ — never finding a future
+# repo-staged copy. Latent until the user-installed copy is removed.
+if [ -x "$PLAN_GATE_REPO" ]; then
+  PLAN_GATE="$PLAN_GATE_REPO"
+elif [ -x "$PLAN_GATE_USER" ]; then
   PLAN_GATE="$PLAN_GATE_USER"
-elif [ -x "$PLAN_GATE_SRC" ]; then
-  PLAN_GATE="$PLAN_GATE_SRC"
 else
   PLAN_GATE=""
 fi
 
 if [ -z "$PLAN_GATE" ]; then
-  echo "  ⊘ Skipping composition tests — plan-gate.sh not found at $PLAN_GATE_USER"
+  echo "  ⊘ Skipping composition tests — plan-gate.sh not found at $PLAN_GATE_REPO or $PLAN_GATE_USER"
 else
   reset_state
   PLAN_MARKER="$TEST_DIR/.claude/.plan-approval-pending"
