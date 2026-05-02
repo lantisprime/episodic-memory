@@ -2,7 +2,7 @@
 rfc_id: RFC-003
 slug: pluggable-tool-adapters
 title: "Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging"
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-05-02
 last_modified: 2026-05-02

@@ -6,7 +6,7 @@ Raw input for future RFCs. Each entry is a problem + evidence + candidate direct
 
 ## MCP surface vs file-based install — convergent peer signal vs design differentiator
 
-**Status:** seed for potential RFC (numbered after RFC-003 if that lands)
+**Status:** seed for potential RFC (numbered after RFC-003, which is now accepted)
 **Date:** 2026-05-01
 **Triggering question:** Peer-system research synthesis (knowledge_base/) found all major neighbors expose memory via MCP server. This repo exposes via instruction files. Is this a gap to close, or the differentiator?
 
