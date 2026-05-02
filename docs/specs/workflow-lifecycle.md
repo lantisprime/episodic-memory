@@ -96,6 +96,7 @@ At least one of `reply_ref` or `evidence_ref` is required (external witness).
 
 ```json
 {
+  "pre_checkpoint_ref": "episode:<pre-checkpoint episode id>",
   "evidence": {
     "tests": [
       { "command": "node tests/test-x.mjs", "status": "passed", "log_ref": "episode:<id>" }
@@ -116,6 +117,11 @@ At least one of `reply_ref` or `evidence_ref` is required (external witness).
 }
 ```
 
+`pre_checkpoint_ref` is **required** (schema_version 1). It binds the
+post-checkpoint back to the pre-checkpoint that authorized the work; without
+it an attacker could splice a same-task post-checkpoint from an unrelated
+attempt onto the chain.
+
 - `evidence.tests` MUST be a non-empty array.
 - `code_review.reply_ref` required when `status === "done"`.
 - `e2e.log_ref` required when `status === "passed"`.
@@ -134,6 +140,43 @@ At least one of `reply_ref` or `evidence_ref` is required (external witness).
 ```
 
 Validator rejects `push-allowed` whose `post_checkpoint_ref` does not resolve to a `post-checkpoint` episode for the same task.
+
+## Per-gate head & branch rules
+
+The validator enforces context (`worktree`, `branch`, `head`) consistency
+across the chain. Rules differ for terminal vs non-terminal links:
+
+- **Worktree** equality enforced on every chain link (compared via realpath).
+- **Branch** equality enforced on every chain link AND against `--branch`
+  (when passed). Branch-switch mid-chain is rejected — it's the primary
+  forgery vector.
+- **Head**:
+  - Terminal link (the gated event itself): `ctx.head === --head` exact.
+    Rationale: the terminal episode asserts the chain is current.
+  - Non-terminal links: `ctx.head` may be older than `--head`, but when git
+    is available it must be an ancestor of `--head` (`git merge-base
+    --is-ancestor`). When git is available but the recorded `ctx.head` is
+    not a known commit (status 128), the link is rejected — referencing a
+    fictional commit is a chain failure. When git is unavailable (no repo),
+    the ancestor check is skipped silently so the validator remains usable
+    outside a repo.
+
+Special case for `push-allowed` gate: the referenced `post-checkpoint`
+episode's `context.head` MUST also equal `--head` exactly. Ancestor-only
+would be too weak — it would allow new commits between the post-checkpoint
+evidence and the push, defeating the purpose. Re-run the post-checkpoint at
+current HEAD if commits have landed. To make this check meaningful,
+**`--head` is required when `--gate push-allowed`** — the validator exits
+with a usage error if it is omitted.
+
+## Schema versioning
+
+Validator-backed gates (PR-D Plan Gate v2, PR-E checkpoint-gate) accept
+only `schema_version: 1` workflow.lifecycle chains. Pre-PR-C lifecycle
+episodes (if any) without `pre_checkpoint_ref` will not satisfy the gates;
+since PR-C is not yet hook-wired, no migration is required — chains are
+authored fresh under the new schema. Older non-lifecycle episodes are
+unaffected.
 
 ## Episode reference resolution (RFC-002:327)
 

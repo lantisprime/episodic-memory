@@ -207,10 +207,11 @@ test('T8 happy: post-checkpoint gate with full evidence (real witness episodes)'
   const reviewId = mkWitness({ summary: 'code review' })
   const e2eId = mkWitness({ summary: 'e2e log' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
-  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
     event: 'post-checkpoint',
     extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
       evidence: {
         tests: [{ command: 'node tests/test-x.mjs', status: 'passed', log_ref: `episode:${logId}` }],
         code_review: { status: 'done', reply_ref: `episode:${reviewId}` },
@@ -270,10 +271,11 @@ test('T11 push-allowed: requires post_checkpoint_ref pointing to actual episode'
   const rId = mkWitness({ summary: 'review' })
   const eId = mkWitness({ summary: 'e2e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
-  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   const postId = mkEpisode({
     event: 'post-checkpoint',
     extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
       evidence: {
         tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
         code_review: { status: 'done', reply_ref: `episode:${rId}` },
@@ -283,7 +285,7 @@ test('T11 push-allowed: requires post_checkpoint_ref pointing to actual episode'
     }
   })
   mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${postId}` } })
-  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed'])
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
   assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
 })
 
@@ -305,7 +307,7 @@ test('T12 push-allowed: orphaned post_checkpoint_ref is rejected', () => {
     }
   })
   mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: 'episode:bogus-id-12345' } })
-  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed'])
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
   assert.strictEqual(r.json.valid, false)
   assert.ok(r.json.errors.some(e => e.includes('post_checkpoint_ref')))
 })
@@ -497,10 +499,11 @@ test('T25 bug_logging.issues[]: gh:owner/repo#n short form accepted', () => {
   const rId = mkWitness({ summary: 'r' })
   const eId = mkWitness({ summary: 'e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
-  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
     event: 'post-checkpoint',
     extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
       evidence: {
         tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
         code_review: { status: 'done', reply_ref: `episode:${rId}` },
@@ -518,10 +521,11 @@ test('T26 bug_logging.issues[]: GitHub URL accepted', () => {
   const rId = mkWitness({ summary: 'r' })
   const eId = mkWitness({ summary: 'e' })
   const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
-  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
   mkEpisode({
     event: 'post-checkpoint',
     extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
       evidence: {
         tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
         code_review: { status: 'done', reply_ref: `episode:${rId}` },
@@ -532,6 +536,181 @@ test('T26 bug_logging.issues[]: GitHub URL accepted', () => {
   })
   const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
   assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+// ---------------------------------------------------------------------------
+// #98 finding 1 — per-gate head/branch rules + chain selection via refs.
+// ---------------------------------------------------------------------------
+
+test('T28 per-gate head: non-terminal link with old head passes when git unavailable (no ancestor check)', () => {
+  // pre-checkpoint at old head, validating post-checkpoint gate at new head.
+  // pre-checkpoint is non-terminal here, so its old head is acceptable.
+  // git is unavailable in the test env (tmpCwd is not a repo) so the
+  // ancestor check is skipped silently.
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', head: 'oldsha111', extra: { plan_ref: 'p.md' } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', head: 'oldsha111', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    head: 'newsha222',
+    extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint', '--head', 'newsha222'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T29 per-gate head: terminal link with mismatched head fails', () => {
+  // pre-checkpoint at oldsha; --head is newsha; pre-checkpoint IS terminal
+  // for pre-checkpoint gate, so it must equal --head.
+  const planId = mkEpisode({ event: 'plan-approved', head: 'oldsha111', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', head: 'oldsha111', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'newsha222'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('terminal pre-checkpoint must be at current HEAD')),
+    `expected terminal head error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T30 branch switch between plan-approved and post-checkpoint fails', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', branch: 'feature-a', extra: { plan_ref: 'p.md' } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', branch: 'feature-a', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    branch: 'feature-b', // switched mid-chain
+    extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint', '--branch', 'feature-b'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('chain links must share branch')),
+    `expected branch-switch error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T31 push-allowed: post-checkpoint at older head than --head fails (extra commits)', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', head: 'sha1', extra: { plan_ref: 'p.md' } })
+  const preId = mkEpisode({ event: 'pre-checkpoint', head: 'sha1', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const postId = mkEpisode({
+    event: 'post-checkpoint',
+    head: 'sha2', // evidence recorded at sha2
+    extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  // push-allowed at sha3 — but post-checkpoint was at sha2. Extra commits
+  // landed since evidence; must re-run post-checkpoint.
+  mkEpisode({ event: 'push-allowed', head: 'sha3', extra: { post_checkpoint_ref: `episode:${postId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'sha3'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('Code may have changed since evidence')),
+    `expected post-checkpoint head exact-equal error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T32 pre_checkpoint_ref missing in post-checkpoint is rejected', () => {
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      // pre_checkpoint_ref intentionally omitted
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('pre_checkpoint_ref missing')),
+    `expected pre_checkpoint_ref missing error, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T33 pre_checkpoint_ref splicing: refs different chain pre-checkpoint fails', () => {
+  // Two parallel chains for same task — task-A pre-checkpoint and task-B
+  // pre-checkpoint (different tasks). post-checkpoint for TASK-A but
+  // pre_checkpoint_ref points to TASK-B's pre-checkpoint. Validator queries
+  // for TASK-A: TASK-B episodes are filtered out, so the pre_checkpoint_ref
+  // resolves to a workflow.lifecycle episode (passes category check) but
+  // is not in the loaded events[] for TASK-A — the chain-link check rejects.
+  const lId = mkWitness({ summary: 'log' })
+  const rId = mkWitness({ summary: 'r' })
+  const eId = mkWitness({ summary: 'e' })
+  const planA = mkEpisode({ event: 'plan-approved', task: 'TASK-A', extra: { plan_ref: 'a.md' } })
+  mkEpisode({ event: 'pre-checkpoint', task: 'TASK-A', extra: { plan_ref: 'a.md', approval_ref: `episode:${planA}` } })
+  // TASK-B's pre-checkpoint — splice target
+  const planB = mkEpisode({ event: 'plan-approved', task: 'TASK-B', extra: { plan_ref: 'b.md' } })
+  const preB = mkEpisode({ event: 'pre-checkpoint', task: 'TASK-B', extra: { plan_ref: 'b.md', approval_ref: `episode:${planB}` } })
+  mkEpisode({
+    event: 'post-checkpoint',
+    task: 'TASK-A',
+    extra: {
+      pre_checkpoint_ref: `episode:${preB}`, // splice from TASK-B
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] }
+      }
+    }
+  })
+  const r = runValidate(['--task', 'TASK-A', '--gate', 'post-checkpoint'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('chain splicing rejected') || e.includes('pre_checkpoint_ref')),
+    `expected splicing rejection, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T34 push-allowed gate without --head is rejected as usage error', () => {
+  // BLOCKER 2: post-checkpoint head check is silently skipped without --head.
+  // Validator now refuses push-allowed gate when --head is absent.
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed'])
+  assert.strictEqual(r.exit, 2, `expected exit 2, got ${r.exit}`)
+  assert.strictEqual(r.json.status, 'error')
+  assert.ok(r.json.message.includes('--head is required'),
+    `expected --head required error, got: ${r.json.message}`)
+})
+
+test('T35 branch switch on plan-approved (vs pre-checkpoint) is also caught', () => {
+  // MAJOR 4: confirm branch enforcement covers plan-approved, not just
+  // post-checkpoint. plan-approved at feature-a, pre-checkpoint at feature-b.
+  const planId = mkEpisode({ event: 'plan-approved', branch: 'feature-a', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', branch: 'feature-b', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--branch', 'feature-b'])
+  assert.strictEqual(r.json.valid, false)
+  // plan-approved is on feature-a, --branch is feature-b → mismatch
+  assert.ok(r.json.errors.some(e => e.includes('chain links must share branch')),
+    `expected branch-switch error on plan-approved, got: ${JSON.stringify(r.json.errors)}`)
 })
 
 test('T27 self-witness: real id pointing to citing episode is rejected', () => {

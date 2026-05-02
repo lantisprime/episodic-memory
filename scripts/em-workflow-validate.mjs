@@ -29,6 +29,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { execFileSync } from 'child_process'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = path.join(process.cwd(), '.episodic-memory')
@@ -67,6 +68,19 @@ const REQUIRED_FOR_GATE = {
   'push-allowed': ['plan-approved', 'pre-checkpoint', 'post-checkpoint', 'push-allowed']
 }
 
+// Terminal event for each gate. Per-gate head rules (#98 finding 1):
+// only the terminal link must have ctx.head == --head; non-terminal chain
+// links may sit at older heads (their authoring time, not current HEAD).
+// Branch must match across ALL chain links — branch-switch is the forgery
+// vector. push-allowed adds an additional exact-equality check on the
+// referenced post-checkpoint's head, since that's what asserts "code at
+// this SHA passed evidence" (see validateChain for that special case).
+const TERMINAL_FOR_GATE = {
+  'pre-checkpoint': 'pre-checkpoint',
+  'post-checkpoint': 'post-checkpoint',
+  'push-allowed': 'push-allowed'
+}
+
 function fail(msg, code = 2) {
   console.log(JSON.stringify({ status: 'error', message: msg }))
   process.exit(code)
@@ -76,6 +90,10 @@ if (!task) fail('Missing --task')
 if (!gate) fail(`Missing --gate. Must be one of: ${VALID_GATES.join(', ')}`)
 if (!VALID_GATES.includes(gate)) fail(`Invalid --gate "${gate}". Must be one of: ${VALID_GATES.join(', ')}`)
 if (!VALID_SCOPES.includes(scope)) fail(`Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES.join(', ')}`)
+// push-allowed gate requires --head: without it the post-checkpoint exact-
+// equality head check is silently skipped, which would let stale evidence
+// satisfy a push (#98 finding 1 / Codex BLOCKER 2).
+if (gate === 'push-allowed' && !head) fail('--head is required for --gate push-allowed (post-checkpoint head must be asserted against current HEAD)')
 
 // ---------------------------------------------------------------------------
 // Index loading — mirrors em-search.mjs:loadIndex / em-recall.mjs:loadIndex.
@@ -131,6 +149,46 @@ function realpathOrPath(p) {
   try { return fs.realpathSync(p) } catch { return p }
 }
 
+// Probe git availability once. If we're inside a work tree, git is "available"
+// — and a subsequent status-128 from is-ancestor must mean "unknown sha"
+// (which we treat as failure, not skip). If git is unavailable / not a repo,
+// ancestor checks are skipped silently — the validator must work outside a
+// repo (e.g. running over a pure index dump in CI).
+let GIT_AVAILABLE = null
+function gitAvailable() {
+  if (GIT_AVAILABLE !== null) return GIT_AVAILABLE
+  try {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      stdio: 'ignore', cwd: process.cwd()
+    })
+    GIT_AVAILABLE = true
+  } catch {
+    GIT_AVAILABLE = false
+  }
+  return GIT_AVAILABLE
+}
+
+// `git merge-base --is-ancestor <a> <b>` exits 0 if a is an ancestor of b,
+// 1 if not, 128 if not a repo / unknown sha.
+// Returns true / false / null (null = git unavailable, skip the check).
+// When git IS available but a sha is unknown (status 128), returns false —
+// referencing a fictional commit is a chain failure.
+function isAncestor(ancestor, descendant) {
+  if (!ancestor || !descendant) return null
+  if (ancestor === descendant) return true
+  if (!gitAvailable()) return null
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], {
+      stdio: 'ignore', cwd: process.cwd()
+    })
+    return true
+  } catch (e) {
+    // status 1 = not an ancestor; status 128 = unknown sha (now that git is
+    // available, this is a hard failure, not "skip silently").
+    return false
+  }
+}
+
 function isPlaceholder(v) {
   if (v == null) return true
   if (typeof v !== 'string') return false
@@ -184,14 +242,29 @@ function validatePayload(payload, entry, errors, warnings, indexById) {
       errors.push(`${fp}: context.worktree "${ctx.worktree}" != expected "${expectedWorktree}"`)
     }
   }
-  // Branch / head mismatch is an error when a flag is explicitly passed
-  // (a hook caller asserts a specific value). Stale-head warnings without
-  // an explicit flag would be too strict for ad-hoc validator runs.
+  // Branch must match across ALL chain links (#98 finding 1 — branch-switch
+  // is the forgery vector). Enforced whenever --branch is passed.
   if (branch && ctx.branch && ctx.branch !== branch) {
-    errors.push(`${fp}: context.branch "${ctx.branch}" != requested "${branch}"`)
+    errors.push(`${fp}: context.branch "${ctx.branch}" != requested "${branch}" (chain links must share branch)`)
   }
-  if (head && ctx.head && ctx.head !== head) {
-    errors.push(`${fp}: context.head "${ctx.head}" != requested "${head}" (stale episode?)`)
+  // Head check is per-gate: terminal link MUST equal --head; non-terminal
+  // links may sit at an older head, but if git is available that head must
+  // be an ancestor of --head (same git history). Skip ancestor check if
+  // git is unavailable (validator must work outside a repo too).
+  if (head && ctx.head) {
+    const terminalEvent = TERMINAL_FOR_GATE[gate]
+    const isTerminal = payload.event === terminalEvent
+    if (isTerminal) {
+      if (ctx.head !== head) {
+        errors.push(`${fp}: context.head "${ctx.head}" != requested "${head}" (terminal ${payload.event} must be at current HEAD; new commits since evidence?)`)
+      }
+    } else if (ctx.head !== head) {
+      const anc = isAncestor(ctx.head, head)
+      if (anc === false) {
+        errors.push(`${fp}: context.head "${ctx.head}" is not an ancestor of current HEAD "${head}" (chain link must be in same git history — branch switch or unrelated chain?)`)
+      }
+      // anc === null: git unavailable; skip silently.
+    }
   }
 
   switch (payload.event) {
@@ -231,6 +304,17 @@ function validatePayload(payload, entry, errors, warnings, indexById) {
       )
       break
     case 'post-checkpoint':
+      // pre_checkpoint_ref is required — it's the splice-resistance link
+      // back to the pre-checkpoint episode in the same chain (#98 finding 1).
+      if (isPlaceholder(payload.pre_checkpoint_ref)) {
+        errors.push(`${fp}: post-checkpoint.pre_checkpoint_ref missing or placeholder (required to bind chain back to pre-checkpoint)`)
+      } else {
+        checkEpisodeRefs(
+          [['pre_checkpoint_ref', payload.pre_checkpoint_ref]],
+          entry, indexById, errors,
+          { expectedCategory: 'workflow.lifecycle' }
+        )
+      }
       const ev = payload.evidence
       if (!ev || typeof ev !== 'object') {
         errors.push(`${fp}: post-checkpoint.evidence missing`)
@@ -335,7 +419,7 @@ function resolveEpisodeRef(ref, indexById, currentEpisode, opts = {}) {
 // Free-form strings are rejected (was previously unvalidated — #98 finding 2).
 const ISSUE_REF_RE = /^(https:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/issues\/\d+|gh:[^\/\s]+\/[^\/\s#]+#\d+)$/
 
-function validateChain(events, errors) {
+function validateChain(events, errors, gateArg, headArg) {
   const byEvent = {}
   for (const e of events) {
     if (!byEvent[e.payload.event]) byEvent[e.payload.event] = []
@@ -353,7 +437,21 @@ function validateChain(events, errors) {
       errors.push(`episode:${pre.entry.id}: approval_ref episode:${targetId} not a plan-approved episode for this task (chain link must be same-task plan-approved, not arbitrary episode)`)
     }
   }
-  // push-allowed.post_checkpoint_ref must point to a post-checkpoint episode
+  // post-checkpoint.pre_checkpoint_ref must point to a pre-checkpoint episode
+  // for same task (#98 finding 1 splice-resistance).
+  for (const post of (byEvent['post-checkpoint'] || [])) {
+    if (!post.payload.pre_checkpoint_ref) continue // already errored upstream
+    const targetId = refTarget(post.payload.pre_checkpoint_ref)
+    if (!targetId) continue
+    const matching = (byEvent['pre-checkpoint'] || []).find(e => e.entry.id === targetId)
+    if (!matching) {
+      errors.push(`episode:${post.entry.id}: pre_checkpoint_ref episode:${targetId} not a pre-checkpoint episode for this task (chain splicing rejected)`)
+    }
+  }
+  // push-allowed.post_checkpoint_ref must point to a post-checkpoint episode.
+  // Additionally for push-allowed gate: the referenced post-checkpoint's head
+  // MUST equal --head (Codex correction on #98 finding 1: ancestor-only is too
+  // weak — it would let commits land after the evidence SHA).
   for (const pa of (byEvent['push-allowed'] || [])) {
     const targetId = refTarget(pa.payload.post_checkpoint_ref)
     if (!targetId) {
@@ -363,6 +461,15 @@ function validateChain(events, errors) {
     const matching = (byEvent['post-checkpoint'] || []).find(e => e.entry.id === targetId)
     if (!matching) {
       errors.push(`episode:${pa.entry.id}: post_checkpoint_ref episode:${targetId} not a post-checkpoint episode for this task (chain link must be same-task post-checkpoint, not arbitrary episode)`)
+      continue
+    }
+    if (gateArg === 'push-allowed' && headArg) {
+      const pcHead = matching.payload.context && matching.payload.context.head
+      if (!pcHead) {
+        errors.push(`episode:${pa.entry.id}: referenced post-checkpoint episode:${targetId} has no context.head — cannot verify against current HEAD`)
+      } else if (pcHead !== headArg) {
+        errors.push(`episode:${pa.entry.id}: referenced post-checkpoint episode:${targetId} has head "${pcHead}" != current --head "${headArg}". Code may have changed since evidence was recorded — re-run post-checkpoint at current HEAD.`)
+      }
     }
   }
 }
@@ -417,7 +524,7 @@ for (const entry of workflowEntries) {
   events.push({ entry, payload })
 }
 
-validateChain(events, errors)
+validateChain(events, errors, gate, head)
 
 const presentEvents = new Set(events.map(e => e.payload.event))
 const required = REQUIRED_FOR_GATE[gate] || []
