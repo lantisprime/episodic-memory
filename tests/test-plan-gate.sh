@@ -19,6 +19,14 @@ if [ ! -f "$HOOK" ]; then
 fi
 
 TEST_DIR=$(mktemp -d)
+# macOS: /var is a symlink to /private/var. plan-gate's resolve_repo_root uses
+# `cd -P` which resolves symlinks; the test's MARKER path must use the same
+# resolved form so target-equality checks succeed.
+TEST_DIR="$(cd -P "$TEST_DIR" && pwd)"
+# Session 1 (#86 PR-B): plan-gate sources hooks/lib/command-classifier.sh and
+# resolves repo-root via git-common-dir (PR #105 algorithm). Initialize
+# TEST_DIR as a git repo so resolve_repo_root returns TEST_DIR.
+git -C "$TEST_DIR" init -q 2>/dev/null
 MARKER="$TEST_DIR/.claude/.plan-approval-pending"
 passed=0
 failed=0
@@ -110,8 +118,14 @@ assert_blocked "3. Bash with write command blocked with marker" \
 assert_allowed "4. rm ...plan-approval-pending allowed through" \
   "$(mock_json 'Bash' "rm $MARKER")"
 
-assert_allowed "5. Adversarial rm with marker name (documents current regex)" \
-  "$(mock_json 'Bash' "rm -rf /tmp/foo .plan-approval-pending")"
+# Issue #86 PR-B: classifier-driven detection. The old regex matched any rm
+# whose token list mentioned `.plan-approval-pending`; the new classifier
+# returns marker_write only for the exact resolved marker path. A multi-arg
+# rm targeting a different .plan-approval-pending elsewhere in the FS is
+# still classified as marker_write but the TARGET won't equal repo-root, so
+# plan-gate now blocks it.
+assert_blocked "5. Adversarial rm with /tmp marker name BLOCKED (PR-B classifier)" \
+  "$(mock_json 'Bash' "rm -rf /tmp/foo /tmp/.plan-approval-pending")"
 
 assert_blocked "6. rm without marker name blocked" \
   "$(mock_json 'Bash' 'rm somefile.txt')"
@@ -119,11 +133,39 @@ assert_blocked "6. rm without marker name blocked" \
 assert_blocked "7. Write tool blocked with marker" \
   "$(mock_json 'Write')"
 
-# Issue #86 PR-B (deferred): plan-gate still blocks all read-only Bash. PR-A
-# does NOT introduce a Bash command-level allowlist. This guard ensures PR-B's
-# scope stays scoped — if PR-A inadvertently lets ls through, the test fails.
-assert_blocked "7b. Bash read-only command also blocked with marker (PR-B owns this)" \
+# Issue #86 PR-B + #89: plan-gate now allows read-only Bash via classifier.
+assert_allowed "7b. Bash read-only ls allowed with marker (#86 PR-B + #89)" \
   "$(mock_json 'Bash' 'ls -la')"
+assert_allowed "7b2. Bash git status allowed with marker" \
+  "$(mock_json 'Bash' 'git status')"
+assert_allowed "7b3. Bash gh pr view allowed with marker" \
+  "$(mock_json 'Bash' 'gh pr view 123')"
+assert_allowed "7b4. Bash node em-search allowed with marker" \
+  "$(mock_json 'Bash' 'node scripts/em-search.mjs --project x')"
+
+# #101: gh write methods must remain blocked while plan-gate is armed.
+assert_blocked "7b5. gh pr create blocked with marker (write)" \
+  "$(mock_json 'Bash' 'gh pr create --title foo')"
+assert_blocked "7b6. gh api -X POST blocked with marker" \
+  "$(mock_json 'Bash' 'gh api -X POST /repos/foo/bar/issues')"
+assert_blocked "7b7. git push blocked with marker" \
+  "$(mock_json 'Bash' 'git push origin main')"
+
+# #86 ...a1e0: quoted body containing 'gh pr create' must NOT bypass.
+# Plan-gate blocks because echo with quoted body classifies as read_only,
+# which is allowed — but the marker was being incorrectly removed by the
+# old regex if the body matched `^rm.*\.plan-approval-pending`. New
+# classifier doesn't have that bypass.
+assert_allowed "7b8. echo with quoted 'gh pr create' allowed (read_only)" \
+  "$(mock_json 'Bash' "echo 'gh pr create'")"
+
+# #86 ...a1e0 specifically: an rm whose body string mentions
+# .plan-approval-pending but doesn't actually target the real path must block.
+# The old regex `^rm\s+.*\.plan-approval-pending` matched any rm with the
+# substring; the new classifier resolves the target path and refuses if it
+# doesn't equal the repo-root marker.
+assert_blocked "7b9. rm of unrelated file with marker-name in body BLOCKS (PR-B)" \
+  "$(mock_json 'Bash' "rm /tmp/some-file-mentioning-.plan-approval-pending-in-name")"
 
 # Issue #86 PR-A regression guard: BashOutput / KillBash deliberately NOT on
 # the allowlist (Codex review feedback — KillBash mutates process state; both

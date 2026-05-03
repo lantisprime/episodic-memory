@@ -474,18 +474,25 @@ _classify_segment() {
   done
 
   # ---- Check redirects for marker writes ----
+  # If any output redirect targets a marker → marker_write.
+  # If any output redirect targets a non-marker → has_nonmarker_redirect, which
+  # forces shared_write later (overrides read-only command classification —
+  # `echo hello > file.txt` is a write even though `echo` is read-only).
   local r
+  local has_nonmarker_redirect=0
   for r in ${REDIRS[@]+"${REDIRS[@]}"}; do
     local rop="${r%%	*}"
     local rtarget="${r#*	}"
     local rbase="$(basename "$rtarget")"
     case "$rbase" in
       .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending)
-        # Resolve target path to absolute under target_root
         local abs_target
         abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
         printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
         return 0
+        ;;
+      *)
+        has_nonmarker_redirect=1
         ;;
     esac
   done
@@ -606,11 +613,19 @@ _classify_segment() {
     ls|cat|head|tail|grep|egrep|fgrep|rg|find|wc|awk|sed|tr|cut|sort|uniq|file|stat|du|df|pwd|whoami|hostname|date|env|printenv|which|type|command|tree|less|more|jq|yq|cmp|diff|column)
       # tee deliberately NOT here — it always writes (to stdout or file).
       # Bare tee in a pipeline is rare; we err safe and classify as shared_write.
+      if [ "$has_nonmarker_redirect" = "1" ]; then
+        printf '%s\t\t%s\n' "shared_write" "readonly_cmd_redirected"
+        return 0
+      fi
       printf '%s\t\t%s\n' "read_only" "readonly_cmd"
       return 0
       ;;
     echo|printf|true|false)
-      # echo/printf without redirect: no side effect
+      # echo/printf with output redirect → shared_write; without → read_only.
+      if [ "$has_nonmarker_redirect" = "1" ]; then
+        printf '%s\t\t%s\n' "shared_write" "echo_redirected"
+        return 0
+      fi
       printf '%s\t\t%s\n' "read_only" "echo_or_printf"
       return 0
       ;;
