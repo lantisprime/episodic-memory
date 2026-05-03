@@ -122,6 +122,51 @@ test('non-git cwd falls back to <cwd>/.episodic-memory/', () => {
   )
 })
 
+// Regression for the v1 bug Codex caught on PR #105: --git-common-dir for a
+// submodule returns <super>/.git/modules/<name>; an over-eager `/.git/` strip
+// would resolve the submodule's local memory to the SUPERPROJECT root, cross-
+// contaminating two separate stores. Correct behavior: --show-toplevel returns
+// the submodule's own working tree.
+test('submodule writes to the SUBMODULE working tree, not the superproject', () => {
+  const superRepo = path.join(tmpRoot, 'super')
+  const subSrc = path.join(tmpRoot, 'subsrc')
+  fs.mkdirSync(superRepo, { recursive: true })
+  fs.mkdirSync(subSrc, { recursive: true })
+
+  // Create a "remote" repo for the submodule
+  git(subSrc, 'init -q -b main')
+  git(subSrc, 'config user.email test@example.com')
+  git(subSrc, 'config user.name test')
+  fs.writeFileSync(path.join(subSrc, 'README.md'), '# sub\n')
+  git(subSrc, 'add README.md')
+  git(subSrc, 'commit -q -m sub-init')
+
+  // Create the superproject and add the submodule. file:// + protocol.file.allow
+  // is required by modern git for local submodule sources.
+  git(superRepo, 'init -q -b main')
+  git(superRepo, 'config user.email test@example.com')
+  git(superRepo, 'config user.name test')
+  fs.writeFileSync(path.join(superRepo, 'README.md'), '# super\n')
+  git(superRepo, 'add README.md')
+  git(superRepo, 'commit -q -m super-init')
+  git(superRepo, `-c protocol.file.allow=always submodule add -q file://${fs.realpathSync(subSrc)} sub`)
+
+  const subCheckout = path.join(superRepo, 'sub')
+  const superStore = path.join(fs.realpathSync(superRepo), '.episodic-memory')
+  const subStore = path.join(fs.realpathSync(subCheckout), '.episodic-memory')
+
+  const res = storeFrom(subCheckout, 'from-submodule')
+  assert.strictEqual(res.status, 'ok')
+  assert.ok(
+    res.file.startsWith(subStore + path.sep),
+    `expected file under submodule store ${subStore}, got ${res.file}`,
+  )
+  assert.ok(
+    !res.file.startsWith(superStore + path.sep),
+    `submodule episode leaked into superproject store: ${res.file}`,
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Summary (cleanup runs via process.on('exit') registered above)
 // ---------------------------------------------------------------------------
