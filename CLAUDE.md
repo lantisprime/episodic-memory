@@ -25,6 +25,14 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - You must not do mental tracing always use the actual files or data
 - You must do code review and use the actual files
 
+## Discovering active priorities (read on session start)
+Before recommending or starting work, fetch the latest workplan:
+```bash
+node scripts/em-search.mjs --tags workplan --limit 1 --scope all
+# then read the body of the top result
+```
+Workplans are stored as `category: decision` with tag `workplan`. The terminal revision in the supersedes chain is the current one. The active queue table holds priority/status/session/tokens/depends-on per item. (Tier-2 of MEMORY.md "Current workplan" pointer; tool-agnostic for Cursor/Codex/Windsurf.)
+
 ## Testing
 ```bash
 node scripts/em-store.mjs --project test --category decision --summary "test" --body "test body"
