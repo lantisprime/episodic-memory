@@ -907,7 +907,9 @@ _classify_gh() {
       ;;
     pr)
       case "$sub" in
-        create|merge|close|reopen|edit|comment|ready)
+        create|merge|close|reopen|edit|comment|ready|update-branch)
+          # update-branch added during commit 8 subagent review (same F2
+          # pathology: a write verb that updates the PR head on the remote).
           printf '%s\t\t%s\n' "push_or_pr_create" "gh_pr_${sub}"
           return 0
           ;;
@@ -920,11 +922,35 @@ _classify_gh() {
           printf '%s\t\t%s\n' "push_or_pr_create" "gh_pr_review"
           return 0
           ;;
-        list|view|status|diff|checks|checkout|lock|unlock)
+        list|view|status|diff|checks)
           printf '%s\t\t%s\n' "read_only" "gh_pr_${sub}"
           return 0
           ;;
+        checkout)
+          # Codex PR #113 F2 [P1] (`...9796`/`...9cdd`): gh pr checkout
+          # mutates the local working tree (fetches the PR ref, switches/
+          # creates a branch, may stomp uncommitted changes). It is not a
+          # read of GitHub state. Classify shared_write so plan-gate and
+          # checkpoint pre-gate block it; not push_or_pr_create because
+          # nothing is published to the remote.
+          printf '%s\t\t%s\n' "shared_write" "gh_pr_checkout"
+          return 0
+          ;;
+        lock|unlock)
+          # Codex PR #113 F2 [P1] (`...9796`/`...9cdd`): gh pr lock|unlock
+          # mutate shared GitHub state (PR comment-locking is observable to
+          # everyone with repo access). Mirror gh issue lock|unlock which
+          # was already correctly classified. push_or_pr_create routes
+          # through the checkpoint post-gate (visible-to-others bucket).
+          printf '%s\t\t%s\n' "push_or_pr_create" "gh_pr_${sub}"
+          return 0
+          ;;
         *)
+          # All known `gh pr` write verbs are enumerated above. Default
+          # is shared_write so unknown future subcommands fail safe (block
+          # plan-gate / pre-gate) without bypassing the push-gate's
+          # narrower bucket. If a new shared/remote-mutating verb lands,
+          # add it explicitly above.
           printf '%s\t\t%s\n' "shared_write" "gh_pr_unknown"
           return 0
           ;;

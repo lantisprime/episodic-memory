@@ -151,6 +151,21 @@ assert_blocked "7b6. gh api -X POST blocked with marker" \
 assert_blocked "7b7. git push blocked with marker" \
   "$(mock_json 'Bash' 'git push origin main')"
 
+# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr checkout mutates local
+# working tree (shared_write). Plan-gate must block writes while marker
+# armed. lock/unlock are push_or_pr_create — also blocked here.
+assert_blocked "7b10. gh pr checkout blocked with marker (F2 shared_write)" \
+  "$(mock_json 'Bash' 'gh pr checkout 113')"
+assert_blocked "7b11. gh pr lock blocked with marker (F2 push_or_pr_create)" \
+  "$(mock_json 'Bash' 'gh pr lock 113')"
+assert_blocked "7b12. gh pr unlock blocked with marker (F2 push_or_pr_create)" \
+  "$(mock_json 'Bash' 'gh pr unlock 113')"
+# Negative: read-only PR commands must still be allowed under marker.
+assert_allowed "7b13. gh pr list still allowed with marker (read_only)" \
+  "$(mock_json 'Bash' 'gh pr list')"
+assert_allowed "7b14. gh pr diff still allowed with marker (read_only)" \
+  "$(mock_json 'Bash' 'gh pr diff 113')"
+
 # #86 ...a1e0: quoted body containing 'gh pr create' must NOT bypass.
 # Plan-gate blocks because echo with quoted body classifies as read_only,
 # which is allowed — but the marker was being incorrectly removed by the

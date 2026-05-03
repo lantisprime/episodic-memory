@@ -152,6 +152,13 @@ assert_blocked "14. Bash write command blocked by pre-gate" \
   "$(mock_json 'Bash' 'echo hello > /tmp/somefile')" "Checkpoint required"
 assert_allowed "14b. Bash read-only echo allowed (#89)" \
   "$(mock_json 'Bash' 'echo hello')"
+# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr checkout mutates local
+# working tree (shared_write), so pre-gate must block it.
+assert_blocked "14c. gh pr checkout blocked by pre-gate (F2 shared_write)" \
+  "$(mock_json 'Bash' 'gh pr checkout 113')" "Checkpoint required"
+# Negative: read-only PR commands must still pass during pre-gate.
+assert_allowed "14d. gh pr view allowed by pre-gate (read_only)" \
+  "$(mock_json 'Bash' 'gh pr view 113')"
 assert_blocked "15. NotebookEdit blocked by pre-gate" "$(mock_json 'NotebookEdit')" "Checkpoint required"
 
 # Marker-write allowlist (deadlock prevention)
@@ -210,6 +217,16 @@ assert_blocked "27. cd && git push blocked by push-gate" \
   "$(mock_json 'Bash' 'cd /tmp && git push')" "Post-implementation checkpoint required"
 assert_blocked "28. git push -f blocked by push-gate" \
   "$(mock_json 'Bash' 'git push -f origin main')" "Post-implementation checkpoint required"
+
+# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr lock/unlock are shared
+# GitHub mutations (push_or_pr_create) and must be blocked by the push-gate.
+assert_blocked "28b. gh pr lock blocked by push-gate (F2 push_or_pr_create)" \
+  "$(mock_json 'Bash' 'gh pr lock 113')" "Post-implementation checkpoint required"
+assert_blocked "28c. gh pr unlock blocked by push-gate (F2 push_or_pr_create)" \
+  "$(mock_json 'Bash' 'gh pr unlock 113')" "Post-implementation checkpoint required"
+# Subagent review on commit 8: gh pr update-branch is push_or_pr_create.
+assert_blocked "28d. gh pr update-branch blocked by push-gate" \
+  "$(mock_json 'Bash' 'gh pr update-branch 113')" "Post-implementation checkpoint required"
 
 # Empty post-done does NOT unblock
 touch "$POST_DONE"

@@ -268,6 +268,23 @@ assert_label "T196 git worktree lock" "git worktree lock /tmp/wt" "shared_write"
 assert_label "T197 git worktree unlock" "git worktree unlock /tmp/wt" "shared_write"
 assert_label "T198 git worktree prune" "git worktree prune" "shared_write"
 
+# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr checkout/lock/unlock were
+# wrongly bucketed read_only. checkout mutates local working tree;
+# lock/unlock mutate shared GitHub PR state.
+assert_label "T199 gh pr checkout" "gh pr checkout 113" "shared_write"
+assert_label "T200 gh pr lock" "gh pr lock 113" "push_or_pr_create"
+assert_label "T201 gh pr unlock" "gh pr unlock 113" "push_or_pr_create"
+# Negative coverage — read-only PR commands must remain read_only after the
+# above split, otherwise the fix would over-block legitimate inspection.
+assert_label "T202 gh pr view (still read_only)" "gh pr view 113" "read_only"
+assert_label "T203 gh pr list (still read_only)" "gh pr list" "read_only"
+assert_label "T204 gh pr status (still read_only)" "gh pr status" "read_only"
+assert_label "T205 gh pr diff (still read_only)" "gh pr diff 113" "read_only"
+assert_label "T206 gh pr checks (still read_only)" "gh pr checks 113" "read_only"
+# Subagent review on commit 8: same F2 pathology — gh pr update-branch
+# updates the PR head on the remote, must be push_or_pr_create.
+assert_label "T207 gh pr update-branch" "gh pr update-branch 113" "push_or_pr_create"
+
 echo ""
 echo "--- classify_path ---"
 assert_path() {
