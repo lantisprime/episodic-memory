@@ -30,9 +30,10 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { execFileSync } from 'child_process'
+import { resolveLocalDir } from './lib/local-dir.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
-const LOCAL_DIR = path.join(process.cwd(), '.episodic-memory')
+const LOCAL_DIR = resolveLocalDir()
 
 // ---------------------------------------------------------------------------
 // CLI args

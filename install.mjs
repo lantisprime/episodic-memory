@@ -88,6 +88,15 @@ for (const file of scriptFiles) {
   fs.copyFileSync(src, dst)
   fs.chmodSync(dst, 0o755)
 }
+// scripts/lib/ — shared helpers (e.g. local-dir.mjs for #85). Imported by em-* scripts.
+const REPO_SCRIPTS_LIB = path.join(REPO_SCRIPTS, 'lib')
+if (fs.existsSync(REPO_SCRIPTS_LIB)) {
+  const libDst = path.join(SCRIPTS_DIR, 'lib')
+  fs.mkdirSync(libDst, { recursive: true })
+  for (const file of fs.readdirSync(REPO_SCRIPTS_LIB).filter(f => f.endsWith('.mjs'))) {
+    fs.copyFileSync(path.join(REPO_SCRIPTS_LIB, file), path.join(libDst, file))
+  }
+}
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
 
 // 1b. Copy patterns/_index.json for global pattern validation
