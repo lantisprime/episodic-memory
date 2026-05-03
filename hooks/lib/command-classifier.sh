@@ -393,6 +393,12 @@ _tokenize() {
               printf 'E heredoc_unterminated\n'
               return 0
             fi
+            # After heredoc body ends, force a segment break. Anything after
+            # the heredoc terminator is a NEW command; without this break,
+            # `cat > .pre-checkpoint-done <<EOF\n...\nEOF\nrm -rf /` would
+            # pass through as a single segment and the classifier would only
+            # see the marker_write, missing the chained rm.
+            printf 'O NL\n'
           fi
         elif [ "${cmd:$((i+1)):1}" = "(" ]; then
           printf 'E process_substitution\n'

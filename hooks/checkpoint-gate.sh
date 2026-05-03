@@ -1,147 +1,195 @@
 #!/usr/bin/env bash
 set -e
 
-# checkpoint-gate.sh — RFC-002 Phase 3b PreToolUse hook
+# checkpoint-gate.sh — RFC-002 Phase 3b PreToolUse hook.
 #
-# Dependencies: bash, jq, grep. Same as plan-gate.sh — if any are missing
-# the hook will fail under set -e; behavior in that case is whatever Claude
-# Code does with a hook exit code != 0 (not redocumented here).
+# Session 1 rewrite (#86 PR-B / #89 / #101): replaces the regex-based
+# marker-write allowlist (lines ~46-117 in the prior version) and the
+# git-push / gh-pr-create regex (lines ~125-141) with the shared classifier
+# from hooks/lib/command-classifier.sh.
 #
-# Two gates with shared marker state in $CWD/.claude/:
+# Two gates with shared marker state in <repo-root>/.claude/:
 #
 #   pre-checkpoint:
-#     Blocks Edit/Write/MultiEdit/Bash/NotebookEdit when
-#     .checkpoint-required exists AND .pre-checkpoint-done is missing/empty.
-#     Activator: em-recall.mjs touches .checkpoint-required when bp-001
-#     violations surface in pre-flight (Phase 3, em-recall.mjs:347-369).
+#     Blocks Edit/Write/MultiEdit/Bash/NotebookEdit when .checkpoint-required
+#     exists AND .pre-checkpoint-done is missing/empty. Activator:
+#     em-recall.mjs touches .checkpoint-required when bp-001 violations
+#     surface in pre-flight (Phase 3, em-recall.mjs:347-369).
 #
 #   push-gate:
-#     Blocks Bash containing `git push` or `gh pr create` when
-#     .post-checkpoint-required exists AND .post-checkpoint-done missing/empty.
-#     Allowed pushes clean all 4 markers (task complete).
+#     Blocks Bash classified as push_or_pr_create OR shared_write that mutates
+#     external GitHub state when .post-checkpoint-required exists AND
+#     .post-checkpoint-done is missing/empty. Allowed pushes clean all 4
+#     markers (task complete).
 #
 # .post-checkpoint-required is armed on every allowed write that passed the
-# pre-gate (idempotent touch). Allowlist: Bash commands referencing
-# .pre-checkpoint-done or .post-checkpoint-done pass through (deadlock
-# prevention — same pattern as plan-gate.sh's rm allowlist).
+# pre-gate (idempotent touch).
+#
+# Marker-write allowlist (deadlock prevention) is now classifier-driven:
+# Bash classified as marker_write whose TARGET is one of the repo-root
+# checkpoint markers passes the pre-gate iff:
+#   - .pre-checkpoint-done write: requires .checkpoint-required exists AND
+#     .pre-checkpoint-done is missing/empty (writing into the gate's expected
+#     state, not bypassing it).
+#   - .post-checkpoint-done write: requires .post-checkpoint-required exists
+#     AND .post-checkpoint-done is missing/empty.
+# Cross-gate invariant (Codex ...3503 P1): checkpoint marker writes are
+# blocked while the repo-root .plan-approval-pending marker exists. Both
+# gates independently enforce the invariant; do not rely on Claude hook
+# order.
 
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-MARKER_DIR="$CWD/.claude"
+# Source classifier + repo-root resolver. Use BASH_SOURCE for symlink safety.
+HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+LIB_DIR="$HOOK_DIR/lib"
+if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ]; then
+  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook. Re-run install.mjs --install-hooks."}'
+  exit 0
+fi
+# shellcheck disable=SC1091
+source "$LIB_DIR/repo-root.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/command-classifier.sh"
+
+REPO_ROOT="$(resolve_repo_root "$CWD")"
+MARKER_DIR="$REPO_ROOT/.claude"
 PRE_REQ="$MARKER_DIR/.checkpoint-required"
 PRE_DONE="$MARKER_DIR/.pre-checkpoint-done"
 POST_REQ="$MARKER_DIR/.post-checkpoint-required"
 POST_DONE="$MARKER_DIR/.post-checkpoint-done"
+PLAN_PENDING="$MARKER_DIR/.plan-approval-pending"
 
 # Read-only tools — always allowed
 case "$TOOL_NAME" in
-  Read|Glob|Grep|Agent|WebFetch|WebSearch|AskUserQuestion|EnterPlanMode|ExitPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|Skill|mcp__*)
+  Read|Glob|Grep|Agent|WebFetch|WebSearch|AskUserQuestion|EnterPlanMode|ExitPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|Skill|NotebookRead|ToolSearch|mcp__*)
     exit 0
     ;;
 esac
 
-# Allowlist: Bash redirecting (>, >>, or tee) into a checkpoint-done marker.
-# Three-step tightening history:
-#   #65: require redirect operator before marker name (no longer just a
-#        substring match) — blocked `cat /etc/passwd; echo .pre-checkpoint-done`.
-#   #66: only check the part of the command BEFORE the first `<<` (heredoc /
-#        here-string introducer). Heredoc bodies are text, not commands; a
-#        redirect mentioned inside a heredoc body must not bypass the gate.
-#        Example bypass that this addresses:
-#          cat > readme.md <<EOF
-#          echo > .pre-checkpoint-done
-#          EOF
-#        Pre-<< portion is `cat > readme.md `; no marker redirect → blocks.
-#   #68: anchor the pattern to end-of-COMMAND_HEAD ([[:space:]]*$) so a
-#        chained command after the marker write doesn't ride through the
-#        allowlist. Pre-fix: `echo X > .pre-checkpoint-done; rm -rf /tmp`
-#        passed the allowlist and the rm ran. Post-fix: trailing `;` (or
-#        `&&`/`||`/`|`/`&`) after the marker filename means no match —
-#        falls through to the gates' normal block path.
-#
-# Legitimate single-statement marker-writes still pass:
-#   echo "..." > .pre-checkpoint-done
-#   cat > .pre-checkpoint-done <<EOF\n...\nEOF
-#   tee .post-checkpoint-done <<<"text"
-#   printf "..." > .pre-checkpoint-done
-#
-# Known residuals (accepted): quoted strings and command substitution can
-# still embed the redirect-to-marker pattern as text (#67); heredoc body
-# followed by a chained command after EOF still bypasses (because the `<<`
-# truncation drops everything from the heredoc onward).
+# Helper: emit a block decision
+_block_pre() {
+  echo '{"decision": "block", "reason": "Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to .claude/.pre-checkpoint-done (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh."}'
+  exit 0
+}
+_block_post() {
+  echo '{"decision": "block", "reason": "Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty) before pushing. Hook: checkpoint-gate.sh."}'
+  exit 0
+}
+_block_plan_pending() {
+  echo '{"decision": "block", "reason": "Plan approval pending. Checkpoint marker writes are blocked while .claude/.plan-approval-pending exists. Approve the plan first. Hook: checkpoint-gate.sh."}'
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Bash classification — compute label up front for downstream gates.
+# ---------------------------------------------------------------------------
+LABEL=""
+TARGET=""
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  COMMAND_HEAD="${COMMAND%%<<*}"
-  # Flatten newlines to spaces (#72): grep -E evaluates line-by-line and `$`
-  # matches end-of-line, so without flattening, `echo > marker\n; rm` would
-  # match line 1 and bypass the allowlist. Flattening makes the whole
-  # COMMAND_HEAD a single line so `$` matches end-of-string.
-  COMMAND_HEAD_FLAT="${COMMAND_HEAD//$'\n'/ }"
+  RESULT="$(classify_command "$COMMAND" "$REPO_ROOT")"
+  LABEL="${RESULT%%	*}"
+  REST="${RESULT#*	}"
+  TARGET="${REST%%	*}"
 
-  # #73 / #75: detect post-heredoc-EOF chained commands. If COMMAND has
-  # `<<TERM`, find the terminator line and check for non-whitespace content
-  # after it. If found, the allowlist must NOT match — heredoc body
-  # legitimately writes the marker, but a chained command after EOF runs
-  # unchecked.
-  POST_HEREDOC_HAS_CONTENT=0
-  if [ "$COMMAND_HEAD" != "$COMMAND" ]; then
-    # Extract terminator from first <<. Handles bash heredoc forms:
-    #   <<EOF, <<-EOF, <<'EOF', <<"EOF" (#73 initial coverage)
-    #   <<\EOF (backslash-escaped, #75)
-    #   <<123, <<==EOF==, etc. (any non-whitespace non-special term, #75)
-    # Terminator class: non-whitespace, non-redirect, non-pipe-special,
-    # non-quote chars. Optional leading `\` per bash quote-removal rules.
-    TERM=$(printf '%s' "$COMMAND" | sed -nE "s/^[^<]*<<-?[[:space:]]*['\"]?\\\\?([^[:space:]<>|&;'\"]+).*/\1/p" | head -1)
-    if [ -n "$TERM" ]; then
-      # Find lines AFTER the first occurrence of the terminator-only line.
-      # `<<-` form allows leading tabs on the terminator; awk strips them
-      # before comparing.
-      POST=$(printf '%s' "$COMMAND" | awk -v t="$TERM" '
-        f { print; next }
-        { line=$0; sub(/^\t+/, "", line); if (line==t) f=1 }
-      ')
-      if printf '%s' "$POST" | grep -qE '[^[:space:]]'; then
-        POST_HEREDOC_HAS_CONTENT=1
-      fi
-    fi
+  # Read-only Bash → allow immediately (closes #89).
+  if [ "$LABEL" = "read_only" ]; then
+    exit 0
   fi
 
-  if [ "$POST_HEREDOC_HAS_CONTENT" = "0" ]; then
-    if echo "$COMMAND_HEAD_FLAT" | grep -qE '(>|>>|tee[[:space:]]+)[^|&;<>]*\.(pre|post)-checkpoint-done[[:space:]]*$'; then
-      exit 0
+  # marker_write deadlock-prevention allowlist. Only allow when the gate's
+  # state expects that specific marker write. All other marker_write Bash
+  # falls through to the pre-gate as a normal write.
+  if [ "$LABEL" = "marker_write" ]; then
+    # Cross-gate invariant: checkpoint marker writes are blocked while
+    # .plan-approval-pending exists (Codex ...3503 P1).
+    if [ -f "$PLAN_PENDING" ]; then
+      if [ "$TARGET" = "$PLAN_PENDING" ]; then
+        # Allow plan-marker removal — plan-gate.sh is what cares about this.
+        exit 0
+      fi
+      _block_plan_pending
     fi
+    case "$TARGET" in
+      "$PRE_DONE")
+        if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
+          exit 0
+        fi
+        ;;
+      "$POST_DONE")
+        if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
+          exit 0
+        fi
+        ;;
+      "$PLAN_PENDING")
+        exit 0
+        ;;
+    esac
+    # Did not satisfy a prerequisite — fall through to pre-gate as a normal
+    # write. Pre-gate will block if PRE_REQ armed and PRE_DONE empty.
   fi
 fi
 
+# ---------------------------------------------------------------------------
 # Pre-checkpoint gate
+# ---------------------------------------------------------------------------
+case "$TOOL_NAME" in
+  Edit|Write|MultiEdit|NotebookEdit)
+    # classify_path for Write/Edit/MultiEdit/NotebookEdit
+    FILE_PATH="$(echo "$INPUT" | jq -r '.tool_input.file_path // ""')"
+    if [ -n "$FILE_PATH" ]; then
+      RESULT="$(classify_path "$FILE_PATH" "$REPO_ROOT")"
+      LABEL="${RESULT%%	*}"
+      REST="${RESULT#*	}"
+      TARGET="${REST%%	*}"
+      if [ "$LABEL" = "marker_write" ]; then
+        # Cross-gate invariant
+        if [ -f "$PLAN_PENDING" ] && [ "$TARGET" != "$PLAN_PENDING" ]; then
+          _block_plan_pending
+        fi
+        case "$TARGET" in
+          "$PRE_DONE")
+            if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
+              exit 0
+            fi
+            ;;
+          "$POST_DONE")
+            if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
+              exit 0
+            fi
+            ;;
+          "$PLAN_PENDING")
+            exit 0
+            ;;
+        esac
+      fi
+    fi
+    ;;
+esac
+
 if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
-  echo '{"decision": "block", "reason": "Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to .claude/.pre-checkpoint-done (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh."}'
+  _block_pre
+fi
+
+# ---------------------------------------------------------------------------
+# Push-gate: only fires for Bash classified as push_or_pr_create.
+# ---------------------------------------------------------------------------
+if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
+  if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
+    _block_post
+  fi
+  # Allowed push — clear all four markers (task complete).
+  rm -f "$PRE_REQ" "$PRE_DONE" "$POST_REQ" "$POST_DONE" 2>/dev/null || true
   exit 0
 fi
 
-# Push gate
-# Match `git push` (with optional global flags between git and push) or
-# `gh pr create`. Tightened from `git[[:space:]]+([^&;|]*[[:space:]])?push`
-# per #69 — that allowed arbitrary tokens (including non-push subcommands
-# like `commit -m push` or `branch push`) to ride between `git` and `push`,
-# producing false positives that blocked legitimate non-push git commands.
-# New form only allows global flag tokens: `-X`, `--long-flag`, `-X arg`.
-if [ "$TOOL_NAME" = "Bash" ]; then
-  COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  if echo "$COMMAND" | grep -qE '(^|[[:space:]&;|()])(git[[:space:]]+(-[^[:space:]]+[[:space:]]+([^-][^[:space:]]*[[:space:]]+)?)*push|gh[[:space:]]+pr[[:space:]]+create)([[:space:]&;|()]|$)'; then
-    if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
-      echo '{"decision": "block", "reason": "Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty) before pushing. Hook: checkpoint-gate.sh."}'
-      exit 0
-    fi
-    rm -f "$PRE_REQ" "$PRE_DONE" "$POST_REQ" "$POST_DONE" 2>/dev/null || true
-    exit 0
-  fi
-fi
-
+# ---------------------------------------------------------------------------
 # Allowed write — arm post-tracking if pre-checkpoint was satisfied
+# ---------------------------------------------------------------------------
 case "$TOOL_NAME" in
   Edit|Write|MultiEdit|Bash|NotebookEdit)
     if [ -f "$PRE_REQ" ] && [ -s "$PRE_DONE" ]; then
