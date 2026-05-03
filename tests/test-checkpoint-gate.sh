@@ -18,6 +18,13 @@ fi
 
 TEST_DIR=$(mktemp -d)
 TEST_HOME=$(mktemp -d)
+# macOS /var → /private/var symlink: classifier resolves with cd -P, so the
+# test must use the resolved path for marker-target equality checks.
+TEST_DIR="$(cd -P "$TEST_DIR" && pwd)"
+TEST_HOME="$(cd -P "$TEST_HOME" && pwd)"
+# Session 1 (#86 PR-B): checkpoint-gate sources hooks/lib/command-classifier.sh
+# and resolves repo-root via git-common-dir. Initialize TEST_DIR as a git repo.
+git -C "$TEST_DIR" init -q 2>/dev/null
 MARKER_DIR="$TEST_DIR/.claude"
 PRE_REQ="$MARKER_DIR/.checkpoint-required"
 PRE_DONE="$MARKER_DIR/.pre-checkpoint-done"
@@ -138,16 +145,31 @@ assert_allowed "10. Grep allowed (always)" "$(mock_json 'Grep')"
 assert_blocked "11. Edit blocked by pre-gate" "$(mock_json 'Edit')" "Checkpoint required"
 assert_blocked "12. Write blocked by pre-gate" "$(mock_json 'Write')" "Checkpoint required"
 assert_blocked "13. MultiEdit blocked by pre-gate" "$(mock_json 'MultiEdit')" "Checkpoint required"
-assert_blocked "14. Bash blocked by pre-gate" "$(mock_json 'Bash' 'echo hello')" "Checkpoint required"
+# #89 (Session 1): read-only Bash is now allowed during pre-gate. The shape
+# of test 14 changes from "echo hello" (now read_only / allowed) to a real
+# write that should block.
+assert_blocked "14. Bash write command blocked by pre-gate" \
+  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')" "Checkpoint required"
+assert_allowed "14b. Bash read-only echo allowed (#89)" \
+  "$(mock_json 'Bash' 'echo hello')"
+# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr checkout mutates local
+# working tree (shared_write), so pre-gate must block it.
+assert_blocked "14c. gh pr checkout blocked by pre-gate (F2 shared_write)" \
+  "$(mock_json 'Bash' 'gh pr checkout 113')" "Checkpoint required"
+# Negative: read-only PR commands must still pass during pre-gate.
+assert_allowed "14d. gh pr view allowed by pre-gate (read_only)" \
+  "$(mock_json 'Bash' 'gh pr view 113')"
 assert_blocked "15. NotebookEdit blocked by pre-gate" "$(mock_json 'NotebookEdit')" "Checkpoint required"
 
 # Marker-write allowlist (deadlock prevention)
 assert_allowed "16. Bash writing pre-checkpoint-done allowed (no deadlock)" \
   "$(mock_json 'Bash' "echo 'checkpoint text' > $PRE_DONE")"
-assert_allowed "17. Bash writing post-checkpoint-done allowed" \
-  "$(mock_json 'Bash' "echo 'post text' > $POST_DONE")"
+# Session 1 (Codex ...3503 P1): per-marker prerequisites. Writing POST_DONE
+# requires .post-checkpoint-required; with only PRE_REQ armed, this blocks.
+assert_blocked "17. Bash writing post-checkpoint-done BLOCKED (POST_REQ not armed)" \
+  "$(mock_json 'Bash' "echo 'post text' > $POST_DONE")" "Checkpoint required"
 assert_allowed "18. Bash heredoc to pre-checkpoint-done allowed" \
-  "$(mock_json 'Bash' "cat > $PRE_DONE <<EOF\ncheckpoint\nEOF")"
+  "$(mock_json 'Bash' "$(printf 'cat > %s <<EOF\ncheckpoint\nEOF' "$PRE_DONE")")"
 
 # ============================================================================
 echo ""
@@ -195,6 +217,19 @@ assert_blocked "27. cd && git push blocked by push-gate" \
   "$(mock_json 'Bash' 'cd /tmp && git push')" "Post-implementation checkpoint required"
 assert_blocked "28. git push -f blocked by push-gate" \
   "$(mock_json 'Bash' 'git push -f origin main')" "Post-implementation checkpoint required"
+
+# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr lock/unlock are shared
+# GitHub mutations (push_or_pr_create) and must be blocked by the push-gate.
+assert_blocked "28b. gh pr lock blocked by push-gate (F2 push_or_pr_create)" \
+  "$(mock_json 'Bash' 'gh pr lock 113')" "Post-implementation checkpoint required"
+assert_blocked "28c. gh pr unlock blocked by push-gate (F2 push_or_pr_create)" \
+  "$(mock_json 'Bash' 'gh pr unlock 113')" "Post-implementation checkpoint required"
+# Subagent review on commit 8: gh pr update-branch is push_or_pr_create.
+assert_blocked "28d. gh pr update-branch blocked by push-gate" \
+  "$(mock_json 'Bash' 'gh pr update-branch 113')" "Post-implementation checkpoint required"
+# Codex review on commit 8 (`...9fc4`): gh pr revert is push_or_pr_create.
+assert_blocked "28e. gh pr revert blocked by push-gate" \
+  "$(mock_json 'Bash' 'gh pr revert 113')" "Post-implementation checkpoint required"
 
 # Empty post-done does NOT unblock
 touch "$POST_DONE"
@@ -273,20 +308,27 @@ touch "$PRE_REQ"
 
 # Pathological cases: command mentions marker name but doesn't write to it.
 # Pre-tightening these would have bypassed the gate; post-tightening they block.
-assert_blocked "45. Bash 'cat etc; echo .pre-checkpoint-done' blocked (no redirect)" \
-  "$(mock_json 'Bash' "cat /etc/passwd; echo .pre-checkpoint-done")" "Checkpoint required"
-assert_blocked "46. Bash echo of marker name without redirect blocked" \
-  "$(mock_json 'Bash' "echo .post-checkpoint-done")" "Checkpoint required"
-assert_blocked "47. Bash heredoc body containing marker name blocked when no redirect to it" \
-  "$(mock_json 'Bash' "cat <<EOF\n.pre-checkpoint-done\nEOF")" "Checkpoint required"
+# #89 (Session 1): read-only commands that merely MENTION marker names
+# (without writing to them) are now allowed. The classifier distinguishes
+# string-content from actual redirects.
+assert_allowed "45. Bash 'cat etc; echo .pre-checkpoint-done' allowed (no write)" \
+  "$(mock_json 'Bash' "cat /etc/passwd; echo .pre-checkpoint-done")"
+assert_allowed "46. Bash echo of marker name without redirect allowed (#89)" \
+  "$(mock_json 'Bash' "echo .post-checkpoint-done")"
+# Heredoc body without redirect still blocks (it's a write — `cat <<EOF` writes
+# to stdout but classifier sees `cat` as read_only when no redirect target).
+# Actually under #89: cat without redirect is read_only. Allow.
+assert_allowed "47. Bash 'cat <<EOF' (heredoc as input, no redirect) allowed" \
+  "$(mock_json 'Bash' "$(printf 'cat <<EOF\n.pre-checkpoint-done\nEOF')")"
 
 # Legitimate writes still pass the tightened allowlist
 assert_allowed "48. Bash '> .pre-checkpoint-done' allowed (redirect)" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE")"
-assert_allowed "49. Bash '>> .post-checkpoint-done' allowed (append)" \
-  "$(mock_json 'Bash' "echo content >> $POST_DONE")"
-assert_allowed "50. Bash 'tee .post-checkpoint-done' allowed" \
-  "$(mock_json 'Bash' "echo content | tee $POST_DONE")"
+# Session 1 (Codex ...3503 P1): writing POST_DONE without POST_REQ armed blocks.
+assert_blocked "49. Bash '>> .post-checkpoint-done' BLOCKED (POST_REQ not armed)" \
+  "$(mock_json 'Bash' "echo content >> $POST_DONE")" "Checkpoint required"
+assert_blocked "50. Bash 'tee .post-checkpoint-done' BLOCKED (POST_REQ not armed)" \
+  "$(mock_json 'Bash' "echo content | tee $POST_DONE")" "Checkpoint required"
 
 # ============================================================================
 echo ""
@@ -311,10 +353,11 @@ EOF'
 assert_allowed "55. Heredoc TO marker still allowed (redirect in pre-<< portion)" \
   "$(mock_json 'Bash' "$heredoc_legit")"
 
-# Here-string to marker still allowed
+# Here-string to POST_DONE: per-marker prereq requires POST_REQ which isn't
+# set in this test section (only PRE_REQ active) → blocks (Session 1 tightening).
 herestring_legit='tee '"$POST_DONE"' <<<"checkpoint text"'
-assert_allowed "56. Here-string TO marker still allowed" \
-  "$(mock_json 'Bash' "$herestring_legit")"
+assert_blocked "56. Here-string to POST_DONE BLOCKED (POST_REQ not armed)" \
+  "$(mock_json 'Bash' "$herestring_legit")" "Checkpoint required"
 
 # Bypass attempt with here-string: < but no redirect to marker in pre-<<<
 herestring_bypass='cat > readme.md <<<"echo > .pre-checkpoint-done"'
@@ -381,7 +424,7 @@ touch "$PRE_REQ"
 assert_allowed "69. Pure echo > marker still allowed (regression)" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE")"
 assert_allowed "70. Pure cat > marker <<EOF still allowed (regression)" \
-  "$(mock_json 'Bash' "cat > $PRE_DONE <<EOF\nRule 18\nEOF")"
+  "$(mock_json 'Bash' "$(printf 'cat > %s <<EOF\nRule 18\nEOF' "$PRE_DONE")")"
 assert_allowed "71. Pure tee marker <<<text still allowed (regression)" \
   "$(mock_json 'Bash' "tee $PRE_DONE <<<\"checkpoint\"")"
 # Trailing whitespace after marker should still pass (legitimate noise)
@@ -448,17 +491,34 @@ assert_blocked "82. heredoc + post-EOF && chain — blocks" \
   "$(mock_json 'Bash' "$heredoc_chain2")" "Checkpoint required"
 
 # <<- form (leading tabs allowed on terminator) with post content
+# Session 1: classifier distinguishes chained-command intent. A chained
+# read_only `echo leak` after a marker write is no longer treated as a
+# bypass attempt — read_only chains cannot escalate the marker write to
+# something dangerous. Adversarial chains that ARE writes (rm, git push,
+# etc.) still escalate to shared_write/push_or_pr_create which block.
+# These tests now assert the read-only-chain case allows.
 heredoc_dash=$(printf 'cat > %s <<-EOF\n\tcontent\n\tEOF\necho leak' "$PRE_DONE")
-assert_blocked "83. <<-EOF form with post-EOF content — blocks" \
-  "$(mock_json 'Bash' "$heredoc_dash")" "Checkpoint required"
+assert_allowed "83. <<-EOF + read-only echo chain — allowed (read_only chain)" \
+  "$(mock_json 'Bash' "$heredoc_dash")"
 
-# Quoted terminator <<'EOF'
+# Adversarial dash-EOF with rm chain still blocks (rm is shared_write).
+heredoc_dash_evil=$(printf 'cat > %s <<-EOF\n\tcontent\n\tEOF\nrm -rf /tmp/IMPORTANT' "$PRE_DONE")
+assert_blocked "83b. <<-EOF + rm chain — blocks (shared_write chain)" \
+  "$(mock_json 'Bash' "$heredoc_dash_evil")" "Checkpoint required"
+
 heredoc_quoted="cat > $PRE_DONE <<'EOF'
 literal text
 EOF
 echo leak"
-assert_blocked "84. <<'EOF' quoted-terminator form with post content — blocks" \
-  "$(mock_json 'Bash' "$heredoc_quoted")" "Checkpoint required"
+assert_allowed "84. <<'EOF' + read-only echo chain — allowed (read_only chain)" \
+  "$(mock_json 'Bash' "$heredoc_quoted")"
+
+heredoc_quoted_evil="cat > $PRE_DONE <<'EOF'
+literal text
+EOF
+rm -rf /tmp/IMPORTANT"
+assert_blocked "84b. <<'EOF' + rm chain — blocks (shared_write chain)" \
+  "$(mock_json 'Bash' "$heredoc_quoted_evil")" "Checkpoint required"
 
 # Pure heredoc (regression): no post-EOF content → still allowed
 pure_heredoc="cat > $PRE_DONE <<EOF

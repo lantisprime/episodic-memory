@@ -368,8 +368,54 @@ function installHookFile(repoFile, destFile, force) {
 if (installHooks) {
   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
   const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
-  const touched = { hooks: [], settings: [] }
+  const userHooksLibDir = path.join(userHooksDir, 'lib')
+  const REPO_HOOKS_LIB = path.join(REPO_HOOKS, 'lib')
+  const touched = { hooks: [], settings: [], hookLib: [] }
   try {
+    // 5_lib. Deploy hooks/lib/ alongside hooks/. Session 1 (#86 PR-B / #89 /
+    // #101) introduces hooks/lib/command-classifier.sh and hooks/lib/repo-root.sh
+    // sourced by plan-gate.sh and checkpoint-gate.sh via $BASH_SOURCE/cd -P.
+    // Per Codex review ...8c92: install must keep the lib in sync with the
+    // hooks; same per-file hash + --install-hooks-force semantics. Per
+    // ...3503 Q3: source-of-truth is current repo files at install time.
+    // libResults[file] tracks per-lib install outcome. Codex PR #113 review
+    // finding 3 [P2]: dependent hooks must NOT be registered if any required
+    // lib was skipped-divergent — registered hook would source stale/missing
+    // lib at runtime and fail loud (or worse, silently behave wrong if user's
+    // divergent lib is incomplete).
+    const libResults = {}
+    let anyLibSkippedDivergent = false
+    if (fs.existsSync(REPO_HOOKS_LIB)) {
+      fs.mkdirSync(userHooksLibDir, { recursive: true })
+      const libFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh'))
+      for (const file of libFiles) {
+        const src = path.join(REPO_HOOKS_LIB, file)
+        const dst = path.join(userHooksLibDir, file)
+        const result = installHookFile(src, dst, installHooksForce)
+        libResults[file] = result
+        switch (result) {
+          case 'copied':
+            console.log(`Installed hook lib: ${dst}`)
+            touched.hookLib.push(dst)
+            break
+          case 'unchanged':
+            console.log(`Hook lib already current: ${dst}`)
+            break
+          case 'forced':
+            console.log(`Force-overwrote hook lib: ${dst}`)
+            touched.hookLib.push(dst)
+            break
+          case 'skipped-divergent':
+            console.log(`Skipped hook lib (divergent local edit): ${dst} — re-run with --install-hooks-force to overwrite`)
+            anyLibSkippedDivergent = true
+            break
+          case 'missing-source':
+            console.log(`Note: ${src} not found in repo, skipped`)
+            break
+        }
+      }
+    }
+
     // 5a. Hook specs (file → event + matcher + timeout + canonical command).
     const hookSpecs = [
       {
@@ -440,15 +486,58 @@ if (installHooks) {
     // registration (per Codex review): we don't want install.mjs to point
     // Claude at unreviewed custom content. If a registration already exists
     // for the canonical path, addHookEntry returns 'present' and leaves it.
+    //
+    // Codex PR #113 finding 3 [P2]: hooks that source hooks/lib/ files are
+    // dependent on lib install success. If any required lib was skipped-
+    // divergent, withhold NEW registration of dependent hooks. Existing
+    // registration is preserved (don't yank a working setup).
+    //
+    // Issue #116 [P2] / Plan-agent v2 review: derive libDependentHooks at
+    // runtime by grepping each hook's REPO source for `source.*hooks/lib/`
+    // (not the deployed copy — Plan-agent confirmed direction to avoid
+    // bootstrap circularity). A future hook (e.g. push-gate.sh in PR-E)
+    // that sources hooks/lib/ is automatically included; a stateless hook
+    // is automatically excluded.
     const eligibleForReg = new Set(['copied', 'unchanged', 'forced'])
+    const libDependentHooks = new Set()
+    // Build the set of expected lib basenames (so a hook need not literally
+    // contain "hooks/lib/" — variable-built paths via $LIB_DIR/ also match).
+    let libBasenames = []
+    if (fs.existsSync(REPO_HOOKS_LIB)) {
+      libBasenames = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh'))
+    }
+    for (const spec of hookSpecs) {
+      const repoFile = path.join(REPO_HOOKS, spec.file)
+      if (!fs.existsSync(repoFile)) continue
+      const src = fs.readFileSync(repoFile, 'utf8')
+      // Match if the hook (a) literally references hooks/lib/, or (b) uses
+      // a `source` / `.` statement naming any known lib basename. The latter
+      // catches variable-built paths like `source "$LIB_DIR/foo.sh"`.
+      // Codex audit: previous regex only matched (a), missing both real
+      // dependent hooks because they use $LIB_DIR variable form. Silent
+      // protection bypass.
+      const literalLibPath = /(^|\s)(source|\.)\s+[^\n]*hooks\/lib\//.test(src)
+      const sourcesKnownLib = libBasenames.some(b => {
+        // Match `source ... <basename>` or `. ... <basename>` on the same line.
+        const re = new RegExp(`(^|\\n|\\s)(source|\\.)\\s+[^\\n]*${b.replace(/\./g, '\\.')}`)
+        return re.test(src)
+      })
+      if (literalLibPath || sourcesKnownLib) {
+        libDependentHooks.add(spec.file)
+      }
+    }
 
     for (const spec of hookSpecs) {
       const canonicalCmd = shellQuote(path.join(userHooksDir, spec.file))
-      if (!eligibleForReg.has(fileResults[spec.file])) {
+      const fileEligible = eligibleForReg.has(fileResults[spec.file])
+      const libBlocksReg = libDependentHooks.has(spec.file) && anyLibSkippedDivergent
+      if (!fileEligible || libBlocksReg) {
         const alreadyRegistered = (settings.hooks[spec.event] || []).some(e =>
           entryHasExactCommand(e, canonicalCmd))
         if (alreadyRegistered) {
           console.log(`${spec.event} ${spec.file}: existing registration preserved`)
+        } else if (libBlocksReg) {
+          console.log(`${spec.event} ${spec.file}: registration withheld (required hooks/lib was skipped-divergent — re-run with --install-hooks-force)`)
         } else {
           console.log(`${spec.event} ${spec.file}: registration withheld (file install skipped)`)
         }
