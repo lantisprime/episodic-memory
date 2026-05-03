@@ -227,6 +227,9 @@ assert_blocked "28c. gh pr unlock blocked by push-gate (F2 push_or_pr_create)" \
 # Subagent review on commit 8: gh pr update-branch is push_or_pr_create.
 assert_blocked "28d. gh pr update-branch blocked by push-gate" \
   "$(mock_json 'Bash' 'gh pr update-branch 113')" "Post-implementation checkpoint required"
+# Codex review on commit 8 (`...9fc4`): gh pr revert is push_or_pr_create.
+assert_blocked "28e. gh pr revert blocked by push-gate" \
+  "$(mock_json 'Bash' 'gh pr revert 113')" "Post-implementation checkpoint required"
 
 # Empty post-done does NOT unblock
 touch "$POST_DONE"

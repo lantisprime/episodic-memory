@@ -907,9 +907,11 @@ _classify_gh() {
       ;;
     pr)
       case "$sub" in
-        create|merge|close|reopen|edit|comment|ready|update-branch)
+        create|merge|close|reopen|edit|comment|ready|update-branch|revert)
           # update-branch added during commit 8 subagent review (same F2
           # pathology: a write verb that updates the PR head on the remote).
+          # revert added during commit 9 per Codex `...9fc4` (creates a
+          # revert PR — same shared-mutation class as create).
           printf '%s\t\t%s\n' "push_or_pr_create" "gh_pr_${sub}"
           return 0
           ;;

@@ -284,6 +284,9 @@ assert_label "T206 gh pr checks (still read_only)" "gh pr checks 113" "read_only
 # Subagent review on commit 8: same F2 pathology — gh pr update-branch
 # updates the PR head on the remote, must be push_or_pr_create.
 assert_label "T207 gh pr update-branch" "gh pr update-branch 113" "push_or_pr_create"
+# Codex review on commit 8 (`...9fc4`): gh pr revert creates a revert PR —
+# same shared-mutation class as gh pr create.
+assert_label "T208 gh pr revert" "gh pr revert 113" "push_or_pr_create"
 
 echo ""
 echo "--- classify_path ---"

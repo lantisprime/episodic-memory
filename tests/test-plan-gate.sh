@@ -160,6 +160,9 @@ assert_blocked "7b11. gh pr lock blocked with marker (F2 push_or_pr_create)" \
   "$(mock_json 'Bash' 'gh pr lock 113')"
 assert_blocked "7b12. gh pr unlock blocked with marker (F2 push_or_pr_create)" \
   "$(mock_json 'Bash' 'gh pr unlock 113')"
+# Codex review on commit 8 (`...9fc4`): gh pr revert is push_or_pr_create.
+assert_blocked "7b12b. gh pr revert blocked with marker" \
+  "$(mock_json 'Bash' 'gh pr revert 113')"
 # Negative: read-only PR commands must still be allowed under marker.
 assert_allowed "7b13. gh pr list still allowed with marker (read_only)" \
   "$(mock_json 'Bash' 'gh pr list')"
