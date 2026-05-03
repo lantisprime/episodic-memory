@@ -530,7 +530,33 @@ _classify_segment() {
       ;;
   esac
 
-  # ---- Unsafe shell forms ----
+  # ---- Unsafe shell forms (Audit P1: control-flow + wrappers) ----
+  # Any control-flow keyword or shell-group token AT ANY POSITION in the
+  # segment makes structural classification unreliable: `while true; do
+  # git push; done` and `( git push )` would otherwise classify by their
+  # first token (`while`, `(`) and never reach _classify_git. Conservative
+  # block-by-default — these are rare in normal Bash tool calls.
+  local _ti
+  for _ti in "${TOKS[@]+${TOKS[@]}}"; do
+    case "$_ti" in
+      "if"|"then"|"else"|"elif"|"fi"|"for"|"while"|"until"|"do"|"done"|"case"|"esac"|"select"|"function"|"{"|"}"|"("|")"|"[["|"]]")
+        printf '%s\t\t%s\n' "unsafe_complex" "shell_keyword_or_group"
+        return 0
+        ;;
+    esac
+  done
+
+  # Wrapper utilities that execute their argument (env, command, sudo,
+  # nohup, nice, ionice, time, timeout, xargs, watch). Treat as
+  # unsafe_complex so the structural escape `env GIT_DIR=… git push`
+  # cannot bypass push detection by classifying as read_only.
+  case "$first" in
+    env|command|sudo|nohup|nice|ionice|time|timeout|xargs|watch|stdbuf|chronic)
+      printf '%s\t\t%s\n' "unsafe_complex" "wrapper_utility_${first}"
+      return 0
+      ;;
+  esac
+
   case "$first" in
     bash|sh|zsh|dash|ksh)
       # Is there a -c flag?
@@ -616,9 +642,13 @@ _classify_segment() {
 
   # ---- Read-only command allowlist ----
   case "$first" in
-    ls|cat|head|tail|grep|egrep|fgrep|rg|find|wc|awk|sed|tr|cut|sort|uniq|file|stat|du|df|pwd|whoami|hostname|date|env|printenv|which|type|command|tree|less|more|jq|yq|cmp|diff|column)
-      # tee deliberately NOT here — it always writes (to stdout or file).
-      # Bare tee in a pipeline is rare; we err safe and classify as shared_write.
+    ls|cat|head|tail|grep|egrep|fgrep|rg|find|wc|awk|sed|tr|cut|sort|uniq|file|stat|du|df|pwd|whoami|hostname|date|printenv|which|tree|less|more|jq|yq|cmp|diff|column)
+      # Audit P1: env / command / type / sudo / xargs / nohup / nice / ionice
+      # / time / timeout deliberately NOT here. They are wrapper utilities
+      # that execute the next argument — `env GIT_DIR=… git push` would
+      # bypass push detection if env classified as read_only. tee likewise:
+      # always writes. Err safe and let those fall through to default
+      # shared_write or, where structural risk warrants, unsafe_complex below.
       if [ "$has_nonmarker_redirect" = "1" ]; then
         printf '%s\t\t%s\n' "shared_write" "readonly_cmd_redirected"
         return 0

@@ -147,6 +147,28 @@ assert_label "T82 mkdir" "mkdir -p foo" "shared_write"
 assert_label "T83 node em-store" "node scripts/em-store.mjs --project x" "shared_write"
 
 echo ""
+echo "--- Audit P1 (subagent finding 1): shell-keyword / group bypass ---"
+# Without these, ( git push ), { git push; }, while/for/if-bodies all
+# classified as shared_write because the first token wasn't 'git'/'gh'.
+assert_label "T90 ( git push )" "( git push )" "unsafe_complex"
+assert_label "T91 { git push; }" "{ git push; }" "unsafe_complex"
+assert_label "T92 if then git push fi" "if true; then git push; fi" "unsafe_complex"
+assert_label "T93 while do git push done" "while true; do git push; done" "unsafe_complex"
+assert_label "T94 for do git push done" "for x in a b; do git push; done" "unsafe_complex"
+
+echo ""
+echo "--- Audit P1 (subagent finding 2): wrapper-utility bypass ---"
+# env / command / sudo / xargs / nohup / time / timeout all execute the
+# next argument. Pre-fix these were on the read_only allowlist (env,
+# command, type) and let trailing git push slip through.
+assert_label "T96 env git push" "env GIT_DIR=/tmp git push" "unsafe_complex"
+assert_label "T97 command git push" "command git push" "unsafe_complex"
+assert_label "T98 sudo git push" "sudo git push" "unsafe_complex"
+assert_label "T99 xargs git push" "echo origin | xargs git push" "unsafe_complex"
+assert_label "T100 nohup gh pr create" "nohup gh pr create --title x" "unsafe_complex"
+assert_label "T101 timeout gh api" "timeout 30 gh api -X POST /foo" "unsafe_complex"
+
+echo ""
 echo "--- classify_path ---"
 assert_path() {
   local desc="$1"

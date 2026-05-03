@@ -182,8 +182,15 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
     _block_post
   fi
-  # Allowed push — clear all four markers (task complete).
-  rm -f "$PRE_REQ" "$PRE_DONE" "$POST_REQ" "$POST_DONE" 2>/dev/null || true
+  # Audit P1: marker cleanup is gated on plan-gate not pending. PreToolUse
+  # hooks run independently; if plan-gate or another PreToolUse hook ALSO
+  # blocks this call, we must not have already removed the markers (the
+  # tool will not actually run). Cleanup only when plan-gate is clear —
+  # in that case, push_or_pr_create has reached the user's intended
+  # task-complete moment.
+  if [ ! -f "$PLAN_PENDING" ]; then
+    rm -f "$PRE_REQ" "$PRE_DONE" "$POST_REQ" "$POST_DONE" 2>/dev/null || true
+  fi
   exit 0
 fi
 
