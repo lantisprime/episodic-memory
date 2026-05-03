@@ -368,8 +368,45 @@ function installHookFile(repoFile, destFile, force) {
 if (installHooks) {
   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
   const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
-  const touched = { hooks: [], settings: [] }
+  const userHooksLibDir = path.join(userHooksDir, 'lib')
+  const REPO_HOOKS_LIB = path.join(REPO_HOOKS, 'lib')
+  const touched = { hooks: [], settings: [], hookLib: [] }
   try {
+    // 5_lib. Deploy hooks/lib/ alongside hooks/. Session 1 (#86 PR-B / #89 /
+    // #101) introduces hooks/lib/command-classifier.sh and hooks/lib/repo-root.sh
+    // sourced by plan-gate.sh and checkpoint-gate.sh via $BASH_SOURCE/cd -P.
+    // Per Codex review ...8c92: install must keep the lib in sync with the
+    // hooks; same per-file hash + --install-hooks-force semantics. Per
+    // ...3503 Q3: source-of-truth is current repo files at install time.
+    if (fs.existsSync(REPO_HOOKS_LIB)) {
+      fs.mkdirSync(userHooksLibDir, { recursive: true })
+      const libFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh'))
+      for (const file of libFiles) {
+        const src = path.join(REPO_HOOKS_LIB, file)
+        const dst = path.join(userHooksLibDir, file)
+        const result = installHookFile(src, dst, installHooksForce)
+        switch (result) {
+          case 'copied':
+            console.log(`Installed hook lib: ${dst}`)
+            touched.hookLib.push(dst)
+            break
+          case 'unchanged':
+            console.log(`Hook lib already current: ${dst}`)
+            break
+          case 'forced':
+            console.log(`Force-overwrote hook lib: ${dst}`)
+            touched.hookLib.push(dst)
+            break
+          case 'skipped-divergent':
+            console.log(`Skipped hook lib (divergent local edit): ${dst} — re-run with --install-hooks-force to overwrite`)
+            break
+          case 'missing-source':
+            console.log(`Note: ${src} not found in repo, skipped`)
+            break
+        }
+      }
+    }
+
     // 5a. Hook specs (file → event + matcher + timeout + canonical command).
     const hookSpecs = [
       {

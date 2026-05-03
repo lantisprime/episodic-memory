@@ -77,6 +77,15 @@ assert_eq "T1b em-recall-sessionstart.sh installed and executable" "true" "$r"
 [ -x "$TEST_HOME/.claude/hooks/plan-gate.sh" ] && r=true || r=false
 assert_eq "T1b2 plan-gate.sh installed and executable (#86 PR-A)" "true" "$r"
 
+# Session 1 (#86 PR-B / #89 / #101): hooks/lib/ deployed alongside hooks/.
+[ -f "$TEST_HOME/.claude/hooks/lib/command-classifier.sh" ] && r=true || r=false
+assert_eq "T1b3 hooks/lib/command-classifier.sh installed (Session 1)" "true" "$r"
+[ -f "$TEST_HOME/.claude/hooks/lib/repo-root.sh" ] && r=true || r=false
+assert_eq "T1b4 hooks/lib/repo-root.sh installed (Session 1)" "true" "$r"
+# Hooks should be able to source the lib (smoke test).
+HOME="$TEST_HOME" bash -c "source $TEST_HOME/.claude/hooks/lib/command-classifier.sh && type classify_command >/dev/null 2>&1" && r=true || r=false
+assert_eq "T1b5 installed lib sources successfully and exports classify_command" "true" "$r"
+
 cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T1c PreToolUse contains exactly one checkpoint-gate entry" "1" "$cg_count"
 
