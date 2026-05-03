@@ -4,7 +4,10 @@
  *
  * Usage:
  *   node em-revise.mjs --original <id> --project <name> --tags <t1,t2>
- *                      --summary <text> --body <text> [--scope local|global]
+ *                      --summary <text> --body <text> [--scope inherit|local|global]
+ *
+ * --scope defaults to "inherit" (write the revision to the same store as the
+ * original). Pass "local" or "global" only to force a cross-scope revision.
  *
  * Creates a new episode that supersedes the original. Marks the original
  * episode as superseded in both its file and the index.
@@ -36,9 +39,9 @@ const project = flag('--project')
 const tagsRaw = flag('--tags')
 const summary = flag('--summary')
 const body = flag('--body')
-const scope = flag('--scope') || 'global'
+const scope = flag('--scope') || 'inherit'
 
-const VALID_SCOPES_REVISE = ['local', 'global']
+const VALID_SCOPES_REVISE = ['inherit', 'local', 'global']
 if (!VALID_SCOPES_REVISE.includes(scope)) {
   console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES_REVISE.join(', ')}` }))
   process.exit(1)
@@ -47,7 +50,7 @@ if (!VALID_SCOPES_REVISE.includes(scope)) {
 if (!originalId || !summary || !body) {
   console.log(JSON.stringify({
     status: 'error',
-    message: 'Missing required args. Usage: --original <id> --project <name> --tags <t1,t2> --summary <text> --body <text> [--scope local|global]'
+    message: 'Missing required args. Usage: --original <id> --project <name> --tags <t1,t2> --summary <text> --body <text> [--scope inherit|local|global]'
   }))
   process.exit(1)
 }
@@ -122,7 +125,9 @@ if (origFmMatch) {
 // ---------------------------------------------------------------------------
 // Create the revision episode in the same store as the original
 // ---------------------------------------------------------------------------
-const dataDir = scope === 'global' ? GLOBAL_DIR : (original.dir === GLOBAL_DIR ? GLOBAL_DIR : LOCAL_DIR)
+const dataDir = scope === 'inherit'
+  ? original.dir
+  : (scope === 'global' ? GLOBAL_DIR : LOCAL_DIR)
 const episodesDir = path.join(dataDir, 'episodes')
 const indexFile = path.join(dataDir, 'index.jsonl')
 
