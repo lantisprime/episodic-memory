@@ -1,0 +1,27 @@
+{
+  "_comment": "Example config for em-backup.mjs. Copy to ~/.config/em-backup/config.json (or set $EM_BACKUP_CONFIG to a path) and edit. The script will refuse --init/--sync without a valid config.",
+
+  "repo_owner": "your-github-username",
+  "repo_name": "episodic-memory-backup",
+
+  "_backup_dir_comment": "Where the local clone of the backup repo lives. Defaults to ~/.local/share/episodic-memory-backup if omitted. Tilde expansion supported.",
+  "backup_dir": "~/.local/share/episodic-memory-backup",
+
+  "_sources_comment": "List of source dirs to mirror. Each gets rsynced into <backup_dir>/<dest> with redaction applied to text files; binaries are skipped (manifested in .skipped-files.json). At minimum back up your global ~/.episodic-memory/.",
+  "sources": [
+    {
+      "src": "~/.episodic-memory",
+      "dest": "global",
+      "label": "global"
+    },
+    {
+      "src": "~/Documents/projects/myproject/.episodic-memory",
+      "dest": "local/myproject",
+      "label": "local:myproject"
+    }
+  ],
+
+  "_allowlist_comment": "Optional. Add per-config allowlist for emails/domains that should NOT be redacted (e.g. your team's published vendor addresses). Vendor commit-author constants for Claude/Codex/Cursor/Windsurf/Continue/Copilot, GitHub no-reply, RFC 2606 reserved domains, juan.delacruz@acme.com sample, and git@github.com SSH protocol address are already allowlisted by default.",
+  "extra_allowlist_emails": [],
+  "extra_allowlist_domains": []
+}
