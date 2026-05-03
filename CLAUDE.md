@@ -28,10 +28,11 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 ## Discovering active priorities (read on session start)
 Before recommending or starting work, fetch the latest workplan:
 ```bash
-node scripts/em-search.mjs --tags workplan --limit 1 --scope all
-# then read the body of the top result
+node scripts/em-search.mjs --tag workplan --category decision --limit 1 --scope all --full --no-score --no-track
 ```
 Workplans are stored as `category: decision` with tag `workplan`. The terminal revision in the supersedes chain is the current one. The active queue table holds priority/status/session/tokens/depends-on per item. (Tier-2 of MEMORY.md "Current workplan" pointer; tool-agnostic for Cursor/Codex/Windsurf.)
+
+Notes on the flags: `--tag` (singular — em-search silently ignores `--tags` per #123), `--category decision` (filters out evidence/lesson siblings that share the `workplan` tag), `--no-score` (recency sort; remove when #123 ships `--sort recency`), `--full` (returns body so the table renders), `--no-track` (avoids access-counter pollution from session-start polling).
 
 ## Testing
 ```bash
