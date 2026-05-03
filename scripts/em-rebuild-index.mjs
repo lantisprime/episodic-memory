@@ -13,9 +13,10 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { resolveLocalDir } from './lib/local-dir.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
-const LOCAL_DIR = path.join(process.cwd(), '.episodic-memory')
+const LOCAL_DIR = resolveLocalDir()
 
 const argv = process.argv.slice(2)
 function flag(name) {

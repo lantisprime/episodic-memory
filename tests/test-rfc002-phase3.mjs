@@ -493,6 +493,14 @@ test('T7j. End-to-end: real SessionStart hook arms marker without --task-type (P
       fs.copyFileSync(path.join(SCRIPTS_DIR, f), path.join(sessionScripts, f))
     }
   }
+  const SCRIPTS_LIB = path.join(SCRIPTS_DIR, 'lib')
+  if (fs.existsSync(SCRIPTS_LIB)) {
+    const sessionLib = path.join(sessionScripts, 'lib')
+    fs.mkdirSync(sessionLib, { recursive: true })
+    for (const f of fs.readdirSync(SCRIPTS_LIB)) {
+      if (f.endsWith('.mjs')) fs.copyFileSync(path.join(SCRIPTS_LIB, f), path.join(sessionLib, f))
+    }
+  }
 
   // Seed a recent bp-001 violation in the project's local store using
   // the same env/HOME the hook will run under.
