@@ -736,14 +736,64 @@ _classify_git() {
       printf '%s\t\t%s\n' "push_or_pr_create" "git_push"
       return 0
       ;;
-    status|log|diff|show|rev-parse|rev-list|reflog|blame|grep|describe|ls-files|ls-tree|ls-remote|fetch|cat-file|config|remote|branch|tag|worktree|var|help|version|shortlog|whatchanged|name-rev|check-ignore|check-mailmap|check-attr|annotate|count-objects)
-      # These are mostly read-only when used without write subcommands.
-      # branch/tag/remote/worktree/config CAN write — but by default invocation
-      # they list. We err on the side of read_only for these and let the
-      # specific write forms (push, commit, etc) catch the actual writes.
-      # Note: `git fetch` is technically a network op but produces no remote
-      # mutation; classify as read_only for our purposes.
+    status|log|diff|show|rev-parse|rev-list|reflog|blame|grep|describe|ls-files|ls-tree|ls-remote|fetch|cat-file|var|help|version|shortlog|whatchanged|name-rev|check-ignore|check-mailmap|check-attr|annotate|count-objects)
+      # Pure reads. fetch is a network op with no remote mutation.
       printf '%s\t\t%s\n' "read_only" "git_read_subcommand"
+      return 0
+      ;;
+    branch|tag|remote|worktree|config)
+      # Codex PR #113 review finding 1 [P1]: these subcommands EITHER list OR
+      # write depending on args. `git branch foo` creates a branch,
+      # `git remote add`, `git worktree add`, `git config user.name x` all
+      # write — and previously classified as read_only, bypassing plan-gate.
+      # Rule: if any positional (non-flag) arg follows the subcommand OR a
+      # write-only flag is present → shared_write. Bare list forms remain
+      # read_only.
+      local _gj=$((i+1))
+      local _has_positional=0 _has_write_flag=0 _np=0
+      while [ $_gj -lt ${#T[@]} ]; do
+        local _gt="${T[$_gj]}"
+        case "$_gt" in
+          -D|-d|-M|-m|-c|-C|--delete|--rename|--copy|--unset|--unset-all|--add|--replace-all|--edit|--set-upstream|--track|--no-track|--set-upstream-to|--force|-f)
+            _has_write_flag=1
+            ;;
+          -*) ;; # other flags treated as read-flags (verbose, list, etc.)
+          *)
+            _has_positional=1
+            _np=$((_np+1))
+            ;;
+        esac
+        _gj=$((_gj+1))
+      done
+      if [ "$sub" = "config" ]; then
+        # `git config <key>` (1 positional) reads; 2+ writes.
+        if [ $_np -le 1 ] && [ $_has_write_flag -eq 0 ]; then
+          printf '%s\t\t%s\n' "read_only" "git_config_read"
+          return 0
+        fi
+        printf '%s\t\t%s\n' "shared_write" "git_config_write"
+        return 0
+      fi
+      if [ "$sub" = "worktree" ]; then
+        local _wt_idx=$((i+2))
+        local _wt_sub=""
+        if [ $_wt_idx -lt ${#T[@]} ]; then _wt_sub="${T[$_wt_idx]}"; fi
+        case "$_wt_sub" in
+          ""|list)
+            printf '%s\t\t%s\n' "read_only" "git_worktree_list"
+            return 0
+            ;;
+          add|remove|move|repair|prune|lock|unlock)
+            printf '%s\t\t%s\n' "shared_write" "git_worktree_${_wt_sub}"
+            return 0
+            ;;
+        esac
+      fi
+      if [ $_has_positional -eq 1 ] || [ $_has_write_flag -eq 1 ]; then
+        printf '%s\t\t%s\n' "shared_write" "git_${sub}_write"
+        return 0
+      fi
+      printf '%s\t\t%s\n' "read_only" "git_${sub}_list"
       return 0
       ;;
     commit|add|rm|mv|reset|restore|checkout|switch|merge|rebase|cherry-pick|revert|stash|clean|pull|fetch|clone|init|gc|prune|notes|submodule|apply|am|format-patch|bisect|update-index|update-ref|symbolic-ref|hash-object|mktree|read-tree|write-tree|commit-tree|fsck|repack|pack-refs|pack-objects|unpack-objects|prune-packed|rerere|filter-branch|replay|sparse-checkout|maintenance)
@@ -795,18 +845,12 @@ _classify_gh() {
           return 0
           ;;
         review)
-          # gh pr review --approve mutates; --comment is informational.
-          local j=$((i+2))
-          while [ $j -lt $n ]; do
-            case "${T[$j]}" in
-              --approve|--request-changes)
-                printf '%s\t\t%s\n' "push_or_pr_create" "gh_pr_review_approve"
-                return 0
-                ;;
-            esac
-            j=$((j+1))
-          done
-          printf '%s\t\t%s\n' "shared_write" "gh_pr_review_comment"
+          # Codex PR #113 review finding 2 [P1]: gh pr review --comment was
+          # shared_write, but checkpoint-gate push-gate only blocks
+          # push_or_pr_create — bypass. ALL gh pr review forms write a review
+          # state to the PR (the --comment flag still posts a review record,
+          # not a side-comment). Treat all as push_or_pr_create.
+          printf '%s\t\t%s\n' "push_or_pr_create" "gh_pr_review"
           return 0
           ;;
         list|view|status|diff|checks|checkout|lock|unlock)

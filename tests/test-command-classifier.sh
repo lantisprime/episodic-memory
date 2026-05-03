@@ -169,6 +169,32 @@ assert_label "T100 nohup gh pr create" "nohup gh pr create --title x" "unsafe_co
 assert_label "T101 timeout gh api" "timeout 30 gh api -X POST /foo" "unsafe_complex"
 
 echo ""
+echo "--- Codex PR-113 review finding 1: git management subcommands ---"
+# branch/tag/remote/worktree/config: list forms read_only, write forms shared_write.
+assert_label "T110 git branch (list)" "git branch" "read_only"
+assert_label "T111 git branch -a (list)" "git branch -a" "read_only"
+assert_label "T112 git branch foo (create)" "git branch new-topic" "shared_write"
+assert_label "T113 git branch -D foo (delete)" "git branch -D old-topic" "shared_write"
+assert_label "T114 git tag (list)" "git tag" "read_only"
+assert_label "T115 git tag v1 (create)" "git tag v1.0" "shared_write"
+assert_label "T116 git remote (list)" "git remote" "read_only"
+assert_label "T117 git remote -v (list)" "git remote -v" "read_only"
+assert_label "T118 git remote add (write)" "git remote add origin https://x" "shared_write"
+assert_label "T119 git worktree list" "git worktree list" "read_only"
+assert_label "T120 git worktree add (write)" "git worktree add /tmp/wt foo" "shared_write"
+assert_label "T121 git config user.name (read)" "git config user.name" "read_only"
+assert_label "T122 git config user.name x (write)" "git config user.name foo" "shared_write"
+assert_label "T123 git config --unset (write)" "git config --unset user.name" "shared_write"
+
+echo ""
+echo "--- Codex PR-113 review finding 2: gh pr review ---"
+# All gh pr review forms write a review state — even --comment posts a review.
+assert_label "T130 gh pr review --approve" "gh pr review 5 --approve" "push_or_pr_create"
+assert_label "T131 gh pr review --comment" "gh pr review 5 --comment --body x" "push_or_pr_create"
+assert_label "T132 gh pr review --request-changes" "gh pr review 5 --request-changes" "push_or_pr_create"
+assert_label "T133 gh pr review (no flags)" "gh pr review 5" "push_or_pr_create"
+
+echo ""
 echo "--- classify_path ---"
 assert_path() {
   local desc="$1"

@@ -378,6 +378,13 @@ if (installHooks) {
     // Per Codex review ...8c92: install must keep the lib in sync with the
     // hooks; same per-file hash + --install-hooks-force semantics. Per
     // ...3503 Q3: source-of-truth is current repo files at install time.
+    // libResults[file] tracks per-lib install outcome. Codex PR #113 review
+    // finding 3 [P2]: dependent hooks must NOT be registered if any required
+    // lib was skipped-divergent — registered hook would source stale/missing
+    // lib at runtime and fail loud (or worse, silently behave wrong if user's
+    // divergent lib is incomplete).
+    const libResults = {}
+    let anyLibSkippedDivergent = false
     if (fs.existsSync(REPO_HOOKS_LIB)) {
       fs.mkdirSync(userHooksLibDir, { recursive: true })
       const libFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh'))
@@ -385,6 +392,7 @@ if (installHooks) {
         const src = path.join(REPO_HOOKS_LIB, file)
         const dst = path.join(userHooksLibDir, file)
         const result = installHookFile(src, dst, installHooksForce)
+        libResults[file] = result
         switch (result) {
           case 'copied':
             console.log(`Installed hook lib: ${dst}`)
@@ -399,6 +407,7 @@ if (installHooks) {
             break
           case 'skipped-divergent':
             console.log(`Skipped hook lib (divergent local edit): ${dst} — re-run with --install-hooks-force to overwrite`)
+            anyLibSkippedDivergent = true
             break
           case 'missing-source':
             console.log(`Note: ${src} not found in repo, skipped`)
@@ -477,15 +486,27 @@ if (installHooks) {
     // registration (per Codex review): we don't want install.mjs to point
     // Claude at unreviewed custom content. If a registration already exists
     // for the canonical path, addHookEntry returns 'present' and leaves it.
+    //
+    // Codex PR #113 finding 3 [P2]: hooks that source hooks/lib/ files are
+    // dependent on lib install success. If any required lib was skipped-
+    // divergent, withhold NEW registration of dependent hooks. Existing
+    // registration is preserved (don't yank a working setup). This applies
+    // to plan-gate.sh and checkpoint-gate.sh which source command-classifier
+    // and repo-root.
     const eligibleForReg = new Set(['copied', 'unchanged', 'forced'])
+    const libDependentHooks = new Set(['plan-gate.sh', 'checkpoint-gate.sh'])
 
     for (const spec of hookSpecs) {
       const canonicalCmd = shellQuote(path.join(userHooksDir, spec.file))
-      if (!eligibleForReg.has(fileResults[spec.file])) {
+      const fileEligible = eligibleForReg.has(fileResults[spec.file])
+      const libBlocksReg = libDependentHooks.has(spec.file) && anyLibSkippedDivergent
+      if (!fileEligible || libBlocksReg) {
         const alreadyRegistered = (settings.hooks[spec.event] || []).some(e =>
           entryHasExactCommand(e, canonicalCmd))
         if (alreadyRegistered) {
           console.log(`${spec.event} ${spec.file}: existing registration preserved`)
+        } else if (libBlocksReg) {
+          console.log(`${spec.event} ${spec.file}: registration withheld (required hooks/lib was skipped-divergent — re-run with --install-hooks-force)`)
         } else {
           console.log(`${spec.event} ${spec.file}: registration withheld (file install skipped)`)
         }
