@@ -23,5 +23,8 @@
 
   "_allowlist_comment": "Optional. Add per-config allowlist for emails/domains that should NOT be redacted (e.g. your team's published vendor addresses). Vendor commit-author constants for Claude/Codex/Cursor/Windsurf/Continue/Copilot, GitHub no-reply, RFC 2606 reserved domains, juan.delacruz@acme.com sample, and git@github.com SSH protocol address are already allowlisted by default.",
   "extra_allowlist_emails": [],
-  "extra_allowlist_domains": []
+  "extra_allowlist_domains": [],
+
+  "_extra_redact_strings_comment": "Optional. Literal strings to additionally redact regardless of surrounding context. Catches narrative usage (e.g. your username inside a markdown code-fence) that the built-in path/email regex misses. Recommended: add your username, real name, project codenames, company name. Replaced with [REDACTED]. Applied BEFORE built-in patterns so longer strings win.",
+  "extra_redact_strings": ["your-username", "Your Real Name"]
 }

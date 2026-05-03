@@ -47,7 +47,8 @@ Episodes accumulate on local disk and have no built-in durability. If your disk 
     { "src": "~/.episodic-memory", "dest": "global", "label": "global" }
   ],
   "extra_allowlist_emails": [],
-  "extra_allowlist_domains": []
+  "extra_allowlist_domains": [],
+  "extra_redact_strings": ["your-username", "Real Name"]
 }
 ```
 
@@ -56,11 +57,34 @@ Episodes accumulate on local disk and have no built-in durability. If your disk 
 | `repo_owner` | yes | GitHub user/org for the backup repo |
 | `repo_name` | yes | Repo name (will be created as private on first `--init`) |
 | `backup_dir` | no | Local clone path. Default `~/.local/share/episodic-memory-backup`. Tilde expansion supported. |
-| `sources` | yes (≥1) | Array of `{ src, dest, label }`. `src` = absolute or `~/`-prefixed source dir; `dest` = subdir under backup repo root; `label` = display name. |
+| `sources` | yes (≥1) | Array of `{ src, dest, label }`. `src` = absolute or `~/`-prefixed source dir; `dest` = subdir under backup repo root; `label` = display name. Dest must NOT escape backup_dir (`..`, absolute paths rejected at config-load). |
 | `extra_allowlist_emails` | no | Emails NOT to redact (e.g. published team addresses). Lowercased. |
 | `extra_allowlist_domains` | no | Domains NOT to redact (e.g. your company domain). Lowercased. |
+| `extra_redact_strings` | no | Literal strings to additionally redact (e.g. your username, real name, company name). Replaces with `[REDACTED]`. Applied BEFORE built-in patterns. Catches narrative usage that path/email regex misses (e.g. username inside markdown code-fence). |
 
 Config is searched in this order: `$EM_BACKUP_CONFIG`, then `~/.config/em-backup/config.json`. First match wins.
+
+### Why `extra_redact_strings` exists
+
+The built-in `home_path` regex catches `/Users/<name>` in path context but misses bare username strings in narrative text (e.g. `` `charltond.ho` was not redacted `` inside a markdown code-fence). Synthetic test fixtures don't exercise narrative usage; first real `--init` against a real corpus surfaced one such leak. `extra_redact_strings` is the user-supplied complement: list anything you don't want to leak as a literal string, regardless of context.
+
+Add your username, real name, project codename, company name, etc. The script applies these BEFORE built-in patterns so they can't be partially eaten by generic regex. Sort-longest-first means `["Foo", "Foo Bar"]` redacts `"Foo Bar"` correctly.
+
+### Artifact-wide redaction policy
+
+`extra_redact_strings` is treated as an **artifact-wide policy**, not just content. The same redaction is applied to:
+
+| Surface | Behavior |
+|---|---|
+| File contents | Replaced with `[REDACTED]` (along with built-in patterns) |
+| Backup pathnames under `BACKUP_DIR/<dest>/` | Path segments containing the literal are rewritten (e.g. source `src/SecretCodename/note.md` → backup `<dest>/[REDACTED]/note.md`) |
+| `.skipped-files.json` manifest entries | Paths run through the redaction (also redacts `/Users/<name>` → `/Users/USER`) |
+| `--audit` JSON `file:` and `src:` fields | Same treatment |
+| `--show-config` output | `extra_redact_strings` field is masked (shown as count) so terminal output / shared review evidence doesn't leak the list itself |
+
+Pruning uses a source-driven model: it computes the expected backup paths from the source side (applying the same redaction transformation), then deletes anything in backup that isn't in the expected set. This keeps prune correct when redacted segment names diverge from source segment names.
+
+The only raw strings that ever leave the script are the actual filesystem operations on `BACKUP_DIR` itself (Node fs API calls — not in any output stream that an attacker or reviewer could see).
 
 ## What gets redacted
 
