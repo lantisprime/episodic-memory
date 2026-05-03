@@ -741,62 +741,129 @@ _classify_git() {
       printf '%s\t\t%s\n' "read_only" "git_read_subcommand"
       return 0
       ;;
-    branch|tag|remote|worktree|config)
-      # Codex PR #113 review finding 1 [P1]: these subcommands EITHER list OR
-      # write depending on args. `git branch foo` creates a branch,
-      # `git remote add`, `git worktree add`, `git config user.name x` all
-      # write — and previously classified as read_only, bypassing plan-gate.
-      # Rule: if any positional (non-flag) arg follows the subcommand OR a
-      # write-only flag is present → shared_write. Bare list forms remain
-      # read_only.
+    branch|tag)
+      # Issue #116 [P1]: read forms with positionals were misclassified.
+      # Inverted default per Plan-agent recommendation: detect write flags
+      # explicitly; read flags + free positionals = read; bare positional
+      # (no flags) = create (write).
       local _gj=$((i+1))
-      local _has_positional=0 _has_write_flag=0 _np=0
+      local _has_write_flag=0 _has_read_flag=0 _free_positional=0
       while [ $_gj -lt ${#T[@]} ]; do
         local _gt="${T[$_gj]}"
         case "$_gt" in
-          -D|-d|-M|-m|-c|-C|--delete|--rename|--copy|--unset|--unset-all|--add|--replace-all|--edit|--set-upstream|--track|--no-track|--set-upstream-to|--force|-f)
-            _has_write_flag=1
-            ;;
-          -*) ;; # other flags treated as read-flags (verbose, list, etc.)
-          *)
-            _has_positional=1
-            _np=$((_np+1))
-            ;;
+          # Write flags (delete / rename / copy / move / track / sign / edit)
+          -d|-D|-m|-M|-c|-C|--delete|--rename|--copy|--move|-u|--track|--no-track|--unset-upstream|-f|--force|-s|--sign|--edit-description|--set-upstream-to|--cleanup)
+            _has_write_flag=1 ;;
+          --edit-description=*|--set-upstream-to=*|--cleanup=*)
+            _has_write_flag=1 ;;
+          # Read flags (list / filter / sort / format / verbose)
+          --list|-l|--contains|--no-contains|--merged|--no-merged|--points-at|--sort|--format|--column|-a|-r|-v|-vv|--all|--remotes|--show-current|-q|--quiet|--no-color|--ignore-case|-i)
+            _has_read_flag=1 ;;
+          --list=*|--contains=*|--no-contains=*|--merged=*|--no-merged=*|--points-at=*|--sort=*|--format=*|--column=*)
+            _has_read_flag=1 ;;
+          -n*) _has_read_flag=1 ;;  # tag -n[N]
+          --*=*) ;;                  # unknown equals-form
+          -*) ;;                     # unknown flag — neutral
+          *)  _free_positional=1 ;;
         esac
         _gj=$((_gj+1))
       done
-      if [ "$sub" = "config" ]; then
-        # `git config <key>` (1 positional) reads; 2+ writes.
-        if [ $_np -le 1 ] && [ $_has_write_flag -eq 0 ]; then
-          printf '%s\t\t%s\n' "read_only" "git_config_read"
-          return 0
-        fi
-        printf '%s\t\t%s\n' "shared_write" "git_config_write"
+      if [ $_has_write_flag -eq 1 ]; then
+        printf '%s\t\t%s\n' "shared_write" "git_${sub}_write_flag"
         return 0
       fi
-      if [ "$sub" = "worktree" ]; then
-        local _wt_idx=$((i+2))
-        local _wt_sub=""
-        if [ $_wt_idx -lt ${#T[@]} ]; then _wt_sub="${T[$_wt_idx]}"; fi
-        case "$_wt_sub" in
-          ""|list)
-            printf '%s\t\t%s\n' "read_only" "git_worktree_list"
-            return 0
-            ;;
-          add|remove|move|repair|prune|lock|unlock)
-            printf '%s\t\t%s\n' "shared_write" "git_worktree_${_wt_sub}"
-            return 0
-            ;;
-        esac
-      fi
-      if [ $_has_positional -eq 1 ] || [ $_has_write_flag -eq 1 ]; then
-        printf '%s\t\t%s\n' "shared_write" "git_${sub}_write"
+      if [ $_free_positional -eq 1 ] && [ $_has_read_flag -eq 0 ]; then
+        # Bare `git branch new-name` or `git tag v1.0` creates.
+        printf '%s\t\t%s\n' "shared_write" "git_${sub}_create"
         return 0
       fi
-      printf '%s\t\t%s\n' "read_only" "git_${sub}_list"
+      printf '%s\t\t%s\n' "read_only" "git_${sub}_read"
       return 0
       ;;
-    commit|add|rm|mv|reset|restore|checkout|switch|merge|rebase|cherry-pick|revert|stash|clean|pull|fetch|clone|init|gc|prune|notes|submodule|apply|am|format-patch|bisect|update-index|update-ref|symbolic-ref|hash-object|mktree|read-tree|write-tree|commit-tree|fsck|repack|pack-refs|pack-objects|unpack-objects|prune-packed|rerere|filter-branch|replay|sparse-checkout|maintenance)
+    remote)
+      # Inverted default: known write subcommands explicitly listed.
+      # Anything else (incl. get-url, show, show-url, get-all, -v, -vv) → read.
+      local _gj=$((i+1))
+      while [ $_gj -lt ${#T[@]} ]; do
+        case "${T[$_gj]}" in
+          -*) _gj=$((_gj+1));;
+          *)  break ;;
+        esac
+      done
+      if [ $_gj -lt ${#T[@]} ]; then
+        case "${T[$_gj]}" in
+          add|remove|rm|rename|set-url|set-head|set-branches|prune|update)
+            printf '%s\t\t%s\n' "shared_write" "git_remote_${T[$_gj]}"
+            return 0 ;;
+        esac
+      fi
+      printf '%s\t\t%s\n' "read_only" "git_remote_read"
+      return 0
+      ;;
+    worktree)
+      local _gj=$((i+1))
+      while [ $_gj -lt ${#T[@]} ]; do
+        case "${T[$_gj]}" in
+          -*) _gj=$((_gj+1));;
+          *)  break ;;
+        esac
+      done
+      if [ $_gj -lt ${#T[@]} ]; then
+        # Subagent code review: lock/unlock/prune mutate state too (locks
+        # touch metadata; prune removes stale entries). Previous version had
+        # them as writes; the inverted-default revision dropped them. Restore.
+        case "${T[$_gj]}" in
+          add|remove|move|repair|lock|unlock|prune)
+            printf '%s\t\t%s\n' "shared_write" "git_worktree_${T[$_gj]}"
+            return 0 ;;
+        esac
+      fi
+      printf '%s\t\t%s\n' "read_only" "git_worktree_read"
+      return 0
+      ;;
+    config)
+      # Write detection: explicit write flag OR (2+ free positionals AND no
+      # explicit read flag). Scope flags (--global/--system/--local/
+      # --worktree) and value-taking option flags (--file/--blob/-f/--type/
+      # --default) consumed without counting as positionals.
+      #
+      # Subagent code review fixes:
+      # - --remove-section / --rename-section are writes (was missed).
+      # - --get / --get-all / --get-regexp / --get-urlmatch / --get-color /
+      #   --get-colorbool / --list / -l are explicit READ flags. They take
+      #   one or more positional args but those args are NOT a key/value
+      #   set-form pair. Suppress the _np>=2 rule when any read flag is
+      #   present (e.g. `git config --get-color color.diff red` is read).
+      local _gj=$((i+1))
+      local _has_write_flag=0 _has_read_flag=0 _np=0
+      while [ $_gj -lt ${#T[@]} ]; do
+        local _gt="${T[$_gj]}"
+        case "$_gt" in
+          --unset|--unset-all|--add|--replace-all|--edit|-e|--remove-section|--rename-section)
+            _has_write_flag=1 ;;
+          --get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--list|-l|--show-scope|--show-origin|--name-only|--includes|--no-includes|-z|--null)
+            _has_read_flag=1 ;;
+          --file|--blob|-f|--type|--default)
+            _gj=$((_gj+1)) ;;
+          --file=*|--blob=*|--type=*|--default=*) ;;
+          --*=*) ;;
+          -*) ;;
+          *) _np=$((_np+1)) ;;
+        esac
+        _gj=$((_gj+1))
+      done
+      if [ $_has_write_flag -eq 1 ]; then
+        printf '%s\t\t%s\n' "shared_write" "git_config_write_flag"
+        return 0
+      fi
+      if [ $_np -ge 2 ] && [ $_has_read_flag -eq 0 ]; then
+        printf '%s\t\t%s\n' "shared_write" "git_config_set"
+        return 0
+      fi
+      printf '%s\t\t%s\n' "read_only" "git_config_read"
+      return 0
+      ;;
+    commit|add|rm|mv|reset|restore|checkout|switch|merge|rebase|cherry-pick|revert|stash|clean|pull|clone|init|gc|prune|notes|submodule|apply|am|format-patch|bisect|update-index|update-ref|symbolic-ref|hash-object|mktree|read-tree|write-tree|commit-tree|fsck|repack|pack-refs|pack-objects|unpack-objects|prune-packed|rerere|filter-branch|replay|sparse-checkout|maintenance)
       printf '%s\t\t%s\n' "shared_write" "git_local_write"
       return 0
       ;;

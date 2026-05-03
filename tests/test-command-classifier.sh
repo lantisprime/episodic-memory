@@ -195,6 +195,80 @@ assert_label "T132 gh pr review --request-changes" "gh pr review 5 --request-cha
 assert_label "T133 gh pr review (no flags)" "gh pr review 5" "push_or_pr_create"
 
 echo ""
+echo "--- Commit 7 (#116): inverted-default git mgmt classifier ---"
+# Read forms with positionals — previously misclassified shared_write.
+assert_label "T140 git remote get-url" "git remote get-url origin" "read_only"
+assert_label "T141 git remote show" "git remote show origin" "read_only"
+assert_label "T142 git remote -v" "git remote -v" "read_only"
+assert_label "T143 git tag -l pattern" "git tag -l 'v*'" "read_only"
+assert_label "T144 git tag --list" "git tag --list" "read_only"
+assert_label "T145 git tag --contains" "git tag --contains HEAD" "read_only"
+assert_label "T146 git tag --merged" "git tag --merged main" "read_only"
+assert_label "T147 git tag --sort= equals form" "git tag --sort=-version:refname" "read_only"
+assert_label "T148 git tag -n5 glued count" "git tag -n5" "read_only"
+assert_label "T149 git branch -a" "git branch -a" "read_only"
+assert_label "T150 git branch -r" "git branch -r" "read_only"
+assert_label "T151 git branch --contains" "git branch --contains HEAD" "read_only"
+assert_label "T152 git branch --merged" "git branch --merged main" "read_only"
+assert_label "T153 git branch --no-merged" "git branch --no-merged" "read_only"
+assert_label "T154 git branch --points-at" "git branch --points-at HEAD" "read_only"
+assert_label "T155 git branch --list pattern" "git branch --list 'feat/*'" "read_only"
+assert_label "T156 git branch -l pattern" "git branch -l 'feat/*'" "read_only"
+assert_label "T157 git branch --show-current" "git branch --show-current" "read_only"
+assert_label "T158 git branch --column" "git branch --column" "read_only"
+assert_label "T159 git branch --sort=" "git branch --sort=committerdate" "read_only"
+assert_label "T160 git branch --format=" "git branch --format='%(refname)'" "read_only"
+assert_label "T161 git config --list" "git config --list" "read_only"
+assert_label "T162 git config --get-regexp" "git config --get-regexp '^user'" "read_only"
+assert_label "T163 git config --global user.name read" "git config --global user.name" "read_only"
+assert_label "T164 git config --file path key" "git config --file /tmp/c user.name" "read_only"
+assert_label "T165 git worktree list" "git worktree list" "read_only"
+assert_label "T166 git worktree --help" "git worktree --help" "read_only"
+
+# Write forms still detected (regression).
+assert_label "T170 git branch new-name (create)" "git branch new-topic" "shared_write"
+assert_label "T171 git branch -D delete" "git branch -D old" "shared_write"
+assert_label "T172 git branch --edit-description" "git branch --edit-description" "shared_write"
+assert_label "T173 git branch --edit-description=foo" "git branch --edit-description=foo" "shared_write"
+assert_label "T174 git branch --set-upstream-to=" "git branch --set-upstream-to=origin/main" "shared_write"
+assert_label "T175 git branch --track" "git branch --track main origin" "shared_write"
+assert_label "T176 git tag v1" "git tag v1.0" "shared_write"
+assert_label "T177 git tag -d" "git tag -d v1.0" "shared_write"
+assert_label "T178 git tag -f" "git tag -f v1.0" "shared_write"
+assert_label "T179 git tag -s" "git tag -s v1.0" "shared_write"
+assert_label "T180 git remote add" "git remote add origin https://x" "shared_write"
+assert_label "T181 git remote rename" "git remote rename old new" "shared_write"
+assert_label "T182 git remote set-url" "git remote set-url origin https://y" "shared_write"
+assert_label "T183 git remote prune" "git remote prune origin" "shared_write"
+assert_label "T184 git config user.name foo" "git config user.name foo" "shared_write"
+assert_label "T185 git config --global user.name foo" "git config --global user.name foo" "shared_write"
+assert_label "T186 git config --unset" "git config --unset user.name" "shared_write"
+assert_label "T187 git config --add" "git config --add user.name foo" "shared_write"
+assert_label "T188 git worktree add" "git worktree add /tmp/wt foo" "shared_write"
+assert_label "T189 git worktree remove" "git worktree remove /tmp/wt" "shared_write"
+
+# Reverse-flag-order (Plan-agent [P3] fuzz)
+assert_label "T190 reversed: pattern then --list" "git branch 'feat/*' --list" "read_only"
+
+# Subagent code review fixes for commit 7
+# git config read-flags suppress positional-count rule
+assert_label "T191 git config --get-color (3 positionals, read flag)" \
+  "git config --get-color color.diff red" "read_only"
+assert_label "T192 git config --get-colorbool" \
+  "git config --get-colorbool color.ui true" "read_only"
+assert_label "T193 git config --get-urlmatch" \
+  "git config --get-urlmatch http http://example.com" "read_only"
+# git config write-only flags previously missed
+assert_label "T194 git config --remove-section" \
+  "git config --remove-section section.name" "shared_write"
+assert_label "T195 git config --rename-section" \
+  "git config --rename-section old new" "shared_write"
+# git worktree lock/unlock/prune restored as writes
+assert_label "T196 git worktree lock" "git worktree lock /tmp/wt" "shared_write"
+assert_label "T197 git worktree unlock" "git worktree unlock /tmp/wt" "shared_write"
+assert_label "T198 git worktree prune" "git worktree prune" "shared_write"
+
+echo ""
 echo "--- classify_path ---"
 assert_path() {
   local desc="$1"

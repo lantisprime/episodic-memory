@@ -490,11 +490,42 @@ if (installHooks) {
     // Codex PR #113 finding 3 [P2]: hooks that source hooks/lib/ files are
     // dependent on lib install success. If any required lib was skipped-
     // divergent, withhold NEW registration of dependent hooks. Existing
-    // registration is preserved (don't yank a working setup). This applies
-    // to plan-gate.sh and checkpoint-gate.sh which source command-classifier
-    // and repo-root.
+    // registration is preserved (don't yank a working setup).
+    //
+    // Issue #116 [P2] / Plan-agent v2 review: derive libDependentHooks at
+    // runtime by grepping each hook's REPO source for `source.*hooks/lib/`
+    // (not the deployed copy — Plan-agent confirmed direction to avoid
+    // bootstrap circularity). A future hook (e.g. push-gate.sh in PR-E)
+    // that sources hooks/lib/ is automatically included; a stateless hook
+    // is automatically excluded.
     const eligibleForReg = new Set(['copied', 'unchanged', 'forced'])
-    const libDependentHooks = new Set(['plan-gate.sh', 'checkpoint-gate.sh'])
+    const libDependentHooks = new Set()
+    // Build the set of expected lib basenames (so a hook need not literally
+    // contain "hooks/lib/" — variable-built paths via $LIB_DIR/ also match).
+    let libBasenames = []
+    if (fs.existsSync(REPO_HOOKS_LIB)) {
+      libBasenames = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh'))
+    }
+    for (const spec of hookSpecs) {
+      const repoFile = path.join(REPO_HOOKS, spec.file)
+      if (!fs.existsSync(repoFile)) continue
+      const src = fs.readFileSync(repoFile, 'utf8')
+      // Match if the hook (a) literally references hooks/lib/, or (b) uses
+      // a `source` / `.` statement naming any known lib basename. The latter
+      // catches variable-built paths like `source "$LIB_DIR/foo.sh"`.
+      // Codex audit: previous regex only matched (a), missing both real
+      // dependent hooks because they use $LIB_DIR variable form. Silent
+      // protection bypass.
+      const literalLibPath = /(^|\s)(source|\.)\s+[^\n]*hooks\/lib\//.test(src)
+      const sourcesKnownLib = libBasenames.some(b => {
+        // Match `source ... <basename>` or `. ... <basename>` on the same line.
+        const re = new RegExp(`(^|\\n|\\s)(source|\\.)\\s+[^\\n]*${b.replace(/\./g, '\\.')}`)
+        return re.test(src)
+      })
+      if (literalLibPath || sourcesKnownLib) {
+        libDependentHooks.add(spec.file)
+      }
+    }
 
     for (const spec of hookSpecs) {
       const canonicalCmd = shellQuote(path.join(userHooksDir, spec.file))
