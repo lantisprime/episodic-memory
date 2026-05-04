@@ -44,6 +44,7 @@ const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
 const warnCount = parseInt(flag('--warn-count') || '500', 10)
 const taskTypeFlag = flag('--task-type')
+const gateFlag = flag('--gate')
 
 const VALID_SCOPES = ['local', 'global', 'all']
 if (!VALID_SCOPES.includes(scope)) {
@@ -55,6 +56,43 @@ const VALID_TASK_TYPES = ['implementation', 'push', 'rule', 'general']
 if (taskTypeFlag !== undefined && !VALID_TASK_TYPES.includes(taskTypeFlag)) {
   console.log(JSON.stringify({ status: 'error', message: `Invalid --task-type "${taskTypeFlag}". Must be one of: ${VALID_TASK_TYPES.join(', ')}` }))
   process.exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// Gate dispatch (RFC-003 Phase 3b primitive; future Phase 2 will subsume the
+// shell wrapper into adapters/claude-code/capabilities/enforcement.mjs while
+// keeping this dispatch in core per P9. See RFC-003 §Considerations — #128
+// stop-gate alignment for the event-name-keying commitment.)
+//
+// `--gate <event>` returns a hook-decision JSON to stdout for adapter
+// consumption. Empty stdout = allow (Claude proceeds normally on Stop).
+// `{decision: "block", reason: "..."}` = block.
+//
+// Currently implemented: stop. The dispatch contract may extend to other
+// Claude Code events (presubmit/prewrite/prepush) as Phase 1 ratifies.
+// ---------------------------------------------------------------------------
+const VALID_GATES = ['stop']
+if (gateFlag !== undefined && !VALID_GATES.includes(gateFlag)) {
+  console.log(JSON.stringify({ status: 'error', message: `Invalid --gate "${gateFlag}". Must be one of: ${VALID_GATES.join(', ')}` }))
+  process.exit(1)
+}
+
+if (gateFlag === 'stop') {
+  // REPO_ROOT was resolved at module load (line ~26) via resolveRepoRoot()
+  // from scripts/lib/local-dir.mjs. This converges with the hook readers in
+  // hooks/checkpoint-gate.sh + hooks/plan-gate.sh that use repo-root.sh.
+  // Closes #106's worktree-orphan class for this gate.
+  const claudeDir = path.join(REPO_ROOT, '.claude')
+  const preReq = path.join(claudeDir, '.checkpoint-required')
+  const postDone = path.join(claudeDir, '.post-checkpoint-done')
+  let postDoneSize = 0
+  try { postDoneSize = fs.statSync(postDone).size } catch {}
+  if (fs.existsSync(preReq) && postDoneSize === 0) {
+    const reason = 'Post-implementation checkpoint required. Write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty), then end your turn again. Hook: stop-gate.sh.'
+    console.log(JSON.stringify({ decision: 'block', reason }))
+  }
+  // Otherwise: emit nothing. Empty stdout on Stop = allow Claude to stop.
+  process.exit(0)
 }
 
 const recallStart = Date.now()

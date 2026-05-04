@@ -438,6 +438,23 @@ if (installHooks) {
         file: 'em-recall-sessionstart.sh',
         event: 'SessionStart',
         timeout: 10
+      },
+      // stop-gate.sh: registered on both Stop AND SubagentStop. SubagentStop
+      // is the conversion of Stop for subagent contexts per
+      // claude-code-hooks-reference.md:409 — without explicit SubagentStop
+      // registration, subagent shape-4 (docs-only-summarize-as-done from
+      // inside a Skill / Plan / Explore agent) is uncovered. Issue #128.
+      // Phase 3b primitive; future RFC-003 Phase 2 subsumes into
+      // adapters/claude-code/capabilities/enforcement.mjs.
+      {
+        file: 'stop-gate.sh',
+        event: 'Stop',
+        timeout: 5
+      },
+      {
+        file: 'stop-gate.sh',
+        event: 'SubagentStop',
+        timeout: 5
       }
     ]
 
@@ -562,7 +579,8 @@ if (installHooks) {
       'em-session-end-prompt.mjs': path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'),
       'checkpoint-gate.sh': path.join(userHooksDir, 'checkpoint-gate.sh'),
       'plan-gate.sh': path.join(userHooksDir, 'plan-gate.sh'),
-      'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh')
+      'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh'),
+      'stop-gate.sh': path.join(userHooksDir, 'stop-gate.sh')
     }
     const staleEntries = detectStaleCanonicalEntries(settings.hooks, canonicalByBasename)
     for (const { event, basename, command } of staleEntries) {

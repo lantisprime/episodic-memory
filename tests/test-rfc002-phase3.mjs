@@ -530,6 +530,130 @@ test('T7j. End-to-end: real SessionStart hook arms marker without --task-type (P
   fs.rmSync(sessionHome, { recursive: true, force: true })
 })
 
+test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next SessionStart re-arms (#128 SessionEnd race tie-breaker)', () => {
+  // Verifies the SessionEnd-race tie-breaker verdict from #128 plan review:
+  // even though SessionEnd unconditionally sweeps all 4 markers, the next
+  // SessionStart re-arms the gate because shouldArmBp001Checkpoint reads
+  // from the EPISODE STORE (persistent), not the marker file. The marker
+  // is just runtime state for the current arming cycle. This test pins the
+  // idempotent-re-arm contract — any future regression that points the
+  // predicate at the marker would silently disarm the gate; this test
+  // catches that.
+  //
+  // Round-trip:
+  //   1. Setup: temp project + seeded bp-001 violation in episode store
+  //   2. SessionStart hook arms .checkpoint-required
+  //   3. Simulate Stop firing (em-recall --gate stop) → returns block JSON
+  //   4. em-session-end-prompt.mjs sweeps all 4 markers
+  //   5. SessionStart hook runs again → .checkpoint-required re-armed
+  //   6. Verify the violation episode still exists (source of truth survived)
+  const sessionHome = fs.mkdtempSync(path.join(os.tmpdir(), 'em-rfc002-p3-roundtrip-'))
+  const sessionProject = path.join(sessionHome, 'project')
+  fs.mkdirSync(sessionProject, { recursive: true })
+  execSync('git init -q', { cwd: sessionProject })
+  execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: sessionProject })
+  execSync('git checkout -q -B main', { cwd: sessionProject })
+
+  const sessionPatterns = path.join(sessionProject, 'patterns')
+  fs.mkdirSync(sessionPatterns, { recursive: true })
+  fs.copyFileSync(srcIndex, path.join(sessionPatterns, '_index.json'))
+
+  const sessionScripts = path.join(sessionHome, '.episodic-memory', 'scripts')
+  fs.mkdirSync(sessionScripts, { recursive: true })
+  const SCRIPTS_DIR = path.join(REPO_ROOT, 'scripts')
+  for (const f of fs.readdirSync(SCRIPTS_DIR)) {
+    if (f.endsWith('.mjs')) {
+      fs.copyFileSync(path.join(SCRIPTS_DIR, f), path.join(sessionScripts, f))
+    }
+  }
+  const SCRIPTS_LIB = path.join(SCRIPTS_DIR, 'lib')
+  if (fs.existsSync(SCRIPTS_LIB)) {
+    const sessionLib = path.join(sessionScripts, 'lib')
+    fs.mkdirSync(sessionLib, { recursive: true })
+    for (const f of fs.readdirSync(SCRIPTS_LIB)) {
+      if (f.endsWith('.mjs')) fs.copyFileSync(path.join(SCRIPTS_LIB, f), path.join(sessionLib, f))
+    }
+  }
+
+  const sessionEnv = { ...process.env, HOME: sessionHome }
+  // Seed violation in episode store. This is the persistent source of truth
+  // that survives SessionEnd sweep.
+  execSync(`node "${VIOLATION}" --pattern bp-001-implementation-workflow --summary "round-trip seed" --body "test" --scope local`, {
+    cwd: sessionProject, env: sessionEnv, encoding: 'utf8'
+  })
+  execSync(`node "${REBUILD}" --scope all`, { cwd: sessionProject, env: sessionEnv })
+
+  const hookPath = path.join(REPO_ROOT, 'hooks', 'em-recall-sessionstart.sh')
+  const claudeDir = path.join(sessionProject, '.claude')
+  const preReq = path.join(claudeDir, '.checkpoint-required')
+  const postReq = path.join(claudeDir, '.post-checkpoint-required')
+  const preDone = path.join(claudeDir, '.pre-checkpoint-done')
+  const postDone = path.join(claudeDir, '.post-checkpoint-done')
+
+  // ----- Step 1: First SessionStart arms marker -----
+  spawnSync('bash', [hookPath], {
+    input: JSON.stringify({ cwd: sessionProject }),
+    env: sessionEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
+  })
+  assert.ok(fs.existsSync(preReq), 'step 1: SessionStart should arm .checkpoint-required')
+
+  // ----- Step 2: Stop fires; em-recall --gate stop returns block -----
+  const stopOut = execSync(`node "${path.join(sessionScripts, 'em-recall.mjs')}" --gate stop`, {
+    cwd: sessionProject, env: sessionEnv, encoding: 'utf8'
+  })
+  const stopJson = JSON.parse(stopOut)
+  assert.strictEqual(stopJson.decision, 'block',
+    'step 2: --gate stop must block when armed and post-done empty')
+
+  // Defensive: marker still present at the moment we asserted block decision.
+  // Guards against vacuous-pass if cleanup raced ahead of the assertion.
+  assert.ok(fs.existsSync(preReq),
+    'step 2 (defensive): marker still present at decision time (non-vacuous)')
+
+  // ----- Step 3: SessionEnd sweeps all 4 markers -----
+  // Pre-condition: arm all 4 to verify the sweep covers them all
+  fs.writeFileSync(preDone, 'pre-content')
+  fs.writeFileSync(postReq, '')
+  fs.writeFileSync(postDone, 'post-content')
+  // Defensive: confirm setup is real before SessionEnd touches it
+  assert.ok(fs.existsSync(preReq) && fs.existsSync(preDone) &&
+            fs.existsSync(postReq) && fs.existsSync(postDone),
+    'step 3 setup: all 4 markers seeded')
+
+  execSync(`node "${path.join(sessionScripts, 'em-session-end-prompt.mjs')}"`, {
+    cwd: sessionProject, env: sessionEnv, encoding: 'utf8'
+  })
+
+  assert.ok(!fs.existsSync(preReq), 'step 3: SessionEnd should sweep .checkpoint-required')
+  assert.ok(!fs.existsSync(preDone), 'step 3: SessionEnd should sweep .pre-checkpoint-done')
+  assert.ok(!fs.existsSync(postReq), 'step 3: SessionEnd should sweep .post-checkpoint-required')
+  assert.ok(!fs.existsSync(postDone), 'step 3: SessionEnd should sweep .post-checkpoint-done')
+
+  // ----- Step 4: Next SessionStart re-arms marker (idempotent contract) -----
+  spawnSync('bash', [hookPath], {
+    input: JSON.stringify({ cwd: sessionProject }),
+    env: sessionEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
+  })
+  assert.ok(fs.existsSync(preReq),
+    'step 4: SECOND SessionStart should re-arm marker — proves shouldArmBp001Checkpoint reads episode store, not marker')
+
+  // ----- Step 5: Violation episode still in the store (source of truth survived) -----
+  const indexPath = path.join(sessionProject, '.episodic-memory', 'index.jsonl')
+  assert.ok(fs.existsSync(indexPath), 'step 5: episode index still exists post-roundtrip')
+  const indexLines = fs.readFileSync(indexPath, 'utf8').split('\n').filter(Boolean)
+  const hasViolation = indexLines.some(line => {
+    try {
+      const e = JSON.parse(line)
+      return e.category === 'violation' && Array.isArray(e.tags) &&
+             e.tags.includes('violated:bp-001-implementation-workflow')
+    } catch { return false }
+  })
+  assert.ok(hasViolation,
+    'step 5: bp-001 violation episode survived the round-trip (the actual source of truth for re-arming)')
+
+  fs.rmSync(sessionHome, { recursive: true, force: true })
+})
+
 // ===========================================================================
 // Summary
 // ===========================================================================
