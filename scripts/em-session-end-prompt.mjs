@@ -15,6 +15,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { resolveRepoRoot } from './lib/local-dir.mjs'
 
 // ---------------------------------------------------------------------------
 // Load known patterns from _index.json
@@ -38,7 +39,12 @@ function loadPatternsIndex() {
 // Cleans orphaned states too (e.g. .post-checkpoint-required without
 // .checkpoint-required, per RFC-002 line 207). Failure is silent — markers
 // may not exist or .claude/ may be missing in some workflows.
-const claudeDir = path.join(process.cwd(), '.claude')
+//
+// resolveRepoRoot ensures we clean the SAME .claude/ that armCheckpointMarker
+// (em-recall) and the hooks (hooks/lib/repo-root.sh) target — a worktree-cwd
+// would otherwise sweep an empty worktree-local .claude/ while leaving the
+// real markers stranded at the main repo root. Closes #106.
+const claudeDir = path.join(resolveRepoRoot(), '.claude')
 for (const marker of [
   '.checkpoint-required',
   '.pre-checkpoint-done',
