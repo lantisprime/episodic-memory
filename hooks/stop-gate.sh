@@ -41,6 +41,17 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# Parse .cwd from hook input. The hook PROCESS cwd is whatever Claude Code
+# launched the hook from — NOT necessarily the project. Codex round-1 caught
+# this bypass: without honoring input .cwd, em-recall's resolveRepoRoot at
+# module load resolves from /private/tmp (or wherever) instead of the
+# project, silently allowing Stop on an armed project.
+#
+# Same pattern as em-recall-sessionstart.sh:27-28 + checkpoint-gate.sh:43-44 +
+# plan-gate.sh:27-28: parse .cwd, fall back to pwd if missing.
+CWD="$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")"
+[ -z "$CWD" ] && CWD="$(pwd)"
+
 # Resolve em-recall.mjs at canonical global install path. The hook does not
 # attempt to use the in-repo script — production hooks invoke globally
 # installed copies, which is what install.mjs --install-hooks deploys.
@@ -50,9 +61,19 @@ if [ ! -f "$EM_RECALL" ]; then
   exit 0
 fi
 
+# Invalid .cwd guard: if CWD doesn't exist or isn't readable, fail-soft (no
+# decision). Mirrors em-recall-sessionstart.sh:43-45 + #70 wrong-project
+# class (don't run em-recall in whatever cwd the hook process inherited).
+# Fail-soft because Stop's "no decision" = allow, which is the conservative
+# default when we can't be sure which project's marker to read.
+if ! cd "$CWD" 2>/dev/null; then
+  exit 0
+fi
+
 # Invoke core decision logic. Capture stdout; fail-loud envelope on error.
-# Repo-root resolution lives in em-recall.mjs (post-#140 resolveRepoRoot at
-# module load); we intentionally do NOT pass cwd info via stdin.
+# Repo-root resolution in em-recall.mjs (resolveRepoRoot module-load) now
+# resolves from the cwd we just cd'd to — i.e., the project the hook input
+# named, not the hook process's inherited cwd.
 DECISION="$(node "$EM_RECALL" --gate stop 2>/dev/null)" || {
   echo '{"decision": "block", "reason": "stop-gate.sh: em-recall --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
   exit 0

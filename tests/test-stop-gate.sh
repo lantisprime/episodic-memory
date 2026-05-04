@@ -289,6 +289,53 @@ if [ -f "$L3_MAIN/.claude/.checkpoint-required" ]; then pass "L3.7 (defensive): 
 else fail "L3.7 defensive" "marker disappeared during short-circuit"
 fi
 
+# 3.8 BYPASS REGRESSION (Codex round-1 finding 1, P1):
+# Hook PROCESS cwd is /private/tmp (outside any project) but hook INPUT JSON
+# has cwd pointing at the armed repo. Pre-fix: stop-gate.sh ignored input
+# cwd → em-recall resolveRepoRoot resolved from /private/tmp → silently
+# allowed Stop on the armed project. Post-fix: hook parses input cwd,
+# cd's to it, em-recall reads main repo's .claude/ correctly → blocks.
+mkdir -p "$L3_MAIN/.claude"
+touch "$L3_MAIN/.claude/.checkpoint-required"
+rm -f "$L3_MAIN/.claude/.post-checkpoint-done"
+input_with_cwd="$(printf '{"cwd":"%s","stop_hook_active":false}' "$L3_MAIN")"
+out="$(cd /private/tmp 2>/dev/null && echo "$input_with_cwd" | HOME="$L3_HOME" bash "$HOOK" 2>/dev/null)"
+if echo "$out" | grep -qE '"decision":[[:space:]]*"block"'; then
+  pass "L3.8: hook from /private/tmp + input cwd→armed repo → blocks (Codex finding 1 regression)"
+else
+  fail "L3.8: bypass regression (Codex P1 finding)" "got: $out (expected block; armed marker at $L3_MAIN/.claude/.checkpoint-required)"
+fi
+# Defensive: confirm the marker we set still exists at this point
+if [ -f "$L3_MAIN/.claude/.checkpoint-required" ]; then pass "L3.8 (defensive): marker still present at check time"
+else fail "L3.8 defensive existence" "marker disappeared between setup and assertion"
+fi
+
+# 3.9 INVALID .cwd graceful-fail: input cwd points at non-existent dir.
+# Per #70 wrong-project class, we must NOT run em-recall in whatever cwd
+# the hook process inherited. Hook should fail-soft (empty stdout = allow).
+input_bad_cwd='{"cwd":"/nonexistent-path-for-test","stop_hook_active":false}'
+out="$(cd "$L3_MAIN" && echo "$input_bad_cwd" | HOME="$L3_HOME" bash "$HOOK" 2>/dev/null)"
+# Note: even though we cd'd to L3_MAIN (which has armed marker), the bad
+# input .cwd takes precedence. The hook tries to cd to the bad path, fails,
+# and exits 0 with no decision (graceful — don't run em-recall in
+# inherited cwd to avoid #70 wrong-project bug).
+if [ -z "$out" ]; then
+  pass "L3.9: invalid input .cwd → fail-soft, no decision (#70 wrong-project guard)"
+else
+  fail "L3.9: invalid cwd graceful-fail" "got: $out (expected empty; should not run em-recall in inherited cwd)"
+fi
+
+# 3.10 Empty .cwd in input falls back to pwd (canonical pattern).
+# When .cwd is "" or missing, hook uses pwd. Process cwd here is L3_MAIN
+# (armed); should block.
+input_no_cwd='{"stop_hook_active":false}'
+out="$(cd "$L3_MAIN" && echo "$input_no_cwd" | HOME="$L3_HOME" bash "$HOOK" 2>/dev/null)"
+if echo "$out" | grep -qE '"decision":[[:space:]]*"block"'; then
+  pass "L3.10: missing input .cwd → falls back to pwd → blocks correctly"
+else
+  fail "L3.10: cwd fallback to pwd" "got: $out"
+fi
+
 # ============================================================================
 # Summary
 # ============================================================================
