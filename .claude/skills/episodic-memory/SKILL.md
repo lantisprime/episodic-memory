@@ -8,7 +8,7 @@ description: >
   when starting work on a project to proactively recall relevant past episodes.
   Even if the user doesn't explicitly ask, store episodes for important
   decisions, discoveries, or context valuable in future sessions.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # Episodic Memory
@@ -34,11 +34,12 @@ When researching from the web: first check `em-search.mjs --category research --
 
 ## Recall
 
-- Session start: proactively `em-search.mjs --project <name> --limit 5`
+- Session start: proactively `em-recall.mjs --project <name> [--task-type <implementation|push|rule|general>] [--limit 5]` — surfaces relevant episodes + violation pre-flight for behavioral patterns related to the task type (RFC-002 Phase 3). Use `--task-type implementation` before code work to surface recent bp-001/bp-006 violations.
 - User asks about past decisions: `em-search.mjs --query "<topic>" [--full]`
 - Before contradicting a past decision: search first
 
 ```bash
+node ~/.episodic-memory/scripts/em-recall.mjs [--project <name>] [--task-type <implementation|push|rule|general>] [--scope local|global|all] [--limit <n>] [--days <n>]
 node ~/.episodic-memory/scripts/em-search.mjs [--project <name>] [--query <text>] [--tag <t>] [--category <c>] [--since <date>] [--limit <n>] [--full] [--scope local|global|all] [--include-superseded] [--history <id>]
 node ~/.episodic-memory/scripts/em-list.mjs [--project <name>] [--limit <n>]
 ```

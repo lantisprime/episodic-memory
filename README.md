@@ -85,7 +85,7 @@ The installer:
 2. Copies `patterns/_index.json` to `~/.episodic-memory/patterns/` for global pattern validation
 3. Creates `.episodic-memory/` in the target project for local episodes
 4. Copies the appropriate instruction file for your tool
-5. With `--install-hooks`: registers SessionEnd + SessionStart hooks in `~/.claude/settings.json` (Claude Code only, opt-in)
+5. With `--install-hooks`: copies `hooks/*.sh` into `~/.claude/hooks/` and `hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Use `--install-hooks-force` to overwrite locally edited hook files.
 
 ## Supported Tools
 
@@ -131,6 +131,8 @@ patterns/                     # Behavioral patterns (shipped with repo)
 
 All episodes go to the **global common store by default**, making them available across all projects. Use `--scope local` for decisions private to one project. Scripts search **both local and global** by default.
 
+> **Worktrees:** scripts resolve the local `.episodic-memory/` via `git rev-parse --git-common-dir`, so all worktrees of the same repo share one local store (the one at the main checkout). Fixed in [#105](https://github.com/lantisprime/episodic-memory/pull/105).
+
 ## Self-Correction: Revision Chains
 
 When a past decision proves wrong:
@@ -140,6 +142,8 @@ When a past decision proves wrong:
 node ~/.episodic-memory/scripts/em-search.mjs --query "framework" --full
 
 # Create a revision (original is auto-marked superseded)
+# --scope defaults to "inherit" — revision lands in the same store as the
+# original. Pass --scope local|global only to force a cross-store revision.
 node ~/.episodic-memory/scripts/em-revise.mjs \
   --original <episode-id> \
   --summary "Switched from Express to Fastify" \
@@ -256,6 +260,26 @@ node ~/.episodic-memory/scripts/em-prune.mjs --scope global --threshold 0.15
 node ~/.episodic-memory/scripts/em-prune.mjs --check  # exit 1 if prunable episodes exist
 ```
 
+### Backup (Mirror to Private Repo with Redaction)
+```bash
+# Scan all sources, report what would be redacted, no writes
+node ~/.episodic-memory/scripts/em-backup.mjs --audit
+
+# One-time setup: create the private GitHub repo + initial commit + push
+node ~/.episodic-memory/scripts/em-backup.mjs --init
+
+# Daily run: rsync sources, redact, commit, push
+node ~/.episodic-memory/scripts/em-backup.mjs --sync
+
+# Built-in redaction unit tests
+node ~/.episodic-memory/scripts/em-backup.mjs --self-test
+
+# Inspect resolved config (with secrets/PII masked)
+node ~/.episodic-memory/scripts/em-backup.mjs --show-config
+```
+
+Mirrors `~/.episodic-memory/` (and any other configured sources) to a private GitHub repo, applying PII / secret redaction to the staging copy. Source files on disk are never modified. Config lives at `~/.config/em-backup/config.json` or `$EM_BACKUP_CONFIG`; see `examples/em-backup.config.example.json`. Refuses `--init` / `--sync` without a config to prevent shipping raw personal memory.
+
 ### Violation Tracking
 ```bash
 node ~/.episodic-memory/scripts/em-violation.mjs \
@@ -265,6 +289,19 @@ node ~/.episodic-memory/scripts/em-violation.mjs \
   --sequence "plan,code,push" \
   --correct "plan,checkpoint,code,review,push"
 ```
+
+### Workflow Validation (Lifecycle Episode Chains)
+```bash
+# Validate the workflow.lifecycle chain for a task at a given gate
+node ~/.episodic-memory/scripts/em-workflow-validate.mjs \
+  --task <task-id> \
+  --gate <pre-checkpoint|post-checkpoint|push-allowed> \
+  [--pattern-id bp-001-implementation-workflow] \
+  [--worktree <abs-path>] [--branch <name>] [--head <sha>] \
+  [--scope local|global|all] [--strict]
+```
+
+Pure validator (no side effects) for RFC-002 Phase 3b-H1 hook gates. Checks that the required `workflow.lifecycle` episodes exist for the task and gate, and verifies context (worktree / branch / HEAD) when those args are passed. Exits 0 on pass, 1 on fail, 2 on usage/IO error; always emits JSON `{ status, valid, gate, task, missing[], errors[], warnings[], episodes[] }`. Hooks shell out to it and act on the result.
 
 ### Pattern Health
 ```bash
