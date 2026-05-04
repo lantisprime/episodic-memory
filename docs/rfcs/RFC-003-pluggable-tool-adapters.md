@@ -494,3 +494,27 @@ Other findings addressed:
 | OQ-5 | Cursor/Windsurf manual `/em-check` — implemented as a slash command (Claude Code style) or a documented shell alias? Different tools have different surfaces. | Charlton Ho | open |
 | OQ-6 | Issue [#64](https://github.com/lantisprime/episodic-memory/issues/64) `em-store --scope local` cwd-resolution policy — three options (walk-to-`.git`, explicit `--project-root`, warn-on-worktree). | Charlton Ho | **open — to be decided in Phase 1** (moved earlier than original plan because typed requests inherit the bug if deferred) |
 | OQ-7 | Issue [#118](https://github.com/lantisprime/episodic-memory/issues/118) (`em-review-request` + `review-request` schema in `em-workflow-validate`) is the first concrete consumer of `em-request review.code`. Three alignment items to settle before #118 builds — and one honest migration-cost note. **(a) BP-001 evidence refs:** the plan ref / approval ref / pre-checkpoint ref / tests ref / code-review ref / bug-log ref / command-inventory ref are not declared in [Message envelope](#message-envelope). Lean: add a generic optional `evidence: {}` map to the envelope, with required keys declared per-type in `requests/<type>.json` (consistent with the existing `required_fields` precedent under [Request taxonomy registry](#request-taxonomy-registry); keeps BP-001-specific vocabulary out of the type schema, per P2). **(b) Validation reuse:** PR [#98](https://github.com/lantisprime/episodic-memory/pull/98)'s `resolveEpisodeRef` (exact-id, active-status, not-self, timestamp ordering, category check, local+global priority) is a strict superset of P1 envelope validation. Lean: lift into core verbatim (per P9). **(c) Field naming:** Lean: #118 adopts RFC-003 names (`target` not `--task`; split `branch` and `worktree`) and adds `requester` / `recipient` from day one. **Migration-cost note:** `em-workflow-validate.mjs` today is gate-/event-name-keyed (`REQUIRED_FOR_GATE`, `EVENT_ORDER`) with **flat-keyed** payloads (`payload.plan_ref`, `payload.pre_checkpoint_ref`, `payload.evidence.tests[]`) and chain-semantic checks (splice-resistance, per-gate head rules) that have no analog on a typed `em-request`. The resolver lifts cleanly; the payload schema does not. Open: write both shapes during transition vs write envelope shape from day one and teach the validator to read it — not a clean "rename + extract." Field-mapping table and detailed reconciliation: see [#118](https://github.com/lantisprime/episodic-memory/issues/118). | Charlton Ho | **open — alignment proposal pending** |
+
+---
+
+## Considerations — #128 stop-gate alignment
+
+Issue [#128](https://github.com/lantisprime/episodic-memory/issues/128) ships `hooks/stop-gate.sh` as a Phase 3b primitive that closes the docs-only-summarize-as-done hole (canonical violation episode `20260503-093636-...-a25d`; reinforced by `20260504-113846-...-d6e5`). To stay alignable with this RFC's adapter architecture, #128's implementation makes three commitments — annotation only; does not amend the accepted Proposal/Implementation plan.
+
+### Commitments
+
+1. **Decision logic in core, hook is a thin wrapper.** The block-or-allow decision lives in `scripts/em-recall.mjs` as `--gate stop`. The shell hook reads stdin, honors the `stop_hook_active` infinite-loop guard (per cached docs `claude-code-hooks-guide.md:421-431`), invokes the core script, and passes JSON through (with a fail-loud envelope on script absence/error). [Phase 2:404](#phase-2-claude-code-reference-adapter) will relocate the shell wrapper into `adapters/claude-code/capabilities/enforcement.mjs`; the core `--gate` flag remains in core unchanged (P9 — core never imports adapters).
+
+2. **`--gate <event>` keys on Claude Code event names.** First implementation: `--gate stop`. Future events that may follow if Phase 1 ratifies the dispatch contract: `presubmit` (UserPromptSubmit), `prewrite` (PreToolUse with write tools), `prepush` (PreToolUse with push), `pretool` (broad PreToolUse). This locks the dispatch convention to **event-name keying** so Phase 1's typed-request work and Phase 2's enforcement.mjs share one taxonomy. If Phase 1 later chooses gate-class keying over event-name keying, this section becomes the migration record.
+
+3. **Marker file paths via `resolveRepoRoot()` (PR #105 / PR #140 primitive).** The core `--gate stop` reads `.claude/` markers from the main repo root, not from the hook's stdin `cwd` field. This converges hook writers and readers per #106's worktree-orphan fix (PR #140). Reusing the post-#140 module-load `REPO_ROOT` constant in `em-recall.mjs` makes the gate worktree-safe by construction.
+
+### Out of scope for #128
+
+- Full BP-1 step-by-step state machine ("design C" from prior conversation) — belongs in `scripts/em-workflow-validate.mjs` as core, when RFC-003 Phase 1 starts. #128 closes only the wrap-up gate.
+- `--gate presubmit` / `--gate prewrite` / `--gate prepush` — extensible by design but not implemented in #128.
+- Migration to `adapters/claude-code/capabilities/enforcement.mjs` — Phase 2 work; #128 stays as a runtime hook.
+
+### Phase 3b spec link
+
+The Phase 3b *spec* (issue [#25](https://github.com/lantisprime/episodic-memory/issues/25)) and tracking issue [#80](https://github.com/lantisprime/episodic-memory/issues/80) remain valid. #128 is a tactical hole-closer for the docs-only-summarize-as-done shape; the architectural cleanup remains [Phase 2:404](#phase-2-claude-code-reference-adapter) territory.
