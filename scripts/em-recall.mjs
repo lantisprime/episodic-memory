@@ -19,10 +19,11 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { execSync } from 'child_process'
-import { resolveLocalDir } from './lib/local-dir.mjs'
+import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
+const REPO_ROOT = resolveRepoRoot()
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -261,9 +262,9 @@ function shouldArmBp001Checkpoint(activeEntries, now) {
 // Idempotent marker arming. Best-effort — failures are swallowed so a
 // non-writable .claude dir doesn't take down the whole recall.
 // ---------------------------------------------------------------------------
-function armCheckpointMarker(cwd) {
+function armCheckpointMarker(repoRoot) {
   try {
-    const claudeDir = path.join(cwd, '.claude')
+    const claudeDir = path.join(repoRoot, '.claude')
     fs.mkdirSync(claudeDir, { recursive: true })
     const markerPath = path.join(claudeDir, '.checkpoint-required')
     if (!fs.existsSync(markerPath)) fs.writeFileSync(markerPath, '')
@@ -380,7 +381,7 @@ const preflight_warnings = []
 // blocks write tools, so the false-positive surface is bounded.
 // ---------------------------------------------------------------------------
 if (shouldArmBp001Checkpoint(activeEntries, new Date())) {
-  armCheckpointMarker(process.cwd())
+  armCheckpointMarker(REPO_ROOT)
 }
 
 // ---------------------------------------------------------------------------
