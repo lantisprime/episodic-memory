@@ -1660,6 +1660,90 @@ test('T78 wrapper: non-episode chain ref (file:path) rejected', () => {
     `expected non-episode rejection, got: ${JSON.stringify(wr.json.errors)}`)
 })
 
+// ---------------------------------------------------------------------------
+// Codex PR #156 round-2 P2: wrapper checkChainRef must require task strict
+// equality (no null-as-provenance) and reject orphaned index entries (file
+// missing on disk).
+// ---------------------------------------------------------------------------
+
+test('T79 Codex round-2 repro: wrapper rejects chain ref to lifecycle episode with no task field', () => {
+  // Codex repro verbatim: workflow.lifecycle plan-approved episode whose body
+  // has event=plan-approved and correct context but NO task field. Pre-fix
+  // wrapper accepted (treated as provenance-only); post-fix MUST reject.
+  const chain = mkBaseChainForReview()
+  counter++
+  const taskedlessId = `20260502-1100${String(counter).padStart(2, '0')}-no-task-plan-${counter.toString(16).padStart(4, '0')}`
+  const taskedlessPayload = {
+    event: 'plan-approved',
+    pattern_id: 'bp-001-implementation-workflow',
+    // task: deliberately omitted
+    context: { worktree: tmpCwd, branch: 'main', head: 'abc1234' },
+    plan_ref: 'p.md'
+  }
+  const fm = `---\nid: ${taskedlessId}\ndate: 2026-05-02\ntime: "11:00"\nproject: test\ncategory: workflow.lifecycle\nstatus: active\ntags: []\nsummary: no task\n---\n`
+  const body = `# x\n\n\`\`\`json\n${JSON.stringify(taskedlessPayload, null, 2)}\n\`\`\`\n`
+  fs.writeFileSync(path.join(episodesDir, `${taskedlessId}.md`), fm + '\n' + body)
+  fs.appendFileSync(indexFile, JSON.stringify({
+    id: taskedlessId, date: '2026-05-02', time: '11:00', project: 'test',
+    category: 'workflow.lifecycle', status: 'active', supersedes: null, tags: [], summary: 'no task'
+  }) + '\n')
+  const wr = runReviewWrapper([
+    '--task', 'TEST',
+    '--plan-ref', 'docs/plan.md',
+    '--approval-ref', `episode:${taskedlessId}`,
+    '--pre-checkpoint-ref', `episode:${chain.preId}`,
+    '--post-checkpoint-ref', `episode:${chain.postId}`,
+    '--tests-ref', `episode:${chain.logId}`,
+    '--code-review-ref', `episode:${chain.reviewId}`,
+    '--no-new-bugs', '--branch', 'main', '--head', 'abc1234',
+    '--worktree', tmpCwd, '--scope', 'global',
+    '--dry-run',
+  ])
+  assert.strictEqual(wr.exit, 1, `expected exit 1 (validation failure), got ${wr.exit}: ${JSON.stringify(wr.json)}`)
+  assert.ok(wr.json.errors.some(e => e.includes('--approval-ref') && (e.includes('<undefined>') || e.includes('missing-task'))),
+    `expected wrapper missing-task rejection, got: ${JSON.stringify(wr.json.errors)}`)
+})
+
+test('T80 wrapper rejects chain ref to indexed-but-file-missing episode (orphan)', () => {
+  // Index has an entry for episode-X, but episodes/episode-X.md was deleted.
+  // checkChainRef cannot verify event/task without the body → reject.
+  const chain = mkBaseChainForReview()
+  counter++
+  const orphanId = `20260502-1100${String(counter).padStart(2, '0')}-orphan-plan-${counter.toString(16).padStart(4, '0')}`
+  // Add to index but DON'T write the .md file.
+  fs.appendFileSync(indexFile, JSON.stringify({
+    id: orphanId, date: '2026-05-02', time: '11:00', project: 'test',
+    category: 'workflow.lifecycle', status: 'active', supersedes: null, tags: [], summary: 'orphan'
+  }) + '\n')
+  const wr = runReviewWrapper([
+    '--task', 'TEST',
+    '--plan-ref', 'docs/plan.md',
+    '--approval-ref', `episode:${orphanId}`,
+    '--pre-checkpoint-ref', `episode:${chain.preId}`,
+    '--post-checkpoint-ref', `episode:${chain.postId}`,
+    '--tests-ref', `episode:${chain.logId}`,
+    '--code-review-ref', `episode:${chain.reviewId}`,
+    '--no-new-bugs', '--branch', 'main', '--head', 'abc1234',
+    '--worktree', tmpCwd, '--scope', 'global',
+    '--dry-run',
+  ])
+  assert.strictEqual(wr.exit, 1, `expected exit 1 (validation failure), got ${wr.exit}: ${JSON.stringify(wr.json)}`)
+  assert.ok(wr.json.errors.some(e => e.includes('--approval-ref') && (e.includes('file missing') || e.includes('cannot verify'))),
+    `expected wrapper orphan-file rejection, got: ${JSON.stringify(wr.json.errors)}`)
+})
+
+test('T81 triggered_by retains provenance-only semantics (NOT tightened by P2 fix)', () => {
+  // Sanity check: triggered_by should KEEP its null-task-allowed behavior.
+  // The P2 fix only tightens checkChainRef (chain refs); triggered_by uses a
+  // separate code path with intentional provenance-only handling.
+  const chain = mkBaseChainForReview()
+  // Witness has no task field → triggered_by should accept it.
+  const triggerId = mkWitness({ category: 'lesson', summary: 'codex feedback' })
+  mkReviewRequest({ chain, extra: { triggered_by: `episode:${triggerId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `triggered_by null task is provenance-only, must remain valid; errors: ${JSON.stringify(r.json.errors)}`)
+})
+
 test('T67 wrapper: --dry-run prints payload without writing', () => {
   const chain = mkBaseChainForReview()
   const beforeFiles = fs.readdirSync(episodesDir).length

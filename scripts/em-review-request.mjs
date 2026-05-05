@@ -284,26 +284,37 @@ function checkChainRef(label, value, expectedEvent) {
     errors.push(`${label}: ${r.error}`)
     return null
   }
-  // Body inspection — verify event type and task match.
+  // Body inspection — verify event type AND task match. Chain refs are
+  // same-task by definition (Codex PR #156 round-2 P2): missing/null task
+  // in the referenced body is a REJECTION, not provenance-only. Same for
+  // missing file on disk: indexed-but-orphaned cannot be verified, so
+  // reject. (Distinct from triggered_by, where missing task IS legitimate
+  // provenance-only — that path uses checkRef + a separate body-parse.)
   const filePath = path.join(r.entry._dataDir, 'episodes', `${r.entry.id}.md`)
-  if (fs.existsSync(filePath)) {
-    const text = fs.readFileSync(filePath, 'utf8')
-    const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
-    if (m) {
-      try {
-        const p = JSON.parse(m[1])
-        if (p.event !== expectedEvent) {
-          errors.push(`${label}: episode:${r.entry.id} has event "${p.event}" but expected "${expectedEvent}" for this chain link`)
-        }
-        if (p.task != null && p.task !== task) {
-          errors.push(`${label}: episode:${r.entry.id} has task "${p.task}" but expected "${task}" (chain links must share task; cross-task splice rejected)`)
-        }
-      } catch (e) {
-        errors.push(`${label}: episode:${r.entry.id} body JSON parse failed (${e.message})`)
-      }
-    } else {
-      errors.push(`${label}: episode:${r.entry.id} body has no \`\`\`json fenced block; cannot verify event/task`)
-    }
+  if (!fs.existsSync(filePath)) {
+    errors.push(`${label}: episode:${r.entry.id} indexed but file missing at ${filePath}; cannot verify event/task for chain link`)
+    return null
+  }
+  const text = fs.readFileSync(filePath, 'utf8')
+  const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
+  if (!m) {
+    errors.push(`${label}: episode:${r.entry.id} body has no \`\`\`json fenced block; cannot verify event/task for chain link`)
+    return null
+  }
+  let p
+  try {
+    p = JSON.parse(m[1])
+  } catch (e) {
+    errors.push(`${label}: episode:${r.entry.id} body JSON parse failed (${e.message})`)
+    return null
+  }
+  if (p.event !== expectedEvent) {
+    errors.push(`${label}: episode:${r.entry.id} has event "${p.event}" but expected "${expectedEvent}" for this chain link`)
+  }
+  // Strict equality: chain refs MUST share task. null/undefined/mismatch all rejected.
+  if (p.task !== task) {
+    const got = p.task === undefined ? '<undefined>' : (p.task === null ? '<null>' : `"${p.task}"`)
+    errors.push(`${label}: episode:${r.entry.id} has task ${got} but expected "${task}" (chain links must share task exactly; cross-task splice and missing-task rejected)`)
   }
   return r.entry
 }
