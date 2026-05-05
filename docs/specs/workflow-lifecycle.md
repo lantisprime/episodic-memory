@@ -30,6 +30,7 @@ Ordered chain. Each event is one episode.
 | `pre-checkpoint` | Pre-implementation checkpoint armed (was: `.pre-checkpoint-done` marker) |
 | `review-done` | Second-opinion or code-review complete with reply reference |
 | `post-checkpoint` | Post-implementation checkpoint with full evidence (was: `.post-checkpoint-done` marker) |
+| `review-request` | Bot/Codex review request with full lifecycle ref bundle (#118 PR-D) |
 | `scope-change` | Approved scope expansion (Phase 3b-H2) |
 | `push-allowed` | Push/PR-create cleared by validator |
 
@@ -141,6 +142,118 @@ attempt onto the chain.
 
 Validator rejects `push-allowed` whose `post_checkpoint_ref` does not resolve to a `post-checkpoint` episode for the same task.
 
+### `review-request`
+
+The wrapper for filing a Codex/bot review request. Built and stored by [`scripts/em-review-request.mjs`](../../scripts/em-review-request.mjs) (#118 PR-D).
+
+```json
+{
+  "plan_ref": "<file path or episode:<id> of the plan>",
+  "approval_ref": "episode:<plan-approved episode id>",
+  "pre_checkpoint_ref": "episode:<pre-checkpoint episode id>",
+  "post_checkpoint_ref": "episode:<post-checkpoint episode id>",
+  "evidence": {
+    "tests_ref": "<episode:<id> or file:<path>>",
+    "code_review_ref": "episode:<subagent review id>",
+    "command_inventory_ref": "<optional; required when classifier/gate code touched>",
+    "bug_logging": {
+      "status": "done",
+      "issues": ["https://github.com/owner/repo/issues/123"]
+    },
+    "verifications": [
+      { "kind": "evidence", "claim": "X", "path": "scripts/foo.mjs:42", "excerpt": "..." }
+    ]
+  },
+  "triggered_by": "episode:<id of the feedback episode that triggered this review-request>"
+}
+```
+
+`bug_logging.status` accepts:
+- `"done"` with `issues[]` array — empty array means "checked, no bugs"; non-empty entries MUST match the GitHub issue ref shape (URL or `gh:owner/repo#N`).
+- `"no-new-bugs"` (no `issues[]` required) — the `em-review-request` wrapper's `--no-new-bugs` flag emits this; an explicit alternate to `status="done"` with empty `issues[]`. Both forms are accepted by the validator.
+
+This mirrors `post-checkpoint.evidence.bug_logging` (#118 review M2 alignment): post-checkpoint already accepted empty `issues[]` with `status="done"`, so review-request follows suit.
+
+All four chain refs (`approval_ref`, `pre_checkpoint_ref`, `post_checkpoint_ref`,
+plus `evidence.tests_ref` and `evidence.code_review_ref` when episode-shaped) are
+resolved via the same exact-id semantics described in [Episode reference
+resolution](#episode-reference-resolution-rfc-002327).
+
+**Chain-ref same-task event-type binding** (Codex PR #156 review F1): each of
+the three chain refs MUST be episode-shaped (file/URL/other shapes are
+rejected — they cannot enforce same-task chain semantics) AND must resolve to
+the matching event for the same task:
+
+- `approval_ref` → same-task `plan-approved` event
+- `pre_checkpoint_ref` → same-task `pre-checkpoint` event
+- `post_checkpoint_ref` → same-task `post-checkpoint` event
+
+This mirrors the existing `pre-checkpoint.approval_ref` and
+`post-checkpoint.pre_checkpoint_ref` splice-resistance contracts. Without it,
+a review-request could cite an unrelated task's approval/pre-checkpoint while
+citing this task's post-checkpoint, defeating the artifact-binding contract
+this PR is intended to enforce.
+
+`post_checkpoint_ref` additionally enforces `--head` exact-match against the
+referenced post-checkpoint's `context.head` (mirrors `push-allowed`
+contract). Re-run the post-checkpoint at current HEAD if commits have landed.
+
+#### `triggered_by` (top-level, optional)
+
+Causal-upstream pointer: identifies the episode that *triggered* this review
+request (e.g. a Codex feedback lesson, a post-merge lesson, a violation).
+Lives **top-level on the payload, not under `evidence`** — provenance is not
+verification (RFC-003 OQ-7).
+
+`triggered_by` MUST be an episode reference (`episode:<id>`) when set.
+Freeform strings are rejected — em-store the source as an episode first
+(any category), then pass `episode:<id>` (#118 review n1 tightening).
+
+When `triggered_by` is set:
+
+- Resolved via the standard semantics (id exists, active, not self, temporally
+  ordered).
+- **Task-binding:** if the resolved episode has a `task` field in its body's
+  JSON payload, that task MUST equal the citing review-request's task. This
+  rejects cross-task pollution.
+- `task: null` and `task: undefined` (no task field) are both treated as
+  **provenance-only** — no task assertion.
+
+A future follow-up issue ([#147](https://github.com/lantisprime/episodic-memory/issues/147))
+will add temporal-ordering rules (require `plan_ref.timestamp >
+triggered_by.timestamp` for Codex/post-merge feedback). The field is
+forward-compatible.
+
+#### `evidence.verifications[]` (optional, schema v1)
+
+Per-claim verification array. Each item:
+
+```json
+{
+  "kind": "evidence",
+  "claim": "string — what the review asserts",
+  "path": "<file:line or command>",
+  "excerpt": "<file excerpt — required when kind=evidence and path is a file>",
+  "output": "<command stdout — required when kind=evidence and path is a command>"
+}
+```
+
+`kind` defaults to `"evidence"`. When `kind === "evidence"`, **at least one of
+`excerpt` or `output`** must be non-empty (non-placeholder). `kind ===
+"narrative"` is the explicit opt-in to unfalsifiable form — it accepts any
+shape (including empty), but is grep-able as an anti-pattern. Permissive
+acceptance of empty narrative is intentional: choosing `kind: "narrative"`
+itself is the loud signal; what's inside doesn't matter.
+
+The `kind` whitelist is `["evidence", "narrative"]` enforced under **schema
+v1** (validator error string includes `(schema v1)`). Future extensions
+(e.g. `"weak-evidence"`, `"claim"`) will surface as a discoverable schema bump,
+not a silent reject. Migrating to a new whitelist requires a coordinated
+schema-version flip.
+
+`null` and missing `verifications` are both treated as "not provided"; an
+empty array `[]` is "checked, no claims" (distinct).
+
 ## Per-gate head & branch rules
 
 The validator enforces context (`worktree`, `branch`, `head`) consistency
@@ -161,13 +274,46 @@ across the chain. Rules differ for terminal vs non-terminal links:
     the ancestor check is skipped silently so the validator remains usable
     outside a repo.
 
-Special case for `push-allowed` gate: the referenced `post-checkpoint`
-episode's `context.head` MUST also equal `--head` exactly. Ancestor-only
-would be too weak — it would allow new commits between the post-checkpoint
-evidence and the push, defeating the purpose. Re-run the post-checkpoint at
-current HEAD if commits have landed. To make this check meaningful,
-**`--head` is required when `--gate push-allowed`** — the validator exits
-with a usage error if it is omitted.
+Special case for `push-allowed` AND `review-request` gates: the referenced
+`post-checkpoint` episode's `context.head` MUST also equal `--head` exactly.
+Ancestor-only would be too weak — it would allow new commits between the
+post-checkpoint evidence and the gate clearing, defeating the purpose. Re-run
+the post-checkpoint at current HEAD if commits have landed. To make this
+check meaningful, **`--head` is required when `--gate push-allowed` or
+`--gate review-request`** — the validator exits with a usage error if it is
+omitted.
+
+### Multi-`review-request` per task (pre-#102 chain-walk fallback)
+
+When multiple `review-request` episodes exist for the same task (e.g. user
+re-runs `em-review-request` after fixing a missed ref), the validator picks
+the **latest by timestamp** as the terminal review-request. Older
+review-request episodes are surfaced as warnings (not errors); any errors
+keyed to non-terminal review-request ids are downgraded to warnings.
+
+This is a pragmatic pre-#102 (chain-walk) fallback. The canonical multi-
+attempt path is `em-revise --original <id>` to make the supersedes chain
+explicit. After [#102](https://github.com/lantisprime/episodic-memory/issues/102)
+lands, chain-walk anchors at the terminal explicitly; this rule will tighten.
+
+### Wrapper-validator scope-parity contract
+
+The `em-review-request` wrapper duplicates `resolveEpisodeRef` + the
+placeholder/self-witness/timestamp/category checks inline (see
+[scripts/em-review-request.mjs](../../scripts/em-review-request.mjs)
+"Duplicated resolver" section). Behavior is pinned BYTE-EQUAL via a drift
+test in `tests/test-workflow-validate.mjs`.
+
+**Contract for the lifted resolver** (when [#150](https://github.com/lantisprime/episodic-memory/issues/150) lifts to
+`scripts/lib/resolve-episode-ref.mjs`):
+
+- Index loaded from BOTH local AND global scopes regardless of caller's `--scope` flag.
+- Local entries take priority on id collisions (local wins).
+- Same `PLACEHOLDER_VALUES`, `REF_PREFIXES`, `SELF_REFS` sets.
+- Same temporal ordering check (refTime <= curTime).
+- Same `expectedCategory` opt-in.
+
+#119 (checkpoint-gate v2) inherits this contract and must not regress it.
 
 ## Schema versioning
 
@@ -200,7 +346,10 @@ Fields resolved: `pre-checkpoint.approval_ref`, `pre-checkpoint.plan_ref`
 (when episode-shaped), `pre-checkpoint.second_opinion.reply_ref`,
 `review-done.reply_ref`, `review-done.evidence_ref`,
 `evidence.tests[].log_ref`, `evidence.code_review.reply_ref`,
-`evidence.e2e.log_ref`, `push-allowed.post_checkpoint_ref`.
+`evidence.e2e.log_ref`, `push-allowed.post_checkpoint_ref`,
+`review-request.{approval_ref, pre_checkpoint_ref, post_checkpoint_ref,
+plan_ref}`, `review-request.evidence.{tests_ref, code_review_ref,
+command_inventory_ref}`, `review-request.triggered_by` (top-level).
 
 Non-episode-shaped values (file paths, URLs, GitHub issue refs) pass through
 unchanged.
@@ -252,9 +401,25 @@ Output (always JSON to stdout):
 |---|---|
 | `pre-checkpoint` | `plan-approved`, `pre-checkpoint` |
 | `post-checkpoint` | `plan-approved`, `pre-checkpoint`, `post-checkpoint` |
+| `review-request` | `plan-approved`, `pre-checkpoint`, `post-checkpoint`, `review-request` |
 | `push-allowed` | `plan-approved`, `pre-checkpoint`, `post-checkpoint`, `push-allowed` |
 
 `classified`, `review-done`, and `scope-change` are not required for any gate by default. Future PRs (Plan Gate v2 / Phase 3b-H2) may tighten this.
+
+`review-request` is **NOT** a predecessor of `push-allowed`. Hook-side
+enforcement of the review-request gate before push lives in
+[#119](https://github.com/lantisprime/episodic-memory/issues/119) (PR-E
+checkpoint-gate v2), which will add it as a predecessor in its own PR with
+the necessary test updates.
+
+### Known non-coverage (shape-4 caveat)
+
+Wrap-up summarize-as-done transitions ("ready for next task" / "all layers
+green") happen with no tool call — they are invisible to PreToolUse hooks.
+The push-gate cannot see them. A "task-complete" tool primitive would close
+this hole but belongs to a separate harness-discipline issue. #118 closes
+the artifact-shaped half of bp-001 violations (shapes 1, 3, 5, 6); shape-4
+remains harness-discipline territory.
 
 ## Out of scope (this PR)
 
