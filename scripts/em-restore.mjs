@@ -436,12 +436,18 @@ function preflight({ backupDir, sourceMap }) {
   // Validate each --source-map target
   for (const [label, dir] of sourceMap) {
     const expanded = expandHome(dir)
-    // Don't require dir to exist — first-time restore creates it. Just
-    // ensure parent exists or can be created.
+    // Round-2 R1 (P1): first-time restore previously broke because
+    // ensureUnder called realpathSync(root) which throws ENOENT when the
+    // target dir doesn't exist. The README's `--source-map home-em=
+    // $HOME/.episodic-memory` pattern explicitly assumes the target may
+    // not yet exist (spinning up a fresh machine from backup is the
+    // headline use case). Preflight now CREATES the target dir during
+    // validation. Failure surfaces as a clean error before any write.
     if (!fs.existsSync(expanded)) {
-      const parent = path.dirname(expanded)
-      if (!fs.existsSync(parent)) {
-        throw new Error(`Source-map target ${redactArtifactString(label)} → ${redactArtifactString(expanded)}: parent dir does not exist`)
+      try {
+        fs.mkdirSync(expanded, { recursive: true })
+      } catch (e) {
+        throw new Error(`Source-map target ${redactArtifactString(label)} → ${redactArtifactString(expanded)}: cannot create: ${e.message}`)
       }
     } else {
       // If exists, ensure it's a directory and not a symlink
@@ -758,8 +764,16 @@ function applyDocWrites(plan, sourceMap) {
   }
 
   for (const [targetDir, writes] of byTargetDir) {
-    const stagingDir = path.join(targetDir, `.em-restore-staging-${process.pid}-${Date.now()}`)
-    fs.mkdirSync(stagingDir, { recursive: true })
+    // Round-2 R2 (P2): mkdirSync({recursive:true}) on a pre-existing symlink
+    // at the staging dir path silently accepts the symlink and subsequent
+    // copyFileSync writes through it — confirmed via direct repro. The
+    // previous name `.em-restore-staging-<pid>-<ts>` is predictable enough
+    // that an attacker with write access to targetDir could plant the
+    // symlink before mkdirSync runs. mkdtempSync atomically creates a fresh
+    // dir with random suffix; symlink-redirect is impossible because the
+    // final name is generated only on successful creation. Defense-in-depth
+    // (attack still requires write access to targetDir).
+    const stagingDir = fs.mkdtempSync(path.join(targetDir, '.em-restore-staging-'))
     try {
       // Stage all writes to staging dir using a deterministic relative key.
       const staged = []
@@ -1813,6 +1827,81 @@ function selfTest() {
     assert('codex3_index_reflects_new_tag', finalIndex.tags.includes('new') && !finalIndex.tags.includes('old'))
     fs.rmSync(tmp, { recursive: true, force: true })
   } catch (e) { bad('codex3_stale_tag_cleanup', e.message) }
+
+  // T-codex-r2-1 (Round-2 R1 regression): first-time restore where the
+  // target dir doesn't exist (only its parent does). Pre-fix, ensureUnder
+  // called realpathSync(root) which threw ENOENT before any user-friendly
+  // error could surface. The headline use case (`--source-map home-em=
+  // $HOME/.episodic-memory` on a fresh machine) was broken. Fix: preflight
+  // creates the target dir; restore proceeds normally.
+  // Defensive ordering: verify (a) the target dir was created AND (b) the
+  // episode landed inside it — vacuous if either step gets skipped.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const ep = makeEpisode('id-r2-1', { id: 'id-r2-1', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'r2-1' })
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-r2-1.md'), ep)
+    commitBackup(backupDir)
+
+    // Target does NOT exist — only its parent does (root)
+    const target = path.join(root, 'fresh-machine-target')
+    assert('first_time_target_initially_absent', !fs.existsSync(target))
+
+    run({
+      backupDir, sourceMap: new Map([['lab', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: false
+    })
+
+    // Defensive ordering: dir created, episode landed
+    assert('first_time_target_created', fs.existsSync(target) && fs.statSync(target).isDirectory())
+    assert('first_time_episode_landed', fs.existsSync(path.join(target, 'episodes', 'id-r2-1.md')))
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('first_time_restore', e.message) }
+
+  // T-codex-r2-2 (Round-2 R2 regression): staging dir uses mkdtempSync, so
+  // even if an attacker plants a symlink at a guessed staging-dir name
+  // before this run, the new staging dir gets a different random suffix
+  // and the symlink is irrelevant.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const labRoot = path.join(backupDir, 'lab')
+    fs.mkdirSync(path.join(labRoot, 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(labRoot, 'doc.md'), 'doc content\n')
+    commitBackup(backupDir)
+    const target = path.join(root, 'target')
+    fs.mkdirSync(target, { recursive: true })
+
+    // Plant a symlink at a predictable old-style staging path. mkdtempSync
+    // generates a random name so it ignores this entirely.
+    const elsewhere = path.join(root, 'elsewhere')
+    fs.mkdirSync(elsewhere, { recursive: true })
+    const trapPath = path.join(target, '.em-restore-staging-99999-1234567890')
+    fs.symlinkSync(elsewhere, trapPath)
+
+    run({
+      backupDir, sourceMap: new Map([['lab', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'skip', force: false, includeDocs: true,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: false
+    })
+
+    // Defensive ordering: trap symlink still exists (was never followed),
+    // doc landed at the real target (not in `elsewhere` via symlink).
+    assert('staging_trap_symlink_unfollowed', fs.lstatSync(trapPath).isSymbolicLink())
+    assert('staging_no_leak_to_elsewhere', fs.readdirSync(elsewhere).length === 0,
+      `elsewhere contents: ${fs.readdirSync(elsewhere).join(',')}`)
+    assert('staging_doc_landed_in_real_target', fs.existsSync(path.join(target, 'doc.md')))
+
+    // Also assert no leftover staging dir (mkdtempSync naming + try/finally cleanup)
+    const leftover = fs.readdirSync(target).filter(n => n.startsWith('.em-restore-staging-') && !fs.lstatSync(path.join(target, n)).isSymbolicLink())
+    assert('staging_no_leftover_real_dir', leftover.length === 0,
+      `leftover: ${leftover.join(',')}`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('staging_mkdtemp', e.message) }
 
   // T22: invalid category → throws
   try {
