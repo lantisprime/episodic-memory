@@ -598,6 +598,18 @@ test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next Sessio
   assert.ok(fs.existsSync(preReq), 'step 1: SessionStart should arm .checkpoint-required')
 
   // ----- Step 2: Stop fires; em-recall --gate stop returns block -----
+  // Post-#146 (A2 carve-out): SessionStart now writes .session-baseline.
+  // For Stop to block, a real mid-session task signal must exist. Without
+  // one, the carve-out correctly treats the turn as no-task-signal and
+  // allows stop. Simulate the post-arming task signal that a real
+  // implementation turn would produce by touching .post-checkpoint-required
+  // with a future mtime (mtime > baseline → carve-out denied).
+  const baseline = path.join(claudeDir, '.session-baseline')
+  if (fs.existsSync(baseline)) {
+    fs.writeFileSync(postReq, '')
+    const future = (Date.now() + 5_000) / 1000
+    fs.utimesSync(postReq, future, future)
+  }
   const stopOut = execSync(`node "${path.join(sessionScripts, 'em-recall.mjs')}" --gate stop`, {
     cwd: sessionProject, env: sessionEnv, encoding: 'utf8'
   })

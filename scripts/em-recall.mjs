@@ -45,6 +45,7 @@ const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
 const warnCount = parseInt(flag('--warn-count') || '500', 10)
 const taskTypeFlag = flag('--task-type')
 const gateFlag = flag('--gate')
+const sessionStartFlag = argv.includes('--session-start')
 
 const VALID_SCOPES = ['local', 'global', 'all']
 if (!VALID_SCOPES.includes(scope)) {
@@ -77,6 +78,84 @@ if (gateFlag !== undefined && !VALID_GATES.includes(gateFlag)) {
   process.exit(1)
 }
 
+// #146 P2-5: --session-start is a SessionStart-hook side-effect mode; it
+// must not be combined with --gate (which is a different hook event-key).
+// Combining them would cause --gate's early exit to silently skip the
+// baseline write, which is the worst failure mode (carve-out inactive
+// without a clear signal).
+if (sessionStartFlag && gateFlag !== undefined) {
+  console.log(JSON.stringify({ status: 'error', message: '--session-start cannot be combined with --gate' }))
+  process.exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// Task-signal markers (#146 P3-3): the closed set of files whose mtime
+// distinguishes "fresh task work this session" from "stale from prior".
+// Extended class members (e.g. a future .review-pending) MUST be added here
+// to keep stopGateCarveOutApplies and the SessionStart orphan-clear in sync.
+// ---------------------------------------------------------------------------
+const TASK_SIGNAL_MARKERS = [
+  '.checkpoint-required',
+  '.post-checkpoint-required',
+  '.plan-approval-pending'
+]
+
+// ---------------------------------------------------------------------------
+// Stop-gate carve-out (#146 A2). Pure function — testable in isolation.
+//
+// Returns true iff the stop-gate should treat the current turn as having no
+// real task signal (e.g. session-start handoff y/n + workplan display) and
+// allow stop despite an armed .checkpoint-required.
+//
+// Invariant: every TASK_SIGNAL_MARKERS member must be either absent or
+// have mtime <= .session-baseline mtime. A signal mtime > baseline means it
+// was created/touched mid-session, which is the case the gate must catch.
+//
+// .session-baseline is written/touched by em-recall --session-start (called
+// from hooks/em-recall-sessionstart.sh). If it's missing, the carve-out does
+// not apply (conservative — pre-existing sessions before this fix shipped).
+//
+// SubagentStop semantics (P1-1): the same predicate runs for SubagentStop.
+// A subagent that wrote files would have caused checkpoint-gate to arm
+// .post-checkpoint-required (mtime > baseline), denying the carve-out. A
+// subagent that did read-only work satisfies the carve-out — same semantics
+// as the parent's no-task-signal turn, which is the desired behavior.
+//
+// Symlink defense (P2-2): uses lstatSync so a symlink to an old file cannot
+// trick the carve-out into firing. ANY symlink — baseline or marker —
+// causes the carve-out to FAIL CLOSED (return false / deny). Same-class
+// symmetry per feedback_same_class_completeness.md: a symlinked marker
+// could represent an active mid-session signal masked behind the symlink,
+// so treating it as absent (skip) is unsafe. Codex round-1 P2 finding
+// (episode 20260505-124511-...-845f) reproduced the asymmetry. Threat
+// model is honest-agent self-discipline, not adversarial.
+// ---------------------------------------------------------------------------
+function stopGateCarveOutApplies(claudeDir) {
+  const baseline = path.join(claudeDir, '.session-baseline')
+  let baselineMtime
+  try {
+    const st = fs.lstatSync(baseline)
+    if (st.isSymbolicLink()) return false
+    baselineMtime = st.mtimeMs
+  } catch {
+    return false
+  }
+  for (const name of TASK_SIGNAL_MARKERS) {
+    const p = path.join(claudeDir, name)
+    let mt
+    try {
+      const st = fs.lstatSync(p)
+      // Symmetric with baseline: any marker symlink fails carve-out closed.
+      // SessionStart cleanup still skips symlinks (won't unlink them), but
+      // gate evaluation must not treat them as absent.
+      if (st.isSymbolicLink()) return false
+      mt = st.mtimeMs
+    } catch { continue }
+    if (mt > baselineMtime) return false
+  }
+  return true
+}
+
 if (gateFlag === 'stop') {
   // REPO_ROOT was resolved at module load (line ~26) via resolveRepoRoot()
   // from scripts/lib/local-dir.mjs. This converges with the hook readers in
@@ -88,8 +167,11 @@ if (gateFlag === 'stop') {
   let postDoneSize = 0
   try { postDoneSize = fs.statSync(postDone).size } catch {}
   if (fs.existsSync(preReq) && postDoneSize === 0) {
-    const reason = 'Post-implementation checkpoint required. Write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty), then end your turn again. Hook: stop-gate.sh.'
-    console.log(JSON.stringify({ decision: 'block', reason }))
+    if (!stopGateCarveOutApplies(claudeDir)) {
+      const reason = 'Post-implementation checkpoint required. Write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty), then end your turn again. Hook: stop-gate.sh.'
+      console.log(JSON.stringify({ decision: 'block', reason }))
+    }
+    // else: carve-out applies — emit nothing (allow stop).
   }
   // Otherwise: emit nothing. Empty stdout on Stop = allow Claude to stop.
   process.exit(0)
@@ -409,6 +491,43 @@ const context = inferContext()
 const preflight_warnings = []
 
 // ---------------------------------------------------------------------------
+// SessionStart orphan-clear (#146 P1-2 + P1-3). MUST run BEFORE arming so
+// a freshly armed .checkpoint-required isn't a cleanup candidate.
+//
+// For every TASK_SIGNAL_MARKERS member that exists with mtime <= prior
+// baseline: rm. Skipped entirely if no prior baseline (first session ever).
+// Symlinks ignored (lstat-based; threat-model: honest-agent only).
+// ---------------------------------------------------------------------------
+let priorBaselineMtime = null
+if (sessionStartFlag) {
+  try {
+    const claudeDir = path.join(REPO_ROOT, '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    const baseline = path.join(claudeDir, '.session-baseline')
+    try {
+      const st = fs.lstatSync(baseline)
+      if (!st.isSymbolicLink()) priorBaselineMtime = st.mtimeMs
+    } catch {}
+
+    if (priorBaselineMtime !== null) {
+      for (const name of TASK_SIGNAL_MARKERS) {
+        const p = path.join(claudeDir, name)
+        try {
+          const st = fs.lstatSync(p)
+          if (st.isSymbolicLink()) continue
+          if (st.mtimeMs <= priorBaselineMtime) {
+            fs.rmSync(p, { force: true })
+          }
+        } catch {}
+      }
+    }
+  } catch {
+    // Best-effort: a failure here leaves carve-out inactive (fall back to
+    // original blocking behavior).
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 3b activation (RFC-002 Phase 3 / T7): arm the checkpoint marker
 // whenever a recent bp-001-implementation-workflow violation exists,
 // regardless of task_type. The SessionStart hook
@@ -420,6 +539,32 @@ const preflight_warnings = []
 // ---------------------------------------------------------------------------
 if (shouldArmBp001Checkpoint(activeEntries, new Date())) {
   armCheckpointMarker(REPO_ROOT)
+}
+
+// ---------------------------------------------------------------------------
+// SessionStart baseline write (#146 A2). Runs AFTER the arming block above
+// so a fresh `.checkpoint-required` armed for this session has mtime <=
+// baseline mtime (carve-out treats it as "armed at session start").
+//
+// fs.utimesSync forces baseline mtime to Date.now() — guarantees ordering
+// against the arm above regardless of filesystem mtime resolution (P2-1).
+// The orphan-clear for stale TASK_SIGNAL_MARKERS members ran earlier
+// (before arming) using the *prior* baseline mtime as the staleness
+// threshold.
+// ---------------------------------------------------------------------------
+if (sessionStartFlag) {
+  try {
+    const claudeDir = path.join(REPO_ROOT, '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
+    const baseline = path.join(claudeDir, '.session-baseline')
+    fs.writeFileSync(baseline, '')
+    const now = Date.now() / 1000
+    fs.utimesSync(baseline, now, now)
+  } catch {
+    // Best-effort: baseline write failure leaves carve-out inactive for
+    // this session (gate falls back to original behavior — original
+    // bp-001 enforcement still works without the carve-out).
+  }
 }
 
 // ---------------------------------------------------------------------------
