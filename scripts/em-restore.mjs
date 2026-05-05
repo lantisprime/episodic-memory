@@ -366,16 +366,18 @@ function mergeIndexes(targetDir, restoredEntries, conflictMode) {
   const lines = sortedIds.map(id => JSON.stringify(merged.get(id))).join('\n') + (sortedIds.length ? '\n' : '')
   writeAtomic(indexFile, lines)
 
-  // tags.json: set-union per tag
-  let tagsIndex = {}
-  if (fs.existsSync(tagsFile)) {
-    try { tagsIndex = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
-  }
+  // Codex round-1 F3: tags.json is DERIVED from index.jsonl. Set-unioning into
+  // the existing tags.json was per-string patching — when force-restore changes
+  // an entry's tags, the OLD tags would still keep the id. Apply the
+  // single-output-boundary lesson (`20260503-134615-...-8457`) to file
+  // ownership: tags.json is rebuilt EXCLUSIVELY from the merged index map,
+  // never read from disk. em-rebuild-index uses the same discipline.
+  const tagsIndex = {}
   for (const id of sortedIds) {
     const e = merged.get(id)
     for (const tag of (e.tags || [])) {
       if (!tagsIndex[tag]) tagsIndex[tag] = []
-      if (!tagsIndex[tag].includes(id)) tagsIndex[tag].push(id)
+      tagsIndex[tag].push(id)
     }
   }
   writeJSONAtomic(tagsFile, tagsIndex)
@@ -468,7 +470,16 @@ function discoverEpisodes(backupDir, sourceLabels, sourceMap, sourceFilter) {
   // refuse with a clear "missing --source-map" error. Skipping unmapped
   // labels here would silently empty byId and the missing-map check upstream
   // would never fire.
+  //
+  // Codex round-1 F2: byId previously OVERWROTE on cross-label same-id, so
+  // --allow-duplicate-id would still drop one label's entry. Now byId keeps
+  // first-encountered (used for chain-walk lookups), and every additional
+  // label-bound dup is pushed to `additionalDuplicates`. With
+  // --allow-duplicate-id, the apply phase iterates byId + dups whose id is
+  // in the expanded set. Without the flag, the discovery-time `collisions`
+  // array still triggers refusal in run().
   const unmappedLabelsWithEpisodes = []
+  const additionalDuplicates = [] // entries that lost the byId race
   for (const label of sourceLabels) {
     if (sourceFilter.length > 0 && !sourceFilter.includes(label)) continue
     const labelRoot = path.join(backupDir, label)
@@ -490,13 +501,15 @@ function discoverEpisodes(backupDir, sourceLabels, sourceMap, sourceFilter) {
       const entry = { fm, sourcePath: f, label, content }
       if (byId.has(fm.id)) {
         collisions.push({ id: fm.id, labels: [byId.get(fm.id).label, label] })
+        additionalDuplicates.push(entry)
+      } else {
+        byId.set(fm.id, entry)
       }
-      byId.set(fm.id, entry)
     }
     if (hadEpisodeForLabel && !sourceMap.has(label)) unmappedLabelsWithEpisodes.push(label)
   }
 
-  return { byId, collisions, symlinkRejects, unmappedLabelsWithEpisodes }
+  return { byId, additionalDuplicates, collisions, symlinkRejects, unmappedLabelsWithEpisodes }
 }
 
 // ---------------------------------------------------------------------------
@@ -553,7 +566,7 @@ function detectCrossSourceDuplicates(byId, sourceMap) {
 // Build write plan
 // ---------------------------------------------------------------------------
 function buildWritePlan({
-  selected, sourceMap, sourceLabelByEpisode, conflictMode, allowSymlinkOverwrite, includeDocs, docs, restoreClaudeMd, skipMemoryMd, sidecarRefuseExisting
+  selected, extraEntries = [], sourceMap, sourceLabelByEpisode, conflictMode, allowSymlinkOverwrite, allowDuplicateId, includeDocs, docs, restoreClaudeMd, skipMemoryMd, sidecarRefuseExisting
 }) {
   const episodeWrites = [] // { sourcePath, targetPath, conflict, label, id, action }
   const docWrites = []
@@ -562,7 +575,15 @@ function buildWritePlan({
   const symlinkSkips = []
   const targetByPath = new Map() // collision detection within plan
 
-  for (const [, entry] of selected) {
+  // Codex round-1 F2: iterate the expanded selection AND any cross-label
+  // duplicates that the user explicitly opted-in to via --allow-duplicate-id.
+  // Each entry brings its own label, so per-target dispatch is correct
+  // (different labels → different target dirs → both files written).
+  const allEntries = []
+  for (const e of selected.values()) allEntries.push(e)
+  for (const e of extraEntries) allEntries.push(e)
+
+  for (const entry of allEntries) {
     const label = entry.label
     const targetDir = sourceMap.get(label)
     const targetPath = ensureUnder(targetDir, path.join(targetDir, 'episodes', `${entry.fm.id}.md`))
@@ -587,20 +608,33 @@ function buildWritePlan({
       }
     }
 
-    // Within-plan target collision: defensive assertion. byId is already
-    // collapsed by id, and the target filename is `<id>.md`, so two entries
-    // landing at the same path implies an internal inconsistency, not a
-    // user-correctable condition. F5 (code review): the previous error
-    // message claimed --allow-duplicate-id overrides, but that flag is
-    // consumed in run() before this branch is reachable. Keep the check as
-    // a tripwire; reword honestly.
-    if (targetByPath.has(targetPath) && action !== 'skip') {
+    // Within-plan target collision. Three cases:
+    // (a) Same id from two source-labels, both mapped to the SAME target
+    //     dir, AND --allow-duplicate-id was passed → user explicitly opted
+    //     into last-write-wins. First entry stays; later entries skip.
+    // (b) Anything else → defensive assertion. byId is keyed by id and the
+    //     target filename is `<id>.md`, so different ids cannot collide;
+    //     same-id-different-target is allowed under --allow-duplicate-id;
+    //     same-id-same-target without the flag was already refused at
+    //     discovery. The remaining case is genuinely unreachable.
+    if (targetByPath.has(targetPath) && action !== 'skip' && action !== 'noop') {
       const prev = targetByPath.get(targetPath)
-      throw new Error(`Internal: two entries (id=${prev.id} from ${prev.label}, id=${entry.fm.id} from ${label}) resolved to same target ${redactArtifactString(targetPath)}. This should be unreachable; please file a bug with backup contents.`)
+      if (allowDuplicateId && prev.id === entry.fm.id) {
+        // Case (a): record as skipped with reason; first entry already in plan.
+        symlinkSkips.push({ targetPath, reason: `cross-source same-id at same target (first wins: ${prev.label})` })
+        action = 'skip'
+      } else {
+        throw new Error(`Internal: two entries (id=${prev.id} from ${prev.label}, id=${entry.fm.id} from ${label}) resolved to same target ${redactArtifactString(targetPath)}. This should be unreachable; please file a bug with backup contents.`)
+      }
     }
-    targetByPath.set(targetPath, { label, id: entry.fm.id })
+    if (action !== 'skip' && action !== 'noop') {
+      targetByPath.set(targetPath, { label, id: entry.fm.id })
+    }
 
-    episodeWrites.push({ sourcePath: entry.sourcePath, targetPath, conflict, label, id: entry.fm.id, action })
+    // Codex round-1 F2: store the source-content directly on the plan write
+    // so applyEpisodeWrites doesn't lose label distinction by re-keying via
+    // byId.get(id). Cross-label same-id dups carry their own content here.
+    episodeWrites.push({ sourcePath: entry.sourcePath, targetPath, conflict, label, id: entry.fm.id, action, content: entry.content, fm: entry.fm })
   }
 
   if (includeDocs) {
@@ -640,6 +674,37 @@ function buildWritePlan({
   return { episodeWrites, docWrites, refusedClaudeMd, sidecarConflicts, symlinkSkips }
 }
 
+// Pre-creates every unique parent dir referenced by the plan's writes
+// (episode targets, doc targets, and sidecar paths). Any failure here —
+// notably "EEXIST: file exists at <segment>" when a path component is a
+// regular file rather than a directory — surfaces BEFORE applyEpisodeWrites
+// touches disk. Idempotent: rerunning a clean restore is a no-op.
+function preflightTargetDirs(plan) {
+  const dirs = new Set()
+  for (const w of plan.episodeWrites) {
+    if (w.action === 'skip' || w.action === 'noop') continue
+    dirs.add(path.dirname(w.targetPath))
+    if (w.action === 'sidecar') dirs.add(path.dirname(w.targetPath + '.from-backup'))
+  }
+  for (const w of plan.docWrites) {
+    if (w.action === 'skip' || w.action === 'noop') continue
+    dirs.add(path.dirname(w.targetPath))
+    if (w.action === 'sidecar') dirs.add(path.dirname(w.targetPath + '.from-backup'))
+  }
+  const failures = []
+  for (const d of dirs) {
+    try {
+      fs.mkdirSync(d, { recursive: true })
+    } catch (e) {
+      failures.push({ dir: d, error: e.message })
+    }
+  }
+  if (failures.length > 0) {
+    const summary = failures.map(f => `  - ${redactArtifactString(f.dir)}: ${f.error}`).join('\n')
+    throw new Error(`Target directory pre-creation failed for ${failures.length} path(s); refusing to write any files:\n${summary}`)
+  }
+}
+
 function decideAction(conflict, conflictMode) {
   if (conflict === 'clean') return 'create'
   if (conflict === 'identical') return 'noop'
@@ -656,20 +721,22 @@ function decideAction(conflict, conflictMode) {
 // ---------------------------------------------------------------------------
 // Apply (write phase)
 // ---------------------------------------------------------------------------
-function applyEpisodeWrites(plan, byId) {
+function applyEpisodeWrites(plan) {
   const written = []
   const skipped = []
   const sidecarsWritten = []
   for (const w of plan.episodeWrites) {
     if (w.action === 'skip' || w.action === 'noop') { skipped.push(w); continue }
-    const entry = byId.get(w.id)
+    // Codex round-1 F2: w.content is captured at plan-build time from the
+    // specific (label, id) entry. Re-keying via a global byId map would
+    // collapse cross-label dups to the first-encountered content.
     if (w.action === 'sidecar') {
       const sidecar = w.targetPath + '.from-backup'
-      writeAtomic(sidecar, entry.content)
+      writeAtomic(sidecar, w.content)
       sidecarsWritten.push({ targetPath: w.targetPath, sidecarPath: sidecar, label: w.label })
       continue
     }
-    writeAtomic(w.targetPath, entry.content)
+    writeAtomic(w.targetPath, w.content)
     written.push(w)
   }
   return { written, skipped, sidecarsWritten }
@@ -792,7 +859,7 @@ function run(opts) {
   }
 
   // Discovery
-  const { byId, collisions: discoverCollisions, symlinkRejects: epSymlinkRejects, unmappedLabelsWithEpisodes } = discoverEpisodes(backupDir, sourceLabels, sourceMap, sources)
+  const { byId, additionalDuplicates, collisions: discoverCollisions, symlinkRejects: epSymlinkRejects, unmappedLabelsWithEpisodes } = discoverEpisodes(backupDir, sourceLabels, sourceMap, sources)
 
   // Refuse if any label has episodes in backup but no --source-map.
   // (For docs-only labels: still surface, but only when --include-docs would
@@ -830,19 +897,45 @@ function run(opts) {
   const sourceLabelByEpisode = new Map()
   for (const [id, entry] of expanded) sourceLabelByEpisode.set(id, entry.label)
 
+  // Codex round-1 F2: when --allow-duplicate-id, additional same-id entries
+  // from other labels (preserved by discoverEpisodes) become extra plan
+  // entries — but only those whose id is in the post-filter expanded set,
+  // so dups for filtered-out episodes don't sneak in.
+  const extraEntries = []
+  if (allowDuplicateId) {
+    for (const dup of additionalDuplicates) {
+      if (expanded.has(dup.fm.id)) extraEntries.push(dup)
+    }
+  }
+
   // Build plan
   const plan = buildWritePlan({
     selected: expanded,
+    extraEntries,
     sourceMap,
     sourceLabelByEpisode,
     conflictMode: force ? 'force' : conflictMode,
     allowSymlinkOverwrite,
+    allowDuplicateId,
     includeDocs,
     docs,
     restoreClaudeMd,
     skipMemoryMd,
     sidecarRefuseExisting: true
   })
+
+  // Codex round-1 F1: validation-timing checklist (`feedback_validation_
+  // timing_checklist.md`) step 3 — "imagine the validator throws AFTER the
+  // operation is partway done. What state is left on disk?" Pre-PR, an
+  // applyDocWrites mkdir failure (e.g. target has 'dir' as a regular file
+  // blocking 'dir/file.md') threw AFTER applyEpisodeWrites already wrote
+  // episodes, leaving episodes on disk but indexes unwritten — exactly the
+  // partial-state class the checklist closes. Solution: writability preflight
+  // collects every unique parent dir across the plan and pre-creates them.
+  // Any mkdir failure is raised BEFORE any episode write.
+  if (apply) {
+    preflightTargetDirs(plan)
+  }
 
   // MEMORY.md ref-integrity
   const refReports = includeDocs ? buildRefIntegrityReport(plan, sourceMap, docs) : []
@@ -870,7 +963,7 @@ function run(opts) {
   }
 
   // Apply
-  const epResult = applyEpisodeWrites(plan, byId)
+  const epResult = applyEpisodeWrites(plan)
   const docResult = applyDocWrites(plan, sourceMap)
 
   // Index merge per target dir
@@ -880,7 +973,10 @@ function run(opts) {
     for (const w of epResult.written) {
       const targetDir = sourceMap.get(w.label)
       if (!writtenByTarget.has(targetDir)) writtenByTarget.set(targetDir, [])
-      writtenByTarget.get(targetDir).push(byId.get(w.id).fm)
+      // Codex round-1 F2: w.fm is the per-(label,id) frontmatter, not byId's
+      // first-encountered version. Each cross-label dup updates ITS target's
+      // index correctly.
+      writtenByTarget.get(targetDir).push(w.fm)
     }
     for (const [targetDir, fms] of writtenByTarget) {
       const restoredEntries = fms.map(fm => ({
@@ -1601,6 +1697,122 @@ function selfTest() {
     assert('rebuild_index_without_apply_refused', stdout.includes('--rebuild-index has no effect without --apply'),
       `got: ${stdout.slice(0, 300)}`)
   }
+
+  // T-codex-1 (Codex round-1 F1 regression): doc target has 'dir' as a FILE
+  // blocking 'dir/file.md'. Pre-fix, applyEpisodeWrites wrote episodes
+  // BEFORE applyDocWrites mkdir failure → episodes on disk, indexes
+  // unwritten. With the validation-timing fix, preflightTargetDirs runs
+  // BEFORE any episode write and throws cleanly.
+  // (Defensive ordering applied: assert resource-NOT-on-disk after the
+  // refusal — the test would silently pass if the temp dir vanished early.)
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const labRoot = path.join(backupDir, 'lab')
+    fs.mkdirSync(path.join(labRoot, 'episodes'), { recursive: true })
+    const ep = makeEpisode('id-codex1', { id: 'id-codex1', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'codex1' })
+    fs.writeFileSync(path.join(labRoot, 'episodes', 'id-codex1.md'), ep)
+    fs.mkdirSync(path.join(labRoot, 'docs-dir'), { recursive: true })
+    fs.writeFileSync(path.join(labRoot, 'docs-dir', 'inner.md'), 'inner content\n')
+    commitBackup(backupDir)
+
+    const target = path.join(root, 'target')
+    fs.mkdirSync(path.join(target, 'episodes'), { recursive: true })
+    // Place a regular file at the path the docs-dir/ would need to be a dir at.
+    fs.writeFileSync(path.join(target, 'docs-dir'), 'I am a file blocking the dir\n')
+
+    let caught = null
+    try {
+      run({
+        backupDir, sourceMap: new Map([['lab', target]]),
+        fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+        apply: true, conflictMode: 'skip', force: false, includeDocs: true,
+        restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+        allowDuplicateId: false, rebuildIndex: false
+      })
+    } catch (e) { caught = e }
+    assert('codex1_partial_state_refused', caught !== null && /Target directory pre-creation failed|EEXIST/.test(caught.message), `expected throw, got: ${caught && caught.message}`)
+    // Defensive ordering: episode must NOT have been written.
+    const epExists = fs.existsSync(path.join(target, 'episodes', 'id-codex1.md'))
+    const dirStillBlocking = fs.existsSync(path.join(target, 'docs-dir')) && fs.statSync(path.join(target, 'docs-dir')).isFile()
+    assert('codex1_no_partial_episode_write', !epExists && dirStillBlocking, `epExists=${epExists} dirStillBlocking=${dirStillBlocking}`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('codex1_partial_state', e.message) }
+
+  // T-codex-2 (Codex round-1 F2 regression): cross-label same-id with
+  // separate target dirs and --allow-duplicate-id. Pre-fix, only one
+  // target received the file. Post-fix, BOTH targets receive their
+  // respective label's content.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    // Two labels, same episode id, different content (so we can verify
+    // each target got the right one).
+    const epA = makeEpisode('id-shared', { id: 'id-shared', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'from-label-a' }, 'CONTENT-FROM-A\n')
+    const epB = makeEpisode('id-shared', { id: 'id-shared', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'from-label-b' }, 'CONTENT-FROM-B\n')
+    fs.mkdirSync(path.join(backupDir, 'a', 'episodes'), { recursive: true })
+    fs.mkdirSync(path.join(backupDir, 'b', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'a', 'episodes', 'id-shared.md'), epA)
+    fs.writeFileSync(path.join(backupDir, 'b', 'episodes', 'id-shared.md'), epB)
+    commitBackup(backupDir)
+
+    const ta = path.join(root, 'ta')
+    const tb = path.join(root, 'tb')
+    fs.mkdirSync(ta, { recursive: true })
+    fs.mkdirSync(tb, { recursive: true })
+
+    run({
+      backupDir, sourceMap: new Map([['a', ta], ['b', tb]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: true, rebuildIndex: false
+    })
+    // Defensive ordering: target dirs should still be present so existsSync
+    // is meaningful. Both files must be there with their respective content.
+    assert('codex2_dirs_still_present', fs.existsSync(ta) && fs.existsSync(tb))
+    const aPath = path.join(ta, 'episodes', 'id-shared.md')
+    const bPath = path.join(tb, 'episodes', 'id-shared.md')
+    assert('codex2_label_a_target_written', fs.existsSync(aPath), `missing: ${aPath}`)
+    assert('codex2_label_b_target_written', fs.existsSync(bPath), `missing: ${bPath}`)
+    if (fs.existsSync(aPath) && fs.existsSync(bPath)) {
+      const aContent = fs.readFileSync(aPath, 'utf8')
+      const bContent = fs.readFileSync(bPath, 'utf8')
+      assert('codex2_target_a_has_label_a_content', aContent.includes('CONTENT-FROM-A'), `a content: ${aContent.slice(0, 100)}`)
+      assert('codex2_target_b_has_label_b_content', bContent.includes('CONTENT-FROM-B'), `b content: ${bContent.slice(0, 100)}`)
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('codex2_cross_label_dup', e.message) }
+
+  // T-codex-3 (Codex round-1 F3 regression): force-restore must drop stale
+  // tag entries from tags.json. Pre-fix, set-union into existing tags.json
+  // kept old tag pointing at id; post-fix, tags.json is rebuilt from the
+  // merged index map (single source of truth).
+  try {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'em-restore-codex3-'))
+    const indexFile = path.join(tmp, 'index.jsonl')
+    const tagsFile = path.join(tmp, 'tags.json')
+    // Pre-existing entry with tag "old"
+    fs.writeFileSync(indexFile, JSON.stringify({
+      id: 'id-tags', tags: ['old'], category: 'decision', date: '2026-04-01',
+      access_count: 0, last_accessed: null
+    }) + '\n')
+    fs.writeFileSync(tagsFile, JSON.stringify({ old: ['id-tags'] }))
+    // Force-restore the same id with NEW tag only
+    const restored = [{
+      id: 'id-tags', tags: ['new'], category: 'decision', date: '2026-05-01',
+      access_count: 0, last_accessed: null
+    }]
+    mergeIndexes(tmp, restored, 'force')
+    const finalTags = JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+    // The "old" tag must NOT contain id-tags anymore (or the bucket should be gone).
+    const oldHasId = (finalTags.old || []).includes('id-tags')
+    const newHasId = (finalTags.new || []).includes('id-tags')
+    assert('codex3_old_tag_dropped', !oldHasId, `tags.json: ${JSON.stringify(finalTags)}`)
+    assert('codex3_new_tag_present', newHasId, `tags.json: ${JSON.stringify(finalTags)}`)
+    // index.jsonl should reflect new tag only
+    const finalIndex = JSON.parse(fs.readFileSync(indexFile, 'utf8').trim())
+    assert('codex3_index_reflects_new_tag', finalIndex.tags.includes('new') && !finalIndex.tags.includes('old'))
+    fs.rmSync(tmp, { recursive: true, force: true })
+  } catch (e) { bad('codex3_stale_tag_cleanup', e.message) }
 
   // T22: invalid category → throws
   try {
