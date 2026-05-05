@@ -18,7 +18,9 @@ const SCRIPT = path.join(REPO, 'scripts', 'em-restore.mjs')
 
 let result
 try {
-  result = execFileSync('node', [SCRIPT, '--self-test'], { encoding: 'utf8' })
+  // maxBuffer raised: selfTest output grew past 1MB once the test count
+  // crossed ~100 assertions with full results[] echo. Keep ample headroom.
+  result = execFileSync('node', [SCRIPT, '--self-test'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
 } catch (e) {
   // Non-zero exit = some test failed; surface stdout so CI shows which.
   console.error(e.stdout || '')

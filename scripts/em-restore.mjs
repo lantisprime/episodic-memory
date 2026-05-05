@@ -77,7 +77,21 @@ function sanitizeOutputObject(o) {
 }
 
 function out(o) {
-  console.log(JSON.stringify(sanitizeOutputObject(o), null, 2))
+  // Use process.stdout.write directly. console.log is async-flushed via the
+  // event loop; when paired with process.exit() the trailing chunk is
+  // truncated at the OS pipe buffer (~8KB on macOS). selfTest output now
+  // exceeds that. process.stdout.write is synchronous for small payloads on
+  // file-streams; for safety we additionally drain via writeSync of a
+  // newline if needed. See Node issue: process.exit() truncates stdout.
+  const s = JSON.stringify(sanitizeOutputObject(o), null, 2) + '\n'
+  // For pipe stdout (subprocess), writeSync directly on the fd guarantees
+  // the buffer reaches the OS before exit. Falls back to process.stdout.write
+  // for terminal-attached stdout where writeSync(1,...) might block.
+  try {
+    fs.writeSync(1, s)
+  } catch {
+    process.stdout.write(s)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,28 +330,45 @@ function classifyConflict(srcPath, dstPath) {
 // ---------------------------------------------------------------------------
 // Path-traversal guard (every target path resolved-realpath under known root)
 // ---------------------------------------------------------------------------
+// Resolve a path to its semantic absolute form: walk up to the deepest
+// existing ancestor, realpathSync that (which resolves any symlinks in the
+// ancestry), then append the lexical suffix for the non-existent tail. If
+// nothing in the chain exists, fall back to pure lexical resolution.
+//
+// This is the foundation for ensureUnder's traversal check. The same
+// algorithm is applied to BOTH root and candidate, eliminating the
+// asymmetry that previously caused macOS /var ↔ /private/var false
+// rejections (root realpath'd vs candidate lexical).
+function realpathLogical(p) {
+  if (typeof p !== 'string' || p.length === 0) return p
+  let cur = p
+  let suffix = ''
+  while (!fs.existsSync(cur)) {
+    suffix = path.sep + path.basename(cur) + suffix
+    const parent = path.dirname(cur)
+    if (parent === cur) return path.resolve(p) // nothing in chain exists
+    cur = parent
+  }
+  try {
+    return fs.realpathSync(cur) + suffix
+  } catch {
+    return path.resolve(p)
+  }
+}
+
 function ensureUnder(root, candidate) {
   // Verify candidate doesn't escape root after symlinks resolve in either.
   // Return the candidate path AS GIVEN — downstream code (mkdirSync, rename)
   // operates on the original path; realpath is for the safety check only.
-  // Returning the realpath form caused doubled-prefix bugs on macOS where
-  // os.tmpdir() returns /var/... but realpath resolves to /private/var/...,
-  // and applyDocWrites then computed rel from the un-realpathed targetDir
-  // joined to the realpathed targetPath, yielding /var/private/var/...
-  const rootReal = fs.realpathSync(root)
-  let p = candidate
-  let suffix = ''
-  while (!fs.existsSync(p)) {
-    suffix = path.sep + path.basename(p) + suffix
-    const parent = path.dirname(p)
-    if (parent === p) {
-      throw new Error(`Cannot resolve any ancestor of ${redactArtifactString(candidate)}`)
-    }
-    p = parent
-  }
-  const realPrefix = fs.realpathSync(p)
-  const realFinal = realPrefix + suffix
-  if (realFinal !== rootReal && !realFinal.startsWith(rootReal + path.sep)) {
+  //
+  // Codex round-2: ensureUnder must not REQUIRE root to exist on disk
+  // (dry-run path planning).
+  // Reviewer round-3 MINOR-2: applying realpath asymmetrically (root real,
+  // candidate lexical) is fractal #9 level-2 violation. Both paths now go
+  // through the same `realpathLogical` helper.
+  const rootResolved = realpathLogical(root)
+  const candResolved = realpathLogical(candidate)
+  if (candResolved !== rootResolved && !candResolved.startsWith(rootResolved + path.sep)) {
     throw new Error(`Path traversal refused: ${redactArtifactString(candidate)} resolves outside ${redactArtifactString(root)}`)
   }
   return candidate
@@ -479,18 +510,22 @@ function preflight({ backupDir, sourceMap }) {
   // Validate each --source-map target
   for (const [label, dir] of sourceMap) {
     const expanded = expandHome(dir)
-    // Round-2 R1 (P1): first-time restore previously broke because
-    // ensureUnder called realpathSync(root) which throws ENOENT when the
-    // target dir doesn't exist. The README's `--source-map home-em=
-    // $HOME/.episodic-memory` pattern explicitly assumes the target may
-    // not yet exist (spinning up a fresh machine from backup is the
-    // headline use case). Preflight now CREATES the target dir during
-    // validation. Failure surfaces as a clean error before any write.
+    // Round-2 R1 (P1): first-time restore needs the target to be CREATABLE
+    // — but Codex round-2 caught a regression where preflight created the
+    // dir UNCONDITIONALLY, even in dry-run mode (violating the README "no
+    // disk writes" contract) and even before later validation like invalid
+    // --category (creating dirs as a side effect of failed validation).
+    //
+    // Validate-before-side-effect (feedback_validation_timing_checklist.md
+    // step 3): preflight is the validation layer; it must NOT mkdir.
+    // Apply-phase preflightTargetDirs (only-on-apply, runs after ALL
+    // validation has passed) is the create layer. ensureUnder gracefully
+    // handles a non-existent root for dry-run path planning.
     if (!fs.existsSync(expanded)) {
-      try {
-        fs.mkdirSync(expanded, { recursive: true })
-      } catch (e) {
-        throw new Error(`Source-map target ${redactArtifactString(label)} → ${redactArtifactString(expanded)}: cannot create: ${e.message}`)
+      // Verify the parent exists so apply-phase mkdir has somewhere to land.
+      const parent = path.dirname(expanded)
+      if (!fs.existsSync(parent)) {
+        throw new Error(`Source-map target ${redactArtifactString(label)} → ${redactArtifactString(expanded)}: parent dir does not exist (cannot be created at apply time)`)
       }
     } else {
       // If exists, ensure it's a directory and not a symlink
@@ -622,6 +657,12 @@ function buildWritePlan({
   const refusedClaudeMd = []
   const sidecarConflicts = [] // { targetPath, .from-backup already exists }
   const symlinkSkips = []
+  // Codex round-2 non-blocking note: cross-source same-id at same target
+  // (allowed via --allow-duplicate-id, last-write-wins) was previously
+  // reported under symlink_rejects.target — semantic mismatch since it's
+  // not a symlink rejection. Dedicated field makes the report self-
+  // documenting.
+  const duplicateSkips = []
   const targetByPath = new Map() // collision detection within plan
 
   // Codex round-1 F2: iterate the expanded selection AND any cross-label
@@ -679,8 +720,8 @@ function buildWritePlan({
     if (targetByPath.has(targetPath) && action !== 'skip' && action !== 'noop') {
       const prev = targetByPath.get(targetPath)
       if (allowDuplicateId && prev.id === entry.fm.id) {
-        // Case (a): record as skipped with reason; first entry already in plan.
-        symlinkSkips.push({ targetPath, reason: `cross-source same-id at same target (first wins: ${prev.label})` })
+        // Case (a): record as skipped under the dedicated field.
+        duplicateSkips.push({ targetPath, id: entry.fm.id, kept_label: prev.label, skipped_label: label, reason: 'cross-source same-id at same target; last-write-wins disabled, first entry kept' })
         action = 'skip'
       } else {
         throw new Error(`Internal: two entries (id=${prev.id} from ${prev.label}, id=${entry.fm.id} from ${label}) resolved to same target ${redactArtifactString(targetPath)}. This should be unreachable; please file a bug with backup contents.`)
@@ -733,7 +774,7 @@ function buildWritePlan({
     }
   }
 
-  return { episodeWrites, docWrites, refusedClaudeMd, sidecarConflicts, symlinkSkips }
+  return { episodeWrites, docWrites, refusedClaudeMd, sidecarConflicts, symlinkSkips, duplicateSkips }
 }
 
 // Pre-creates every unique parent dir referenced by the plan's writes
@@ -928,14 +969,19 @@ function run(opts) {
     allowSymlinkOverwrite, allowDuplicateId, rebuildIndex
   } = opts
 
-  preflight({ backupDir, sourceMap })
-
-  // Validate categories against em-store's whitelist (P0-2)
+  // Codex round-2 finding: ALL pure-input validation must run before any
+  // function that touches disk. Even though preflight() no longer creates
+  // dirs, defense-in-depth says: if preflight ever regrows a side effect
+  // (e.g. running git commands against the backup), categories check must
+  // already have passed. Same shape as proof-rigor v4 #1 (validation
+  // timing): pure-input checks are the cheapest layer; do them first.
   for (const c of categories) {
     if (!VALID_CATEGORIES.includes(c)) {
       throw new Error(`Invalid --category "${c}". Must be one of: ${VALID_CATEGORIES.join(', ')}`)
     }
   }
+
+  preflight({ backupDir, sourceMap })
 
   const sourceLabels = discoverSourceLabels(backupDir)
 
@@ -1040,6 +1086,7 @@ function run(opts) {
     refused_claude_md: plan.refusedClaudeMd,
     sidecar_collisions: plan.sidecarConflicts,
     symlink_rejects: { source: [...epSymlinkRejects, ...docSymlinkRejects], target: plan.symlinkSkips },
+    duplicate_skips: plan.duplicateSkips,
     ref_integrity: refReports,
     chain_breaks: chainBreaks, // reviewer n1: actually surface dangling supersedes refs
     skipped_in_backup: skipManifest
@@ -2122,6 +2169,183 @@ function selfTest() {
     assert('orphan_chain_break_surfaced', chainBreaks.length === 1 && chainBreaks[0].tip === 'orphan-tip' && chainBreaks[0].missing_ancestor === 'missing-ancestor-id')
     fs.rmSync(root, { recursive: true, force: true })
   } catch (e) { bad('orphan_chain_break', e.message) }
+
+  // T-codex-r3-1 (Codex round-2 P1): dry-run with a NONEXISTENT source-map
+  // target leaves the filesystem untouched. Pre-fix the R1 preflight
+  // unconditionally mkdir'd the target dir, violating the README "no disk
+  // writes" contract for dry-run.
+  // Defensive ordering: assert target absent BEFORE the run AND target
+  // STILL absent after — vacuous if cleanup ran early.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const ep = makeEpisode('id-r3-1', { id: 'id-r3-1', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'r3-1' })
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-r3-1.md'), ep)
+    commitBackup(backupDir)
+    const target = path.join(root, 'never-create-on-dry-run')
+    assert('r3_1_target_absent_pre_run', !fs.existsSync(target))
+
+    const r = run({
+      backupDir, sourceMap: new Map([['lab', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: false, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: false
+    })
+    assert('r3_1_dry_run_status_ok', r.status === 'ok' && r.mode === 'dry-run')
+    // Defensive ordering: target STILL absent at check time
+    assert('r3_1_target_still_absent', !fs.existsSync(target),
+      `target was created during dry-run: ${fs.readdirSync(path.dirname(target)).filter(n => n === path.basename(target))}`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('r3_1_dry_run_no_dir_creation', e.message) }
+
+  // T-codex-r3-2 (Codex round-2 P1): failed validation (invalid category)
+  // leaves a nonexistent target absent. Pre-fix preflight ran BEFORE
+  // category validation and side-effected on a request that would later
+  // fail. After: category validation runs FIRST.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    commitBackup(backupDir)
+    const target = path.join(root, 'never-create-on-bad-category')
+    assert('r3_2_target_absent_pre_run', !fs.existsSync(target))
+
+    let threw = false
+    try {
+      run({
+        backupDir, sourceMap: new Map([['lab', target]]),
+        fromDate: undefined, toDate: undefined, tags: [], categories: ['BOGUS_CATEGORY'], sources: [],
+        apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+        restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+        allowDuplicateId: false, rebuildIndex: false
+      })
+    } catch (e) { threw = /Invalid --category/.test(e.message) }
+    assert('r3_2_invalid_category_throws', threw)
+    // Defensive ordering: target STILL absent at check time
+    assert('r3_2_target_still_absent', !fs.existsSync(target),
+      `target was created before category validation`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('r3_2_invalid_category_no_dir_creation', e.message) }
+
+  // T-codex-r3-3: dedicated duplicate_skips report field (Codex round-2
+  // non-blocking note). Cross-source same-id mapped to same target, with
+  // --allow-duplicate-id: first entry wins, second appears in
+  // duplicate_skips (not in symlink_rejects.target).
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const epA = makeEpisode('shared-id', { id: 'shared-id', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'from-a' }, 'A\n')
+    const epB = makeEpisode('shared-id', { id: 'shared-id', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'from-b' }, 'B\n')
+    fs.mkdirSync(path.join(backupDir, 'a', 'episodes'), { recursive: true })
+    fs.mkdirSync(path.join(backupDir, 'b', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'a', 'episodes', 'shared-id.md'), epA)
+    fs.writeFileSync(path.join(backupDir, 'b', 'episodes', 'shared-id.md'), epB)
+    commitBackup(backupDir)
+    // Both labels mapped to the SAME target dir — same-target same-id collision
+    const target = path.join(root, 'shared-target')
+    fs.mkdirSync(target, { recursive: true })
+    const r = run({
+      backupDir, sourceMap: new Map([['a', target], ['b', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: false, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: true, rebuildIndex: false
+    })
+    assert('r3_3_duplicate_skips_field_present', Array.isArray(r.summary.duplicate_skips))
+    assert('r3_3_duplicate_skips_records_collision', r.summary.duplicate_skips.length === 1 && r.summary.duplicate_skips[0].id === 'shared-id',
+      `duplicate_skips: ${JSON.stringify(r.summary.duplicate_skips)}`)
+    // Should NOT appear under symlink_rejects.target (reviewer NIT-1:
+    // tighten — there are no symlinks in this fixture, so length must be
+    // exactly 0; substring check would pass vacuously under future renames).
+    assert('r3_3_no_symlink_rejects_at_all', r.summary.symlink_rejects.target.length === 0,
+      `symlink_rejects.target leaked: ${JSON.stringify(r.summary.symlink_rejects.target)}`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('r3_3_duplicate_skips_field', e.message) }
+
+  // T-codex-r3-4 (reviewer MINOR-1): parameterized "every pre-apply throw
+  // leaves a nonexistent target absent." Codex caught one member (invalid
+  // category); the same invariant must hold for ALL pre-apply validation
+  // throws. Single test walks the class so a future regression in any
+  // member is caught.
+  try {
+    const cases = [
+      {
+        name: 'invalid_category',
+        opts: { categories: ['BAD'], sources: [], allowDuplicateId: false },
+        setup: (backupDir) => {
+          fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+        },
+        errMatch: /Invalid --category/
+      },
+      {
+        name: 'unknown_source',
+        opts: { categories: [], sources: ['nonexistent-label'], allowDuplicateId: false },
+        setup: (backupDir) => {
+          fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+        },
+        errMatch: /--source "nonexistent-label" not found/
+      },
+      {
+        name: 'unmapped_label_with_episodes',
+        opts: { categories: [], sources: [], allowDuplicateId: false, sourceMapStrategy: 'wrong-label' },
+        setup: (backupDir) => {
+          // Episode under label "lab" but the test will pass --source-map other-label=...
+          fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+          const ep = makeEpisode('id-um', { id: 'id-um', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'um' })
+          fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-um.md'), ep)
+        },
+        errMatch: /no --source-map|Pass --source-map/
+      },
+      {
+        name: 'cross_source_dup_strict',
+        opts: { categories: [], sources: [], allowDuplicateId: false },
+        setup: (backupDir) => {
+          fs.mkdirSync(path.join(backupDir, 'a', 'episodes'), { recursive: true })
+          fs.mkdirSync(path.join(backupDir, 'b', 'episodes'), { recursive: true })
+          const ep = makeEpisode('dup', { id: 'dup', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'd' })
+          fs.writeFileSync(path.join(backupDir, 'a', 'episodes', 'dup.md'), ep)
+          fs.writeFileSync(path.join(backupDir, 'b', 'episodes', 'dup.md'), ep)
+        },
+        errMatch: /multiple source labels/,
+        useTwoLabels: true
+      }
+    ]
+    for (const c of cases) {
+      const { root, backupDir } = makeFakeBackup()
+      c.setup(backupDir)
+      commitBackup(backupDir)
+      const target1 = path.join(root, `target-${c.name}-1`)
+      const target2 = path.join(root, `target-${c.name}-2`)
+      let sourceMap
+      if (c.opts.sourceMapStrategy === 'wrong-label') {
+        sourceMap = new Map([['other-label', target1]])
+      } else if (c.useTwoLabels) {
+        sourceMap = new Map([['a', target1], ['b', target2]])
+      } else {
+        sourceMap = new Map([['lab', target1]])
+      }
+      assert(`r3_4_${c.name}_target_absent_pre`, !fs.existsSync(target1) && !fs.existsSync(target2))
+      let threw = false
+      let actualErr = null
+      try {
+        run({
+          backupDir, sourceMap,
+          fromDate: undefined, toDate: undefined, tags: [],
+          categories: c.opts.categories, sources: c.opts.sources,
+          apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+          restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+          allowDuplicateId: c.opts.allowDuplicateId, rebuildIndex: false
+        })
+      } catch (e) {
+        actualErr = e.message
+        threw = c.errMatch.test(e.message)
+      }
+      assert(`r3_4_${c.name}_throws_expected`, threw, `expected ${c.errMatch}, got: ${actualErr}`)
+      // Defensive ordering: target STILL absent at check time
+      assert(`r3_4_${c.name}_target_still_absent`, !fs.existsSync(target1) && !fs.existsSync(target2),
+        `targets should be absent after ${c.name} throw`)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  } catch (e) { bad('r3_4_pre_apply_throws_no_side_effect', e.message) }
 
   // T22: invalid category → throws
   try {
