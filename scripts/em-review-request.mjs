@@ -260,9 +260,57 @@ function checkRef(label, value, opts = {}) {
   return null
 }
 
-const approvalEntry = checkRef('--approval-ref', approvalRef, { expectedCategory: 'workflow.lifecycle' })
-const preCheckpointEntry = checkRef('--pre-checkpoint-ref', preCheckpointRef, { expectedCategory: 'workflow.lifecycle' })
-const postCheckpointEntry = checkRef('--post-checkpoint-ref', postCheckpointRef, { expectedCategory: 'workflow.lifecycle' })
+// Chain-ref check (Codex PR #156 review F1 splice-resistance):
+// approval_ref + pre_checkpoint_ref + post_checkpoint_ref MUST each be
+// episode-shaped, resolve to workflow.lifecycle, AND have body event ===
+// expected event AND body task === current task. Reject any of:
+// - non-episode shape (file:, url, etc.)
+// - placeholder
+// - wrong category
+// - wrong event type
+// - cross-task
+function checkChainRef(label, value, expectedEvent) {
+  if (!value) return null
+  if (isPlaceholder(value)) {
+    errors.push(`${label}: placeholder value "${value}" rejected`)
+    return null
+  }
+  if (typeof value !== 'string' || !value.startsWith('episode:')) {
+    errors.push(`${label}: "${value}" must be an episode reference (episode:<id>); chain refs cannot be file/URL/other shapes`)
+    return null
+  }
+  const r = resolveEpisodeRef(value, { expectedCategory: 'workflow.lifecycle' })
+  if (r.error) {
+    errors.push(`${label}: ${r.error}`)
+    return null
+  }
+  // Body inspection — verify event type and task match.
+  const filePath = path.join(r.entry._dataDir, 'episodes', `${r.entry.id}.md`)
+  if (fs.existsSync(filePath)) {
+    const text = fs.readFileSync(filePath, 'utf8')
+    const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
+    if (m) {
+      try {
+        const p = JSON.parse(m[1])
+        if (p.event !== expectedEvent) {
+          errors.push(`${label}: episode:${r.entry.id} has event "${p.event}" but expected "${expectedEvent}" for this chain link`)
+        }
+        if (p.task != null && p.task !== task) {
+          errors.push(`${label}: episode:${r.entry.id} has task "${p.task}" but expected "${task}" (chain links must share task; cross-task splice rejected)`)
+        }
+      } catch (e) {
+        errors.push(`${label}: episode:${r.entry.id} body JSON parse failed (${e.message})`)
+      }
+    } else {
+      errors.push(`${label}: episode:${r.entry.id} body has no \`\`\`json fenced block; cannot verify event/task`)
+    }
+  }
+  return r.entry
+}
+
+const approvalEntry = checkChainRef('--approval-ref', approvalRef, 'plan-approved')
+const preCheckpointEntry = checkChainRef('--pre-checkpoint-ref', preCheckpointRef, 'pre-checkpoint')
+const postCheckpointEntry = checkChainRef('--post-checkpoint-ref', postCheckpointRef, 'post-checkpoint')
 checkRef('--plan-ref', planRef)
 checkRef('--tests-ref', testsRef)
 checkRef('--code-review-ref', codeReviewRef)

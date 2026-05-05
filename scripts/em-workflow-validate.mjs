@@ -389,11 +389,26 @@ function validatePayload(payload, entry, errors, warnings, indexById) {
       break
     case 'review-request': {
       // #118 PR-D. Required refs per #118 body + Codex tier-2 fold-in.
-      // post_checkpoint_ref added per Plan-agent Q1b (splice-resistance).
+      // post_checkpoint_ref added per Plan-agent Q1b. approval_ref +
+      // pre_checkpoint_ref same-task binding added in validateChain per
+      // Codex PR #156 review F1 (splice-resistance for ALL three chain refs).
       if (isPlaceholder(payload.plan_ref)) errors.push(`${fp}: review-request.plan_ref missing or placeholder`)
       if (isPlaceholder(payload.approval_ref)) errors.push(`${fp}: review-request.approval_ref missing or placeholder`)
       if (isPlaceholder(payload.pre_checkpoint_ref)) errors.push(`${fp}: review-request.pre_checkpoint_ref missing or placeholder`)
       if (isPlaceholder(payload.post_checkpoint_ref)) errors.push(`${fp}: review-request.post_checkpoint_ref missing or placeholder`)
+      // Chain refs MUST be episode-shaped (Codex PR #156 review F1). file:,
+      // url, command:, etc. shapes accepted by checkEpisodeRefs (which only
+      // resolves episode:-prefixed values) would otherwise silently bypass
+      // the workflow.lifecycle category check below.
+      for (const [label, value] of [
+        ['approval_ref', payload.approval_ref],
+        ['pre_checkpoint_ref', payload.pre_checkpoint_ref],
+        ['post_checkpoint_ref', payload.post_checkpoint_ref],
+      ]) {
+        if (typeof value === 'string' && !isPlaceholder(value) && !value.startsWith('episode:')) {
+          errors.push(`${fp}: review-request.${label} "${value}" must be an episode reference (episode:<id>); chain refs cannot be file/URL/other shapes`)
+        }
+      }
       // Lifecycle chain refs must resolve to workflow.lifecycle episodes.
       checkEpisodeRefs(
         [
@@ -627,6 +642,27 @@ function validateChain(events, errors, warnings, gateArg, headArg) {
     }
   }
   for (const rr of reviewRequests) {
+    // approval_ref → same-task plan-approved (Codex PR #156 review F1
+    // splice-resistance; mirrors pre-checkpoint.approval_ref pattern at :553-563).
+    if (rr.payload.approval_ref) {
+      const apTargetId = refTarget(rr.payload.approval_ref)
+      if (apTargetId) {
+        const apMatching = (byEvent['plan-approved'] || []).find(e => e.entry.id === apTargetId)
+        if (!apMatching) {
+          errors.push(`episode:${rr.entry.id}: approval_ref episode:${apTargetId} not a plan-approved episode for this task (chain link must be same-task plan-approved, not arbitrary lifecycle episode)`)
+        }
+      }
+    }
+    // pre_checkpoint_ref → same-task pre-checkpoint (Codex PR #156 review F1).
+    if (rr.payload.pre_checkpoint_ref) {
+      const pcTargetId = refTarget(rr.payload.pre_checkpoint_ref)
+      if (pcTargetId) {
+        const pcMatching = (byEvent['pre-checkpoint'] || []).find(e => e.entry.id === pcTargetId)
+        if (!pcMatching) {
+          errors.push(`episode:${rr.entry.id}: pre_checkpoint_ref episode:${pcTargetId} not a pre-checkpoint episode for this task (chain link must be same-task pre-checkpoint, not arbitrary lifecycle episode)`)
+        }
+      }
+    }
     if (!rr.payload.post_checkpoint_ref) continue // already errored upstream
     const targetId = refTarget(rr.payload.post_checkpoint_ref)
     if (!targetId) continue

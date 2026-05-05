@@ -1541,6 +1541,125 @@ test('T71 wrapper --scope inherit: chain in local → review-request lands in lo
     `episode should be in local episodesDir: ${wr.json.file}`)
 })
 
+// ---------------------------------------------------------------------------
+// Codex PR #156 review F1: splice-resistance for ALL three chain refs
+// (approval_ref + pre_checkpoint_ref + post_checkpoint_ref).
+// Codex's exact repro reproduced as T72; T73-T77 cover related shapes.
+// ---------------------------------------------------------------------------
+
+test('T72 Codex F1 repro: review-request with cross-task approval_ref + pre_checkpoint_ref rejected', () => {
+  // Codex repro verbatim (PR #156 review F1, episode `...921a`):
+  // - TASK-A full chain (plan/pre/post)
+  // - TASK-B plan-approved + pre-checkpoint
+  // - TASK-A review-request citing TASK-B's approval_ref + pre_checkpoint_ref
+  //   (and TASK-A's post_checkpoint_ref).
+  // Pre-fix: validator returned exit 0, valid=true. Post-fix: must reject.
+  const chainA = mkBaseChainForReview({ task: 'TASK-A' })
+  const planB = mkEpisode({ event: 'plan-approved', task: 'TASK-B', extra: { plan_ref: 'b.md' } })
+  const preB = mkEpisode({ event: 'pre-checkpoint', task: 'TASK-B', extra: { plan_ref: 'b.md', approval_ref: `episode:${planB}` } })
+  // Build review-request manually with the cross-task approval/pre refs.
+  mkReviewRequest({
+    chain: { ...chainA, planId: planB, preId: preB }, // splice approval/pre
+    task: 'TASK-A'
+  })
+  const r = runValidate(['--task', 'TASK-A', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false, `pre-fix exit=0 valid=true was the bug; post-fix MUST reject. errors: ${JSON.stringify(r.json.errors)}`)
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && (e.includes('plan-approved episode for this task') || e.includes('chain link'))),
+    `expected approval_ref splice rejection, got: ${JSON.stringify(r.json.errors)}`)
+  assert.ok(r.json.errors.some(e => e.includes('pre_checkpoint_ref') && (e.includes('pre-checkpoint episode for this task') || e.includes('chain link'))),
+    `expected pre_checkpoint_ref splice rejection, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T73 review-request: approval_ref to non-existent plan-approved episode rejected', () => {
+  const chain = mkBaseChainForReview()
+  // approval_ref to a different-category episode (lifecycle category check
+  // alone wouldn't catch this — needs plan-approved event check).
+  const witnessId = mkWitness({ category: 'workflow.lifecycle', summary: 'fake lifecycle' })
+  mkReviewRequest({ chain, extra: { approval_ref: `episode:${witnessId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  // Either the wrapper-side body-parse catches it (wrong event), OR the
+  // validateChain check catches "not a plan-approved for this task".
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref')),
+    `expected approval_ref rejection, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T74 review-request: pre_checkpoint_ref pointing to plan-approved (wrong event type) rejected', () => {
+  // Even within same task, refs must point to the CORRECT event type.
+  const chain = mkBaseChainForReview()
+  // pre_checkpoint_ref points to plan-approved id (wrong event).
+  mkReviewRequest({ chain, extra: { pre_checkpoint_ref: `episode:${chain.planId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('pre_checkpoint_ref') && (e.includes('not a pre-checkpoint episode') || e.includes('chain link'))),
+    `expected pre_checkpoint_ref event-type rejection, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T75 review-request: non-episode chain ref (file:path) rejected', () => {
+  const chain = mkBaseChainForReview()
+  // approval_ref is file:path — not episode-shaped. Must be rejected.
+  mkReviewRequest({ chain, extra: { approval_ref: 'file:docs/plan-approved.md' } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && e.includes('episode reference')),
+    `expected non-episode chain-ref rejection, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T76 wrapper: --approval-ref splice (different-task plan-approved) rejected (Codex F1 wrapper-side)', () => {
+  const chainA = mkBaseChainForReview({ task: 'TASK-A' })
+  const planB = mkEpisode({ event: 'plan-approved', task: 'TASK-B', extra: { plan_ref: 'b.md' } })
+  const wr = runReviewWrapper([
+    '--task', 'TASK-A',
+    '--plan-ref', 'docs/plan.md',
+    '--approval-ref', `episode:${planB}`, // splice from TASK-B
+    '--pre-checkpoint-ref', `episode:${chainA.preId}`,
+    '--post-checkpoint-ref', `episode:${chainA.postId}`,
+    '--tests-ref', `episode:${chainA.logId}`,
+    '--code-review-ref', `episode:${chainA.reviewId}`,
+    '--no-new-bugs', '--branch', 'main', '--head', 'abc1234',
+    '--worktree', tmpCwd, '--scope', 'global',
+  ])
+  assert.strictEqual(wr.exit, 1, `expected exit 1 (validation failure), got ${wr.exit}: ${JSON.stringify(wr.json)}`)
+  assert.ok(wr.json.errors.some(e => e.includes('--approval-ref') && (e.includes('cross-task') || e.includes('expected "TASK-A"'))),
+    `expected wrapper cross-task error, got: ${JSON.stringify(wr.json.errors)}`)
+})
+
+test('T77 wrapper: --pre-checkpoint-ref pointing to plan-approved (wrong event) rejected', () => {
+  const chain = mkBaseChainForReview()
+  const wr = runReviewWrapper([
+    '--task', 'TEST',
+    '--plan-ref', 'docs/plan.md',
+    '--approval-ref', `episode:${chain.planId}`,
+    '--pre-checkpoint-ref', `episode:${chain.planId}`, // wrong event type
+    '--post-checkpoint-ref', `episode:${chain.postId}`,
+    '--tests-ref', `episode:${chain.logId}`,
+    '--code-review-ref', `episode:${chain.reviewId}`,
+    '--no-new-bugs', '--branch', 'main', '--head', 'abc1234',
+    '--worktree', tmpCwd, '--scope', 'global',
+  ])
+  assert.strictEqual(wr.exit, 1)
+  assert.ok(wr.json.errors.some(e => e.includes('--pre-checkpoint-ref') && e.includes('event "plan-approved"')),
+    `expected wrapper event-type error, got: ${JSON.stringify(wr.json.errors)}`)
+})
+
+test('T78 wrapper: non-episode chain ref (file:path) rejected', () => {
+  const chain = mkBaseChainForReview()
+  const wr = runReviewWrapper([
+    '--task', 'TEST',
+    '--plan-ref', 'docs/plan.md',
+    '--approval-ref', 'file:docs/plan-approved.md', // non-episode shape
+    '--pre-checkpoint-ref', `episode:${chain.preId}`,
+    '--post-checkpoint-ref', `episode:${chain.postId}`,
+    '--tests-ref', `episode:${chain.logId}`,
+    '--code-review-ref', `episode:${chain.reviewId}`,
+    '--no-new-bugs', '--branch', 'main', '--head', 'abc1234',
+    '--worktree', tmpCwd, '--scope', 'global',
+  ])
+  assert.strictEqual(wr.exit, 1)
+  assert.ok(wr.json.errors.some(e => e.includes('--approval-ref') && e.includes('episode reference')),
+    `expected non-episode rejection, got: ${JSON.stringify(wr.json.errors)}`)
+})
+
 test('T67 wrapper: --dry-run prints payload without writing', () => {
   const chain = mkBaseChainForReview()
   const beforeFiles = fs.readdirSync(episodesDir).length

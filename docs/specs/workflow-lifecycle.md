@@ -177,14 +177,26 @@ This mirrors `post-checkpoint.evidence.bug_logging` (#118 review M2 alignment): 
 All four chain refs (`approval_ref`, `pre_checkpoint_ref`, `post_checkpoint_ref`,
 plus `evidence.tests_ref` and `evidence.code_review_ref` when episode-shaped) are
 resolved via the same exact-id semantics described in [Episode reference
-resolution](#episode-reference-resolution-rfc-002327). The chain refs additionally
-require `category === "workflow.lifecycle"`.
+resolution](#episode-reference-resolution-rfc-002327).
 
-`post_checkpoint_ref` provides splice-resistance: it binds review-request back
-to the post-checkpoint that authorized the review. Same rule as
-`push-allowed.post_checkpoint_ref`; if `--head` is passed, the referenced
-post-checkpoint's `context.head` MUST equal `--head` exactly (defeats stale-
-evidence forgery).
+**Chain-ref same-task event-type binding** (Codex PR #156 review F1): each of
+the three chain refs MUST be episode-shaped (file/URL/other shapes are
+rejected — they cannot enforce same-task chain semantics) AND must resolve to
+the matching event for the same task:
+
+- `approval_ref` → same-task `plan-approved` event
+- `pre_checkpoint_ref` → same-task `pre-checkpoint` event
+- `post_checkpoint_ref` → same-task `post-checkpoint` event
+
+This mirrors the existing `pre-checkpoint.approval_ref` and
+`post-checkpoint.pre_checkpoint_ref` splice-resistance contracts. Without it,
+a review-request could cite an unrelated task's approval/pre-checkpoint while
+citing this task's post-checkpoint, defeating the artifact-binding contract
+this PR is intended to enforce.
+
+`post_checkpoint_ref` additionally enforces `--head` exact-match against the
+referenced post-checkpoint's `context.head` (mirrors `push-allowed`
+contract). Re-run the post-checkpoint at current HEAD if commits have landed.
 
 #### `triggered_by` (top-level, optional)
 
