@@ -153,6 +153,28 @@ function parseSourceMap(values) {
   return map
 }
 
+// Reviewer m3: reject hostile fm.id shapes that would create path-traversal,
+// NUL injection, or unrenderable filenames at the target. Em-store generates
+// ids matching `^[a-z0-9-]+$` (timestamp + slug + 4-hex suffix). We accept
+// a slightly wider grammar to tolerate hand-edited episodes from older
+// versions, but draw the line at any path separator, any control char,
+// any space, and any id longer than 200 chars. Full em-store grammar
+// drift test deferred to a follow-up issue (mirrors the VALID_CATEGORIES
+// drift discipline at T1).
+function isSafeId(id) {
+  if (typeof id !== 'string' || id.length === 0 || id.length > 200) return false
+  if (id.includes('/') || id.includes('\\') || id.includes('\0')) return false
+  // Reject any control character (C0 + DEL).
+  for (let i = 0; i < id.length; i++) {
+    const code = id.charCodeAt(i)
+    if (code < 0x20 || code === 0x7F) return false
+  }
+  // Defensive: forbid leading dot (would create hidden file or .. traversal
+  // when joined naively). Em-store ids never start with '.'.
+  if (id.startsWith('.')) return false
+  return true
+}
+
 function expandHome(p) {
   if (!p) return p
   if (p === '~') return os.homedir()
@@ -230,21 +252,42 @@ function passesFilter(fm, filters) {
 // Supersedes-chain expansion (P0-6): when a filter selects a tip, also include
 // its predecessors so the chain is intact at the target. Walks `supersedes:`
 // frontmatter backward across all discovered backup episodes.
+//
+// Returns { expanded, chainBreaks } where chainBreaks lists supersedes refs
+// that point at episodes NOT present in byId (orphan references).
+//
+// Reviewer n2 cycle defense: `out.has()` ensures each ancestor is enqueued at
+// most once. A→B→A two-cycle terminates: starting with selected={A}, we walk
+// to B (added to out), then walk to A (already in out, skipped) → loop ends.
+// Chain expansion is bounded by the size of byId regardless of cycles.
+//
+// Reviewer M3 cross-label gap (#158): byId only retains first-encountered
+// (label, id) tuple. With --allow-duplicate-id, additional same-id entries
+// from other labels live in additionalDuplicates and are NOT consulted here.
+// Their chain ancestors (which may differ from byId's chain) are silently
+// missed. Tracked at #158; not closed in this commit.
 function expandSupersedesChain(selected, byId) {
   const out = new Map(selected) // id → entry
   const queue = [...selected.keys()]
+  const chainBreaks = []
   while (queue.length > 0) {
     const id = queue.shift()
     const entry = byId.get(id)
     if (!entry || !entry.fm.supersedes) continue
     const ancestor = byId.get(entry.fm.supersedes)
-    if (!ancestor) continue // ancestor not in backup; chain broken upstream — surface in report
+    if (!ancestor) {
+      // Reviewer n1: previously the comment claimed chain breaks were
+      // surfaced; they weren't. Now we accumulate them and `run()` includes
+      // them in the summary report.
+      chainBreaks.push({ tip: id, missing_ancestor: entry.fm.supersedes })
+      continue
+    }
     if (!out.has(ancestor.fm.id)) {
       out.set(ancestor.fm.id, ancestor)
       queue.push(ancestor.fm.id)
     }
   }
-  return out
+  return { expanded: out, chainBreaks }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,10 +546,27 @@ function discoverEpisodes(backupDir, sourceLabels, sourceMap, sourceFilter) {
       const fm = parseFrontmatter(content)
       if (!fm || !fm.id) continue
       hadEpisodeForLabel = true
+      // Reviewer m3: fm.id is used as filename and index key. Path traversal
+      // via `..` is caught downstream by ensureUnder, but other shapes (NUL
+      // bytes, control chars, path separators, very long ids) would land on
+      // disk unchecked. Reject hostile fm.id values at discovery.
+      if (!isSafeId(fm.id)) {
+        symlinkRejects.push(`unsafe-id:${f}`) // reuse the rejected list channel
+        continue
+      }
       if (!sourceMap.has(label)) continue // tracked below; don't load entry
       const entry = { fm, sourcePath: f, label, content }
       if (byId.has(fm.id)) {
-        collisions.push({ id: fm.id, labels: [byId.get(fm.id).label, label] })
+        // Reviewer m2: collisions array now keys per id with all labels
+        // accumulated, so 3+ labels containing the same id show ALL of them
+        // in the report (previous shape pushed [first,this] each time,
+        // dropping intermediate labels).
+        const existing = collisions.find(c => c.id === fm.id)
+        if (existing) {
+          if (!existing.labels.includes(label)) existing.labels.push(label)
+        } else {
+          collisions.push({ id: fm.id, labels: [byId.get(fm.id).label, label] })
+        }
         additionalDuplicates.push(entry)
       } else {
         byId.set(fm.id, entry)
@@ -552,23 +612,6 @@ function discoverDocFiles(backupDir, sourceLabels, sourceMap, sourceFilter) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-source duplicate detection (P1-11): same id from two source labels
-// resolving to same target dir → refuse without --allow-duplicate-id.
-// ---------------------------------------------------------------------------
-function detectCrossSourceDuplicates(byId, sourceMap) {
-  // byId is already collapsed to one entry per id (last write wins in
-  // discovery). Cross-source dup is detected by `collisions` array there.
-  // BUT we also need to detect: two LABELS map to the same TARGET dir, and
-  // both contain an episode with the same id.
-  // The collisions array from discoverEpisodes captures the case where two
-  // labels independently contain the same id; the target-dir overlap is a
-  // separate concern handled at write time (every target path is computed
-  // from sourceMap, so two labels mapped to same target → write collisions
-  // detected by classifyConflict).
-  return [] // handled inline; placeholder for future enrichment
-}
-
-// ---------------------------------------------------------------------------
 // Build write plan
 // ---------------------------------------------------------------------------
 function buildWritePlan({
@@ -596,12 +639,22 @@ function buildWritePlan({
     const conflict = classifyConflict(entry.sourcePath, targetPath)
 
     let action = decideAction(conflict, conflictMode)
+    // Reviewer M1: previously set action='overwrite-symlink' but the apply
+    // path only switched on skip/noop/sidecar/<default>, making the label
+    // cosmetic. Now: when --allow-symlink-overwrite is set, the symlink
+    // path takes the SAME action as a regular overwrite (renameSync replaces
+    // the symlink atomically). The dispatch is no longer differentiated;
+    // the conflict field still records 'target-symlink' for the report.
     if (conflict === 'target-symlink') {
       if (!allowSymlinkOverwrite) {
         symlinkSkips.push({ targetPath, reason: 'target is symlink; pass --allow-symlink-overwrite to override' })
         action = 'skip'
       } else {
-        action = 'overwrite-symlink'
+        // Treat as overwrite per conflict-mode semantics; renameSync replaces
+        // the symlink without following it.
+        if (conflictMode === 'force') action = 'overwrite'
+        else if (conflictMode === 'sidecar') action = 'sidecar'
+        else action = 'skip' // default-skip is conservative even under allow-symlink-overwrite
       }
     }
 
@@ -663,7 +716,10 @@ function buildWritePlan({
           symlinkSkips.push({ targetPath, reason: 'target is symlink; pass --allow-symlink-overwrite to override' })
           action = 'skip'
         } else {
-          action = 'overwrite-symlink'
+          // Reviewer M1: same simplification as episode dispatch above.
+          if (conflictMode === 'force') action = 'overwrite'
+          else if (conflictMode === 'sidecar') action = 'sidecar'
+          else action = 'skip'
         }
       }
       if (action === 'sidecar') {
@@ -685,7 +741,7 @@ function buildWritePlan({
 // notably "EEXIST: file exists at <segment>" when a path component is a
 // regular file rather than a directory — surfaces BEFORE applyEpisodeWrites
 // touches disk. Idempotent: rerunning a clean restore is a no-op.
-function preflightTargetDirs(plan) {
+function preflightTargetDirs(plan, sourceMap) {
   const dirs = new Set()
   for (const w of plan.episodeWrites) {
     if (w.action === 'skip' || w.action === 'noop') continue
@@ -696,6 +752,14 @@ function preflightTargetDirs(plan) {
     if (w.action === 'skip' || w.action === 'noop') continue
     dirs.add(path.dirname(w.targetPath))
     if (w.action === 'sidecar') dirs.add(path.dirname(w.targetPath + '.from-backup'))
+  }
+  // Reviewer m5: mergeIndexes writes to <targetDir>/index.jsonl and
+  // <targetDir>/tags.json. Their parent (`targetDir`) is already created
+  // during the higher-level preflight, but include them here defensively
+  // so a future "snapshot index next to episode" change doesn't silently
+  // bypass this layer. Class-completeness audit (toolkit v4 #9) extension.
+  if (sourceMap) {
+    for (const targetDir of sourceMap.values()) dirs.add(targetDir)
   }
   const failures = []
   for (const d of dirs) {
@@ -711,7 +775,15 @@ function preflightTargetDirs(plan) {
   }
 }
 
+// Reviewer M2: validate conflictMode so a misspelled value can't silently
+// fall through to 'skip' (data loss class). CLI dispatcher already validates
+// at line 1969, but in-process callers (selfTest, future programmatic uses)
+// would skip the check. Class-completeness audit (toolkit v4 #9 level 1):
+// `categories` is also validated in run() — same shape applies here.
 function decideAction(conflict, conflictMode) {
+  if (!VALID_CONFLICT_MODES.includes(conflictMode)) {
+    throw new Error(`Invalid conflictMode "${conflictMode}". Must be one of: ${VALID_CONFLICT_MODES.join(', ')}`)
+  }
   if (conflict === 'clean') return 'create'
   if (conflict === 'identical') return 'noop'
   if (conflict === 'normalized-equal') return 'noop' // P1-8: default-skip is conservative
@@ -890,7 +962,7 @@ function run(opts) {
   }
 
   // Supersedes-chain expansion
-  const expanded = expandSupersedesChain(filteredIds, byId)
+  const { expanded, chainBreaks } = expandSupersedesChain(filteredIds, byId)
   const expansionAdded = expanded.size - filteredIds.size
 
   // Cross-source dup
@@ -948,7 +1020,7 @@ function run(opts) {
   // collects every unique parent dir across the plan and pre-creates them.
   // Any mkdir failure is raised BEFORE any episode write.
   if (apply) {
-    preflightTargetDirs(plan)
+    preflightTargetDirs(plan, sourceMap)
   }
 
   // MEMORY.md ref-integrity
@@ -969,6 +1041,7 @@ function run(opts) {
     sidecar_collisions: plan.sidecarConflicts,
     symlink_rejects: { source: [...epSymlinkRejects, ...docSymlinkRejects], target: plan.symlinkSkips },
     ref_integrity: refReports,
+    chain_breaks: chainBreaks, // reviewer n1: actually surface dangling supersedes refs
     skipped_in_backup: skipManifest
   }
 
@@ -1212,7 +1285,8 @@ function selfTest() {
     const selected = new Map()
     for (const [id, e] of byId) if (passesFilter(e.fm, { fromDate: undefined, toDate: undefined, tags: ['picked'], categories: [] })) selected.set(id, e)
     assert('chain_filter_selects_tip_only', selected.size === 1 && selected.has('id-tip'))
-    const expanded = expandSupersedesChain(selected, byId)
+    // Reviewer n1: expandSupersedesChain now returns { expanded, chainBreaks }
+    const { expanded } = expandSupersedesChain(selected, byId)
     assert('chain_expansion_includes_ancestor', expanded.size === 2 && expanded.has('id-tip') && expanded.has('id-orig'))
 
     fs.rmSync(root, { recursive: true, force: true })
@@ -1412,8 +1486,15 @@ function selfTest() {
     })
     assert('docs_claude_md_written_with_flag', fs.existsSync(path.join(target, 'CLAUDE.md')))
 
-    // No staging dir leftovers
-    const stagingPattern = fs.readdirSync(target).filter(n => n.startsWith('.em-restore-staging-'))
+    // No staging dir leftovers (reviewer n3: filter symlinks so a parallel
+    // test that planted a trap symlink with this prefix can't false-fail this
+    // assertion under reordering).
+    const stagingPattern = fs.readdirSync(target).filter(n => {
+      if (!n.startsWith('.em-restore-staging-')) return false
+      try {
+        return !fs.lstatSync(path.join(target, n)).isSymbolicLink()
+      } catch { return false }
+    })
     assert('docs_no_staging_leftover', stagingPattern.length === 0)
 
     fs.rmSync(root, { recursive: true, force: true })
@@ -1902,6 +1983,145 @@ function selfTest() {
       `leftover: ${leftover.join(',')}`)
     fs.rmSync(root, { recursive: true, force: true })
   } catch (e) { bad('staging_mkdtemp', e.message) }
+
+  // T-rev-M1 (reviewer M1): --allow-symlink-overwrite + --force replaces the
+  // SYMLINK with a regular file; the symlink's TARGET file is untouched.
+  // Pre-fix the action 'overwrite-symlink' was cosmetic (no special dispatch);
+  // this test pins behavior so a future "follow the symlink" regression would
+  // surface immediately.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const ep = makeEpisode('id-rm1', { id: 'id-rm1', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'rm1' }, 'BACKUP_CONTENT\n')
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-rm1.md'), ep)
+    commitBackup(backupDir)
+    const target = path.join(root, 'target')
+    fs.mkdirSync(path.join(target, 'episodes'), { recursive: true })
+    // Symlink target must be UNDER the source-map root (ensureUnder refuses
+    // traversal). The invariant — pointee file preserved while link path
+    // becomes a regular file — holds regardless of pointee location.
+    const realFile = path.join(target, 'real-pointee.md')
+    fs.writeFileSync(realFile, 'OUTSIDE_PRESERVED\n')
+    fs.symlinkSync(realFile, path.join(target, 'episodes', 'id-rm1.md'))
+    run({
+      backupDir, sourceMap: new Map([['lab', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'force', force: true, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: true,
+      allowDuplicateId: false, rebuildIndex: false
+    })
+    // Defensive ordering: the symlink target file MUST still exist with original content
+    assert('symlink_target_file_preserved', fs.existsSync(realFile) && fs.readFileSync(realFile, 'utf8') === 'OUTSIDE_PRESERVED\n',
+      `outside content: ${fs.readFileSync(realFile, 'utf8')}`)
+    // The target path is now a regular file with backup content
+    const linkPath = path.join(target, 'episodes', 'id-rm1.md')
+    assert('link_replaced_with_regular_file', !fs.lstatSync(linkPath).isSymbolicLink())
+    assert('link_path_has_backup_content', fs.readFileSync(linkPath, 'utf8').includes('BACKUP_CONTENT'))
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('symlink_target_untouched', e.message) }
+
+  // T-rev-M2 (reviewer M2): in-process call with invalid conflictMode throws.
+  // Pre-fix: only CLI dispatcher validated; programmatic callers got silent
+  // skip-on-overwrite (data loss class).
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const ep = makeEpisode('id-rm2', { id: 'id-rm2', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'rm2' })
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-rm2.md'), ep)
+    commitBackup(backupDir)
+    const target = path.join(root, 'target')
+    fs.mkdirSync(path.join(target, 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(target, 'episodes', 'id-rm2.md'), 'EXISTING_DIFFERENT\n')
+    let threw = false
+    try {
+      run({
+        backupDir, sourceMap: new Map([['lab', target]]),
+        fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+        apply: true, conflictMode: 'forec', force: false, includeDocs: false, // typo
+        restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+        allowDuplicateId: false, rebuildIndex: false
+      })
+    } catch (e) { threw = /Invalid conflictMode/.test(e.message) }
+    assert('invalid_conflict_mode_refused_in_run', threw)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('invalid_conflict_mode', e.message) }
+
+  // T-rev-m3a (reviewer m3): isSafeId direct unit tests. parseFrontmatter
+  // can't even represent some hostile shapes (newline-containing IDs are
+  // truncated at YAML line break), so we test isSafeId directly to lock
+  // the contract; the indirect end-to-end check below covers what survives
+  // parsing.
+  try {
+    assert('isSafeId_simple_lowercase', isSafeId('20260505-074256-foo-9ba3'))
+    assert('isSafeId_reject_path_traversal', !isSafeId('../escape'))
+    assert('isSafeId_reject_forward_slash', !isSafeId('a/b'))
+    assert('isSafeId_reject_backslash', !isSafeId('a\\b'))
+    assert('isSafeId_reject_nul', !isSafeId('a\0b'))
+    assert('isSafeId_reject_newline', !isSafeId('a\nb'))
+    assert('isSafeId_reject_tab', !isSafeId('a\tb'))
+    assert('isSafeId_reject_del', !isSafeId('a\x7Fb'))
+    assert('isSafeId_reject_leading_dot', !isSafeId('.hidden'))
+    assert('isSafeId_reject_empty', !isSafeId(''))
+    assert('isSafeId_reject_too_long', !isSafeId('a'.repeat(201)))
+    assert('isSafeId_reject_non_string', !isSafeId(null) && !isSafeId(undefined) && !isSafeId(42))
+  } catch (e) { bad('isSafeId_direct', e.message) }
+
+  // T-rev-m3b: hostile fm.id shapes that survive YAML parsing get refused at
+  // discovery. (Newline / NUL ids fail to round-trip through frontmatter
+  // parsing — they're caught by the file-write or YAML-parse stage, not the
+  // isSafeId stage. We test only shapes that DO survive parsing here.)
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const labRoot = path.join(backupDir, 'lab', 'episodes')
+    fs.mkdirSync(labRoot, { recursive: true })
+    const cases = [
+      { name: 'slash', id: '../escape' },
+      { name: 'leading-dot', id: '.hidden' },
+      { name: 'too-long', id: 'a'.repeat(201) }
+    ]
+    for (const c of cases) {
+      const ep = makeEpisode(c.id, { id: c.id, date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: c.name })
+      fs.writeFileSync(path.join(labRoot, `case-${c.name}.md`), ep)
+    }
+    commitBackup(backupDir)
+    const { byId } = discoverEpisodes(backupDir, ['lab'], new Map([['lab', '/tmp/x']]), [])
+    assert('hostile_fm_id_rejected_e2e', byId.size === 0, `byId has ${byId.size} entries: ${[...byId.keys()].join(',')}`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('hostile_fm_id_e2e', e.message) }
+
+  // T-rev-n2 (reviewer n2): supersedes-chain cycle detection. A→B→A
+  // terminates without infinite loop and includes both members in expanded.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const labRoot = path.join(backupDir, 'lab', 'episodes')
+    fs.mkdirSync(labRoot, { recursive: true })
+    const epA = makeEpisode('cycle-a', { id: 'cycle-a', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', supersedes: 'cycle-b', tags: ['picked'], summary: 'a' })
+    const epB = makeEpisode('cycle-b', { id: 'cycle-b', date: '2026-05-02', time: '"10:00"', project: 't', category: 'decision', status: 'active', supersedes: 'cycle-a', tags: [], summary: 'b' })
+    fs.writeFileSync(path.join(labRoot, 'cycle-a.md'), epA)
+    fs.writeFileSync(path.join(labRoot, 'cycle-b.md'), epB)
+    commitBackup(backupDir)
+    const { byId } = discoverEpisodes(backupDir, ['lab'], new Map([['lab', '/tmp/x']]), [])
+    const selected = new Map([['cycle-a', byId.get('cycle-a')]])
+    const { expanded, chainBreaks } = expandSupersedesChain(selected, byId)
+    assert('cycle_terminates', expanded.size === 2 && expanded.has('cycle-a') && expanded.has('cycle-b'))
+    assert('cycle_no_chain_break', chainBreaks.length === 0)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('cycle_termination', e.message) }
+
+  // T-rev-n2b: orphan supersedes ref produces a chain_break entry.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const labRoot = path.join(backupDir, 'lab', 'episodes')
+    fs.mkdirSync(labRoot, { recursive: true })
+    const ep = makeEpisode('orphan-tip', { id: 'orphan-tip', date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', supersedes: 'missing-ancestor-id', tags: ['picked'], summary: 'orphan' })
+    fs.writeFileSync(path.join(labRoot, 'orphan-tip.md'), ep)
+    commitBackup(backupDir)
+    const { byId } = discoverEpisodes(backupDir, ['lab'], new Map([['lab', '/tmp/x']]), [])
+    const selected = new Map([['orphan-tip', byId.get('orphan-tip')]])
+    const { expanded, chainBreaks } = expandSupersedesChain(selected, byId)
+    assert('orphan_chain_break_surfaced', chainBreaks.length === 1 && chainBreaks[0].tip === 'orphan-tip' && chainBreaks[0].missing_ancestor === 'missing-ancestor-id')
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('orphan_chain_break', e.message) }
 
   // T22: invalid category → throws
   try {
