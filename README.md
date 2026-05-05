@@ -280,6 +280,38 @@ node ~/.episodic-memory/scripts/em-backup.mjs --show-config
 
 Mirrors `~/.episodic-memory/` (and any other configured sources) to a private GitHub repo, applying PII / secret redaction to the staging copy. Source files on disk are never modified. Config lives at `~/.config/em-backup/config.json` or `$EM_BACKUP_CONFIG`; see `examples/em-backup.config.example.json`. Refuses `--init` / `--sync` without a config to prevent shipping raw personal memory.
 
+### Restore (Selective, from a Local Backup Repo)
+
+```bash
+# Dry-run (default): show what would happen, no disk writes
+node ~/.episodic-memory/scripts/em-restore.mjs \
+  --from /path/to/cloned-backup-repo \
+  --source-map home-em=$HOME/.episodic-memory \
+  --source-map project-em=./.episodic-memory \
+  --tag workplan --from-date 2026-04-01
+
+# Apply with full doc tree (MEMORY.md, feedback_*.md, knowledge_base/)
+node ~/.episodic-memory/scripts/em-restore.mjs \
+  --from /path/to/backup --source-map home-em=$HOME/.episodic-memory \
+  --include-docs --apply
+
+# Built-in tests
+node ~/.episodic-memory/scripts/em-restore.mjs --self-test
+```
+
+**Lossy-data note.** em-backup applies content + path redaction. Restore CANNOT undo redaction — it materializes the backup as-is. Frame as "spin up a fresh machine from backup," not "recover the original." Files redacted via `extra_redact_strings` retain their `[REDACTED]` tokens; binary / oversized / symlinked files are absent and only summarized in the report.
+
+**Filters.** `--from-date` / `--to-date` / `--tag` / `--category` / `--source` AND-compose; supersedes-chain ancestors are pulled in transitively so revision chains are intact.
+
+**Conflicts.** Four-bucket classification (clean / identical / normalized-equal / overwrite). Default is fail-closed: existing target files are skipped and listed in the report. Override with `--force`, or write to side-by-side files with `--conflict-mode=sidecar` (writes `<filename>.from-backup`).
+
+**Project `CLAUDE.md`** is git-tracked; restore refuses by default. Pass `--restore-claude-md` to override (or just use `git restore CLAUDE.md`). User-global `~/.claude/CLAUDE.md` follows the standard conflict model.
+
+**Indexes.** `index.jsonl` and `tags.json` are merged (union by id, set-union per tag) — local-only entries at the target are preserved. `--rebuild-index` is on by default after `--apply` (pass `--no-rebuild-index` to skip).
+
+Common modes: `--include-docs` (whole memory tree, atomic via staging dir), `--source LABEL` (narrow to one source), `--allow-duplicate-id` (cross-source same-id), `--allow-symlink-overwrite` (target-side).
+
+
 ### Violation Tracking
 ```bash
 node ~/.episodic-memory/scripts/em-violation.mjs \
