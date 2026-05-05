@@ -122,10 +122,13 @@ const TASK_SIGNAL_MARKERS = [
 // as the parent's no-task-signal turn, which is the desired behavior.
 //
 // Symlink defense (P2-2): uses lstatSync so a symlink to an old file cannot
-// trick the carve-out into firing. A symlinked baseline returns lstat mtime
-// of the symlink itself (created by writeFileSync via this code); a markers
-// symlink is treated as the file at its own path (the symlink), not its
-// target. Threat model is honest-agent self-discipline, not adversarial.
+// trick the carve-out into firing. ANY symlink — baseline or marker —
+// causes the carve-out to FAIL CLOSED (return false / deny). Same-class
+// symmetry per feedback_same_class_completeness.md: a symlinked marker
+// could represent an active mid-session signal masked behind the symlink,
+// so treating it as absent (skip) is unsafe. Codex round-1 P2 finding
+// (episode 20260505-124511-...-845f) reproduced the asymmetry. Threat
+// model is honest-agent self-discipline, not adversarial.
 // ---------------------------------------------------------------------------
 function stopGateCarveOutApplies(claudeDir) {
   const baseline = path.join(claudeDir, '.session-baseline')
@@ -142,7 +145,10 @@ function stopGateCarveOutApplies(claudeDir) {
     let mt
     try {
       const st = fs.lstatSync(p)
-      if (st.isSymbolicLink()) continue
+      // Symmetric with baseline: any marker symlink fails carve-out closed.
+      // SessionStart cleanup still skips symlinks (won't unlink them), but
+      // gate evaluation must not treat them as absent.
+      if (st.isSymbolicLink()) return false
       mt = st.mtimeMs
     } catch { continue }
     if (mt > baselineMtime) return false

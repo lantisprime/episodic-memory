@@ -366,6 +366,57 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
   else bad('3.3: symlink should defeat carve-out', `got: ${JSON.stringify(r)}`)
 }
 
+// 3.3b Same-class symlink defense for MARKERS (Codex round-1 P2 fix,
+// episode ...845f). Pre-fix: marker symlinks were `continue`d (treated
+// as absent), so a symlinked .post-checkpoint-required newer than baseline
+// would let the carve-out fire incorrectly. Post-fix: any marker symlink
+// fails the carve-out closed, symmetric with baseline.
+{
+  const d = mkRepo('3-3b-post'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.claude')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  // Create a real "newer" file then symlink .post-checkpoint-required to it
+  const realPost = path.join(claudeDir, 'real-post-marker')
+  fs.writeFileSync(realPost, '')
+  setMtime(realPost, Date.now() + 5_000) // newer than baseline
+  fs.symlinkSync(realPost, path.join(claudeDir, '.post-checkpoint-required'))
+  const r = runGateStop(d)
+  if (isBlock(r) && r.status === 0) ok('3.3b-post: symlinked .post-checkpoint-required rejects carve-out (same-class)')
+  else bad('3.3b-post: marker symlink should defeat carve-out', `got: ${JSON.stringify(r)}`)
+}
+{
+  const d = mkRepo('3-3b-checkpoint'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.claude')
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  // Symlinked .checkpoint-required newer than baseline. The gate-stop
+  // path requires preReq to exist (real or symlink) before evaluating
+  // carve-out — a symlinked preReq passes existsSync but should fail
+  // the carve-out closed.
+  const realCp = path.join(claudeDir, 'real-cp-marker')
+  fs.writeFileSync(realCp, '')
+  setMtime(realCp, Date.now() + 5_000)
+  fs.symlinkSync(realCp, path.join(claudeDir, '.checkpoint-required'))
+  const r = runGateStop(d)
+  if (isBlock(r) && r.status === 0) ok('3.3b-cp: symlinked .checkpoint-required rejects carve-out (same-class)')
+  else bad('3.3b-cp: marker symlink should defeat carve-out', `got: ${JSON.stringify(r)}`)
+}
+{
+  const d = mkRepo('3-3b-plan'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.claude')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  const realPlan = path.join(claudeDir, 'real-plan-marker')
+  fs.writeFileSync(realPlan, '')
+  setMtime(realPlan, Date.now() + 5_000)
+  fs.symlinkSync(realPlan, path.join(claudeDir, '.plan-approval-pending'))
+  const r = runGateStop(d)
+  if (isBlock(r) && r.status === 0) ok('3.3b-plan: symlinked .plan-approval-pending rejects carve-out (same-class)')
+  else bad('3.3b-plan: plan-pending symlink should defeat carve-out', `got: ${JSON.stringify(r)}`)
+}
+
 // 3.4 --session-start + --gate stop combo rejected at CLI parse (P2-5).
 // Prevents the silent failure mode where --gate stop's early exit skips
 // the SessionStart-only baseline write.
