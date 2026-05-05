@@ -42,7 +42,14 @@ function bad(name, detail) {
 }
 
 function mkRepo(label) {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), `em-146-${label}-`))
+  // realpathSync canonicalizes through symlinks (e.g. macOS /var → /private/var).
+  // Without this, paths derived from mkdtempSync mismatch the gate's
+  // resolve_repo_root output (which uses `cd -P`), and the marker_write
+  // allowlist's literal `==` compare fails. Real-session agents use the
+  // B1 absolute path emitted by the gate (already canonical), so this is
+  // a test-isolation concern; production path is unaffected.
+  const raw = fs.mkdtempSync(path.join(os.tmpdir(), `em-146-${label}-`))
+  const d = fs.realpathSync(raw)
   execSync(`git init -q -b main "${d}"`)
   execSync(`git -C "${d}" config user.email t@t`)
   execSync(`git -C "${d}" config user.name t`)
@@ -385,6 +392,189 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
     ok('3.5: stop-gate block reason names .post-checkpoint-done marker')
   } else {
     bad('3.5: stop-gate reason', `got: ${JSON.stringify(r)}`)
+  }
+}
+
+// ============================================================================
+console.log('\n=== L4 — Runtime-integration E2E (hook chain via real shell) ===')
+// ============================================================================
+// Exercises the actual hook scripts (em-recall-sessionstart.sh, stop-gate.sh,
+// checkpoint-gate.sh) the way Claude Code invokes them — piping JSON
+// through bash. This is the "real flow" that subprocess unit tests don't
+// cover. Sandbox: fake HOME with em-recall + lib copied in, fake project
+// with empty .episodic-memory/. Closes the BP-1 step 8 gap flagged in
+// violation episode 20260505-123354-...-0088.
+
+const HOOK_DIR = path.join(REPO_ROOT, 'hooks')
+const SESSIONSTART_HOOK = path.join(HOOK_DIR, 'em-recall-sessionstart.sh')
+const STOP_HOOK = path.join(HOOK_DIR, 'stop-gate.sh')
+const CHECKPOINT_HOOK = path.join(HOOK_DIR, 'checkpoint-gate.sh')
+
+function mkE2EHome() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'em-146-e2e-home-'))
+  cleanupDirs.push(home)
+  // Fake canonical install path expected by stop-gate.sh:58
+  const scripts = path.join(home, '.episodic-memory', 'scripts')
+  fs.mkdirSync(path.join(scripts, 'lib'), { recursive: true })
+  fs.copyFileSync(EM_RECALL, path.join(scripts, 'em-recall.mjs'))
+  // em-recall imports scripts/lib/local-dir.mjs at module load
+  const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', 'local-dir.mjs')
+  fs.copyFileSync(libSrc, path.join(scripts, 'lib', 'local-dir.mjs'))
+  // Empty episodes dir so shouldArmBp001Checkpoint returns false
+  fs.mkdirSync(path.join(home, '.episodic-memory', 'episodes'), { recursive: true })
+  return home
+}
+
+function runHook(hookPath, inputJson, cwd, home) {
+  const r = spawnSync('bash', [hookPath], {
+    input: inputJson,
+    cwd,
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+  return { stdout: r.stdout || '', stderr: r.stderr || '', status: r.status }
+}
+
+// 4.1 Full deadlock-scenario roundtrip — closes BP-1 step 8 gap.
+//
+// Reproduces the original #146 deadlock chain via real hook invocations
+// and verifies the fix:
+//   (a) SessionStart hook runs → .session-baseline written
+//   (b) Rule-9-only turn ends → Stop hook fires → carve-out allows stop
+//   (c) Mid-session arm of post-required → Stop hook blocks
+//   (d) Next SessionStart → stale markers cleared, baseline advanced
+{
+  const d = mkRepo('4-1'); cleanupDirs.push(d)
+  const home = mkE2EHome()
+  const claudeDir = path.join(d, '.claude')
+  const baseline = path.join(claudeDir, '.session-baseline')
+  const preReq = path.join(claudeDir, '.checkpoint-required')
+  const postReq = path.join(claudeDir, '.post-checkpoint-required')
+
+  // Plant a stale .checkpoint-required from a "prior session" — this is
+  // exactly the state that caused the original deadlock.
+  fs.writeFileSync(preReq, '')
+  setMtime(preReq, Date.now() - 60_000)
+
+  // (a) SessionStart hook
+  const startInput = JSON.stringify({ cwd: d, session_id: 'e2e-4-1' })
+  const startR = runHook(SESSIONSTART_HOOK, startInput, d, home)
+  if (startR.status === 0 && fs.existsSync(baseline)) {
+    ok('4.1a: SessionStart hook → .session-baseline written')
+  } else {
+    bad('4.1a: SessionStart hook', `status=${startR.status} stderr=${startR.stderr} baseline_exists=${fs.existsSync(baseline)}`)
+  }
+  // Defensive: stale preReq still exists (we planted it) — proves we're
+  // testing the carve-out path, not a vacuous no-marker path.
+  if (fs.existsSync(preReq)) ok('4.1a (defensive): stale preReq still present after SessionStart')
+  else bad('4.1a defensive', 'preReq disappeared (would make next assertions vacuous)')
+
+  // (b) Stop hook for Rule-9-only turn — should ALLOW (carve-out fires)
+  const stopInput = JSON.stringify({ cwd: d, session_id: 'e2e-4-1', stop_hook_active: false })
+  const stopR1 = runHook(STOP_HOOK, stopInput, d, home)
+  if (stopR1.status === 0 && !stopR1.stdout) {
+    ok('4.1b: Stop hook on no-task-signal turn → empty stdout (carve-out allows stop)')
+  } else {
+    bad('4.1b: carve-out should allow stop', `status=${stopR1.status} stdout=${stopR1.stdout}`)
+  }
+
+  // (c) Simulate a real mid-session task signal — touch postReq with
+  // mtime > baseline, then re-fire Stop hook → should BLOCK
+  fs.writeFileSync(postReq, '')
+  setMtime(postReq, Date.now() + 5_000)
+  const stopR2 = runHook(STOP_HOOK, stopInput, d, home)
+  if (stopR2.status === 0 && isBlock(stopR2)) {
+    ok('4.1c: Stop hook with mid-session signal → block (carve-out denied)')
+  } else {
+    bad('4.1c: real-task signal should block', `status=${stopR2.status} stdout=${stopR2.stdout}`)
+  }
+  // Defensive: postReq still present at decision time
+  if (fs.existsSync(postReq)) ok('4.1c (defensive): postReq still present at decision time')
+  else bad('4.1c defensive', 'postReq disappeared')
+
+  // (d) Next SessionStart — roll baseline back FIRST, then set postReq
+  // mtime even further back. Cleanup-loop reads PRIOR baseline (= rolled-
+  // back value) and rms postReq if its mtime <= prior baseline. Order
+  // matters: setMtime(postReq) must use a value strictly less than the
+  // ROLLED baseline, not the original baseline.
+  const rolledBaseline = Date.now() - 60_000
+  setMtime(baseline, rolledBaseline)
+  const rolledBaselineM = fs.statSync(baseline).mtimeMs
+  setMtime(postReq, rolledBaselineM - 5_000) // strictly older than rolled baseline
+  const startR2 = runHook(SESSIONSTART_HOOK, startInput, d, home)
+  if (startR2.status === 0 && !fs.existsSync(postReq)) {
+    ok('4.1d: next SessionStart clears stale postReq')
+  } else {
+    bad('4.1d: stale postReq not cleared', `status=${startR2.status} postReq_exists=${fs.existsSync(postReq)}`)
+  }
+  const newBaselineM = fs.statSync(baseline).mtimeMs
+  if (newBaselineM > rolledBaselineM) ok('4.1d (defensive): baseline mtime strictly advanced')
+  else bad('4.1d defensive', `baseline did not advance: rolled=${rolledBaselineM} new=${newBaselineM}`)
+}
+
+// 4.2 Checkpoint-gate B1 absolute-path emission via real hook.
+//
+// Pipes a synthetic Edit tool_input through checkpoint-gate.sh and asserts
+// the block reason embeds the absolute marker path (B1 fix). Pre-#146 the
+// reason had a relative path and the agent in worktree-cwd resolved it
+// against the wrong root, causing the deadlock.
+{
+  const d = mkRepo('4-2'); cleanupDirs.push(d)
+  const home = mkE2EHome()
+  const preReq = path.join(d, '.claude', '.checkpoint-required')
+  const preDone = path.join(d, '.claude', '.pre-checkpoint-done')
+  fs.writeFileSync(preReq, '') // armed
+  // pre-done absent (empty) → gate must block
+  const editInput = JSON.stringify({
+    tool_name: 'Edit',
+    cwd: d,
+    tool_input: {
+      file_path: path.join(d, 'README.md'),
+      old_string: 'x',
+      new_string: 'y'
+    }
+  })
+  const r = runHook(CHECKPOINT_HOOK, editInput, d, home)
+  if (r.status === 0 && isBlock(r) && r.stdout.includes(preDone)) {
+    ok('4.2: checkpoint-gate Edit → block reason embeds absolute pre-done path (B1)')
+  } else {
+    bad('4.2: B1 absolute path via real hook',
+      `status=${r.status} stdout=${r.stdout} expected_path=${preDone}`)
+  }
+  // Defensive: trigger marker still present at check time
+  if (fs.existsSync(preReq)) ok('4.2 (defensive): trigger marker still present at check time')
+  else bad('4.2 defensive', 'preReq disappeared')
+}
+
+// 4.3 marker_write deadlock-prevention path via real hook.
+//
+// Pipes a Write to .pre-checkpoint-done (the marker itself) through
+// checkpoint-gate.sh — when preReq is armed and preDone empty, the
+// classifier should label it marker_write and the gate should ALLOW.
+// Without this allowlist the agent can't satisfy the gate's precondition
+// (chicken-and-egg).
+{
+  const d = mkRepo('4-3'); cleanupDirs.push(d)
+  const home = mkE2EHome()
+  const preReq = path.join(d, '.claude', '.checkpoint-required')
+  const preDone = path.join(d, '.claude', '.pre-checkpoint-done')
+  fs.writeFileSync(preReq, '')
+  // preDone absent → gate's marker_write allowlist condition met
+  const writeInput = JSON.stringify({
+    tool_name: 'Write',
+    cwd: d,
+    tool_input: {
+      file_path: preDone,
+      content: 'pre-checkpoint block'
+    }
+  })
+  const r = runHook(CHECKPOINT_HOOK, writeInput, d, home)
+  if (r.status === 0 && !r.stdout) {
+    ok('4.3: Write to .pre-checkpoint-done allowed (marker_write allowlist)')
+  } else {
+    bad('4.3: marker_write should be allowed',
+      `status=${r.status} stdout=${r.stdout}`)
   }
 }
 
