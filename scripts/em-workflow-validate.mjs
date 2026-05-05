@@ -54,18 +54,22 @@ const head = flag('--head')
 const scope = flag('--scope') || 'all'
 const strict = argv.includes('--strict')
 
-const VALID_GATES = ['pre-checkpoint', 'post-checkpoint', 'push-allowed']
+const VALID_GATES = ['pre-checkpoint', 'post-checkpoint', 'review-request', 'push-allowed']
 const VALID_SCOPES = ['local', 'global', 'all']
 
 // Lifecycle event order per RFC-002:262.
 // classified and scope-change are not required for any gate by default.
-const EVENT_ORDER = ['classified', 'plan-approved', 'pre-checkpoint', 'review-done', 'post-checkpoint', 'scope-change', 'push-allowed']
+// review-request sits between post-checkpoint and push-allowed (#118 PR-D).
+const EVENT_ORDER = ['classified', 'plan-approved', 'pre-checkpoint', 'review-done', 'post-checkpoint', 'review-request', 'scope-change', 'push-allowed']
 
 // Required predecessor chain by gate. The gate passes iff all required events
 // are present, in order, with valid payloads and consistent task identity.
+// review-request is NOT a predecessor of push-allowed (per Plan-agent Q3 on
+// #118: hook wiring lives in #119; adding it here would break T11/T31/T34).
 const REQUIRED_FOR_GATE = {
   'pre-checkpoint': ['plan-approved', 'pre-checkpoint'],
   'post-checkpoint': ['plan-approved', 'pre-checkpoint', 'post-checkpoint'],
+  'review-request': ['plan-approved', 'pre-checkpoint', 'post-checkpoint', 'review-request'],
   'push-allowed': ['plan-approved', 'pre-checkpoint', 'post-checkpoint', 'push-allowed']
 }
 
@@ -79,6 +83,7 @@ const REQUIRED_FOR_GATE = {
 const TERMINAL_FOR_GATE = {
   'pre-checkpoint': 'pre-checkpoint',
   'post-checkpoint': 'post-checkpoint',
+  'review-request': 'review-request',
   'push-allowed': 'push-allowed'
 }
 
@@ -91,10 +96,13 @@ if (!task) fail('Missing --task')
 if (!gate) fail(`Missing --gate. Must be one of: ${VALID_GATES.join(', ')}`)
 if (!VALID_GATES.includes(gate)) fail(`Invalid --gate "${gate}". Must be one of: ${VALID_GATES.join(', ')}`)
 if (!VALID_SCOPES.includes(scope)) fail(`Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES.join(', ')}`)
-// push-allowed gate requires --head: without it the post-checkpoint exact-
-// equality head check is silently skipped, which would let stale evidence
-// satisfy a push (#98 finding 1 / Codex BLOCKER 2).
-if (gate === 'push-allowed' && !head) fail('--head is required for --gate push-allowed (post-checkpoint head must be asserted against current HEAD)')
+// push-allowed and review-request gates require --head: without it the
+// terminal head exact-equality check is silently skipped, which would let
+// stale evidence satisfy a gate (#98 finding 1 / Codex BLOCKER 2; #118 same
+// rule for review-request terminal).
+if ((gate === 'push-allowed' || gate === 'review-request') && !head) {
+  fail(`--head is required for --gate ${gate} (terminal event head must be asserted against current HEAD)`)
+}
 
 // ---------------------------------------------------------------------------
 // Index loading — mirrors em-search.mjs:loadIndex / em-recall.mjs:loadIndex.
@@ -145,6 +153,12 @@ function extractPayload(filePath) {
 const PLACEHOLDER_VALUES = new Set(['', 'tbd', 'todo', 'placeholder', '...', 'xxx', 'n/a', 'na'])
 const REF_PREFIXES = ['episode:', 'issue:', 'file:', 'command:', 'log:', 'sha:']
 const SELF_REFS = new Set(['episode:self', 'self'])
+
+// review-request evidence.verifications[] kind whitelist (#118 Codex M2).
+// Versioned error string (Plan-agent 2nd-opinion mod 3c) so future schema
+// extensions surface as a discoverable bump, not a silent reject.
+const VERIFICATION_KINDS = ['evidence', 'narrative']
+const VERIFICATION_SCHEMA_VERSION = 'v1'
 
 function realpathOrPath(p) {
   try { return fs.realpathSync(p) } catch { return p }
@@ -373,6 +387,121 @@ function validatePayload(payload, entry, errors, warnings, indexById) {
         { expectedCategory: 'workflow.lifecycle' }
       )
       break
+    case 'review-request': {
+      // #118 PR-D. Required refs per #118 body + Codex tier-2 fold-in.
+      // post_checkpoint_ref added per Plan-agent Q1b (splice-resistance).
+      if (isPlaceholder(payload.plan_ref)) errors.push(`${fp}: review-request.plan_ref missing or placeholder`)
+      if (isPlaceholder(payload.approval_ref)) errors.push(`${fp}: review-request.approval_ref missing or placeholder`)
+      if (isPlaceholder(payload.pre_checkpoint_ref)) errors.push(`${fp}: review-request.pre_checkpoint_ref missing or placeholder`)
+      if (isPlaceholder(payload.post_checkpoint_ref)) errors.push(`${fp}: review-request.post_checkpoint_ref missing or placeholder`)
+      // Lifecycle chain refs must resolve to workflow.lifecycle episodes.
+      checkEpisodeRefs(
+        [
+          ['approval_ref', payload.approval_ref],
+          ['pre_checkpoint_ref', payload.pre_checkpoint_ref],
+          ['post_checkpoint_ref', payload.post_checkpoint_ref],
+        ],
+        entry, indexById, errors,
+        { expectedCategory: 'workflow.lifecycle' }
+      )
+      // plan_ref MAY be episode or file/URL (free-form). Resolve if episode.
+      checkEpisodeRefs([['plan_ref', payload.plan_ref]], entry, indexById, errors)
+      const rev = payload.evidence
+      if (!rev || typeof rev !== 'object') {
+        errors.push(`${fp}: review-request.evidence missing`)
+        break
+      }
+      if (isPlaceholder(rev.tests_ref)) errors.push(`${fp}: review-request.evidence.tests_ref missing or placeholder`)
+      if (isPlaceholder(rev.code_review_ref)) errors.push(`${fp}: review-request.evidence.code_review_ref missing or placeholder`)
+      checkEpisodeRefs(
+        [['evidence.tests_ref', rev.tests_ref], ['evidence.code_review_ref', rev.code_review_ref]],
+        entry, indexById, errors
+      )
+      if (rev.command_inventory_ref) {
+        checkEpisodeRefs([['evidence.command_inventory_ref', rev.command_inventory_ref]], entry, indexById, errors)
+      }
+      // bug_logging: status='done' with issues[] array of GitHub issue refs,
+      // OR status='no-new-bugs' (mutex with --bug-log-ref at wrapper layer).
+      const bl = rev.bug_logging
+      if (!bl || typeof bl !== 'object') {
+        errors.push(`${fp}: review-request.evidence.bug_logging missing`)
+      } else if (bl.status === 'done') {
+        // Mirror post-checkpoint semantics: empty issues[] is "checked, no
+        // bugs" (post-checkpoint :358-360). status="no-new-bugs" is the
+        // wrapper's explicit alternate; validator accepts both forms.
+        if (!Array.isArray(bl.issues)) {
+          errors.push(`${fp}: review-request.evidence.bug_logging.issues must be an array when status=done`)
+        } else {
+          bl.issues.forEach((iss, i) => {
+            if (typeof iss !== 'string' || !ISSUE_REF_RE.test(iss)) {
+              errors.push(`${fp}: review-request.evidence.bug_logging.issues[${i}] must be GitHub issue URL or gh:owner/repo#N, got "${iss}"`)
+            }
+          })
+        }
+      } else if (bl.status !== 'no-new-bugs') {
+        errors.push(`${fp}: review-request.evidence.bug_logging.status must be "done" or "no-new-bugs", got "${bl.status}"`)
+      }
+      // verifications[] — optional. null and missing both treated as "not
+      // provided"; [] is "checked, no claims" (folded gap #7).
+      if (rev.verifications != null) {
+        if (!Array.isArray(rev.verifications)) {
+          errors.push(`${fp}: review-request.evidence.verifications must be an array, got ${typeof rev.verifications}`)
+        } else {
+          rev.verifications.forEach((v, i) => {
+            if (!v || typeof v !== 'object') {
+              errors.push(`${fp}: evidence.verifications[${i}] must be an object`)
+              return
+            }
+            const kindIn = ('kind' in v) ? v.kind : 'evidence'  // default per Codex M2
+            if (!VERIFICATION_KINDS.includes(kindIn)) {
+              errors.push(`${fp}: evidence.verifications[${i}].kind '${v.kind}' must be one of [${VERIFICATION_KINDS.join(', ')}] (schema ${VERIFICATION_SCHEMA_VERSION})`)
+              return
+            }
+            if (kindIn === 'evidence') {
+              const hasExcerpt = !isPlaceholder(v.excerpt)
+              const hasOutput = !isPlaceholder(v.output)
+              if (!hasExcerpt && !hasOutput) {
+                errors.push(`${fp}: evidence.verifications[${i}] kind='evidence' (default) requires non-empty 'excerpt' or 'output' (schema ${VERIFICATION_SCHEMA_VERSION})`)
+              }
+            }
+          })
+        }
+      }
+      // triggered_by — top-level (NOT under evidence). Optional. When set,
+      // MUST be an episode reference (episode:<id>). Freeform strings are
+      // rejected — provenance to a non-episode source should first em-store
+      // the source as an episode (review n1 tightening).
+      if (payload.triggered_by != null) {
+        if (typeof payload.triggered_by !== 'string') {
+          errors.push(`${fp}: triggered_by must be a string (episode:<id>), got ${typeof payload.triggered_by}`)
+        } else if (!payload.triggered_by.startsWith('episode:')) {
+          errors.push(`${fp}: triggered_by "${payload.triggered_by}" must be an episode reference (episode:<id>); freeform provenance strings rejected`)
+        } else {
+          const tbR = resolveEpisodeRef(payload.triggered_by, indexById, entry)
+          if (tbR.error) {
+            errors.push(`${fp}: triggered_by ${tbR.error}`)
+          } else {
+            const tbFilePath = path.join(tbR.entry._dataDir, 'episodes', `${tbR.entry.id}.md`)
+            if (fs.existsSync(tbFilePath)) {
+              const tbText = fs.readFileSync(tbFilePath, 'utf8')
+              const tbM = tbText.match(/```json\s*\n([\s\S]*?)\n```/)
+              if (tbM) {
+                try {
+                  const tbP = JSON.parse(tbM[1])
+                  if (tbP.task != null && tbP.task !== payload.task) {
+                    errors.push(`${fp}: triggered_by episode:${tbR.entry.id} has task "${tbP.task}" which differs from current task "${payload.task}" (cross-task pollution rejected)`)
+                  }
+                  // task null/undefined: provenance-only, no assertion.
+                } catch {
+                  // unparseable body → provenance-only.
+                }
+              }
+            }
+          }
+        }
+      }
+      break
+    }
   }
 }
 
@@ -420,7 +549,7 @@ function resolveEpisodeRef(ref, indexById, currentEpisode, opts = {}) {
 // Free-form strings are rejected (was previously unvalidated — #98 finding 2).
 const ISSUE_REF_RE = /^(https:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/issues\/\d+|gh:[^\/\s]+\/[^\/\s#]+#\d+)$/
 
-function validateChain(events, errors, gateArg, headArg) {
+function validateChain(events, errors, warnings, gateArg, headArg) {
   const byEvent = {}
   for (const e of events) {
     if (!byEvent[e.payload.event]) byEvent[e.payload.event] = []
@@ -472,6 +601,70 @@ function validateChain(events, errors, gateArg, headArg) {
         errors.push(`episode:${pa.entry.id}: referenced post-checkpoint episode:${targetId} has head "${pcHead}" != current --head "${headArg}". Code may have changed since evidence was recorded — re-run post-checkpoint at current HEAD.`)
       }
     }
+  }
+  // review-request handling (#118).
+  // 1) Multi-review-request "latest-by-timestamp wins" pre-#102 chain-walk
+  //    fallback (folded gap #1). Older review-request episodes' errors get
+  //    downgraded to warnings — they may have stale refs from prior attempts,
+  //    which is OK as long as the terminal review-request is clean.
+  // 2) post_checkpoint_ref chain-link check (mirrors push-allowed contract).
+  const reviewRequests = byEvent['review-request'] || []
+  let nonTerminalRrIds = new Set()
+  if (reviewRequests.length > 1) {
+    const sorted = reviewRequests.slice().sort((a, b) => {
+      const ka = `${a.entry.date} ${a.entry.time}`
+      const kb = `${b.entry.date} ${b.entry.time}`
+      // ISO date strings are zero-padded, so plain ASCII compare is correct.
+      // Descending: latest first.
+      if (ka < kb) return 1
+      if (ka > kb) return -1
+      return 0
+    })
+    const terminal = sorted[0]
+    nonTerminalRrIds = new Set(sorted.slice(1).map(e => e.entry.id))
+    for (const ntId of nonTerminalRrIds) {
+      warnings.push(`episode:${ntId}: superseded by review-request episode:${terminal.entry.id} (latest-by-timestamp wins; consider em-revise to make the supersedes chain explicit)`)
+    }
+  }
+  for (const rr of reviewRequests) {
+    if (!rr.payload.post_checkpoint_ref) continue // already errored upstream
+    const targetId = refTarget(rr.payload.post_checkpoint_ref)
+    if (!targetId) continue
+    const matching = (byEvent['post-checkpoint'] || []).find(e => e.entry.id === targetId)
+    if (!matching) {
+      errors.push(`episode:${rr.entry.id}: post_checkpoint_ref episode:${targetId} not a post-checkpoint episode for this task (chain link must be same-task post-checkpoint)`)
+    }
+    if (gateArg === 'review-request' && headArg) {
+      // Mirror push-allowed contract: terminal review-request's referenced
+      // post-checkpoint head MUST equal --head, otherwise stale evidence
+      // could clear the gate after additional commits.
+      if (matching) {
+        const pcHead = matching.payload.context && matching.payload.context.head
+        if (pcHead && pcHead !== headArg) {
+          errors.push(`episode:${rr.entry.id}: referenced post-checkpoint episode:${targetId} has head "${pcHead}" != current --head "${headArg}". Code may have changed since evidence was recorded — re-run post-checkpoint at current HEAD.`)
+        }
+      }
+    }
+  }
+  // Migrate any errors KEYED TO non-terminal review-request ids → warnings.
+  // Errors emitted in validatePayload are anchored to `episode:<id>:` at the
+  // start (see fp = `episode:${entry.id}` at validatePayload:220). We only
+  // migrate errors that BEGIN with `episode:<ntId>:` — substring match would
+  // false-migrate errors that mention a non-terminal id elsewhere in the
+  // string (e.g. terminal review-request citing an older one) (review M1).
+  if (nonTerminalRrIds.size > 0) {
+    const migrated = []
+    for (let i = errors.length - 1; i >= 0; i--) {
+      const err = errors[i]
+      for (const ntId of nonTerminalRrIds) {
+        if (err.startsWith(`episode:${ntId}:`)) {
+          migrated.push(`(non-terminal review-request) ${err}`)
+          errors.splice(i, 1)
+          break
+        }
+      }
+    }
+    warnings.push(...migrated)
   }
 }
 
@@ -533,7 +726,7 @@ for (const entry of workflowEntries) {
   events.push({ entry, payload })
 }
 
-validateChain(events, errors, gate, head)
+validateChain(events, errors, warnings, gate, head)
 
 const presentEvents = new Set(events.map(e => e.payload.event))
 const required = REQUIRED_FOR_GATE[gate] || []
