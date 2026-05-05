@@ -22,6 +22,14 @@ set -e
 # Idempotent: em-recall.mjs:364 only writes the marker if it doesn't already
 # exist, so re-runs (multiple SessionStart firings, --resume, etc.) won't
 # clobber state.
+#
+# --session-start (#146 A2): em-recall writes/touches .session-baseline on
+# every invocation with this flag. The mtime of .session-baseline is the
+# stop-gate's reference point: any task-signal marker (.checkpoint-required,
+# .post-checkpoint-required, .plan-approval-pending) with mtime > baseline
+# was created mid-session and prevents the no-task-signal carve-out. Stale
+# .plan-approval-pending whose mtime predates the prior baseline is also
+# cleared here (orphan from a crashed prior session).
 
 INPUT="$(cat)"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
@@ -43,6 +51,6 @@ fi
 if ! cd "$CWD" 2>/dev/null; then
   exit 0
 fi
-node "$EM_RECALL" --limit 5 >/dev/null 2>&1 || true
+node "$EM_RECALL" --limit 5 --session-start >/dev/null 2>&1 || true
 
 exit 0

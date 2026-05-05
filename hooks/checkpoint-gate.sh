@@ -70,17 +70,24 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-# Helper: emit a block decision
+# Helper: emit a block decision.
+# Reason strings include the ABSOLUTE marker path (#146 B1). Worktree-cwd
+# sessions resolve relative paths against the worktree, but markers live at
+# the main-repo .claude/. Without the absolute path the agent guesses wrong
+# and deadlocks (issue #146 live reproducer comment 4378971459).
 _block_pre() {
-  echo '{"decision": "block", "reason": "Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to .claude/.pre-checkpoint-done (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh."}'
+  jq -nc --arg path "$PRE_DONE" \
+    '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
 _block_post() {
-  echo '{"decision": "block", "reason": "Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty) before pushing. Hook: checkpoint-gate.sh."}'
+  jq -nc --arg path "$POST_DONE" \
+    '{decision: "block", reason: ("Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to " + $path + " (must be non-empty) before pushing. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
 _block_plan_pending() {
-  echo '{"decision": "block", "reason": "Plan approval pending. Checkpoint marker writes are blocked while .claude/.plan-approval-pending exists. Approve the plan first. Hook: checkpoint-gate.sh."}'
+  jq -nc --arg path "$PLAN_PENDING" \
+    '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
 

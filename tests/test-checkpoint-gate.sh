@@ -663,6 +663,57 @@ fi
 
 # ============================================================================
 echo ""
+echo "--- #146 B1: block-reason includes ABSOLUTE marker path ---"
+# ============================================================================
+# Pre-fix (issue #146 live reproducer): block reason said
+# ".claude/.pre-checkpoint-done" (relative). Agent in worktree cwd resolved
+# the relative path against the worktree, which mismatched the gate's
+# main-repo expectation, deadlocking. Fix: emit absolute marker path so
+# the agent writes to the correct location regardless of cwd.
+reset_state
+touch "$PRE_REQ"
+b1_out=$(echo "$(mock_json 'Edit')" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null || true)
+B1_EXPECTED="$TEST_DIR/.claude/.pre-checkpoint-done"
+if echo "$b1_out" | grep -qF "$B1_EXPECTED"; then
+  echo "  ✓ B1.pre. _block_pre reason embeds absolute pre-checkpoint path"
+  ((passed++))
+else
+  echo "  ✗ B1.pre. expected absolute path '$B1_EXPECTED' in: $b1_out"
+  ((failed++))
+fi
+# Defensive: the trigger marker .checkpoint-required still exists AND the
+# asserted path string equals the gate's resolved $PRE_DONE constant.
+if [ -f "$PRE_REQ" ] && [ "$PRE_DONE" = "$B1_EXPECTED" ]; then
+  echo "  ✓ B1.pre (defensive): trigger marker present + path string matches \$PRE_DONE"
+  ((passed++))
+else
+  echo "  ✗ B1.pre defensive: trigger=$([ -f "$PRE_REQ" ] && echo Y || echo N) PRE_DONE=$PRE_DONE expected=$B1_EXPECTED"
+  ((failed++))
+fi
+# Plan-pending block reason also gets absolute path
+reset_state
+touch "$PRE_REQ"
+PLAN_MARKER="$TEST_DIR/.claude/.plan-approval-pending"
+touch "$PLAN_MARKER"
+# A Bash command targeting the pre-checkpoint marker fires the
+# plan-pending block (cross-gate invariant). Reason should embed
+# absolute plan-pending path.
+plan_block_json=$(jq -nc \
+  --arg cmd "echo block > $TEST_DIR/.claude/.pre-checkpoint-done" \
+  --arg cwd "$TEST_DIR" \
+  '{tool_name: "Bash", cwd: $cwd, tool_input: {command: $cmd}}')
+plan_out=$(echo "$plan_block_json" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null || true)
+if echo "$plan_out" | grep -qF "$PLAN_MARKER"; then
+  echo "  ✓ B1.plan. _block_plan_pending reason embeds absolute plan-pending path"
+  ((passed++))
+else
+  echo "  ✗ B1.plan. expected absolute path '$PLAN_MARKER' in: $plan_out"
+  ((failed++))
+fi
+rm -f "$PLAN_MARKER"
+
+# ============================================================================
+echo ""
 echo "--- A8: hook does not pollute REPO_ROOT outside TEST_DIR ---"
 # ============================================================================
 # Regression guard mirroring test-em-recall-sessionstart.sh test 7. Snapshot
