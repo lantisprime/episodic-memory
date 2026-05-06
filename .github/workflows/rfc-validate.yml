@@ -1,0 +1,31 @@
+name: RFC registry validation
+
+on:
+  pull_request:
+    paths:
+      - 'docs/rfcs/**'
+      - 'scripts/em-rfc-validate.mjs'
+      - 'tests/test-em-rfc-validate.mjs'
+      - '.github/workflows/rfc-validate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/rfcs/**'
+      - 'scripts/em-rfc-validate.mjs'
+      - 'tests/test-em-rfc-validate.mjs'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run RFC registry validator
+        run: node scripts/em-rfc-validate.mjs
+
+      - name: Run validator self-tests
+        run: node tests/test-em-rfc-validate.mjs
