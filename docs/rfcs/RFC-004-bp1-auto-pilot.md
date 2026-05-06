@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.7
+version: 3.8
 supersedes: ~
 superseded_by: ~
 ---
@@ -42,7 +42,7 @@ A multi-agent automation pipeline that drives RFCs through Rule 18 end-to-end. C
 - **One lesson agent** — emits global lesson episodes per resolved bug + per-run synthesis, growing the corpus on every run.
 - **Eleven scripts** — RFC scanner (fail-closed), event-table renderer, replay walker, snapshot emitter, run-lock, marker validator, crash classifier, ghost-run archival, token-budget calculator, em-review-request extension, orchestrator runtime.
 - **One SessionStart hook** — bp1-approval-check, ordered after handoff-prompt.
-- **Two scheduled tasks** — `bp1-deadline-tick` (5-min cron, principle-conformant per P6 — visible, listable, episode-emitting) and `bp1-security-audit-weekly` (Sunday meta-audit + ghost-run archival).
+- **Three scheduled tasks** — `bp1-deadline-tick` (5-min cron, request-issued timeout per Path A), `bp1-naked-entry-sweep` (5-min cron, naked-entry recovery per Path B — NEW v3.8), and `bp1-security-audit-weekly` (Sunday meta-audit + ghost-run archival). All principle-conformant per P6 (visible, listable, episode-emitting).
 - **One slash command** — `/bp1-auto <rfc-id>` for manual entry.
 
 The pipeline is gated by two distinct mechanisms:
@@ -161,6 +161,7 @@ Any mismatch → exit non-zero + emit `bp1-disabled-refusal` (or `bp1-flag-versi
 |---|---|---|
 | `bp1-rfc-scan.mjs` | M2 | Print `bp1 inert for project <root>: <reason>` to stderr, exit 0 |
 | `bp1-deadline-tick` scheduled task (T1) | M2 | Emit a single tick episode tagged `bp1-disabled-tick` per project root that lacks activation, no orchestrator dispatch |
+| `bp1-naked-entry-sweep` scheduled task (T1b, NEW v3.8) | M2 | Emit a single tick episode tagged `bp1-disabled-sweep` per project root that lacks activation, no orchestrator dispatch |
 | `bp1-approval-check.sh` hook (H1) | M2 | Return exit 0 immediately, no marker read |
 | `bp1-orchestrator` agent | M1/M3 | Hard-refuse to dispatch any sub-agent; emit `bp1-disabled-refusal` episode with `reason` field |
 | `/bp1-auto` slash command | M5 | Print disabled message and the M5 dry-run instructions; exit non-zero |
@@ -510,14 +511,17 @@ All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_cano
 | 8 | `scripts/bp1-crash-classify.mjs` | Classifies last-state from decision-log; routes to auto-resume or needs-human | ✅ pure state walk |
 | 9 | `scripts/bp1-archive-ghosts.mjs` | Em-revises run-roots in `needs_human` or `halted` for >7 days; emits `bp1-ghost-archived` | ✅ deterministic GC |
 | 10 | `scripts/bp1-token-budget.mjs` | Cumulative token math; called by sentinel | ✅ pure arithmetic |
-| 11 | `scripts/em-review-request.mjs` (extension) | Adds `--target plan-episode:<id>` mode | ✅ existing pattern extension |
+| 11 | `scripts/em-review-request.mjs` (extension) | Adds `--target plan-episode:<id>` mode + `--idempotency-key <hex>` (NEW v3.8 — local idempotency enforcement per I4) | ✅ existing pattern extension |
+| 12 (NEW v3.8) | `scripts/bp1-canonicalize.mjs` | Per-episode canonical-bytes builder; projects frontmatter to canonical payload spec (generic + episode-type-specific fields) and emits sha256. Called by HMAC-signing path. | ✅ pure deterministic |
+| 13 (NEW v3.8) | `scripts/bp1-naked-entry-sweep.mjs` | Path B sweep: scans active runs for naked `codex_review` entries (no `bp1-codex-request-sent` evidence) older than 5min. Called by T1b scheduled task. Emits `bp1-naked-sweep-tick` per fire. | ✅ deterministic data walk |
 
 ### Hooks, scheduled tasks, and manifest
 
 | # | Artifact | Trigger | Role |
 |---|---|---|---|
 | H1 | `.claude/hooks/bp1-approval-check.sh` | SessionStart, after handoff-prompt | Calls `bp1-marker-validate.mjs`; routes by class + deadline |
-| T1 | `bp1-deadline-tick` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs check-deadlines`; emits tick episode |
+| T1 | `bp1-deadline-tick` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs check-deadlines` (Path A — request-issued timeout); emits tick episode |
+| T1b (NEW v3.8) | `bp1-naked-entry-sweep` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs sweep-naked-entries` (Path B — naked-entry recovery, 5-min from entry created_at); emits sweep episode. Activation-gated; flag-check refuses if project not active. |
 | T2 | `bp1-security-audit-weekly` (scheduled task) | Sunday 09:00 PHT | Meta-audit + ghost archival; emits weekly digest |
 | M1 | `/bp1-auto <rfc-id>` (slash command) | manual | Wrapper → orchestrator |
 | M2 | `.claude-plugin/plugin.json` update | — | Registers slash command + scheduled tasks |
@@ -533,9 +537,9 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 2. On success: orchestrator records `scheduled_tasks_capability: native` in the activation episode.
 3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. Both T1 and T2 must run via fallback path until the next probe succeeds.
 
-**Fallback: `scripts/bp1-deadline-sweep.mjs --once`** (M0 deliverable):
+**Fallback: `scripts/bp1-deadline-sweep.mjs --once`** (M0 deliverable, EXTENDED v3.8 to also cover Path B naked-entry sweep):
 
-- Stateless one-shot sweep — replays the same logic T1 would have run (deadline check across active runs).
+- Stateless one-shot sweep — replays the same logic T1 + T1b would have run (Path A request-issued deadline check + Path B naked-entry recovery, both across active runs).
 - Invocable manually: `node scripts/bp1-deadline-sweep.mjs --once`.
 - Auto-wired as a SessionStart hook (`.claude/hooks/bp1-sweep-on-session.sh`) so any human session triggers a sweep — provides best-effort liveness when the scheduled-task capability is missing.
 - Records each invocation as a `bp1-sweep-tick` episode for audit-trail parity with T1.
@@ -855,11 +859,11 @@ Before emitting any new `codex_review` entry, the orchestrator MUST:
 2. Read the most recent `codex_review` entry for this run; extract `attempt_number`.
 3. **Check request-sent state for that entry (v3.6 — uniform across all attempt_number values):** scan for a `bp1-codex-request-sent` evidence episode with `parent_episode == <current entry id>`. The decision tree branches **first on `request_sent`**, then on `attempt_number` — so recovery semantics apply uniformly to every attempt_number value, not only at the `>=2` boundary:
 
-   | request_sent for current entry | attempt_number | Action |
+   | request_sent for current entry | attempt_number | Action (v3.8 — O_EXCL claim BEFORE lock release on every issuing branch) |
    |---|---|---|
-   | `false` (recovery — applies at any attempt_number, including 0/1/2) | any value | **DO NOT advance.** Release lock. Issue request for the existing entry; emit `bp1-codex-request-sent` linking to that entry. |
-   | `true` (request was issued, has timed out) | `< 2` | Emit new entry with `attempt+1`; release lock; issue request; emit `bp1-codex-request-sent` linking to the new entry. |
-   | `true` (request was issued, has timed out) | `>= 2` | Emit `bp1-codex-unreachable` + transition to `needs_human`. Release lock. No further request. |
+   | `false` (recovery — applies at any attempt_number, including 0/1/2) | any value | **DO NOT advance.** Create `O_EXCL` claim at `<run>/request-claims/<existing_entry_id>.claim`. Release lock. Issue request for the existing entry; emit `bp1-codex-request-sent` linking to that entry. |
+   | `true` (request was issued, has timed out) | `< 2` | Emit new entry with `attempt+1`. **Create `O_EXCL` claim at `<run>/request-claims/<new_entry_id>.claim` for the NEW entry** (NEW v3.8 — closes the v3.7 advance-branch race that CLI round-7 caught). Release lock. Issue request. Emit `bp1-codex-request-sent` linking to the new entry. |
+   | `true` (request was issued, has timed out) | `>= 2` | Emit `bp1-codex-unreachable` + transition to `needs_human`. Release lock. No request issued. (No claim needed because no side effect happens.) |
 
    **Why uniform:** the round-5 reviewer caught that v3.5's table only branched on `request_sent` at the `>=2` boundary — a crash after writing `attempt=1` (or `attempt=0`) but before issuing the request silently advanced to attempt+1, burning the unsent attempt. v3.6 fixes by making `request_sent==false` the recovery path at every attempt_number value. The "advance attempt" decision now requires that the previous attempt was actually issued.
 
@@ -871,9 +875,9 @@ The lock is recorded as an episode (immutable claim) and released by emitting a 
 
 The state-transition lock (above) serializes entry emission, but releases BEFORE the side effect (em-review-request) and the request-sent evidence. That opens a window: between lock release and evidence emission, a second tick can acquire the lock, see the same entry's `request_sent==false`, take the recovery branch, release lock, and issue the request again. Both writers issue. (Codex async round-6 finding F1.)
 
-**Fix (v3.7):** add a per-entry **request-in-flight claim** via `O_EXCL` create-and-rename:
+**Fix (v3.7 → v3.8 — uniform across all issuing branches):** add a per-entry **request-in-flight claim** via `O_EXCL` create-and-rename. **Critical (v3.8 update from CLI round-7):** the claim is created BEFORE lock release on EVERY branch that issues a side effect (recovery branch, advance branch, naked-entry recovery branch). Only the `attempt>=2 → needs_human` branch skips it because no request is issued there.
 
-1. After acquiring the state-transition lock and deciding (recovery vs advance), but BEFORE releasing the lock, atomically create a claim file at `<run>/request-claims/<entry_id>.claim` via `O_EXCL`. Claim records:
+1. After acquiring the state-transition lock and deciding (recovery vs advance), but BEFORE releasing the lock, atomically create a claim file at `<run>/request-claims/<entry_id>.claim` via `O_EXCL`. The `<entry_id>` is **the entry the request will be issued for** — for the recovery branch this is the existing entry; for the advance branch it's the NEWLY emitted entry. Claim records:
    ```json
    {
      "claim_id": "<random>",
@@ -926,8 +930,8 @@ This is the original Codex-reply-timeout path. Fires from `bp1-codex-request-sen
 2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → wait → on resume re-check; emit `bp1-tick-deduped` if duplicate.
 3. Inside lock: read current entry's `attempt_number`; confirm `bp1-codex-request-sent` evidence exists for it (by definition of this path).
 4. Apply decision tree (now request_sent==true is implied):
-   - **`attempt_number < 2`** → emit new entry `attempt+1`; release lock; issue request; emit request-sent evidence for the new entry.
-   - **`attempt_number >= 2`** → emit `bp1-codex-unreachable` + needs_human; release lock; no request issued.
+   - **`attempt_number < 2`** → emit new entry `attempt+1`; **create `O_EXCL` claim for the NEW entry at `<run>/request-claims/<new_entry_id>.claim`** (NEW v3.8 — uniform across branches); release lock; issue request; emit request-sent evidence for the new entry.
+   - **`attempt_number >= 2`** → emit `bp1-codex-unreachable` + needs_human; release lock; no request issued (no claim needed).
 
 **Path B — naked-entry recovery sweep (5 min from entry `created_at`, NEW v3.7):**
 
@@ -936,7 +940,7 @@ This path catches crash-before-issue cases where there is NO `bp1-codex-request-
 1. `bp1-naked-entry-sweep` (NEW scheduled task, every 5 min) scans all active runs; for each, finds the most recent `codex_review` entry. If the entry has no `bp1-codex-request-sent` evidence linked to it AND `(now - entry.created_at) >= 5 min`, the entry is "naked + stale" — recovery target.
 2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → emit `bp1-tick-deduped`, exit.
 3. Inside lock: re-confirm naked-entry condition (could have changed during lock acquisition wait — the request might have been issued by another writer post-Path-A).
-4. If still naked and stale: release lock; issue request for the existing entry (no advance); emit `bp1-codex-request-sent` linking to it.
+4. If still naked and stale: create `O_EXCL` claim for the existing entry; release lock; issue request for the existing entry (no advance); emit `bp1-codex-request-sent` linking to it.
 5. If condition no longer holds (request was issued during wait): emit `bp1-naked-sweep-superseded` evidence; exit without side effect.
 
 **Why 5-min for Path B vs 30-min for Path A:**
@@ -1350,10 +1354,10 @@ Lessons emitted contribute to global corpus per `feedback_check_episodes_before_
 graph TD
     M0[M0 — Capability probe + contract validators<br/>mcp__scheduled-tasks availability check<br/>+ bp1-deadline-sweep.mjs fallback<br/>+ flag-check helper + activation episode schema<br/>+ validate-rfc-failure-table.mjs CI script<br/>+ bp1-build-artifact-manifest.mjs (deterministic)<br/>~5k]
     M1[M1 — Foundation<br/>orchestrator runtime + episode schema<br/>+ event-table + replay + snapshot<br/>+ HMAC key mgmt &amp; canonicalization<br/>~16k]
-    M2[M2 — Trigger + safety (FLAG-GATED)<br/>rfc-scan + classifier + run-lock<br/>+ marker-validate + crash-classify<br/>+ approval-check hook + deadline-tick<br/>all artifacts no-op when bp1.enabled=false<br/>~12k]
+    M2[M2 — Trigger + safety (FLAG-GATED)<br/>rfc-scan + classifier + run-lock<br/>+ marker-validate + crash-classify<br/>+ approval-check hook + deadline-tick<br/>+ naked-entry-sweep T1b (NEW v3.8)<br/>all artifacts no-op when bp1.enabled=false<br/>~13k]
     M3[M3 — Planning team<br/>orchestrator agent + sentinel + token-budget<br/>+ em-review-request extension<br/>~10k]
     M4[M4 — Implementation team<br/>code-reviewer + test-runner + security-reviewer<br/>+ auditor + human-input-watcher + lesson-generator<br/>~17k]
-    M5[M5 — Cleanup + wiring + ACTIVATION<br/>auto-PR + Codex PR review<br/>+ /bp1-auto + plugin.json<br/>+ branch-protection assertion + first dry-run<br/>+ bp1-flag-flip on dry-run pass<br/>~5k]
+    M5[M5 — Cleanup + wiring + ACTIVATION<br/>auto-PR + Codex PR review<br/>+ /bp1-auto + plugin.json (T1, T1b, T2 registered)<br/>+ branch-protection assertion + first dry-run<br/>+ dry-run gates Path B sweep firing within 5-min<br/>+ bp1-flag-flip on dry-run pass<br/>~5k]
     M6[M6 — Meta audit + archival<br/>bp1-security-audit + bp1-archive-ghosts<br/>+ weekly scheduled-task wiring<br/>~3k]
 
     M0 -->|hard| M1
@@ -1670,5 +1674,43 @@ Round 6 was empirically the highest-finding-density round since round 1: 4 findi
 Toolkit v9.3 episode `20260506-080224-...-6911`; reviewer prompt v4.3 `...ca0d`; planner v6.2 `...f886`; new tier-2 `feedback_codex_cli_augments_async.md`.
 
 **Status (v3.7):** still `draft`. Re-request via BOTH transports (CLI first to verify ACCEPT, then async em-store for audit trail). The first CLI re-run is the verification gate.
+
+### v3.8 — Codex CLI v3.7 follow-up findings (2026-05-06)
+
+The CLI re-run on v3.7 surfaced 2 new P1 findings that v3.7 introduced. Both were #17 application misses on my own v3.7 fixes — discipline ε (per-branch fan-out) was the right rule but I applied the O_EXCL claim only to the recovery branch in v3.7's decision table, leaving the advance branch with the same race window. Plus the new `bp1-naked-entry-sweep` task wasn't wired into 6 contract surfaces.
+
+| # | Source | Pri | Finding | Verdict | Resolution |
+|---|---|---|---|---|---|
+| CLI-v3.7-F1 | CLI | P1 | O_EXCL claim only added to recovery branch; advance branch still has the post-lock race | ACCEPT | Decision table updated to require `O_EXCL` claim creation BEFORE lock release on EVERY issuing branch (recovery, advance < 2). The `attempt >= 2 → needs_human` branch is exempt because no request issues. Both branches now uniformly atomic. |
+| CLI-v3.7-F2 | CLI | P1 | `bp1-naked-entry-sweep` introduced but not wired into 6 contract surfaces | ACCEPT | Wired into: (1) Proposal summary "Three scheduled tasks"; (2) Activation gate's gated-artifacts table (T1b); (3) Hooks/scheduled-tasks/manifest table (T1b row); (4) Scripts inventory (script #13 `bp1-naked-entry-sweep.mjs`); (5) Path A/B fallback (`bp1-deadline-sweep.mjs --once` extended to cover both); (6) M2 milestone description (T1b included) + M5 dry-run gate (verifies sweep fires within 5-min). |
+
+#### v3.8 #17 fan-out application audit (per discipline ε)
+
+To prevent the round-7 v3.7 → v3.8 reapply, this round explicitly verifies #17(b) per-branch × per-axis fan-out for the O_EXCL fix:
+
+| Decision-tree branch | RACE/TOCTOU coverage | BOUNDARY coverage | Test |
+|---|---|---|---|
+| `request_sent==false` (recovery, any attempt) | R16 (concurrent ticks, recovery branch); O_EXCL claim before lock release | Claim TTL boundary R18 | R3, R11, R14, R16, R18 |
+| `request_sent==true AND attempt < 2` (advance) | R16-advance (NEW v3.8 — concurrent ticks, advance branch); O_EXCL claim on NEW entry before lock release | Initial-entry claim file path uses NEW entry id | R1 + R16-advance |
+| `request_sent==true AND attempt >= 2` (needs_human, no issue) | N/A — no side effect, no claim needed | attempt_number boundary R2 | R2, R12 |
+
+Per-branch coverage now explicit; v9.3 ε rule satisfied.
+
+#### Updated test list (NEW v3.8)
+
+| # | Scenario | Expected outcome |
+|---|---|---|
+| **R16-advance (NEW v3.8)** | Two concurrent timeout-ticks both reach decision; both take advance branch (request_sent==true, attempt < 2). First emits new entry under lock, creates O_EXCL claim for the new entry, releases. Second acquires lock, reads new advanced entry from first writer, attempts to also emit advance entry. | Lock prevents double advance: second's `read most recent codex_review entry` shows the just-emitted entry from first writer. Decision tree on the new entry has `request_sent==false` (the new entry is naked) → second tick takes RECOVERY branch and tries `O_EXCL` claim for the new entry id. Claim already exists (first writer created it). `O_EXCL` fails → second tick emits `bp1-tick-deduped`, exits. Net: exactly one advance, one request, one request-sent evidence. |
+
+#### Updated invariants (v3.8)
+
+| # | Invariant | Locally verifiable? | Holds? |
+|---|---|---|---|
+| I1-I3 | (unchanged from v3.7) | yes | yes |
+| I4 (REVISED v3.8 — uniform across branches) | em-review-request issuance is locally serialized by per-entry O_EXCL claim **on EVERY issuing branch** (recovery + advance) AND idempotency key `sha256(run_id‖parent_episode_id‖attempt_number)`. Exactly one request per (run_id, parent_episode_id, attempt_number) triple. | yes | yes (verified by R16 + R16-advance) |
+| I5-I6 | (unchanged from v3.7) | yes | yes |
+| I7 (NEW v3.8) | `bp1-naked-entry-sweep` is wired into ALL 6 contract surfaces: scheduled-tasks inventory, activation-gated artifacts, scripts inventory, fallback, M2 milestone, M5 dry-run gate. | yes (each surface has an explicit row/line citing T1b or `bp1-naked-entry-sweep.mjs`) | yes |
+
+**Status (v3.8):** still `draft`. Verified locally via `codex review` CLI; will re-run after v3.8 push to confirm clean. If clean, file async em-store request as audit trail.
 
 ---
