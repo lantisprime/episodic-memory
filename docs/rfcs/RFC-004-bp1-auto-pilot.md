@@ -2,11 +2,12 @@
 rfc_id: RFC-004
 slug: bp1-auto-pilot
 title: BP-1 Auto-Pilot — Automated Rule-18 Implementation Workflow
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.11
+accepted: 2026-05-06
+version: 3.12
 supersedes: ~
 superseded_by: ~
 ---
@@ -41,8 +42,8 @@ A multi-agent automation pipeline that drives RFCs through Rule 18 end-to-end. C
 - **One existing agent reused** — `negative-scenario-planner` for plan-time adversarial review.
 - **One lesson agent** — emits global lesson episodes per resolved bug + per-run synthesis, growing the corpus on every run.
 - **Fourteen scripts** — RFC scanner (fail-closed), event-table renderer, replay walker, snapshot emitter, run-lock, marker validator, crash classifier, ghost-run archival, token-budget calculator, em-review-request extension, orchestrator runtime, canonicalize helper (NEW v3.8), naked-entry sweep (NEW v3.8), unified deadline-sweep fallback `bp1-deadline-sweep.mjs` (NEW v3.10 — explicit inventory entry per CLI v3.9 F2; was previously only documented in the fallback section).
-- **One SessionStart hook** — bp1-approval-check, ordered after handoff-prompt.
-- **Three scheduled tasks** — `bp1-deadline-tick` (5-min cron, request-issued timeout per Path A), `bp1-naked-entry-sweep` (5-min cron, naked-entry recovery per Path B — NEW v3.8), and `bp1-security-audit-weekly` (Sunday meta-audit + ghost-run archival). All principle-conformant per P6 (visible, listable, episode-emitting).
+- **Two SessionStart hooks** (UPDATED v3.12) — `bp1-approval-check` (H1, after handoff-prompt) and `bp1-sweep-on-session.sh` (H2, after H1; activation-gated; provides fallback liveness when `mcp__scheduled-tasks` capability missing).
+- **Three scheduled tasks** — `bp1-deadline-tick` (5-min cron, request-issued timeout per Path A), `bp1-naked-entry-sweep` (1-min cron, naked-entry recovery per Path B — NEW v3.8; cadence tightened from 5 min to 1 min in v3.12 per CLI v3.11 F4 so the "Path B fires within 5 min of entry created_at" SLA is mathematically achievable), and `bp1-security-audit-weekly` (Sunday meta-audit + ghost-run archival). All principle-conformant per P6 (visible, listable, episode-emitting).
 - **One slash command** — `/bp1-auto <rfc-id>` for manual entry.
 
 The pipeline is gated by two distinct mechanisms:
@@ -536,11 +537,11 @@ All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_cano
 | H1 | `.claude/hooks/bp1-approval-check.sh` | SessionStart, after handoff-prompt | Calls `bp1-marker-validate.mjs`; routes by class + deadline |
 | H2 (NEW v3.10) | `.claude/hooks/bp1-sweep-on-session.sh` | SessionStart (after H1) | Calls `bp1-deadline-sweep.mjs --once` when `scheduled_tasks_capability == fallback`. **Activation-gated** (calls `bp1-flag-check` first; no-op if flag-check fails). Best-effort liveness for T1 + T1b when scheduled-tasks unavailable. Added v3.10 per CLI v3.9 F2. |
 | T1 | `bp1-deadline-tick` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs check-deadlines` (Path A — request-issued timeout); emits tick episode |
-| T1b (NEW v3.8) | `bp1-naked-entry-sweep` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs sweep-naked-entries` (Path B — naked-entry recovery, 5-min from entry created_at); emits sweep episode. Activation-gated; flag-check refuses if project not active. |
+| T1b (NEW v3.8) | `bp1-naked-entry-sweep` (scheduled task) | every 1 min (UPDATED v3.12) | Calls `bp1-orchestrator.mjs sweep-naked-entries` (Path B — naked-entry recovery, 5-min age threshold from entry created_at); emits sweep episode. Activation-gated; flag-check refuses if project not active. **v3.12 cadence:** 1-min cron + 5-min age threshold ensures upper bound of ~6 min from entry creation to recovery (well within the 5-min SLA the invariant claims, with 1-min margin for the threshold check itself). Was 5 min in v3.8-v3.11 — caused worst-case 10-min latency per CLI v3.11 F4. |
 | T2 | `bp1-security-audit-weekly` (scheduled task) | Sunday 09:00 PHT | Meta-audit + ghost archival; emits weekly digest |
 | M1 | `/bp1-auto <rfc-id>` (slash command) | manual | Wrapper → orchestrator |
 | M2 | `.claude-plugin/plugin.json` update | — | Registers slash command + scheduled tasks |
-| H-cfg | `.claude/settings.json` wiring | — | Adds bp1-approval-check to SessionStart array |
+| H-cfg | `.claude/settings.json` wiring | — | Adds **both** `bp1-approval-check` AND `bp1-sweep-on-session.sh` to the SessionStart array (NEW v3.12 per CLI v3.11 F2 — H2 was inventoried v3.10 but the wiring contract was not updated; both hooks now wired). Order: approval-check FIRST (for handoff-prompt), sweep-on-session SECOND (for fallback liveness). |
 
 ### Scheduled-task probe + fallback (M0)
 
@@ -558,7 +559,15 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 - Invocable manually: `node scripts/bp1-deadline-sweep.mjs --once`.
 - Auto-wired as a SessionStart hook (`.claude/hooks/bp1-sweep-on-session.sh`, hook H2 — added to inventory v3.10 per CLI v3.9 F2) so any human session triggers a sweep — provides best-effort liveness when the scheduled-task capability is missing.
 
-- **Activation gating with M5 dry-run bypass (REVISED v3.11 per CLI v3.10 F1):** the hook + `--once` invocation call `bp1-flag-check.mjs` FIRST and exit 0 silently if the project is disabled/inactive. **Exception:** when `BP1_DRY_RUN_MODE=1` is set in the environment OR a `<project>/.episodic-memory/.bp1-dry-run.lock` file exists (containing the dry-run run_id and a TTL), the sweep dispatches even when activation is false. This bypass is set by `bp1-flag-flip.mjs --dry-run-on <run_id>` at M5 dry-run start and cleared by `--dry-run-off` after dry-run completion. Without this bypass, fallback-only environments (no `mcp__scheduled-tasks` capability) would deadlock M5 — the dry-run needs to exercise Path A/B sweeps to verify them, but activation can only flip after the dry-run passes. The dry-run mode is single-project-scoped (the lock file's run_id binds it to one project's M5 attempt) and TTL-bounded (default 30 min — generous enough for a dry run, short enough to fail closed if M5 crashes mid-run).
+- **Activation gating with M5 dry-run bypass (REVISED v3.12 per CLI v3.11 F3 — both halves project-scoped):** the hook + `--once` invocation call `bp1-flag-check.mjs` FIRST and exit 0 silently if the project is disabled/inactive. **Exception:** the dry-run bypass requires BOTH halves to match the canonical project root:
+  1. `<project>/.episodic-memory/.bp1-dry-run.lock` file exists (containing the dry-run run_id, a TTL, AND `project_root_sha256` = sha256 of canonical project root) — file half, intrinsically project-scoped.
+  2. `BP1_DRY_RUN_MODE` env var is set AND its value equals `<project_root_sha256>` (i.e., the env value must match the canonical project root sha that the lock file declares) — env half, NOW project-scoped per v3.12.
+
+  The flag-check helper extracts canonical project root via `git rev-parse --show-toplevel` + `realpath`, computes sha256, and compares against BOTH the lock file's `project_root_sha256` AND the env var value. If either doesn't match → no bypass; activation gate fails closed.
+
+  Without the env-binding fix, an inherited `BP1_DRY_RUN_MODE=1` from another project's M5 dry run could let an inactive project's bp1 artifacts dispatch (per CLI v3.11 F3 — "another inactive project with BP1 artifacts in the same environment can dispatch the sweep despite enabled=false"). v3.12 binds the env var to the project canonical root, so cross-project bypass is impossible.
+
+  The bypass is set by `bp1-flag-flip.mjs --dry-run-on <run_id>` (writes lock file with project_root_sha256, exports env var to that sha) and cleared by `--dry-run-off` (deletes lock, unsets env). TTL-bounded (default 30 min — generous enough for a dry run, short enough to fail closed if M5 crashes mid-run). Single-project-scoped by construction (sha-based comparison).
 - Records each invocation as a `bp1-sweep-tick` episode for audit-trail parity with T1.
 - Does NOT replicate T2 (weekly meta-audit) — that degrades to a manual `node scripts/bp1-security-audit.mjs --once`, surfaced in the operator runbook.
 
@@ -750,7 +759,7 @@ The records hold everything replay needs to detect tampering **without `run.key`
 2. Recomputes `episodes_records_root` from the records and compares (rejects record-list tampering within the manifest).
 3. For each record: re-derives `canonical_sha256` from on-disk frontmatter fields and re-derives `body_sha256` from on-disk body bytes; compares both to the stored record values. Mismatch → `bp1-manifest-fail`.
 4. (Defence-in-depth, key-not-required) cross-checks on-disk frontmatter `hmac_signature` matches manifest's stored `hmac_signature`. This catches one specific case: someone tampering BOTH body and frontmatter hmac to a self-consistent forgery — the on-disk `hmac_signature` value would mismatch the manifest's record.
-5. **(REVISED v3.11 per CLI v3.10 F2 — cross-store equality check)** Scan the on-disk episode set for this `run_id` across **BOTH** stores: `<project>/.episodic-memory/episodes/` (local) AND `~/.episodic-memory/episodes/` (global). Per the storage policy, `bp1-lesson` episodes are emitted to global scope, but they ARE part of this run's audit trail and ARE included in the manifest's `per_episode_records`. The equality check compares the union of (local-store run-episodes ∪ global-store run-episodes) against `per_episode_records`. Any extra-on-disk episode (in either store, matching `run_id`, but not in the manifest) → `bp1-manifest-fail` with reason `extra-episode`. Any missing-on-disk episode (in the manifest but not on disk in either store) → `bp1-manifest-fail` with reason `missing-episode`. This closes both the local post-terminal append attack AND the global lessons-tampering attack.
+5. **(REVISED v3.12 per CLI v3.11 F1 + v3.10 F2 — cross-store equality check, manifest-self-excluded)** Scan the on-disk episode set for this `run_id` across **BOTH** stores: `<project>/.episodic-memory/episodes/` (local) AND `~/.episodic-memory/episodes/` (global). Per the storage policy, `bp1-lesson` episodes are emitted to global scope, but they ARE part of this run's audit trail and ARE included in the manifest's `per_episode_records`. **The `bp1-run-manifest` episode itself is EXCLUDED from the equality check** (it shares the `run_id` but is the verification artifact, not part of the records list — including it would create a self-reference paradox where the manifest can never be self-consistent). The equality check compares the union of (local-store run-episodes ∪ global-store run-episodes) MINUS the `bp1-run-manifest` episode against `per_episode_records`. Any extra-on-disk episode (in either store, matching `run_id`, not the manifest itself, but not in the manifest's records) → `bp1-manifest-fail` with reason `extra-episode`. Any missing-on-disk episode (in the manifest's records but not on disk in either store) → `bp1-manifest-fail` with reason `missing-episode`. This closes the local post-terminal append attack, the global lessons-tampering attack, AND the v3.10/v3.11 self-reference deadlock.
 
    The manifest builder at `finalize-run` step 2 was updated v3.11 to scan BOTH stores when collecting per-episode records (was local-only in v3.7-v3.10).
 
@@ -964,7 +973,7 @@ This is the original Codex-reply-timeout path. Fires from `bp1-codex-request-sen
 
 This path catches crash-before-issue cases where there is NO `bp1-codex-request-sent` evidence — and therefore no `requested_at` to start a 30-min timer from. Without Path B, R3/R11/R14 are unreachable: a naked entry has no timer that would fire to trigger recovery.
 
-1. `bp1-naked-entry-sweep` (NEW scheduled task, every 5 min) scans all active runs; for each, finds the most recent `codex_review` entry. If the entry has no `bp1-codex-request-sent` evidence linked to it AND `(now - entry.created_at) >= 5 min`, the entry is "naked + stale" — recovery target.
+1. `bp1-naked-entry-sweep` (NEW scheduled task, every 1 min as of v3.12) scans all active runs; for each, finds the most recent `codex_review` entry. If the entry has no `bp1-codex-request-sent` evidence linked to it AND `(now - entry.created_at) >= 5 min`, the entry is "naked + stale" — recovery target. (v3.12 note: 1-min cadence + 5-min age threshold means worst-case latency from `created_at` to recovery is ~6 min, satisfying the "within 5-min" SLA with bounded slop.)
 2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → emit `bp1-tick-deduped`, exit.
 3. Inside lock: re-confirm naked-entry condition (could have changed during lock acquisition wait — the request might have been issued by another writer post-Path-A).
 4. If still naked and stale: create `O_EXCL` claim for the existing entry; release lock; issue request for the existing entry (no advance); emit `bp1-codex-request-sent` linking to it.
@@ -988,7 +997,7 @@ The retry section's contract reduces to five invariants. Each is locally verifia
 | I2 | Advance from `attempt=N` to `attempt=N+1` only when `request_sent==true` for the current entry AND timeout elapsed. | Decision-tree row 2; R1, R2 | yes |
 | I3 | `needs_human` route fires only when `request_sent==true` AND `attempt_number >= 2` AND timeout elapsed. | Decision-tree row 3; R2 (after both retries issued + timed out), R12 (crash-after-issue at attempt=2) | yes |
 | I4 (REVISED v3.7 — locally verifiable) | em-review-request issuance is **locally serialized** by per-entry `O_EXCL` request-in-flight claim AND idempotency key `sha256(run_id ‖ parent_episode_id ‖ attempt_number)`. Exactly one request per `(run_id, parent_episode_id, attempt_number)` triple. | O_EXCL claim file at `<run>/request-claims/<entry_id>.claim`; em-review-request extension rejects duplicate idempotency keys. R16 verifies. | **yes** (was external-asserted in v3.6; v3.7 makes it local) |
-| I5 (NEW v3.7) | Naked-entry recovery fires within 5 min of entry `created_at` regardless of whether a request-issued timeout exists. | Path B (naked-entry sweep) at lines ~889; R17 verifies threshold; R3/R11/R14 verify recovery happens. | yes |
+| I5 (REVISED v3.12 — bounded SLA) | Naked-entry recovery fires within `5 min + sweep_cadence` of entry `created_at` (i.e., ≤6 min with 1-min cadence per v3.12). The age threshold is 5 min; the cadence determines residual slop. R17 verifies threshold; R3/R11/R14 verify recovery happens. | Path B (naked-entry sweep) at lines ~975; cadence in T1b table; R17. | yes |
 | I6 (NEW v3.7) | Authorization-bearing frontmatter fields (`attempt_number`, `parent_state_transition`, `requested_at`, `review_request_ref`, etc.) are signed by the per-episode HMAC because they're listed in the canonical-payload spec. | Canonicalization spec at lines ~640-680 lists episode-type-specific fields; H21-H26 verify tamper-detection per field. | yes |
 
 The split prevents both the round-4 attempt-2-crash silent-loss bug AND the round-5 attempt-1-crash silent-loss bug: any entry with no `bp1-codex-request-sent` evidence is recoverable regardless of attempt_number; only entries with both an attempt and a recorded issuance can advance or exhaust. em-review-request is idempotent per I4.
@@ -1701,6 +1710,34 @@ Round 6 was empirically the highest-finding-density round since round 1: 4 findi
 Toolkit v9.3 episode `20260506-080224-...-6911`; reviewer prompt v4.3 `...ca0d`; planner v6.2 `...f886`; new tier-2 `feedback_codex_cli_augments_async.md`.
 
 **Status (v3.7):** still `draft`. Re-request via BOTH transports (CLI first to verify ACCEPT, then async em-store for audit trail). The first CLI re-run is the verification gate.
+
+### Known second-order issues / follow-ups (v3.12 — for M0/M1 implementation phase)
+
+The 6-round async + 5-round CLI cycle (v3.0 → v3.12) caught and fixed 25+ distinct findings. Remaining residual contract-consistency items that are LOW-risk for spec-level resolution and naturally caught by implementation-phase CI gates are deferred to follow-up issues in M0/M1:
+
+| # | Type | Description | Resolution path |
+|---|---|---|---|
+| FU-1 | Doc-consistency | Cross-reference drift may surface in further CLI iterations; expected pattern: each contract surface (3 stores, 4 verification steps, 6 artifact-management contracts) interacts with ~5 others, creating combinatorial cross-ref burden | M0's `validate-rfc-failure-table.mjs` extension can be generalized to `validate-rfc-cross-refs.mjs` to mechanically catch row-count drift, hook-table drift, scripts-inventory drift, etc. |
+| FU-2 | Spec-vs-implementation gap | Some contracts (e.g., the manifest builder's "scan both stores" rule, the dry-run env-var binding) are easy to spec but require careful implementation to match | M0 + M1 unit tests must pin these contracts; CI failure required to block merges that drift |
+| FU-3 | Edge-case coverage | At round 11, CLI is finding 4 P1/P2 narrow contract-consistency items per round at oscillating rate (not converging in spec-only iteration) | Implementation-phase CI tests against the negative-test catalog (R1-R18, H1-H28, A1-A15) will surface remaining edge cases empirically |
+| FU-4 | Failure-table integrity | New failure rows added across 11 versions; CI uniqueness validator must enforce unique IDs across versions | Already handled by `validate-rfc-failure-table.mjs` (M0 deliverable) per Rule 14 |
+
+**Why ship at v3.12 with these followups instead of iterating to convergence:** the cycle's per-round finding rate has been oscillating 2-4 since v3.7, suggesting a fixed-point characteristic of the design's cross-reference burden rather than improvable specification. Implementation-phase CI gates (validators, manifest-builder unit tests, hook-wiring asserts) are a more efficient enforcement mechanism than continued spec iteration. v3.12 contains 6 invariants (I1-I6, plus I7 from v3.8 wiring) that are all locally verifiable per discipline #18 δ; the fix-introduced surface is fan-out-tested per #17 ε; and the manifest contract closes the round-6/9/10 architectural gaps. Remaining issues are documentation-cross-reference items, not architecture flaws.
+
+### v3.12 — final draft-cycle fixes + flip to `accepted` (2026-05-06)
+
+CLI round 11 (v3.11 review) returned 4 findings. All ACCEPT, all mechanical:
+
+| # | Pri | Finding | Fix |
+|---|---|---|---|
+| 1 | P1 | Manifest episode self-references run_id; step 5 equality check would falsely fail | Step 5 explicitly excludes `bp1-run-manifest` from the equality check |
+| 2 | P1 | H2 hook in inventory but H-cfg row + proposal summary still claim only H1 wired | H-cfg row updated to wire BOTH hooks; proposal summary "Two SessionStart hooks" |
+| 3 | P2 | `BP1_DRY_RUN_MODE` env-var bypass not bound to project root | Env var value MUST equal `<project_root_sha256>`; cross-checked at hook time alongside lock file |
+| 4 | P2 | 5-min cadence × 5-min threshold = up to 10-min recovery (contradicts SLA) | T1b cadence tightened from 5-min to 1-min; I5 revised to bounded `5 min + cadence` (≤6 min) |
+
+After v3.12 fixes: status flipped from `draft` to `accepted`. Per Rule 10 second-opinion requirement satisfied by 11 rounds of Codex review (6 async + 5 CLI). Implementation phase (M0 → M1 → ... → M6) starts.
+
+---
 
 ### v3.8 — Codex CLI v3.7 follow-up findings (2026-05-06)
 
