@@ -1092,7 +1092,7 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 | 17 | run_id collision (F5) | run-lock script | A (regen) | `bp1-runid-regen` | no |
 | 18 | Decision-log orphan (F3) | replay | B | `bp1-orphan-detected` | yes |
 | 19 | Branch-protection fail (Gap 4) | orchestrator startup | C | `bp1-rule17-violation` | yes |
-| 20 | Orchestrator crash | crash-classify | A or B | `bp1-crash-recovered` | yes (if A) |
+| 20 | Orchestrator crash | crash-classify | A or B | `bp1-crash-recovered` | conditional |
 | 21 | `gh pr create` fails | orchestrator | A→B (retry fail) | `bp1-pr-create-fail` | yes |
 | 22 | Codex PR-review request fails | em-review-request | A | `bp1-codex-request-fail` | no |
 | 23 | Abandoned >7 days | archive-ghosts | D | `bp1-ghost-archived` | yes |
@@ -1418,7 +1418,8 @@ graph TD
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| PR-1a (M0 part 1) | `scripts/lib/bp1-manifest.mjs`, `scripts/bp1-flag-check.mjs`, `scripts/bp1-build-artifact-manifest.mjs`, `scripts/validate-rfc-failure-table.mjs`, `scripts/validate-rfc-artifact-manifest.mjs`, `install.mjs` (verify-key + config skeleton + line-anchored .gitignore), `.github/workflows/rfc-validate.yml`, `docs/bp1/config-schema.md`; this row 20 prose lesson "yes (if A)" → "conditional" (matches YAML mirror) | `tests/test-bp1-flag-check.mjs` (9), `tests/test-bp1-build-artifact-manifest.mjs` (10), `tests/test-validate-rfc-failure-table.mjs` (10), `tests/test-validate-rfc-artifact-manifest.mjs` (5), `tests/test-install-bp1.sh` (12) — 46 cases | M0 deliverables landed pre-activation; both validators green on real RFC-004; 2 deferred findings (TOCTOU [#179](https://github.com/lantisprime/episodic-memory/issues/179), em-search fallback [#180](https://github.com/lantisprime/episodic-memory/issues/180)). Codex-ACCEPT'd plan from prior session; review-pass HOLD findings folded in pre-merge. |
+| PR-1b (M0 part 2) | _pending_ — `bp1-deadline-sweep.mjs --once` + `.claude/hooks/bp1-sweep-on-session.sh` H2 hook + scheduled-tasks probe | _pending_ | After PR-1a merges; depends on flag-check (call-site for activation gating). |
 
 ---
 
