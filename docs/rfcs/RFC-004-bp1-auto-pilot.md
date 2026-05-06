@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.6
+version: 3.7
 supersedes: ~
 superseded_by: ~
 ---
@@ -637,22 +637,58 @@ Replay is durable indefinitely without retaining the per-run key. The per-run ke
 - Fingerprint (`HMAC-SHA256(key, "verify-key-fingerprint-v1")` — first 16 hex chars) recorded as `verify_key_id` in the activation map and in every `bp1-run-manifest`. Mismatch → `bp1-flag-key-drift` (failure-table); orchestrator refuses to advance.
 - **Rotation procedure (M5 deliverable, `bp1-rotate-verify-key.mjs`):** (a) refuse if any run is in non-terminal state; (b) generate new key; (c) re-sign each existing `bp1-run-manifest` with the new key, emitting `bp1-manifest-resigned` evidence per manifest; (d) atomically replace the verify-key file; (e) update `verify_key_id` in every project's activation entry; (f) emit `bp1-verify-key-rotated` (global). Active runs are blocked from starting during the rotation window via the global config lock.
 
-#### Canonical bytes (what each HMAC signs)
+#### Canonical bytes (what each HMAC signs) — v3.7 includes episode-type-specific fields
 
-Per-episode HMAC (live-run + stored verbatim into manifest):
+Per-episode HMAC (live-run + stored verbatim into manifest). v3.7 adds **episode-type-specific fields** to the canonical payload. Without them, retry-specific frontmatter fields (`attempt_number`, `parent_state_transition`, `requested_at`, `review_request_ref`) would be unsigned — R7/R13 would be theatrical because tampering those fields wouldn't change the HMAC. (Codex CLI round-6 finding F1.)
 
 ```
 canonical = sha256(JSON.stringify(payload, Object.keys(payload).sort()))
 payload = {
+  // Generic fields — present on every bp1 episode
   run_id,
   parent_episode,
-  type,                          // plan | decision | evidence | violation | lesson
-  expected_post_episode_id,      // null if not a pre-decision
-  summary,                       // immutable user-visible label
-  body_sha256                    // sha256 of utf8-encoded body Markdown (post-frontmatter)
+  type,                            // plan | decision | evidence | violation | lesson | state-transition
+  expected_post_episode_id,        // null if not a pre-decision
+  summary,                         // immutable user-visible label
+  body_sha256,                     // sha256 of utf8-encoded body Markdown (post-frontmatter)
+
+  // Episode-type-specific fields (NEW v3.7) — included when present in frontmatter
+  // For type == "state-transition" with state == "codex_review":
+  state,                           // e.g., "codex_review"
+  attempt_number,                  // integer, retry counter
+  parent_state_transition,         // previous codex_review entry id, or null
+
+  // For tag == "bp1-codex-request-sent" evidence:
+  requested_at,                    // ISO-8601 timestamp
+  review_request_ref,              // em-review-request episode id
+
+  // For tag == "bp1-state-lock-claim" evidence (introduced v3.4):
+  lock_state_tag,                  // e.g., "codex_review"
+  lock_ttl_seconds,                // numeric
+
+  // Future-extensibility: any episode-type-specific authorization-bearing field
+  // MUST be added here at the time the field is introduced. Failure-table CI gate
+  // (validate-rfc-failure-table.mjs) extension v3.7: also validates that every
+  // schema-specific frontmatter field appearing in the RFC is named here OR
+  // explicitly documented as non-load-bearing.
 }
 hmac_signature = HMAC-SHA256(run.key, canonical)
 ```
+
+**Construction rule:** the orchestrator's `bp1-canonicalize.mjs` (M1 deliverable) takes an episode's frontmatter object, projects to the union of (generic fields) + (episode-type-specific fields per the spec above), sorts keys, JSON-stringifies, sha256s. Any frontmatter field NOT in the canonical set is excluded — this is what allows the body's metadata fields (timestamps, tags, etc.) to be edited without invalidating signatures, while still binding the AUTHORIZATION-BEARING fields to the HMAC.
+
+**Why named fields rather than full-frontmatter canonicalization:** full-frontmatter would require the orchestrator to NEVER add non-authorization-bearing fields after signing. That's brittle. Named fields make the contract explicit — adding a new authorization-bearing field requires a coordinated update to (a) the canonical payload spec, (b) the canonicalization script, (c) the failure-table CI validator, (d) every signed episode written from then on. Each of those is a deliberate touchpoint.
+
+**Negative tests for canonicalization (M1, NEW v3.7 — augments H1-H20):**
+
+| # | Scenario | Expected outcome |
+|---|---|---|
+| H21 (NEW v3.7) | Tamper `attempt_number` in `codex_review` entry frontmatter post-emit | `bp1-hmac-fail` (live verification recomputes canonical with new attempt_number, mismatches stored signature) |
+| H22 (NEW v3.7) | Tamper `parent_state_transition` in `codex_review` entry post-emit | `bp1-hmac-fail` |
+| H23 (NEW v3.7) | Tamper `review_request_ref` in `bp1-codex-request-sent` evidence post-emit | `bp1-hmac-fail` |
+| H24 (NEW v3.7) | Tamper `requested_at` in `bp1-codex-request-sent` evidence post-emit | `bp1-hmac-fail` |
+| H25 (NEW v3.7) | Add a NEW frontmatter field (not in canonical spec) post-emit | PASS (non-canonical fields don't affect signature; documented behavior) |
+| H26 (NEW v3.7) | CI: introduce a new authorization-bearing frontmatter field in some other episode type without updating the canonical spec | `validate-rfc-failure-table.mjs` (extended v3.7) fails the build, citing the unsigned field |
 
 Manifest signature (terminal artifact, signed by verify-key) — v3.4 stores **complete per-episode records**, not just HMACs, so post-terminal replay can detect tampering without `run.key`:
 
@@ -831,27 +867,98 @@ Before emitting any new `codex_review` entry, the orchestrator MUST:
 
 The lock is recorded as an episode (immutable claim) and released by emitting a `bp1-state-lock-release` evidence episode. Crash recovery: on orchestrator restart, any lock with a release episode OR with elapsed TTL is treated as released; the next session re-reads state and proceeds. Lock claims older than TTL with no release are treated as crashed; emit `bp1-state-lock-stale` evidence and reclaim.
 
-#### On every timeout fire (revised v3.6)
+#### Per-entry request-in-flight claim (NEW v3.7 — concurrent-tick atomicity)
 
-1. `bp1-deadline-tick` (or fallback sweep) detects the 30-min deadline elapsed for the current `codex_review` entry of this run.
-2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → wait → on resume re-check; emit `bp1-tick-deduped` if duplicate.
-3. Inside lock: read current entry's `attempt_number`; check for `bp1-codex-request-sent` evidence linked to that entry.
-4. Apply the decision tree above (request_sent first, attempt_number second). Possible paths:
-   - **`request_sent==false` (any attempt)** → release lock; issue request for the existing entry; emit `bp1-codex-request-sent` linking to that entry. NO advance. Recovery from crash-before-issue at any attempt value.
-   - **`request_sent==true` AND `attempt_number < 2`** → emit new entry `attempt+1`; release lock; issue request; emit request-sent evidence for the new entry.
-   - **`request_sent==true` AND `attempt_number >= 2`** → emit `bp1-codex-unreachable` + needs_human; release lock; no request issued.
-5. After lock release: any side effect happens here; the request-sent evidence episode follows.
+The state-transition lock (above) serializes entry emission, but releases BEFORE the side effect (em-review-request) and the request-sent evidence. That opens a window: between lock release and evidence emission, a second tick can acquire the lock, see the same entry's `request_sent==false`, take the recovery branch, release lock, and issue the request again. Both writers issue. (Codex async round-6 finding F1.)
 
-#### Invariants (v3.6 — explicit per discipline #18)
+**Fix (v3.7):** add a per-entry **request-in-flight claim** via `O_EXCL` create-and-rename:
 
-The retry section's contract reduces to four invariants:
+1. After acquiring the state-transition lock and deciding (recovery vs advance), but BEFORE releasing the lock, atomically create a claim file at `<run>/request-claims/<entry_id>.claim` via `O_EXCL`. Claim records:
+   ```json
+   {
+     "claim_id": "<random>",
+     "parent_episode_id": "<entry_id>",
+     "attempt_number": <N>,
+     "claimed_at": "<ISO-8601>",
+     "ttl_seconds": 60,
+     "writer_run_id": "<run_id>"
+   }
+   ```
+2. If `O_EXCL` succeeds → this writer is the **side-effect owner**. Release state-transition lock. Issue em-review-request. Emit `bp1-codex-request-sent` evidence linked to the entry. Optionally remove the claim file post-evidence (or leave it; replay can derive serialization from evidence presence).
+3. If `O_EXCL` fails (another writer already owns the claim for this entry_id) → emit `bp1-tick-deduped` evidence linking to the existing claim. Exit without side effect.
 
-| # | Invariant | How verified |
+**Idempotency key for em-review-request (NEW v3.7 — local enforcement, not just external):**
+
+The em-review-request side-effect MUST carry an idempotency key derived from the local claim:
+
+```
+idempotency_key = sha256(run_id || parent_episode_id || attempt_number)
+```
+
+`em-review-request` (extension v3.7) accepts `--idempotency-key <hex>`; if a request with the same key already exists in the local em-review-request queue, the second invocation no-ops and returns the existing request's reference. This is the **local enforcement** of I4: idempotency is now a property of THIS RFC's protocol, not of an external Codex contract.
+
+**Crash recovery for orphaned claims:**
+
+| Scenario | Handling |
+|---|---|
+| Claim file exists, `bp1-codex-request-sent` evidence exists for the same entry | Normal completion path; claim was successful |
+| Claim file exists, no evidence, `(now - claim.claimed_at) < ttl` | In-flight; another writer is processing |
+| Claim file exists, no evidence, `(now - claim.claimed_at) >= ttl` | Crashed mid-issuance; emit `bp1-claim-stale` evidence; clear claim file; retry per Path B (naked-entry sweep) |
+| No claim file, no evidence | Naked entry; Path B will pick it up after entry's 5-min crash-recovery window |
+
+**Negative test (NEW v3.7):**
+
+| # | Scenario | Expected outcome |
 |---|---|---|
-| I1 | `request_sent==false` ⇒ same-entry recovery, **uniformly across all attempt_number values**. No advance. | Decision-tree row 1 above; R3, R11 (NEW v3.6 R14 + R15) test crash-before-issue at attempt=0, 1, 2 |
-| I2 | Advance from `attempt=N` to `attempt=N+1` only when `request_sent==true` for the current entry AND timeout elapsed. | Decision-tree row 2; R1, R2 |
-| I3 | `needs_human` route fires only when `request_sent==true` AND `attempt_number >= 2` AND timeout elapsed (i.e., 2 retries actually issued). | Decision-tree row 3; R2 (after both retries issued + timed out), R12 (crash-after-issue at attempt=2) |
-| I4 | em-review-request is idempotent on Codex side, so re-issuance after partial crash is safe. | External contract (review-request hygiene); cross-checked by re-issuance not duplicating in Codex's queue |
+| R16 (NEW v3.7) | Two concurrent timeout-ticks on same entry, both reach lock-release in ~10ms; first pauses post-release; second acquires lock, takes recovery branch | First's `O_EXCL` claim creation succeeds; second's `O_EXCL` fails → second emits `bp1-tick-deduped` and exits. Exactly one em-review-request issued; exactly one `bp1-codex-request-sent` evidence written. The state-transition lock alone is insufficient (R4 didn't catch this); the per-entry O_EXCL claim closes the post-lock evidence-gap window. |
+| R17 (NEW v3.7) | Naked-entry sweep fires for an entry; entry's `created_at` was 4:55 ago (just under 5-min threshold) | Sweep skips (threshold not met); next sweep fires 5 min later; if entry still naked, recovery proceeds via Path B |
+| R18 (NEW v3.7) | Crash mid-issuance: claim file exists, request was actually issued by Codex but `bp1-codex-request-sent` evidence write crashed before completing | Next sweep observes claim file with no evidence + TTL elapsed → emits `bp1-claim-stale`; clears claim; re-issues request (em-review-request idempotency key catches duplicate; Codex returns existing request reference); writes evidence. Net: one final logical request, audit trail of recovery. |
+
+#### On every timeout fire (revised v3.7 — two distinct deadlines)
+
+v3.7 separates two timer paths because they have different latency budgets and different evidence sources (Codex CLI round-6 finding F2):
+
+**Path A — request-issued timeout (30 min from `requested_at`):**
+
+This is the original Codex-reply-timeout path. Fires from `bp1-codex-request-sent` evidence's `requested_at` + 30 min:
+
+1. `bp1-deadline-tick` (scheduled task) or fallback sweep detects 30-min elapsed since `requested_at` of the most recent `bp1-codex-request-sent` for the current entry.
+2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → wait → on resume re-check; emit `bp1-tick-deduped` if duplicate.
+3. Inside lock: read current entry's `attempt_number`; confirm `bp1-codex-request-sent` evidence exists for it (by definition of this path).
+4. Apply decision tree (now request_sent==true is implied):
+   - **`attempt_number < 2`** → emit new entry `attempt+1`; release lock; issue request; emit request-sent evidence for the new entry.
+   - **`attempt_number >= 2`** → emit `bp1-codex-unreachable` + needs_human; release lock; no request issued.
+
+**Path B — naked-entry recovery sweep (5 min from entry `created_at`, NEW v3.7):**
+
+This path catches crash-before-issue cases where there is NO `bp1-codex-request-sent` evidence — and therefore no `requested_at` to start a 30-min timer from. Without Path B, R3/R11/R14 are unreachable: a naked entry has no timer that would fire to trigger recovery.
+
+1. `bp1-naked-entry-sweep` (NEW scheduled task, every 5 min) scans all active runs; for each, finds the most recent `codex_review` entry. If the entry has no `bp1-codex-request-sent` evidence linked to it AND `(now - entry.created_at) >= 5 min`, the entry is "naked + stale" — recovery target.
+2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → emit `bp1-tick-deduped`, exit.
+3. Inside lock: re-confirm naked-entry condition (could have changed during lock acquisition wait — the request might have been issued by another writer post-Path-A).
+4. If still naked and stale: release lock; issue request for the existing entry (no advance); emit `bp1-codex-request-sent` linking to it.
+5. If condition no longer holds (request was issued during wait): emit `bp1-naked-sweep-superseded` evidence; exit without side effect.
+
+**Why 5-min for Path B vs 30-min for Path A:**
+
+- Path A's 30 min is the Codex-reply window — generous because Codex may legitimately take time to review.
+- Path B's 5 min is the crash-recovery window — short because a naked entry means we crashed BEFORE issuing the request, which is a bug recovery scenario, not an expected wait. Recovery should happen quickly so the run doesn't stall on a typo'd or hardware-glitched moment.
+- Both intervals are configurable in `bp1-config.json` (M1 deliverable).
+
+**Both paths converge in the decision tree:** the unified table from v3.6 still applies — both paths consult `(attempt_number, request_sent)` jointly. Path A only fires when request_sent==true; Path B only fires when request_sent==false. They never overlap by construction.
+
+#### Invariants (v3.7 — explicit per discipline #18, with Locally verifiable column per v9.3 δ)
+
+The retry section's contract reduces to five invariants. Each is locally verifiable against artifacts in this RFC + the project's checked-in code (per v9.3 δ — no external-contract assertions).
+
+| # | Invariant | How verified | Locally verifiable? |
+|---|---|---|---|
+| I1 | `request_sent==false` ⇒ same-entry recovery, **uniformly across all attempt_number values**. No advance. | Decision-tree row 1 above; R3 (attempt=1), R11 (attempt=2), R14 (attempt=0) test crash-before-issue uniformly | yes |
+| I2 | Advance from `attempt=N` to `attempt=N+1` only when `request_sent==true` for the current entry AND timeout elapsed. | Decision-tree row 2; R1, R2 | yes |
+| I3 | `needs_human` route fires only when `request_sent==true` AND `attempt_number >= 2` AND timeout elapsed. | Decision-tree row 3; R2 (after both retries issued + timed out), R12 (crash-after-issue at attempt=2) | yes |
+| I4 (REVISED v3.7 — locally verifiable) | em-review-request issuance is **locally serialized** by per-entry `O_EXCL` request-in-flight claim AND idempotency key `sha256(run_id ‖ parent_episode_id ‖ attempt_number)`. Exactly one request per `(run_id, parent_episode_id, attempt_number)` triple. | O_EXCL claim file at `<run>/request-claims/<entry_id>.claim`; em-review-request extension rejects duplicate idempotency keys. R16 verifies. | **yes** (was external-asserted in v3.6; v3.7 makes it local) |
+| I5 (NEW v3.7) | Naked-entry recovery fires within 5 min of entry `created_at` regardless of whether a request-issued timeout exists. | Path B (naked-entry sweep) at lines ~889; R17 verifies threshold; R3/R11/R14 verify recovery happens. | yes |
+| I6 (NEW v3.7) | Authorization-bearing frontmatter fields (`attempt_number`, `parent_state_transition`, `requested_at`, `review_request_ref`, etc.) are signed by the per-episode HMAC because they're listed in the canonical-payload spec. | Canonicalization spec at lines ~640-680 lists episode-type-specific fields; H21-H26 verify tamper-detection per field. | yes |
 
 The split prevents both the round-4 attempt-2-crash silent-loss bug AND the round-5 attempt-1-crash silent-loss bug: any entry with no `bp1-codex-request-sent` evidence is recoverable regardless of attempt_number; only entries with both an attempt and a recorded issuance can advance or exhaust. em-review-request is idempotent per I4.
 
@@ -959,7 +1066,9 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 | 31 | Finalize-run quiescence fence violated | finalize-run | rollback | `bp1-finalize-fence-fail` | yes |
 | 32 | Finalize-run crash between manifest write and key shred | next-session recovery | A (auto-recover) | `bp1-finalize-recover` | no |
 | 33 | Verify-key rotation attempted while run non-terminal | rotate-verify-key | rollback | `bp1-rotate-blocked` | no |
-| 34 | Codex request-sent evidence missing for `attempt_number >= 2` entry — crash-recovery path | timeout-tick (state-transition lock) | A (re-issue) | `bp1-codex-request-recovered` | yes |
+| 34 | Codex request-sent evidence missing for ANY `codex_review` entry (any attempt_number) — crash-recovery via naked-entry sweep | naked-entry sweep (Path B, 5-min window) → state-transition lock | A (re-issue) | `bp1-codex-request-recovered` | yes |
+| 36 | Naked-entry sweep finds entry but request was issued during lock-wait | naked-entry sweep | A (no-op) | `bp1-naked-sweep-superseded` | no |
+| 37 | `bp1-naked-entry-sweep` scheduled task unavailable (mcp__scheduled-tasks fallback) | M0 probe | A (fallback to manual sweep) | `bp1-scheduled-tasks-fallback` (existing row 24) | yes |
 | 35 | Forged `bp1-codex-request-sent` evidence (`parent_episode` or `review_request_ref` not matching live HMAC) | auditor / manifest replay | C | `bp1-request-sent-fail` | yes |
 
 Machine-readable mirror (CI-validated source of truth):
@@ -1167,10 +1276,22 @@ failure_modes:
     evidence: bp1-rotate-blocked
     lesson: false
   - id: 34
-    failure: Codex request-sent evidence missing for attempt_number >= 2 entry (crash recovery)
-    detector: timeout-tick-under-state-lock
+    failure: Codex request-sent evidence missing for ANY codex_review entry (any attempt_number, naked-entry sweep)
+    detector: naked-entry-sweep-with-state-lock
     terminal: A
     evidence: bp1-codex-request-recovered
+    lesson: true
+  - id: 36
+    failure: Naked-entry sweep finds entry but request was issued during lock-wait
+    detector: naked-entry-sweep
+    terminal: A
+    evidence: bp1-naked-sweep-superseded
+    lesson: false
+  - id: 37
+    failure: bp1-naked-entry-sweep scheduled task unavailable (fallback to manual sweep)
+    detector: M0-probe
+    terminal: A
+    evidence: bp1-scheduled-tasks-fallback
     lesson: true
   - id: 35
     failure: Forged bp1-codex-request-sent evidence (parent_episode or review_request_ref HMAC mismatch)
@@ -1499,5 +1620,55 @@ Codex round-5 review of v3.5 (episode `20260506-064154-codex-re-review-rfc-004-v
 Codex's round-5 framing — *"verify by artifact, invariant-first review, and 8-axis negative-scenario matrix... checking the actual diff... rather than accepting the summary"* (per user FYI 2026-05-06) — drove toolkit v9.1 → v9.2 promotion: NEW discipline #18 (Invariant-first review with mandatory top-of-output Invariants table) + #17 split into (a) decision-logic + (b) negative-test fan-out sub-clauses. v3.6 applies #18 explicitly via the I1-I4 invariants table in the retry section above. Toolkit v9.2 episode `20260506-065003-...-ddff`; reviewer prompt v4.2 `...478f`; planner v6.1 `...3c4a`.
 
 **Status (v3.6):** still `draft`. Re-request Codex review on the round-5 resolution plus the new-integration-surface table.
+
+### v3.7 — Codex round-6 findings (2026-05-06, dual-transport review)
+
+Round 6 was the FIRST round to use BOTH review transports — async em-store + synchronous `codex review` CLI. The two transports caught complementary findings:
+
+- **Async em-store reply** (episode `20260506-074241-...-d148`): 1 P1 — concurrent post-lock evidence gap.
+- **CLI review** (synchronous via `codex review --base origin/main`): 3 findings (2 P1 + 1 P2) — HMAC canonical bytes don't include retry fields; naked-entry recovery deadline unreachable; failure row 34 too narrow.
+
+Together: 4 distinct findings; alone each transport missed half. Promoted to toolkit v9.3 as discipline ζ (run both transports for high-stakes RFCs).
+
+#### Round-6 finding disposition
+
+| # | Source | Pri | Finding | Verdict | Resolution |
+|---|---|---|---|---|---|
+| Async-1 | em-store | P1 | Concurrent post-lock evidence gap | ACCEPT | Per-entry `O_EXCL` request-in-flight claim at `<run>/request-claims/<entry_id>.claim` + local idempotency key `sha256(run_id‖parent_episode_id‖attempt_number)` for em-review-request. Closes the post-lock window; I4 invariant now locally verifiable. R16 added. |
+| CLI-F1 | CLI | P1 | HMAC canonical bytes don't include retry fields (R7/R13 theatrical) | ACCEPT | Canonicalization spec extended to include episode-type-specific fields (`attempt_number`, `parent_state_transition`, `requested_at`, `review_request_ref`, lock-claim fields). New `bp1-canonicalize.mjs` helper (M1) + `validate-rfc-failure-table.mjs` extension (M0) gates against unsigned authorization-bearing fields. H21-H26 added. |
+| CLI-F2 | CLI | P1 | Naked-entry recovery deadline unreachable | ACCEPT | Two-deadline split (Path A 30-min from `requested_at` for request-issued; Path B 5-min from entry `created_at` for naked-entry recovery). New `bp1-naked-entry-sweep` scheduled task. New failure rows 36, 37. R17 added. |
+| CLI-F3 | CLI | P2 | Failure row 34 only covered `attempt_number >= 2` | ACCEPT | Row 34 widened to all attempt_numbers; YAML mirror updated; new rows 36/37 for sweep-superseded + scheduled-task fallback. |
+
+#### New integration surface introduced by v3.7 fixes (per #17 sub-clauses (a) + (b), v9.3 ε per-branch × per-axis)
+
+| Fix | New thing introduced | Sub-clause (a) decision-logic fan-out | Sub-clause (b) negative-test fan-out (per branch × per axis) | Negative test |
+|---|---|---|---|---|
+| Async-1 | Per-entry O_EXCL request-in-flight claim file | Single decision: O_EXCL succeeds → owner; fails → defer | Per axis: RACE/TOCTOU R16 (concurrent ticks); BOUNDARY R18 (claim TTL elapsed mid-issuance); STALE R18 + crash-recovery row in claim-handling table | R16, R18 |
+| Async-1 | Idempotency key for em-review-request | Single key derivation: `sha256(run_id‖parent_episode_id‖attempt_number)` | em-review-request extension v3.7 rejects dup keys | R16 |
+| CLI-F1 | Episode-type-specific canonical-bytes fields | N/A (spec extension, not branched logic) | Per-field tamper test: H21 (`attempt_number`), H22 (`parent_state_transition`), H23 (`review_request_ref`), H24 (`requested_at`), H25 (non-canonical field add), H26 (CI gate) | H21-H26 |
+| CLI-F2 | Path A (30-min from requested_at) + Path B (5-min from entry created_at), distinct paths | Two paths converge in joint-state decision tree; never overlap by construction (`request_sent` value selects path) | Per branch × per axis: Path A test cases (R1, R2, R12), Path B test cases (R3, R11, R14, R17 threshold, R18 crash-recovery) | R3, R11, R14, R17, R18 |
+| CLI-F2 | `bp1-naked-entry-sweep` scheduled task | Single dispatch: every 5 min, scan active runs, identify naked+stale, route to Path B | Per axis: RACE/TOCTOU R17 (sweep racing with state-lock), DEFER R36 (sweep-superseded), STALE R37 (scheduled-task fallback) | R17, failure rows 36/37 |
+| CLI-F3 | Widened row 34 + new rows 36/37 | N/A (failure-table contract update) | YAML mirror + CI uniqueness gate | failure-table CI |
+
+8-axis matrix re-walk on the v3.7 surfaces:
+
+- **Splice (axis 1):** O_EXCL claim file is per-entry, per-run; `writer_run_id` field in claim binds to run; cross-run claim spoof caught by run-lock semantics.
+- **Forge / Stale (axis 2):** Claim file format is binary write-once (O_EXCL); tampering detected by content sha256 + claim TTL. Stale claims (TTL elapsed, no evidence) explicitly handled by recovery table.
+- **Orphan (axis 3):** Claim with no matching evidence after TTL → `bp1-claim-stale`, retry. Claim without entry → impossible (claim creation fenced by lock-decision).
+- **Empty (axis 4):** Missing claim fields → JSON parse fails on read; emit corruption episode.
+- **Wrong-shape (axis 5):** Claim with non-string fields → schema validator at read time.
+- **Wrong-semantic (axis 6):** Claim's `attempt_number` not matching entry's `attempt_number` → mismatch detected at evidence-emit time; emit `bp1-claim-mismatch` (NEW failure row candidate, but covered by R16's strict assertion).
+- **Race / TOCTOU (axis 7):** O_EXCL is the explicit closure for the post-lock evidence-gap window. R16 verifies. Per-branch fan-out: R16 covers RECOVERY branch; advance-branch race already covered by state-transition lock since advance writes the entry (state-transition lock holds during entry write).
+- **Boundary (axis 8):** Claim TTL boundary (R18). Naked-entry sweep threshold (R17). attempt_number=2 already covered. Both endpoints + recovery in between covered.
+
+**No new axes opened.** All eight axes have explicit coverage at the new surfaces. v3.7 is the first round where the implementer-side #18 invariant table is fully Locally Verifiable per v9.3 δ — no rows depend on external contracts.
+
+#### Round-6 process feedback applied
+
+Round 6 was empirically the highest-finding-density round since round 1: 4 findings via dual-transport, vs 1 via async-only. This validates v9.3's ζ (run both transports). Going forward, the dual-transport approach is the default for high-stakes RFCs.
+
+Toolkit v9.3 episode `20260506-080224-...-6911`; reviewer prompt v4.3 `...ca0d`; planner v6.2 `...f886`; new tier-2 `feedback_codex_cli_augments_async.md`.
+
+**Status (v3.7):** still `draft`. Re-request via BOTH transports (CLI first to verify ACCEPT, then async em-store for audit trail). The first CLI re-run is the verification gate.
 
 ---
