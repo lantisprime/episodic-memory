@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.3
+version: 3.4
 supersedes: ~
 superseded_by: ~
 ---
@@ -101,7 +101,46 @@ All side-effecting bp1 artifacts are gated on a **per-project activation entry**
 ```
 
 - `<canonical_project_root>` = `git rev-parse --show-toplevel`, then `realpath` (resolves symlinks). Worktrees and submodules each canonicalize to the toplevel of their containing repo. Per-worktree activation is intentionally NOT a separate scope: a single project shares one safety envelope.
-- `artifact_version_hash` = sha256 of the concatenated `bp1-*.mjs` script contents at install time. `bp1-flag-check.mjs` recomputes this on every read; mismatch → fail closed (`bp1-flag-version-drift` episode), even if `enabled: true`. This blocks partial upgrades — a script update without re-running the M5 dry-run resets the project to inert.
+- `artifact_version_hash` = sha256 over a sorted **runtime-artifact manifest** (v3.4) — covers all installed BP1 runtime artifacts, NOT just scripts. `bp1-flag-check.mjs` recomputes this on every read; mismatch → fail closed (`bp1-flag-version-drift` episode), even if `enabled: true`. This blocks partial upgrades and stale-wiring drift: changing a hook script, settings.json bp1 entry, plugin.json scheduled-task definition, slash-command wrapper, agent-loader file, or referenced canonical-prompt episode id — any of these without re-running M5 — resets the project to inert. (Codex round-3 finding 3 expanded the scope from `bp1-*.mjs` to all runtime artifacts.)
+
+**Runtime-artifact manifest contents (sorted, then sha256'd):**
+
+```yaml
+artifact_manifest:
+  scripts:
+    - path: "scripts/bp1-orchestrator.mjs"
+      sha256: "<file-sha256>"
+    - path: "scripts/bp1-rfc-scan.mjs"
+      sha256: "<file-sha256>"
+    # ... all scripts/bp1-*.mjs
+  hooks:
+    - path: ".claude/hooks/bp1-approval-check.sh"
+      sha256: "<file-sha256>"
+    # ... all .claude/hooks/bp1-*.sh
+  settings_lines:
+    # Deterministic filter: extract any line in .claude/settings.json that
+    # mentions "bp1" (case-insensitive); join sorted; sha256.
+    sha256: "<filtered-content-sha256>"
+  plugin_entries:
+    # Deterministic filter: extract bp1-related entries from .claude-plugin/plugin.json
+    # (scheduled-tasks, slash-commands matching bp1-*); JSON-stringify with sorted keys; sha256.
+    sha256: "<filtered-content-sha256>"
+  agent_loaders:
+    - path: ".claude/agents/bp1-orchestrator.md"
+      sha256: "<file-sha256>"
+    # ... all .claude/agents/bp1-*.md
+  canonical_prompts:
+    # Latest episode id in supersedes chain at install time, per loader file.
+    # Re-resolved by bp1-flag-check.mjs on every read; if a loader's referenced
+    # prompt has been superseded since install, hash drifts → flag-check refuses.
+    - loader: ".claude/agents/bp1-orchestrator.md"
+      latest_prompt_episode_id: "20260506-XXXXXX-..."
+    # ... one entry per agent loader
+```
+
+The installer (`install.mjs --bp1`) builds this manifest at install time and writes the resulting sha256 into the project's activation entry. `bp1-flag-check.mjs` rebuilds the manifest on every read using the SAME deterministic filter (sorted file lists, alphabetical key ordering, regex-defined filter for settings/plugin lines) and compares.
+
+Per Rule 14 (machine-readable blocks for drift-prone state), the artifact-manifest builder script `scripts/bp1-build-artifact-manifest.mjs` (M0 deliverable, alongside `validate-rfc-failure-table.mjs`) is the single source of truth — the YAML above documents its output shape. CI test gates that the script's output is deterministic across two runs on the same install.
 - `verify_key_id` = HMAC-SHA256 fingerprint of the long-lived verify-key (see HMAC §) at activation time — provides forensic linkage between activation and the key used to sign manifests during the dry run.
 - The file is read/written through a shared helper that takes a per-file `flock` (Node.js `fcntl` advisory lock or fallback `O_EXCL` create-and-rename), defending against multi-writer drift (lesson `20260505-130716-...`). Concurrent activations across projects are safe by construction: each writer takes the lock, reads the current map, mutates only its own key, atomically renames the temp file.
 
@@ -148,6 +187,12 @@ A reverse `bp1-flag-flip.mjs --disable` removes only the named project's entry (
 | A6 | `--disable <project A>` with project B active | A entry removed; B unaffected |
 | A7 | Two `--disable` calls race on same project | one wins, other emits `bp1-disable-already` (no-op idempotent) |
 | A8 | Map file corrupted / partial write recovery | `bp1-flag-config-corrupt` emitted; all projects refuse until repair |
+| A9 (NEW v3.4) | Stale `.claude/hooks/bp1-approval-check.sh` (modified) with unchanged scripts/bp1-*.mjs | `bp1-flag-version-drift` (artifact-manifest hash recomputes; differs from stored value) |
+| A10 (NEW v3.4) | Modified `.claude/settings.json` bp1 wiring (e.g., hook removed from SessionStart array) | `bp1-flag-version-drift` (filtered-settings-lines sha256 differs) |
+| A11 (NEW v3.4) | Modified `.claude-plugin/plugin.json` (e.g., scheduled-task definition changed) | `bp1-flag-version-drift` (filtered-plugin-entries sha256 differs) |
+| A12 (NEW v3.4) | Canonical prompt episode for a bp1 agent superseded since install | `bp1-flag-version-drift` (latest_prompt_episode_id resolution differs from stored value) |
+| A13 (NEW v3.4) | Stale agent loader file (`.claude/agents/bp1-orchestrator.md` modified) | `bp1-flag-version-drift` (loader file sha256 differs) |
+| A14 (NEW v3.4) | Build-artifact-manifest non-deterministic (e.g., glob ordering platform-dependent) | CI test fails: two consecutive `bp1-build-artifact-manifest.mjs` runs produce different sha256 |
 
 ### Why this matters
 
@@ -609,7 +654,7 @@ payload = {
 hmac_signature = HMAC-SHA256(run.key, canonical)
 ```
 
-Manifest signature (terminal artifact, signed by verify-key):
+Manifest signature (terminal artifact, signed by verify-key) — v3.4 stores **complete per-episode records**, not just HMACs, so post-terminal replay can detect tampering without `run.key`:
 
 ```
 manifest_payload = {
@@ -618,34 +663,46 @@ manifest_payload = {
   terminal_state,                // complete | aborted | abandoned | archived
   finalized_at,                  // ISO-8601 UTC
   episode_count,
-  per_episode_hmacs: [           // ordered by emission time
-    { episode_id, hmac_signature_bytes_hex },
+  per_episode_records: [         // ordered by emission time
+    {
+      episode_id,
+      canonical_sha256,          // sha256 of JSON.stringify(payload, sortedKeys)
+      body_sha256,               // sha256 of utf8 body bytes (frontmatter excluded)
+      hmac_signature             // bytes_hex — preserved for live-run verification consistency
+    },
     ...
   ],
-  episodes_merkle_root           // sha256 over sorted (episode_id, hmac) pairs — defends against missing-episode insertion
+  episodes_records_root          // sha256 over sorted-by-episode_id concat of (episode_id || canonical_sha256 || body_sha256 || hmac_signature) — defends against drop/insert/reorder
 }
 manifest_signature = HMAC-SHA256(verify_key, sha256(JSON.stringify(manifest_payload, sortedKeys)))
 ```
 
-`run_id` and `project_root` in `manifest_payload` block manifest-from-run-A used as run-B's terminal proof (splice). The `episodes_merkle_root` defends against tampering with the per-episode list (drop / insert / reorder).
+The records hold everything replay needs to detect tampering **without `run.key`**: `canonical_sha256` is recomputed from on-disk episode fields (just JSON.stringify(payload, sortedKeys) → sha256 — no key needed), `body_sha256` is recomputed from on-disk body bytes. Both compared to manifest's stored values. The manifest signature (via long-lived verify-key) ensures the records themselves can't be tampered.
 
-`Object.keys(payload).sort()` enforces key-order stability. `body_sha256` is computed over body bytes only (frontmatter excluded) so re-serialization of frontmatter doesn't invalidate signatures.
+`run_id` and `project_root` in `manifest_payload` block manifest-from-run-A used as run-B's terminal proof (splice). `episodes_records_root` defends against drop / insert / reorder of records (Codex round-3 confirmed sorted-hash-over-records is sufficient; true Merkle tree unnecessary).
+
+`Object.keys(payload).sort()` enforces key-order stability. `body_sha256` is computed over body bytes only (frontmatter excluded) so re-serialization of frontmatter doesn't invalidate digests.
 
 #### Verification flow
 
 **Live-run** — auditor + orchestrator recompute `canonical` from on-disk episode, recompute `HMAC-SHA256(run.key, canonical)`, compare against `hmac_signature` field.
 
-**Post-terminal** — `bp1-replay.mjs` reads the run's `bp1-run-manifest` episode, verifies `manifest_signature` with the verify-key, then for each episode in the run recomputes its `canonical` and looks up the recorded `hmac_signature` in `per_episode_hmacs`. Mismatch on either layer → `bp1-hmac-fail` or `bp1-manifest-fail` (failure-table).
+**Post-terminal** — `bp1-replay.mjs` reads the run's `bp1-run-manifest` episode and:
 
-Verification failure → `bp1-hmac-fail` (live, row 15) or `bp1-manifest-fail` (post-terminal, new failure row).
+1. Verifies `manifest_signature` with the verify-key (rejects manifest-level tampering).
+2. Recomputes `episodes_records_root` from the records and compares (rejects record-list tampering).
+3. For each episode: re-derives `canonical_sha256` from on-disk frontmatter fields and re-derives `body_sha256` from on-disk body bytes; compares both to the stored record values. Mismatch → `bp1-manifest-fail`.
+4. (Optional defence-in-depth, key-not-required) cross-checks on-disk frontmatter `hmac_signature` matches manifest's stored `hmac_signature`. This catches one specific case: someone tampering BOTH body and frontmatter hmac to a self-consistent forgery — the on-disk `hmac_signature` value would mismatch the manifest's record. (Codex round-3 confirmed this is sufficient since the records are signed by verify-key.)
+
+Verification failure → `bp1-hmac-fail` (live, row 16) or `bp1-manifest-fail` (post-terminal, row 30).
 
 #### Finalize-run sequence
 
 `bp1-orchestrator.mjs finalize-run` (atomic-on-success):
 
 1. Quiesce: refuse if any pre-decision episode lacks a matching post-decision (decision-log fence); emit `bp1-finalize-fence-fail` and abort if violated.
-2. Iterate run's episodes in emission order; collect `{episode_id, hmac_signature_bytes_hex}` pairs.
-3. Compute `episodes_merkle_root`.
+2. Iterate run's episodes in emission order; for each compute `canonical_sha256` (via JSON.stringify(payload, sortedKeys)) + `body_sha256` (utf8 body bytes) + read existing `hmac_signature` from frontmatter; build per-episode record.
+3. Compute `episodes_records_root` over sorted-by-episode_id concat of (episode_id || canonical_sha256 || body_sha256 || hmac_signature).
 4. Build `manifest_payload`, sign with verify-key, emit `bp1-run-manifest` episode (local scope, immutable).
 5. Verify the manifest can be successfully read back and signature-verified (gates step 6).
 6. Shred the per-run key (overwrite + unlink). Now post-terminal replay relies on the manifest only.
@@ -665,17 +722,20 @@ If steps 1-5 fail, the run remains in non-terminal state and the per-run key is 
 | H6 | run.key file mode drift to `0644` | `bp1-hmac-keyfile-fail` (refuse to read) | live |
 | H7 | run.key file deleted mid-run | `bp1-hmac-keyfile-fail` | live |
 | **H8** | **Replay after `finalize-run` (key shredded, manifest exists)** | **PASS via manifest** | **post-terminal** |
-| **H9** | **Tampered episode body post-terminal** | `bp1-hmac-fail` (per-episode `body_sha256` mismatch in manifest) | post-terminal |
+| **H9** | **Tampered episode body post-terminal** | `bp1-manifest-fail` — recomputed `body_sha256` mismatches manifest's stored `body_sha256` for that record | post-terminal |
 | **H10** | **Manifest from run-A used as run-B's terminal proof** | `bp1-manifest-fail` (manifest_payload includes `run_id` + `project_root`) | post-terminal |
-| **H11** | **Episode dropped from manifest after finalize** | `bp1-manifest-fail` (merkle root mismatch on replay) | post-terminal |
-| **H12** | **Episode inserted into manifest after finalize** | `bp1-manifest-fail` (signature invalidates) | post-terminal |
+| **H11** | **Episode dropped from manifest after finalize** | `bp1-manifest-fail` (records_root mismatch on replay) | post-terminal |
+| **H12** | **Episode inserted into manifest after finalize** | `bp1-manifest-fail` (manifest signature invalidates) | post-terminal |
 | **H13** | **Verify-key rotated; replay against pre-rotation manifest** | PASS (manifests re-signed during rotation) | post-terminal |
 | **H14** | **Verify-key rotation attempted while run in non-terminal state** | rotation refused; emit `bp1-rotate-blocked` | live |
 | **H15** | **Verify-key file mode drift to `0644`** | `bp1-flag-key-drift` (refuse to use) | both |
 | **H16** | **Verify-key fingerprint mismatch between activation entry and live key** | `bp1-flag-key-drift` (project flips to inert) | live |
 | **H17** | **Finalize crashes between manifest write and key shred** | recovery: manifest exists + key file exists; replay still works; next session detects state and completes shred via `bp1-finalize-recover` | crash |
+| **H18 (NEW v3.4)** | **Tampered episode canonical fields (frontmatter run_id swap, parent_episode swap, etc.) post-terminal** | `bp1-manifest-fail` — recomputed `canonical_sha256` mismatches manifest's stored `canonical_sha256` for that record | post-terminal |
+| **H19 (NEW v3.4)** | **Self-consistent forgery: tamper body AND on-disk frontmatter `hmac_signature` to match each other** | `bp1-manifest-fail` — on-disk `hmac_signature` mismatches manifest's stored `hmac_signature` for that record (records are signed by verify-key, can't be forged in step) | post-terminal |
+| **H20 (NEW v3.4)** | **Replay against manifest with body_sha256/canonical_sha256 fields stripped** | `bp1-manifest-fail` — manifest signature invalidates (records-list-shape covered by manifest_signature) | post-terminal |
 
-Tests H1-H7 ship as `tests/bp1-hmac-live.test.mjs`; H8-H17 ship as `tests/bp1-hmac-manifest.test.mjs`. Both are gating for M1 → M2 transition.
+Tests H1-H7 ship as `tests/bp1-hmac-live.test.mjs`; H8-H20 ship as `tests/bp1-hmac-manifest.test.mjs`. Both are gating for M1 → M2 transition.
 
 ---
 
@@ -711,49 +771,67 @@ Tests H1-H7 ship as `tests/bp1-hmac-live.test.mjs`; H8-H17 ship as `tests/bp1-hm
 | `needs_human` | override episode | `resolved` → resume | bp1-human-input-watcher |
 | `needs_human` | 7 days | `abandoned` → `archived` | bp1-archive-ghosts.mjs |
 
-### Codex-timeout retry counter — persistence (v3.3)
+### Codex-timeout retry counter — `attempt_number` on entry + state-transition lock (v3.4)
 
-The retry budget on `codex_review` (state-machine self-loop, max 2 retries before routing to `needs_human`) MUST be sourced from the **decision log itself**, not from in-memory orchestrator state. Otherwise an orchestrator crash mid-retry resets the counter, keeping a run in `codex_review` indefinitely instead of advancing to `needs_human`. (Codex round-2 finding 4.)
+The retry budget on `codex_review` (state-machine self-loop, max 2 retries before routing to `needs_human`) MUST be sourced from the **decision log itself**, not from in-memory orchestrator state, AND must be atomically claimed under a per-run/per-state lock to prevent concurrent timeout-ticks from doubling the side effect. (Codex round-2 finding 4 + round-3 finding 2.)
 
-**Counter derivation** (computed at every timeout-tick fire, via `bp1-orchestrator.mjs codex-retry-count <run_id>`):
+#### Schema: `attempt_number` on `codex_review` entry episode
 
+Every `codex_review` entry episode (initial `adversarial_reviewed → codex_review` AND every self-loop entry) carries an explicit `attempt_number` field in its frontmatter:
+
+```yaml
+---
+type: state-transition
+run_id: <id>
+state: codex_review
+attempt_number: 0          # 0 for initial entry; 1, 2, ... for self-loop entries
+parent_state_transition: <previous codex_review entry id, or null for initial>
+hmac_signature: ...
+inspected:
+  run_id: ...
+---
 ```
-retry_count(run_id, codex_review_entry_episode) =
-  count of `bp1-codex-timeout-retry` episodes E such that:
-    E.run_id == run_id
-    AND
-    E.parent_episode chain contains codex_review_entry_episode
-        (no intermediate `codex_complete` / `needs_human` / `aborted` episode in the chain)
-    AND
-    E.parent_episode is unique within the result set
-        (dedupe by parent_episode handles concurrent timeout-tick fires —
-         see Race/TOCTOU coverage below)
-```
 
-The `codex_review_entry_episode` is the most recent transition INTO `codex_review` (either initial `adversarial_reviewed → codex_review` or any `codex_review → codex_review` self-loop entry). Parent_episode chain anchoring isolates the count to the current retry sequence; deduping by parent_episode ensures two timeout-ticks racing do not count as two retries.
+The current attempt count is read in O(1) from the most recent `codex_review` entry — no chain walking, no count-of-children. Crash-safe by construction (immutable on disk).
 
-**On every timeout fire:**
+#### State-transition lock
 
-1. `bp1-deadline-tick` (or fallback sweep) detects the 30-min deadline elapsed for a `codex_review` entry.
-2. Compute `retry_count` per the formula above.
-3. Emit `bp1-codex-timeout-retry` episode with `parent_episode = current codex_review entry`, `attempt_number = retry_count + 1`.
-4. If `retry_count >= 2`: route to `needs_human` (emit `bp1-codex-unreachable`). Else: re-issue the em-review-request (re-enter `codex_review`).
+Before emitting any new `codex_review` entry (timeout self-loop OR initial entry) and before triggering its side effect (re-issuing em-review-request), the orchestrator MUST:
 
-This makes retry tracking naturally crash-safe: orchestrator restart re-derives the count by scanning on-disk episodes; no process memory required.
+1. Acquire `bp1-state-lock` for `(run_id, state=codex_review)` with TTL of 60s. Lock is recorded as a `bp1-state-lock-claim` evidence episode (atomic via `O_EXCL` create-and-rename of `<run>/state-locks/codex_review.lock` referencing the claim episode id).
+2. Read the most recent `codex_review` entry for this run; extract `attempt_number`.
+3. Decision tree (atomic under lock):
+   - If `attempt_number >= 2`: emit `bp1-codex-unreachable` + transition to `needs_human`. Release lock.
+   - Else: emit a NEW `codex_review` entry episode with `attempt_number = current + 1` and `parent_state_transition = <current entry id>`. Release lock. Re-issue em-review-request (the side effect happens AFTER lock release; the entry episode itself records the commitment).
+4. If lock acquisition fails (another writer holds it): the second writer queries the lock-claim episode, waits for the lock to be released or its TTL to expire, then re-reads state. If a new entry was already written for the same `attempt_number`, the second writer emits a `bp1-tick-deduped` evidence episode and exits without side effect.
 
-**Race / TOCTOU coverage:** if `bp1-deadline-tick` fires twice for the same `codex_review` entry within milliseconds (e.g., scheduled task + fallback sweep both fire), both writers attempt to emit `bp1-codex-timeout-retry`. The second writer SHOULD detect via the parent_episode dedupe (step 2's count includes the first writer's already-emitted episode) and either skip or emit a `bp1-tick-deduped` evidence episode. The retry count remains accurate.
+The lock is recorded as an episode (immutable claim) and released by emitting a `bp1-state-lock-release` evidence episode. Crash recovery: on orchestrator restart, any lock with a release episode OR with elapsed TTL is treated as released; the next session re-reads state and proceeds. Lock claims older than TTL with no release are treated as crashed; emit `bp1-state-lock-stale` evidence and reclaim.
 
-**Negative tests (M1, gating M1→M2):**
+#### On every timeout fire (revised)
+
+1. `bp1-deadline-tick` (or fallback sweep) detects the 30-min deadline elapsed for the current `codex_review` entry of this run.
+2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → wait → on resume re-check; emit `bp1-tick-deduped` if duplicate.
+3. Inside lock: read current entry's `attempt_number`.
+4. If `attempt_number >= 2`: emit `bp1-codex-unreachable` + transition to `needs_human`.
+5. Else: emit new `codex_review` entry with `attempt_number = current + 1`, `parent_state_transition = current entry id`. Release lock.
+6. After lock release: re-issue the em-review-request bound to the new entry.
+
+The "side effect after lock release" sequence ensures: only one writer can ever advance `attempt_number`; only one writer can ever issue the side effect for a given attempt_number. Crash between steps 5 and 6 is recoverable: the new entry exists with `attempt_number=N+1` but no em-review-request was sent → next deadline-tick (after 30min from new entry's emission) fires, sees the most recent entry already at `attempt_number=N+1`, and reissues the request (this is correct: the em-review-request is idempotent on the Codex side per existing review-request hygiene).
+
+#### Negative tests (M1, gating M1→M2)
 
 | # | Scenario | Expected outcome |
 |---|---|---|
-| R1 | Single 30min timeout → retry as attempt 1 | `bp1-codex-timeout-retry` episode with attempt_number=1 |
-| R2 | Two timeouts → second routes to needs_human | second tick: `retry_count == 1`, attempt 2; on its completion, `retry_count == 2` triggers needs_human |
-| R3 | Crash after first timeout, restart, second timeout | second timeout still recognizes the first as already-counted (chain anchor); routes to needs_human (NOT retry as attempt 1) |
-| R4 | Two concurrent timeout-ticks for same `codex_review` entry | second writer detects dupe via parent_episode, emits `bp1-tick-deduped`; retry count stays at 1 |
-| R5 | `codex_complete` arrives between two ticks | second tick sees `codex_complete` in the chain → does NOT count; chain anchor moved past entry |
-| R6 | Manually-injected fake `bp1-codex-timeout-retry` from earlier run-id | filtered by `E.run_id == run_id`; ignored |
-| R7 | parent_episode forged to point at wrong codex_review entry | manifest verification at finalize catches HMAC mismatch (this is splice — already covered by HMAC) |
+| R1 | Initial entry, single 30min timeout | New entry with `attempt_number=1` after lock acquired; em-review-request re-issued |
+| R2 | Two timeouts in sequence (no concurrency) | First: attempt_number=0→1; second: 1→2; third would-be tick: reads attempt_number=2 → routes to needs_human (no further entry emitted) |
+| R3 | Crash after first timeout, restart, second timeout | Second timeout reads on-disk entry attempt_number=1; advances to 2; routes to needs_human |
+| R4 | Two concurrent timeout-ticks for same entry | First writer acquires lock; second blocks. First emits new entry attempt_number=N+1, releases. Second resumes, reads new entry, sees its planned attempt_number was already claimed → emits `bp1-tick-deduped`, exits |
+| R5 | `codex_complete` arrives between ticks | When ticks resume after lock, they read state = `codex_complete` (not `codex_review`); skip the retry path entirely; emit `bp1-tick-stale` evidence |
+| R6 | Manually-injected fake retry episode from earlier run-id | Lock is per-run; fake from another run can't claim this run's lock; even if injected to look like this run's, has no `bp1-state-lock-claim` predecessor → orchestrator skip-and-flag |
+| R7 | Forged `parent_state_transition` pointing at wrong entry | HMAC verification on the entry episode catches forgery (parent_state_transition is in canonical bytes for the entry's HMAC); also caught by manifest at finalize |
+| R8 (NEW v3.4) | Lock crash: writer dies after step 5, before step 6 | TTL elapses → next tick reads new entry at `attempt_number=N+1` with no em-review-request reply yet → re-issues request bound to that entry (idempotent) |
+| R9 (NEW v3.4) | Lock-claim episode missing release; TTL not elapsed; new tick fires | New tick blocks until TTL elapses, then emits `bp1-state-lock-stale`, reclaims, proceeds |
+| R10 (NEW v3.4) | Lock claim from earlier session contains stale `attempt_number` (writer crashed before emitting entry) | Reclaiming session reads no new entry → treats as if write never happened → new tick proceeds with current `attempt_number` (idempotent retry of the original tick) |
 
 These ship as `tests/bp1-codex-retry.test.mjs`, gating M1→M2.
 
@@ -825,7 +903,7 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 | 27 | Activation verify-key drift | flag-check helper | C (no-op) | `bp1-flag-key-drift` | yes |
 | 28 | Activation map config corrupt | flag-check helper | C | `bp1-flag-config-corrupt` | yes |
 | 29 | HMAC key file missing/unreadable (live-run) | orchestrator startup | C | `bp1-hmac-keyfile-fail` | yes |
-| 30 | `bp1-run-manifest` signature verification fail (post-terminal) | replay | C | `bp1-manifest-fail` | yes |
+| 30 | `bp1-run-manifest` verification fail (post-terminal: signature, records_root, canonical_sha256, body_sha256, or hmac field mismatch) | replay | C | `bp1-manifest-fail` | yes |
 | 31 | Finalize-run quiescence fence violated | finalize-run | rollback | `bp1-finalize-fence-fail` | yes |
 | 32 | Finalize-run crash between manifest write and key shred | next-session recovery | A (auto-recover) | `bp1-finalize-recover` | no |
 | 33 | Verify-key rotation attempted while run non-terminal | rotate-verify-key | rollback | `bp1-rotate-blocked` | no |
@@ -1011,7 +1089,7 @@ failure_modes:
     evidence: bp1-hmac-keyfile-fail
     lesson: true
   - id: 30
-    failure: bp1-run-manifest signature verification fail (post-terminal)
+    failure: bp1-run-manifest verification fail (signature, records_root, canonical_sha256, body_sha256, or hmac mismatch)
     detector: replay
     terminal: C
     evidence: bp1-manifest-fail
@@ -1083,7 +1161,7 @@ Lessons emitted contribute to global corpus per `feedback_check_episodes_before_
 
 ```mermaid
 graph TD
-    M0[M0 — Capability probe + contract validators<br/>mcp__scheduled-tasks availability check<br/>+ bp1-deadline-sweep.mjs fallback<br/>+ flag-check helper + activation episode schema<br/>+ validate-rfc-failure-table.mjs CI script<br/>~4k]
+    M0[M0 — Capability probe + contract validators<br/>mcp__scheduled-tasks availability check<br/>+ bp1-deadline-sweep.mjs fallback<br/>+ flag-check helper + activation episode schema<br/>+ validate-rfc-failure-table.mjs CI script<br/>+ bp1-build-artifact-manifest.mjs (deterministic)<br/>~5k]
     M1[M1 — Foundation<br/>orchestrator runtime + episode schema<br/>+ event-table + replay + snapshot<br/>+ HMAC key mgmt &amp; canonicalization<br/>~16k]
     M2[M2 — Trigger + safety (FLAG-GATED)<br/>rfc-scan + classifier + run-lock<br/>+ marker-validate + crash-classify<br/>+ approval-check hook + deadline-tick<br/>all artifacts no-op when bp1.enabled=false<br/>~12k]
     M3[M3 — Planning team<br/>orchestrator agent + sentinel + token-budget<br/>+ em-review-request extension<br/>~10k]
@@ -1230,5 +1308,54 @@ Codex re-review of v3.2 (episode `20260506-032457-codex-re-review-rfc-004-v3-2-h
 None this round. All identified second-order surfaces have negative-test coverage in M1 or M5 (gated by failure-table CI check from M0).
 
 **Status (v3.3):** still `draft`. Re-request Codex review on these resolutions plus the new-integration-surface table above before flipping to `accepted`.
+
+### v3.4 — Codex round-3 re-review findings (2026-05-06)
+
+Codex round-3 re-review of v3.3 (episode `20260506-051743-codex-re-review-rfc-004-v3-3-hold-on-man-fc4a`) returned **HOLD** with three findings (2 P1 + 1 P2). All ACCEPT after evidence walk. v3.3's "two-phase verification" was theatrical for tampering detection (per-episode HMACs unrecoverable without `run.key`), the retry-counter formula had a correctness bug across self-loop entries plus a write-side race, and the artifact-version hash was scoped too narrowly.
+
+#### Round-3 finding disposition
+
+| # | Pri | Round-3 finding | Verdict | Resolution location |
+|---|---|---|---|---|
+| 1 | P1 | Manifest can't verify tampered episode bodies after `run.key` shred | ACCEPT | Manifest schema changed to `per_episode_records: {episode_id, canonical_sha256, body_sha256, hmac_signature}`. Replay re-derives canonical and body sha256s from on-disk fields (no key required), compares against signed records. New `episodes_records_root` over complete records. Verification flow rewritten. New negative tests H18-H20. H9 description corrected to body_sha256 mismatch. |
+| 2 | P1 | Retry counter resets across self-loop entries + race before dedupe | ACCEPT (option b) | `attempt_number` field on every `codex_review` entry episode (initial + self-loop). State-transition lock (`bp1-state-lock(run_id, codex_review)`) acquired BEFORE entry emission and side effect; lock-claim recorded as immutable evidence episode with TTL. Side effect (em-review-request) happens AFTER lock release; em-review-request idempotent on Codex side (per existing review-request hygiene). New negative tests R8-R10 (lock crash, stale lock, lock-without-entry recovery). |
+| 3 | P2 | Artifact-version hash omits non-MJS runtime artifacts | ACCEPT | `artifact_version_hash` redefined as sha256 over a sorted **runtime-artifact manifest** covering scripts/bp1-*.mjs + .claude/hooks/bp1-*.sh + filtered .claude/settings.json bp1 lines + filtered .claude-plugin/plugin.json bp1 entries + .claude/agents/bp1-*.md loader files + latest-prompt-episode-ids referenced by loaders. New M0 deliverable: `bp1-build-artifact-manifest.mjs` (deterministic). New negative tests A9-A14 (stale hook, settings, plugin, prompt-supersedence, loader, builder-determinism). |
+
+#### New integration surface introduced by v3.4 fixes (per discipline #17)
+
+| Fix | New thing introduced | Scope | Persists across | Terminal | Cross-process | Rollback | Negative test |
+|---|---|---|---|---|---|---|---|
+| F1 | `per_episode_records` array in manifest (per-episode `canonical_sha256` + `body_sha256` + `hmac_signature`) | per-run, in manifest | with manifest, indefinitely | terminal artifact | replay reads | manifests immutable | H8/H9/H18/H19/H20 |
+| F1 | `episodes_records_root` field (renamed from episodes_merkle_root, semantics generalized over full records) | per-run, in manifest | with manifest | n/a | n/a | n/a | H11/H12 |
+| F2 | `attempt_number` field on `codex_review` entry frontmatter | per-state-transition episode | indefinitely | retained | n/a | immutable | R1/R2/R3 |
+| F2 | `parent_state_transition` field on `codex_review` entry frontmatter | per-state-transition episode | indefinitely | retained | n/a | immutable | R7 (forge → HMAC catches) |
+| F2 | `bp1-state-lock(run_id, state)` claim/release evidence episodes + on-disk lock file | per-run, per-state | TTL 60s for lock; episodes indefinitely | claim retained | atomic O_EXCL create-and-rename | TTL expiry → reclaim | R4/R8/R9/R10 |
+| F2 | `bp1-tick-deduped` / `bp1-tick-stale` / `bp1-state-lock-stale` evidence-episode tags | per-tick | with episode | retained | concurrent-tick witnesses | n/a | R4/R5/R9 |
+| F3 | Runtime-artifact manifest schema (scripts + hooks + settings_lines + plugin_entries + agent_loaders + canonical_prompts) | per-install per-project | invalidated on any artifact change | n/a | each flag-check rebuilds + rehashes | revert any artifact → hash matches again → activation restored | A4/A9/A10/A11/A12/A13 |
+| F3 | `bp1-build-artifact-manifest.mjs` script (M0 deliverable, deterministic) | repo | repo lifetime | n/a | n/a | n/a | A14 (CI determinism test) |
+| F3 | Deterministic filter regexes for settings.json bp1 lines + plugin.json bp1 entries | static spec | RFC lifetime | n/a | n/a | RFC revision | A14 |
+
+8-axis matrix re-walk on the new surfaces:
+
+- **Splice (axis 1):** F1 records bound to manifest_payload (run_id + project_root) via signed envelope. F2 lock-claims bound per-run; per-state isolation prevents cross-state lock spoofing. F3 manifest is per-project (path-scoped sha256s).
+- **Forge / Stale (axis 2):** F1 stored sha256s recomputable from on-disk → tampering caught (H18/H19); manifest signature blocks record-list forgery (H20). F2 entry HMACs cover `attempt_number` + `parent_state_transition` (R7). F3 deterministic-builder + CI-determinism gate (A14) prevents accidental hash drift; stale artifacts fail closed (A9-A13).
+- **Orphan (axis 3):** F2 lock-claim without release after TTL → `bp1-state-lock-stale`, reclaim path (R9). F3 missing artifact at flag-check time → `bp1-flag-version-drift` (artifact-manifest builder errors on missing required artifact).
+- **Empty (axis 4):** F1 empty record list signs deterministically (sha256 of empty input); replay handles. F2 attempt_number=0 is valid initial state (R1). F3 empty filtered-settings-content sha256s deterministically.
+- **Wrong-shape (axis 5):** F1 records with non-hex sha256 fields rejected by validator. F2 attempt_number type-checked as integer. F3 builder rejects non-string paths.
+- **Wrong-semantic (axis 6):** F1 swapped canonical_sha256 vs body_sha256 caught by mismatch on either re-derivation. F2 attempt_number semantically bounded (0..N); >2 routes to needs_human (R2). F3 latest_prompt_episode_id resolution semantically vs structurally distinct (resolution can drift even with same loader file content) — A12 covers this.
+- **Race / TOCTOU (axis 7):** F1 finalize already atomic (per v3.3 sequence). F2 state-transition lock serializes all retry/transition attempts (R4); the side-effect-after-lock-release plus idempotent em-review-request closes the post-lock race. F3 builder is single-process at install/check time; no concurrent-build race.
+- **Boundary (axis 8):** F1 first/last record edge cases covered by sorted-by-episode_id ordering. F2 attempt_number=2 boundary (R2) routes to needs_human; lock TTL exactly-elapsed boundary handled in R9. F3 single-artifact install (only one bp1-*.mjs) hashes deterministically.
+
+**No new axes opened** — every new surface has explicit coverage. Specifically: F1's records are signed by long-lived verify-key (no new key). F2's locks are episode-tracked (no new state-store). F3's manifest is rebuilt deterministically from on-disk artifacts (no new mutable state).
+
+#### Intentionally deferred new surfaces (5-field per discipline #8)
+
+None this round. All identified second-order surfaces have negative-test coverage in M0/M1/M5.
+
+#### Round-3 process-feedback applied
+
+Codex's round-2 process meta-feedback (`20260506-033116-...-d32b`) drove toolkit v8 → v9 with new discipline #17 (implementer second-order review of fix-introduced surface). This v3.4 round explicitly applies #17: each fix's new surfaces tabulated, 8-axis re-walk performed, no untested second-order added. Toolkit v9 episode `20260506-033723-...-7dbf`; reviewer prompt v4 `20260506-033907-...-6075`; planner prompt v4 `20260506-034314-...-3193`.
+
+**Status (v3.4):** still `draft`. Re-request Codex review on these resolutions plus the new-integration-surface table above before flipping to `accepted`.
 
 ---
