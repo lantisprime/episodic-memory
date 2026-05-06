@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.4
+version: 3.5
 supersedes: ~
 superseded_by: ~
 ---
@@ -771,15 +771,16 @@ Tests H1-H7 ship as `tests/bp1-hmac-live.test.mjs`; H8-H20 ship as `tests/bp1-hm
 | `needs_human` | override episode | `resolved` → resume | bp1-human-input-watcher |
 | `needs_human` | 7 days | `abandoned` → `archived` | bp1-archive-ghosts.mjs |
 
-### Codex-timeout retry counter — `attempt_number` on entry + state-transition lock (v3.4)
+### Codex-timeout retry counter — separated attempt vs request-sent state (v3.5)
 
-The retry budget on `codex_review` (state-machine self-loop, max 2 retries before routing to `needs_human`) MUST be sourced from the **decision log itself**, not from in-memory orchestrator state, AND must be atomically claimed under a per-run/per-state lock to prevent concurrent timeout-ticks from doubling the side effect. (Codex round-2 finding 4 + round-3 finding 2.)
+The retry budget on `codex_review` (state-machine self-loop, max 2 retries before routing to `needs_human`) MUST be sourced from the **decision log itself**, not from in-memory orchestrator state, AND must be atomically claimed under a per-run/per-state lock. **v3.5 splits "attempt count" from "request-sent state"** so crash recovery can distinguish "attempt N, request never issued" from "attempt N, request issued and timed out". Without that split, a crash after writing `attempt_number=2` and before sending the request causes the next tick to take the `>=2 → needs_human` branch unconditionally, silently losing the second retry. (Codex round-2 finding 4 + round-3 finding 2 + round-4 finding 1.)
 
-#### Schema: `attempt_number` on `codex_review` entry episode
+#### Schema: `attempt_number` + `request_sent` on `codex_review` entry episode (v3.5)
 
-Every `codex_review` entry episode (initial `adversarial_reviewed → codex_review` AND every self-loop entry) carries an explicit `attempt_number` field in its frontmatter:
+Every `codex_review` entry episode carries explicit retry-state fields in its frontmatter. The fields are written across TWO episodes — the entry itself records the commitment (`attempt_number`, `parent_state_transition`); a follow-up `bp1-codex-request-sent` evidence episode records the side-effect completion (`requested_at`, `review_request_ref`):
 
 ```yaml
+# codex_review entry episode (state-transition, written under lock)
 ---
 type: state-transition
 run_id: <id>
@@ -792,48 +793,76 @@ inspected:
 ---
 ```
 
-The current attempt count is read in O(1) from the most recent `codex_review` entry — no chain walking, no count-of-children. Crash-safe by construction (immutable on disk).
+```yaml
+# bp1-codex-request-sent evidence episode (written AFTER lock release, AFTER side effect)
+---
+type: evidence
+run_id: <id>
+parent_episode: <codex_review entry episode id>
+requested_at: 2026-05-06T05:50:00Z
+review_request_ref: <em-review-request episode id>
+hmac_signature: ...
+inspected:
+  run_id: ...
+---
+```
+
+**Why the split:** the entry episode is written under lock and represents the *commitment* to attempt N+1. The `bp1-codex-request-sent` evidence episode is written outside the lock and represents the *completion* of the side effect. Decision logic queries them separately. A crash between entry-emission and request-issuance leaves a "naked" entry (commitment without completion); next tick recognizes that and re-issues the request rather than treating attempt N+1 as exhausted.
+
+`requested_at` derives from the request-sent evidence episode (not from the entry). `review_request_ref` records the em-review-request episode id that was issued for this attempt — provides linkage for replay and for em-watch-codex's reply-to-request matching.
 
 #### State-transition lock
 
-Before emitting any new `codex_review` entry (timeout self-loop OR initial entry) and before triggering its side effect (re-issuing em-review-request), the orchestrator MUST:
+Before emitting any new `codex_review` entry, the orchestrator MUST:
 
 1. Acquire `bp1-state-lock` for `(run_id, state=codex_review)` with TTL of 60s. Lock is recorded as a `bp1-state-lock-claim` evidence episode (atomic via `O_EXCL` create-and-rename of `<run>/state-locks/codex_review.lock` referencing the claim episode id).
 2. Read the most recent `codex_review` entry for this run; extract `attempt_number`.
-3. Decision tree (atomic under lock):
-   - If `attempt_number >= 2`: emit `bp1-codex-unreachable` + transition to `needs_human`. Release lock.
-   - Else: emit a NEW `codex_review` entry episode with `attempt_number = current + 1` and `parent_state_transition = <current entry id>`. Release lock. Re-issue em-review-request (the side effect happens AFTER lock release; the entry episode itself records the commitment).
-4. If lock acquisition fails (another writer holds it): the second writer queries the lock-claim episode, waits for the lock to be released or its TTL to expire, then re-reads state. If a new entry was already written for the same `attempt_number`, the second writer emits a `bp1-tick-deduped` evidence episode and exits without side effect.
+3. **Check request-sent state for that entry:** scan for a `bp1-codex-request-sent` evidence episode with `parent_episode == <current entry id>`. The decision tree branches on the combination:
+
+   | attempt_number | request_sent for this entry? | Action |
+   |---|---|---|
+   | `< 2` | n/a (will issue) | Emit new entry with `attempt+1`; release lock; issue request; emit `bp1-codex-request-sent` |
+   | `>= 2` | ✓ true (request was issued, has timed out) | Emit `bp1-codex-unreachable` + transition to `needs_human`. Release lock. |
+   | `>= 2` | ✗ false (recovery from crash before request issued) | DO NOT advance attempt_number. Release lock. Issue request for the existing entry; emit `bp1-codex-request-sent`. The next tick's timeout (after 30 min) will return to this branch — only routes to `needs_human` once `request_sent == true` AND timed out. |
+
+4. If lock acquisition fails: second writer waits for release or TTL expiry, re-reads state, may emit `bp1-tick-deduped` per concurrent-tick handling.
 
 The lock is recorded as an episode (immutable claim) and released by emitting a `bp1-state-lock-release` evidence episode. Crash recovery: on orchestrator restart, any lock with a release episode OR with elapsed TTL is treated as released; the next session re-reads state and proceeds. Lock claims older than TTL with no release are treated as crashed; emit `bp1-state-lock-stale` evidence and reclaim.
 
-#### On every timeout fire (revised)
+#### On every timeout fire (revised v3.5)
 
 1. `bp1-deadline-tick` (or fallback sweep) detects the 30-min deadline elapsed for the current `codex_review` entry of this run.
 2. Acquire `bp1-state-lock(run_id, codex_review)` per above. If contention → wait → on resume re-check; emit `bp1-tick-deduped` if duplicate.
-3. Inside lock: read current entry's `attempt_number`.
-4. If `attempt_number >= 2`: emit `bp1-codex-unreachable` + transition to `needs_human`.
-5. Else: emit new `codex_review` entry with `attempt_number = current + 1`, `parent_state_transition = current entry id`. Release lock.
-6. After lock release: re-issue the em-review-request bound to the new entry.
+3. Inside lock: read current entry's `attempt_number`; check for `bp1-codex-request-sent` evidence linked to that entry.
+4. Apply the decision tree above. Possible paths:
+   - **`attempt_number < 2`** → emit new entry attempt+1; release lock; issue request; emit `bp1-codex-request-sent` linking to the new entry
+   - **`attempt_number >= 2` AND request was sent** → emit `bp1-codex-unreachable` + needs_human; release lock; no request issued
+   - **`attempt_number >= 2` AND request was NOT sent (crash recovery)** → release lock; issue request for the existing entry; emit `bp1-codex-request-sent` linking to that entry. The "exhausted" decision happens on the NEXT tick, only after the request has been actually issued and its 30-min timeout elapsed.
+5. After lock release: any side effect (re-issue em-review-request) happens here; the request-sent evidence episode follows.
 
-The "side effect after lock release" sequence ensures: only one writer can ever advance `attempt_number`; only one writer can ever issue the side effect for a given attempt_number. Crash between steps 5 and 6 is recoverable: the new entry exists with `attempt_number=N+1` but no em-review-request was sent → next deadline-tick (after 30min from new entry's emission) fires, sees the most recent entry already at `attempt_number=N+1`, and reissues the request (this is correct: the em-review-request is idempotent on the Codex side per existing review-request hygiene).
+The split prevents the round-4 attempt-2-crash silent-loss bug: an entry with `attempt_number=2` but no `bp1-codex-request-sent` evidence is recoverable; only an entry with both is "exhausted". em-review-request is idempotent on the Codex side per existing review-request hygiene, so re-issuance after partial crash is safe.
 
 #### Negative tests (M1, gating M1→M2)
 
+Tests fan out across **all values of `attempt_number`** (per discipline #9 Level 3 + #17 multi-value field fan-out) and across **both states of `request_sent`**:
+
 | # | Scenario | Expected outcome |
 |---|---|---|
-| R1 | Initial entry, single 30min timeout | New entry with `attempt_number=1` after lock acquired; em-review-request re-issued |
-| R2 | Two timeouts in sequence (no concurrency) | First: attempt_number=0→1; second: 1→2; third would-be tick: reads attempt_number=2 → routes to needs_human (no further entry emitted) |
-| R3 | Crash after first timeout, restart, second timeout | Second timeout reads on-disk entry attempt_number=1; advances to 2; routes to needs_human |
-| R4 | Two concurrent timeout-ticks for same entry | First writer acquires lock; second blocks. First emits new entry attempt_number=N+1, releases. Second resumes, reads new entry, sees its planned attempt_number was already claimed → emits `bp1-tick-deduped`, exits |
-| R5 | `codex_complete` arrives between ticks | When ticks resume after lock, they read state = `codex_complete` (not `codex_review`); skip the retry path entirely; emit `bp1-tick-stale` evidence |
-| R6 | Manually-injected fake retry episode from earlier run-id | Lock is per-run; fake from another run can't claim this run's lock; even if injected to look like this run's, has no `bp1-state-lock-claim` predecessor → orchestrator skip-and-flag |
-| R7 | Forged `parent_state_transition` pointing at wrong entry | HMAC verification on the entry episode catches forgery (parent_state_transition is in canonical bytes for the entry's HMAC); also caught by manifest at finalize |
-| R8 (NEW v3.4) | Lock crash: writer dies after step 5, before step 6 | TTL elapses → next tick reads new entry at `attempt_number=N+1` with no em-review-request reply yet → re-issues request bound to that entry (idempotent) |
-| R9 (NEW v3.4) | Lock-claim episode missing release; TTL not elapsed; new tick fires | New tick blocks until TTL elapses, then emits `bp1-state-lock-stale`, reclaims, proceeds |
-| R10 (NEW v3.4) | Lock claim from earlier session contains stale `attempt_number` (writer crashed before emitting entry) | Reclaiming session reads no new entry → treats as if write never happened → new tick proceeds with current `attempt_number` (idempotent retry of the original tick) |
+| R1 | Initial entry (attempt=0), single 30min timeout, request issued + completed normally | New entry with `attempt=1`; `bp1-codex-request-sent` written; em-review-request re-issued |
+| R2 | attempt=0 → attempt=1 → attempt=2; third tick after request_sent + timeout | At third tick: reads `attempt=2` AND `request_sent==true` AND timed out → routes to `needs_human` |
+| R3 | Crash after writing `attempt=1` entry, before request issued | Next tick reads `attempt=1`, `request_sent==false` → recovery path issues request, emits request-sent evidence; subsequent timeout completes attempt 1 normally |
+| R4 | Two concurrent timeout-ticks for same entry | First writer acquires lock; second blocks. First emits new entry, releases. Second resumes, reads new entry, sees attempt was advanced → emits `bp1-tick-deduped`, exits |
+| R5 | `codex_complete` arrives between ticks | Ticks read state = `codex_complete`; skip retry path; emit `bp1-tick-stale` |
+| R6 | Manually-injected fake retry episode from earlier run-id | Per-run lock prevents cross-run contamination; injected episode has no valid `bp1-state-lock-claim` predecessor → skip-and-flag |
+| R7 | Forged `parent_state_transition` pointing at wrong entry | HMAC verification on entry catches forgery; manifest re-verification at finalize confirms |
+| R8 | Lock crash: writer dies after entry emit, before lock release | TTL elapses → next tick reads new entry; check request_sent: if false → re-issue per R3 path |
+| R9 | Lock-claim episode missing release; TTL not elapsed; new tick fires | New tick blocks until TTL, emits `bp1-state-lock-stale`, reclaims |
+| R10 | Lock claim from earlier session, no entry written | Reclaiming session reads no new entry → idempotent retry of original tick |
+| **R11 (NEW v3.5 — round-4 fan-out)** | **Crash after writing `attempt=2` entry, before request issued** | **Next tick reads `attempt=2` AND `request_sent==false` → recovery path issues request, emits request-sent evidence. Only the SUBSEQUENT timeout (after 30 min on the now-issued request) routes to `needs_human`. Second retry is preserved.** |
+| **R12 (NEW v3.5 — round-4 fan-out)** | **Crash after writing both `attempt=2` entry AND `bp1-codex-request-sent`, before timeout fires** | Next tick on timeout reads `attempt=2` AND `request_sent==true` → routes to `needs_human`. Same outcome as R2 — request was issued, timed out, exhausted. |
+| **R13 (NEW v3.5)** | `bp1-codex-request-sent` evidence forged for an entry that was never actually issued | HMAC verification on the evidence episode catches forgery (`parent_episode` and `review_request_ref` are in canonical bytes); manifest re-verification at finalize confirms |
 
-These ship as `tests/bp1-codex-retry.test.mjs`, gating M1→M2.
+The fan-out across `attempt_number ∈ {0, 1, 2}` × `request_sent ∈ {true, false}` produces six relevant combinations; R1-R12 cover all reachable ones. R13 covers the splice/forge axis on the new evidence episode. These ship as `tests/bp1-codex-retry.test.mjs`, gating M1→M2.
 
 ---
 
@@ -907,6 +936,8 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 | 31 | Finalize-run quiescence fence violated | finalize-run | rollback | `bp1-finalize-fence-fail` | yes |
 | 32 | Finalize-run crash between manifest write and key shred | next-session recovery | A (auto-recover) | `bp1-finalize-recover` | no |
 | 33 | Verify-key rotation attempted while run non-terminal | rotate-verify-key | rollback | `bp1-rotate-blocked` | no |
+| 34 | Codex request-sent evidence missing for `attempt_number >= 2` entry — crash-recovery path | timeout-tick (state-transition lock) | A (re-issue) | `bp1-codex-request-recovered` | yes |
+| 35 | Forged `bp1-codex-request-sent` evidence (`parent_episode` or `review_request_ref` not matching live HMAC) | auditor / manifest replay | C | `bp1-request-sent-fail` | yes |
 
 Machine-readable mirror (CI-validated source of truth):
 
@@ -1112,6 +1143,18 @@ failure_modes:
     terminal: rollback
     evidence: bp1-rotate-blocked
     lesson: false
+  - id: 34
+    failure: Codex request-sent evidence missing for attempt_number >= 2 entry (crash recovery)
+    detector: timeout-tick-under-state-lock
+    terminal: A
+    evidence: bp1-codex-request-recovered
+    lesson: true
+  - id: 35
+    failure: Forged bp1-codex-request-sent evidence (parent_episode or review_request_ref HMAC mismatch)
+    detector: auditor / manifest replay
+    terminal: C
+    evidence: bp1-request-sent-fail
+    lesson: true
 ```
 
 Lessons emitted contribute to global corpus per `feedback_check_episodes_before_analysis.md` and feed weekly digest synthesis.
@@ -1357,5 +1400,43 @@ None this round. All identified second-order surfaces have negative-test coverag
 Codex's round-2 process meta-feedback (`20260506-033116-...-d32b`) drove toolkit v8 → v9 with new discipline #17 (implementer second-order review of fix-introduced surface). This v3.4 round explicitly applies #17: each fix's new surfaces tabulated, 8-axis re-walk performed, no untested second-order added. Toolkit v9 episode `20260506-033723-...-7dbf`; reviewer prompt v4 `20260506-033907-...-6075`; planner prompt v4 `20260506-034314-...-3193`.
 
 **Status (v3.4):** still `draft`. Re-request Codex review on these resolutions plus the new-integration-surface table above before flipping to `accepted`.
+
+### v3.5 — Codex round-4 finding (2026-05-06)
+
+Codex round-4 review of v3.4 (episode `20260506-053506-codex-re-review-rfc-004-v3-4-hold-on-ret-1375`) returned **HOLD** with a single P1 finding: crash after writing `attempt_number=2` (before request issued) silently loses the second retry, because the decision tree's `>= 2 → needs_human` branch fires regardless of whether the request was actually sent. Caught a #17 application gap on multi-value field fan-out → drove toolkit v9 → v9.1 promotion (refines #9 fractal Level 3 + #17 fan-out clause).
+
+#### Round-4 finding disposition
+
+| # | Pri | Round-4 finding | Verdict | Resolution location |
+|---|---|---|---|---|
+| 1 | P1 | Retry crash after `attempt_number=2` loses the promised request | ACCEPT | Codex-timeout retry section rewritten v3.5: split commitment (entry's `attempt_number` + `parent_state_transition`) from completion (`bp1-codex-request-sent` evidence with `requested_at` + `review_request_ref`). Decision tree becomes `(attempt_number, request_sent_for_this_entry)` — `attempt >= 2 AND request_sent==true` → needs_human; `attempt >= 2 AND request_sent==false` → recovery (re-issue for existing entry, no advance). New negative tests R11 (crash at attempt=2 before issue → recovery), R12 (crash at attempt=2 after issue → exhausted), R13 (forged request-sent evidence). Failure rows 34, 35 added. |
+
+#### New integration surface introduced by v3.5 fix (per discipline #17, refined v9.1)
+
+| Fix | New thing introduced | Scope | Persists across | Terminal | Cross-process | Rollback | Negative test |
+|---|---|---|---|---|---|---|---|
+| F1 | `bp1-codex-request-sent` evidence episode | per-attempt, local | indefinitely | retained | n/a (one-shot per attempt) | manifest immutable | R1/R3/R11/R12/R13 |
+| F1 | `requested_at` + `review_request_ref` fields on the new evidence episode (in HMAC canonical bytes) | per-evidence | indefinitely | retained | n/a | n/a | R7/R13 |
+| F1 | Two-step decision tree: `(attempt_number, request_sent)` joint state instead of single attempt_number | runtime decision logic | every tick fire | n/a | lock-serialized + idempotent re-issue | n/a | R1-R13 fan-out across all reachable combinations |
+| F1 | Failure-table rows 34 (request-sent-recovered) + 35 (request-sent-forged) | static spec | RFC lifetime | n/a | n/a | RFC revision | failure-table CI uniqueness check |
+
+8-axis matrix re-walk on the new surface (per #9 Level 3 / #17 fan-out across `attempt_number ∈ {0,1,2}` × `request_sent ∈ {true, false}`):
+
+- **Splice (axis 1):** `bp1-codex-request-sent` evidence binds via HMAC over `parent_episode` (the codex_review entry id) + `review_request_ref`; cross-attempt or cross-run reuse caught by HMAC mismatch (R13).
+- **Forge / Stale (axis 2):** R13 — forged evidence with mismatched HMAC fails verification at auditor + at finalize manifest replay.
+- **Orphan (axis 3):** entry without request-sent evidence is the recovery case (R3, R11) — handled by re-issuing; not an orphan failure.
+- **Empty (axis 4):** missing `requested_at` or `review_request_ref` fields → HMAC verification fails (canonical bytes mismatch).
+- **Wrong-shape (axis 5):** non-string `review_request_ref` rejected pre-emit by frontmatter validator.
+- **Wrong-semantic (axis 6):** R5 — `codex_complete` between ticks moves state past codex_review; ticks read state and skip retry path entirely.
+- **Race / TOCTOU (axis 7):** state-transition lock (per v3.4) serializes entry emission; the new evidence episode is emitted AFTER lock release but BEFORE any subsequent tick can fire (30-min interval, far longer than write latency). Concurrent ticks at attempt boundary covered by R4.
+- **Boundary (axis 8):** `attempt_number=2` is the previously-unhandled boundary; v3.5 fan-out covers both values of `request_sent` at this boundary (R11, R12).
+
+**No new axes opened.** All six relevant `(attempt_number, request_sent)` combinations have explicit negative-test coverage (R1-R12); evidence-episode forgery covered by R13.
+
+#### Round-4 process feedback applied
+
+Codex's round-4 review introduced two empirical patterns folded into toolkit v9.1: (α) "Resolved from prior round" section in re-review output, (β) "Verification performed" footer. Plus discipline #17 was refined to demand state-machine field fan-out (γ) — exactly the gap that produced this round's finding. Toolkit v9.1 episode `20260506-055452-...-73f3`; reviewer prompt v4.1 `20260506-055742-...-29d9`; planner prompt v6 `20260506-061239-...-7214` (merged v5 fact-verification fork with v9.1).
+
+**Status (v3.5):** still `draft`. Re-request Codex review on the round-4 resolution plus the new-integration-surface table.
 
 ---
