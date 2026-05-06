@@ -564,11 +564,112 @@ function resolveEpisodeRef(ref, indexById, currentEpisode, opts = {}) {
 // Free-form strings are rejected (was previously unvalidated — #98 finding 2).
 const ISSUE_REF_RE = /^(https:\/\/github\.com\/[^\/\s]+\/[^\/\s]+\/issues\/\d+|gh:[^\/\s]+\/[^\/\s#]+#\d+)$/
 
-function validateChain(events, errors, warnings, gateArg, headArg) {
+// ---------------------------------------------------------------------------
+// Terminal-anchored chain selection (#102).
+//
+// Pre-#102: validateChain validated ALL events of every type for a task in
+// bulk; presentEvents was the union of every event type observed. Two parallel
+// chains (legit + spliced from prior attempt) both contributed to required-
+// event presence, and #119's push-gate cache had no stable "evidence-chain id"
+// to key on.
+//
+// Post-#102: anchor at the terminal event for the gate, walk refs backward
+// through approval_ref / pre_checkpoint_ref / post_checkpoint_ref, return the
+// selected chain id-set. validateChain runs splice-resistance against ALL
+// events as before, but errors keyed to out-of-chain episodes are migrated to
+// warnings, and presentEvents is computed from selectedChain only.
+//
+// Tiebreak when multiple terminal candidates exist:
+//   1. ctx.head === --head exact (when --head passed)
+//   2. Latest by (date, time) descending
+//   3. entry.id lex descending  (id has counter suffix → monotonic & deterministic)
+//
+// Walk axes per terminal event:
+//   pre-checkpoint   →  approval_ref
+//   post-checkpoint  →  pre_checkpoint_ref → its approval_ref
+//   push-allowed     →  post_checkpoint_ref → its pre_checkpoint_ref → approval_ref
+//   review-request   →  post_checkpoint_ref → its pre_checkpoint_ref → approval_ref
+//                       PLUS coalescence assertions on rr's own pre_checkpoint_ref
+//                       and approval_ref (Gap #1: PR #156 F1 same-class shape).
+// ---------------------------------------------------------------------------
+function pickTerminal(candidates, headArg) {
+  // Prefer ctx.head === --head exact match when --head is provided.
+  let pool = candidates
+  if (headArg) {
+    const matched = candidates.filter(c => c.payload.context && c.payload.context.head === headArg)
+    if (matched.length > 0) pool = matched
+  }
+  // Then latest by (date, time) desc; tail tiebreak by entry.id lex desc.
+  // Stable lex compare on date+' '+time works because ISO timestamps are
+  // zero-padded.
+  return pool.slice().sort((a, b) => {
+    const ka = `${a.entry.date} ${a.entry.time}`
+    const kb = `${b.entry.date} ${b.entry.time}`
+    if (ka < kb) return 1
+    if (ka > kb) return -1
+    if (a.entry.id < b.entry.id) return 1
+    if (a.entry.id > b.entry.id) return -1
+    return 0
+  })[0]
+}
+
+function selectChain(events, gateArg, headArg) {
+  const terminalEvent = TERMINAL_FOR_GATE[gateArg]
+  const candidates = events.filter(e => e.payload.event === terminalEvent)
+  if (candidates.length === 0) {
+    return { selectedChain: new Set(), terminal: null }
+  }
+  const terminal = pickTerminal(candidates, headArg)
+  const selectedChain = new Set([terminal.entry.id])
+
+  // Build event lookup by id for walking.
+  const byId = new Map()
+  for (const e of events) byId.set(e.entry.id, e)
+
+  // Walk axes — ordered list of refs to follow from the current event.
+  // Cycle guard: visited Set prevents infinite loops if refs form a cycle
+  // (resolveEpisodeRef already rejects self-witness and timestamp inversions,
+  // but defensive guard keeps walker safe even under malformed inputs).
+  function walk(startEvent) {
+    const queue = [startEvent]
+    while (queue.length > 0) {
+      const current = queue.shift()
+      const refs = []
+      switch (current.payload.event) {
+        case 'review-request':
+        case 'push-allowed':
+          refs.push(current.payload.post_checkpoint_ref)
+          break
+        case 'post-checkpoint':
+          refs.push(current.payload.pre_checkpoint_ref)
+          break
+        case 'pre-checkpoint':
+          refs.push(current.payload.approval_ref)
+          break
+        // plan-approved is the chain root — nothing to walk back to.
+      }
+      for (const ref of refs) {
+        const targetId = refTarget(ref)
+        if (!targetId) continue                 // null/placeholder/non-episode — already errored upstream
+        if (selectedChain.has(targetId)) continue // cycle/visited guard
+        const target = byId.get(targetId)
+        if (!target) continue                   // missing — already errored upstream
+        selectedChain.add(targetId)
+        queue.push(target)
+      }
+    }
+  }
+  walk(terminal)
+  return { selectedChain, terminal }
+}
+
+function validateChain(events, errors, warnings, gateArg, headArg, selectedChain, terminal) {
   const byEvent = {}
+  const eventById = new Map()
   for (const e of events) {
     if (!byEvent[e.payload.event]) byEvent[e.payload.event] = []
     byEvent[e.payload.event].push(e)
+    eventById.set(e.entry.id, e)
   }
   // pre-checkpoint.approval_ref must point to a plan-approved episode for same task
   for (const pre of (byEvent['pre-checkpoint'] || [])) {
@@ -618,27 +719,53 @@ function validateChain(events, errors, warnings, gateArg, headArg) {
     }
   }
   // review-request handling (#118).
-  // 1) Multi-review-request "latest-by-timestamp wins" pre-#102 chain-walk
-  //    fallback (folded gap #1). Older review-request episodes' errors get
-  //    downgraded to warnings — they may have stale refs from prior attempts,
-  //    which is OK as long as the terminal review-request is clean.
-  // 2) post_checkpoint_ref chain-link check (mirrors push-allowed contract).
+  // post_checkpoint_ref chain-link check (mirrors push-allowed contract).
+  // Multi-review-request resolution is now terminal-anchored via selectChain
+  // (#102): the gate's terminal is the chain anchor, non-terminal review-
+  // requests are out-of-chain and their errors get migrated to warnings by the
+  // generalized out-of-chain migration below.
   const reviewRequests = byEvent['review-request'] || []
-  let nonTerminalRrIds = new Set()
-  if (reviewRequests.length > 1) {
-    const sorted = reviewRequests.slice().sort((a, b) => {
-      const ka = `${a.entry.date} ${a.entry.time}`
-      const kb = `${b.entry.date} ${b.entry.time}`
-      // ISO date strings are zero-padded, so plain ASCII compare is correct.
-      // Descending: latest first.
-      if (ka < kb) return 1
-      if (ka > kb) return -1
-      return 0
-    })
-    const terminal = sorted[0]
-    nonTerminalRrIds = new Set(sorted.slice(1).map(e => e.entry.id))
-    for (const ntId of nonTerminalRrIds) {
-      warnings.push(`episode:${ntId}: superseded by review-request episode:${terminal.entry.id} (latest-by-timestamp wins; consider em-revise to make the supersedes chain explicit)`)
+  if (gateArg === 'review-request' && terminal && reviewRequests.length > 1) {
+    for (const rr of reviewRequests) {
+      if (rr.entry.id === terminal.entry.id) continue
+      warnings.push(`episode:${rr.entry.id}: superseded by terminal review-request episode:${terminal.entry.id} (chain-walk anchored at terminal; consider em-revise to make the supersedes chain explicit)`)
+    }
+  }
+  // Coalescence assertions on terminal review-request (#102 Gap #1, the PR #156
+  // F1 same-class shape). When the chain walks rr → post → pre → approval but
+  // rr ALSO carries its own pre_checkpoint_ref + approval_ref, those refs MUST
+  // converge to the same chain — otherwise a forged or accidentally cross-
+  // pointing rr could pass with three valid same-task refs that don't form a
+  // coherent chain. Without coalescence, walking via post_checkpoint_ref alone
+  // would silently accept the divergent refs.
+  if (gateArg === 'review-request' && terminal && terminal.payload.event === 'review-request') {
+    const rr = terminal
+    const postId = refTarget(rr.payload.post_checkpoint_ref)
+    if (postId && eventById.get(postId)) {
+      const post = eventById.get(postId)
+      const walkedPreRef = post.payload.pre_checkpoint_ref
+      const rrPreRef = rr.payload.pre_checkpoint_ref
+      if (walkedPreRef && rrPreRef && walkedPreRef !== rrPreRef) {
+        errors.push(`episode:${rr.entry.id}: pre_checkpoint_ref "${rrPreRef}" does not coalesce with post-checkpoint's pre_checkpoint_ref "${walkedPreRef}" (chain refs must converge — divergent refs indicate splice or cross-chain forgery)`)
+      }
+      const preId = refTarget(walkedPreRef)
+      if (preId && eventById.get(preId)) {
+        const pre = eventById.get(preId)
+        const walkedApprovalRef = pre.payload.approval_ref
+        const rrApprovalRef = rr.payload.approval_ref
+        if (walkedApprovalRef && rrApprovalRef && walkedApprovalRef !== rrApprovalRef) {
+          errors.push(`episode:${rr.entry.id}: approval_ref "${rrApprovalRef}" does not coalesce with pre-checkpoint's approval_ref "${walkedApprovalRef}" (chain refs must converge — divergent refs indicate splice or cross-chain forgery)`)
+        }
+      }
+      // NOTE: plan_ref is NOT coalescence-checked. plan_ref points to the plan
+      // artifact (a doc, episode, or URL) — distinct from approval_ref which
+      // points to the plan-approved lifecycle episode. Spec workflow-lifecycle.md:151
+      // explicitly allows rr.plan_ref to be episode-shaped pointing to a
+      // separate plan-document episode. Codex review on PR #171 caught a
+      // false-rejection where I had treated plan_ref as a chain-identity ref;
+      // the correct semantics is "witness/artifact ref, resolved via
+      // checkEpisodeRefs but not bound to chain identity." See T102-22 for
+      // the legitimate episode-shaped plan_ref pattern.
     }
   }
   for (const rr of reviewRequests) {
@@ -682,22 +809,28 @@ function validateChain(events, errors, warnings, gateArg, headArg) {
       }
     }
   }
-  // Migrate any errors KEYED TO non-terminal review-request ids → warnings.
-  // Errors emitted in validatePayload are anchored to `episode:<id>:` at the
-  // start (see fp = `episode:${entry.id}` at validatePayload:220). We only
-  // migrate errors that BEGIN with `episode:<ntId>:` — substring match would
-  // false-migrate errors that mention a non-terminal id elsewhere in the
-  // string (e.g. terminal review-request citing an older one) (review M1).
-  if (nonTerminalRrIds.size > 0) {
+  // Migrate errors KEYED TO out-of-chain episode ids → warnings (#102).
+  //
+  // Generalizes the prior non-terminal-review-request migration: any error
+  // whose anchor id (the `episode:<id>:` prefix at error start) is NOT in
+  // selectedChain is downgraded to a warning. Errors anchored to in-chain ids
+  // stay as errors. Substring-match avoidance preserved (review M1): use
+  // `startsWith` so an in-chain error that mentions an out-of-chain id
+  // mid-string (e.g. "X cites missing Y" where X is in-chain) is NOT migrated.
+  //
+  // Errors not anchored to any episode id (synthetic chain-link errors that
+  // start with something other than `episode:`) are left as errors — they
+  // surface chain-shape violations that aren't tied to a specific event.
+  if (selectedChain && selectedChain.size > 0) {
     const migrated = []
     for (let i = errors.length - 1; i >= 0; i--) {
       const err = errors[i]
-      for (const ntId of nonTerminalRrIds) {
-        if (err.startsWith(`episode:${ntId}:`)) {
-          migrated.push(`(non-terminal review-request) ${err}`)
-          errors.splice(i, 1)
-          break
-        }
+      const m = err.match(/^episode:([^:]+):/)
+      if (!m) continue
+      const anchorId = m[1]
+      if (!selectedChain.has(anchorId)) {
+        migrated.push(`(out-of-chain) ${err}`)
+        errors.splice(i, 1)
       }
     }
     warnings.push(...migrated)
@@ -762,9 +895,26 @@ for (const entry of workflowEntries) {
   events.push({ entry, payload })
 }
 
-validateChain(events, errors, warnings, gate, head)
+// Terminal-anchored chain selection (#102). selectedChain identifies the chain
+// reachable by walking refs backward from the gate's terminal event. Out-of-
+// chain events still appear in episodes[] with `in_chain: false`, but their
+// errors are migrated to warnings and they don't satisfy required-event
+// presence — closing the bulk-validation parallel-chain gap.
+const { selectedChain, terminal } = selectChain(events, gate, head)
 
-const presentEvents = new Set(events.map(e => e.payload.event))
+validateChain(events, errors, warnings, gate, head, selectedChain, terminal)
+
+// presentEvents counts only events in selectedChain — parallel chains' events
+// no longer satisfy required-event presence (#102).
+//
+// Fallback (review m2): when no terminal exists for the gate (selectedChain
+// empty), compute presentEvents from ALL task events. This preserves the
+// pre-#102 UX of "missing only the terminal" instead of "missing everything"
+// when a user has plan/pre/post recorded but forgot the terminal — the
+// actionable signal stays visible.
+const presentEvents = selectedChain.size > 0
+  ? new Set(events.filter(e => selectedChain.has(e.entry.id)).map(e => e.payload.event))
+  : new Set(events.map(e => e.payload.event))
 const required = REQUIRED_FOR_GATE[gate] || []
 const missing = required.filter(e => !presentEvents.has(e))
 
@@ -783,6 +933,7 @@ const output = {
   episodes: events.map(e => ({
     id: e.entry.id,
     event: e.payload.event,
+    in_chain: selectedChain.has(e.entry.id),
     date: e.entry.date,
     time: e.entry.time,
     branch: e.payload.context && e.payload.context.branch,

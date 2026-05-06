@@ -283,18 +283,84 @@ check meaningful, **`--head` is required when `--gate push-allowed` or
 `--gate review-request`** — the validator exits with a usage error if it is
 omitted.
 
-### Multi-`review-request` per task (pre-#102 chain-walk fallback)
+### Terminal-anchored chain selection (#102)
 
-When multiple `review-request` episodes exist for the same task (e.g. user
-re-runs `em-review-request` after fixing a missed ref), the validator picks
-the **latest by timestamp** as the terminal review-request. Older
-review-request episodes are surfaced as warnings (not errors); any errors
-keyed to non-terminal review-request ids are downgraded to warnings.
+Pre-#102: `validateChain` validated all events of a task in bulk; a parallel
+chain (legit + spliced from a prior attempt) could both contribute to required-
+event presence, and #119's push-gate cache had no stable evidence-chain id to
+key on.
 
-This is a pragmatic pre-#102 (chain-walk) fallback. The canonical multi-
-attempt path is `em-revise --original <id>` to make the supersedes chain
-explicit. After [#102](https://github.com/lantisprime/episodic-memory/issues/102)
-lands, chain-walk anchors at the terminal explicitly; this rule will tighten.
+Post-#102: the validator anchors at the **terminal event** for the gate, walks
+refs backward, and produces a `selectedChain` set of episode ids. Out-of-chain
+episodes still appear in `episodes[]` (with `in_chain: false`) but their
+errors are downgraded to warnings and they don't satisfy required-event
+presence.
+
+#### Walk axes per terminal
+
+| Terminal event | Walk refs |
+|---|---|
+| `pre-checkpoint` | `approval_ref` |
+| `post-checkpoint` | `pre_checkpoint_ref` → its `approval_ref` |
+| `push-allowed` | `post_checkpoint_ref` → its `pre_checkpoint_ref` → its `approval_ref` |
+| `review-request` | `post_checkpoint_ref` → its `pre_checkpoint_ref` → its `approval_ref`, plus coalescence assertions on the rr's own `pre_checkpoint_ref` and `approval_ref` (see below) |
+
+#### Terminal selection (tiebreak)
+
+When multiple events match `TERMINAL_FOR_GATE[gate]`:
+
+1. **Head match** — when `--head` is passed, candidates whose `ctx.head ===
+   --head` are preferred over those that don't match.
+2. **Latest by timestamp** (descending) within the matching pool.
+3. **Lex desc on `entry.id`** as the tail tiebreak. Counter-suffixed ids are
+   monotonic, so this is deterministic across filesystems (avoids macOS vs
+   Linux flakes).
+
+#### `review-request` coalescence (Gap #1, PR #156 F1 same-class)
+
+A `review-request` carries three independent chain identity refs
+(`approval_ref`, `pre_checkpoint_ref`, `post_checkpoint_ref`). Walking via
+`post_checkpoint_ref` alone would silently accept divergent refs that all
+happen to be same-task / right-event-type but don't form a coherent chain.
+The validator additionally asserts:
+
+- `rr.pre_checkpoint_ref === post.pre_checkpoint_ref` (where `post` is the
+  walked target of `rr.post_checkpoint_ref`)
+- `rr.approval_ref === pre.approval_ref` (where `pre` is the walked target of
+  `post.pre_checkpoint_ref`)
+
+Mismatch produces a coalescence error keyed to the review-request, blocking
+the gate.
+
+`plan_ref` is **NOT** coalescence-checked. It points to the plan artifact (a
+file, URL, or arbitrary episode containing the plan), distinct from
+`approval_ref` which points to the `plan-approved` lifecycle episode. Per
+spec above, episode-shaped `plan_ref` MAY point at a non-lifecycle plan-doc
+episode used consistently across `plan-approved`, `pre-checkpoint`, and
+`review-request`. Treating it as a chain identity ref would false-reject this
+legitimate pattern (Codex PR #171 review catch).
+
+This closes the same-class gap that bit PR #156 review F1 (lesson
+`20260505-070434-...-90c7`): fixing one chain-ref check requires auditing all
+three parallel members at the deferral moment, not the fix moment.
+
+#### `episodes[]` JSON shape
+
+Every event in `events[]` (any task-matching `workflow.lifecycle` episode)
+appears in `episodes[]` regardless of chain membership. The `in_chain: bool`
+field marks chain membership. Cache consumers (#119) use this to derive a
+stable evidence-chain id from the in-chain set.
+
+Pre-#102 callers reading `episodes[]` for "all task episodes" continue to
+work; new callers can filter by `in_chain: true` for the gated chain.
+
+#### Multi-`review-request` per task
+
+Older review-requests (re-runs after fixing missed refs) become out-of-chain
+under terminal-anchored selection. The canonical multi-attempt path remains
+`em-revise --original <id>` to make the supersedes chain explicit; the
+terminal-anchored fallback emits a "superseded by terminal review-request"
+warning to surface the implicit chain even when supersedes wasn't recorded.
 
 ### Wrapper-validator scope-parity contract
 

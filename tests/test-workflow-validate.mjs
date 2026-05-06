@@ -1131,10 +1131,12 @@ test('T58 multi-review-request: latest-by-timestamp wins, older becomes warning'
   mkReviewRequest({ chain })
   const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
   assert.strictEqual(r.json.valid, true, `terminal review-request is valid; errors: ${JSON.stringify(r.json.errors)}`)
-  assert.ok(r.json.warnings.some(w => w.includes(olderId) && w.includes('superseded by review-request')),
+  // Post-#102: terminal-anchored chain selection. Older review-request is
+  // out-of-chain; supersedes warning + its errors are migrated.
+  assert.ok(r.json.warnings.some(w => w.includes(olderId) && w.includes('superseded by terminal review-request')),
     `expected supersedes warning, got: ${JSON.stringify(r.json.warnings)}`)
-  assert.ok(r.json.warnings.some(w => w.includes('non-terminal review-request')),
-    `expected migrated error → warning, got: ${JSON.stringify(r.json.warnings)}`)
+  assert.ok(r.json.warnings.some(w => w.includes('(out-of-chain)') && w.includes(olderId)),
+    `expected out-of-chain migrated warning, got: ${JSON.stringify(r.json.warnings)}`)
 })
 
 test('T59 push-allowed regression: still works WITHOUT review-request in chain', () => {
@@ -1765,6 +1767,482 @@ test('T67 wrapper: --dry-run prints payload without writing', () => {
   // No new episode file written.
   const afterFiles = fs.readdirSync(episodesDir).length
   assert.strictEqual(afterFiles, beforeFiles, 'dry-run should not write episode file')
+})
+
+// ===========================================================================
+// #102 — terminal-anchored chain selection
+// ===========================================================================
+
+// Helper: build a parallel post-checkpoint episode in the same task that is
+// NOT chain-linked from any terminal. Used to verify the new contract that
+// out-of-chain post-checkpoints don't satisfy required-event presence.
+function mkParallelPostCheckpoint({ chain }) {
+  const lId = mkWitness({ summary: 'log-parallel' })
+  const rId = mkWitness({ summary: 'review-parallel' })
+  const eId = mkWitness({ summary: 'e2e-parallel' })
+  return mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      pre_checkpoint_ref: `episode:${chain.preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+}
+
+test('T102-1 selectChain: two post-checkpoints, only one chain-linked from push-allowed', () => {
+  const chain = mkBaseChainForReview()
+  const parallelPostId = mkParallelPostCheckpoint({ chain })
+  // push-allowed references the canonical post-checkpoint, not the parallel.
+  mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${chain.postId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `gate should pass; errors: ${JSON.stringify(r.json.errors)}`)
+  // Parallel post-ckpt is in episodes[] but in_chain: false.
+  const parallel = r.json.episodes.find(e => e.id === parallelPostId)
+  assert.ok(parallel, `parallel post should appear in episodes[]`)
+  assert.strictEqual(parallel.in_chain, false, `parallel post must NOT be in selectedChain`)
+  // Canonical post is in_chain: true.
+  const canon = r.json.episodes.find(e => e.id === chain.postId)
+  assert.strictEqual(canon.in_chain, true)
+})
+
+test('T102-2 selectChain: in_chain set includes plan/pre/post for push-allowed walk', () => {
+  const chain = mkBaseChainForReview()
+  const paId = mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${chain.postId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true)
+  const inChainIds = new Set(r.json.episodes.filter(e => e.in_chain).map(e => e.id))
+  assert.ok(inChainIds.has(chain.planId), 'plan-approved should be in chain')
+  assert.ok(inChainIds.has(chain.preId), 'pre-checkpoint should be in chain')
+  assert.ok(inChainIds.has(chain.postId), 'post-checkpoint should be in chain')
+  assert.ok(inChainIds.has(paId), 'push-allowed terminal should be in chain')
+})
+
+test('T102-3 selectChain: multiple plan-approved revisions, only chain-linked one in selectedChain', () => {
+  const chain = mkBaseChainForReview()
+  // Build a parallel plan-approved that's NOT referenced.
+  const parallelPlanId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p2.md' } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+  const parallel = r.json.episodes.find(e => e.id === parallelPlanId)
+  assert.ok(parallel)
+  assert.strictEqual(parallel.in_chain, false, `unreferenced plan-approved must NOT be in selectedChain`)
+  const canon = r.json.episodes.find(e => e.id === chain.planId)
+  assert.strictEqual(canon.in_chain, true)
+})
+
+test('T102-4 review-request gate: chain-walk picks coherent chain, parallel chain warned', () => {
+  // Two complete chains for same task; only chain1 has a review-request.
+  const chain1 = mkBaseChainForReview()
+  const lId2 = mkWitness({ summary: 'log2' })
+  const rId2 = mkWitness({ summary: 'review2' })
+  const eId2 = mkWitness({ summary: 'e2e2' })
+  const planId2 = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p2.md' } })
+  const preId2 = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p2.md', approval_ref: `episode:${planId2}` } })
+  const postId2 = mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      pre_checkpoint_ref: `episode:${preId2}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId2}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId2}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId2}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+  mkReviewRequest({ chain: chain1 })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `gate should pass; errors: ${JSON.stringify(r.json.errors)}`)
+  const inChain = new Set(r.json.episodes.filter(e => e.in_chain).map(e => e.id))
+  assert.ok(inChain.has(chain1.planId) && inChain.has(chain1.preId) && inChain.has(chain1.postId),
+    'chain1 entirely in selectedChain')
+  assert.ok(!inChain.has(planId2) && !inChain.has(preId2) && !inChain.has(postId2),
+    'chain2 entirely out-of-chain')
+})
+
+test('T102-5 out-of-chain post-checkpoint with branch mismatch: error migrated to warning', () => {
+  // A parallel post-ckpt with mismatched branch produces a branch-mismatch
+  // error pre-fix; post-fix it's out-of-chain so the error becomes a warning
+  // and gate still passes against the canonical chain. Branch mismatch is
+  // enforced unconditionally in validatePayload (no git dependency, unlike
+  // the head ancestor check).
+  const chain = mkBaseChainForReview()
+  const lId = mkWitness({ summary: 'log-x' })
+  const rId = mkWitness({ summary: 'review-x' })
+  const eId = mkWitness({ summary: 'e2e-x' })
+  const parallelPostId = mkEpisode({
+    event: 'post-checkpoint',
+    branch: 'feature-other',
+    extra: {
+      pre_checkpoint_ref: `episode:${chain.preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+  mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${chain.postId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234', '--branch', 'main'])
+  assert.strictEqual(r.json.valid, true, `gate must pass; errors: ${JSON.stringify(r.json.errors)}`)
+  // The branch-mismatch text is now in warnings, prefixed (out-of-chain).
+  assert.ok(r.json.warnings.some(w => w.includes('(out-of-chain)') && w.includes(parallelPostId) && w.includes('branch')),
+    `expected migrated branch-mismatch warning, got: ${JSON.stringify(r.json.warnings)}`)
+})
+
+test('T102-6 broken ref mid-chain: terminal references missing post-checkpoint id', () => {
+  // selectChain walker tolerates missing refs (validatePayload already errored
+  // upstream). Walk halts; selectedChain only contains terminal. presentEvents
+  // missing post-checkpoint → gate fails with missing[].
+  const chain = mkBaseChainForReview()
+  // push-allowed cites a non-existent post-checkpoint id.
+  mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: 'episode:does-not-exist-xyz' } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  // The original "not found" error is preserved (precise error string, not
+  // synthesized "chain unselectable").
+  assert.ok(r.json.errors.some(e => e.includes('does-not-exist-xyz')),
+    `expected precise not-found error preserved, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-7 triggered_by NOT walked into selectedChain', () => {
+  const chain = mkBaseChainForReview()
+  const trigId = mkWitness({ category: 'lesson', summary: 'trigger lesson' })
+  mkReviewRequest({ chain, extra: { triggered_by: `episode:${trigId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true)
+  const trig = r.json.episodes.find(e => e.id === trigId)
+  // Witness episodes (lesson category) aren't in workflow.lifecycle pre-filter
+  // so they don't appear in episodes[] at all. selectChain must not pull them.
+  assert.strictEqual(trig, undefined, 'triggered_by witness should not be in episodes[]')
+})
+
+test('T102-8 second_opinion.reply_ref NOT in selectedChain', () => {
+  // pre-checkpoint with second_opinion.reply_ref to a non-lifecycle witness.
+  // selectedChain walks approval_ref only; reply_ref is a witness, not a chain link.
+  const lId = mkWitness({ summary: 'so-reply' })
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({
+    event: 'pre-checkpoint',
+    extra: {
+      plan_ref: 'p.md',
+      approval_ref: `episode:${planId}`,
+      second_opinion: { status: 'done', recipient: 'codex', reply_ref: `episode:${lId}` },
+    },
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+  // Witness lId is non-lifecycle; not in episodes[]. Confirms it didn't sneak in.
+  const witnessInEpisodes = r.json.episodes.find(e => e.id === lId)
+  assert.strictEqual(witnessInEpisodes, undefined)
+})
+
+test('T102-9 walk hits cross-category ref: error preserved, missing populated', () => {
+  // pre-checkpoint approval_ref points to non-lifecycle category (caught by
+  // expectedCategory check upstream). selectChain walks anyway but the error
+  // is raised by validatePayload + checkEpisodeRefs.
+  const witnessId = mkWitness({ category: 'discovery', summary: 'fake plan' })
+  mkEpisode({
+    event: 'pre-checkpoint',
+    extra: { plan_ref: 'p.md', approval_ref: `episode:${witnessId}` },
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && e.includes('category')),
+    `expected category-mismatch error preserved, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-10 no-terminal: gate=post-checkpoint with only plan+pre → missing[] populated, no crash', () => {
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.missing.includes('post-checkpoint'),
+    `expected missing post-checkpoint, got: ${JSON.stringify(r.json.missing)}`)
+})
+
+test('T102-11 placeholder approval_ref in terminal: walk halts, plan-approved missing', () => {
+  // pre-checkpoint with placeholder approval_ref. validatePayload errors;
+  // selectChain walk halts at terminal; plan-approved not in selectedChain.
+  // Even if a plan-approved exists for the task, it's not in selectedChain.
+  mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: 'episode:' } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  // missing reflects out-of-chain plan-approved.
+  assert.ok(r.json.missing.includes('plan-approved'),
+    `expected missing plan-approved (not in selectedChain), got: ${JSON.stringify(r.json.missing)}`)
+  // Schema error still surfaces.
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && e.includes('placeholder')),
+    `expected placeholder error preserved, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-12 wrong-shape approval_ref: walk halts, error preserved', () => {
+  mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: 'file:plans/foo.md' } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && e.includes('episode reference')),
+    `expected non-episode error preserved, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-13 wrong-semantic: post_checkpoint_ref points to pre-checkpoint id', () => {
+  const chain = mkBaseChainForReview()
+  // push-allowed.post_checkpoint_ref points at preId (wrong event type).
+  mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${chain.preId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false)
+  // Original "not a post-checkpoint" error preserved.
+  assert.ok(r.json.errors.some(e => e.includes('post_checkpoint_ref') && e.includes('not a post-checkpoint')),
+    `expected wrong-event-type error preserved, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-14 tiebreak: multiple terminals at identical timestamp, id-lex desc wins (deterministic)', () => {
+  // Two pre-checkpoints with same timestamp (same date/time fields). selectChain
+  // tiebreak: lex desc on entry.id. Counter-suffixed ids are monotonic so
+  // the LATER-CREATED one (higher counter → lex larger) wins deterministically.
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p.md' } })
+  const pre1 = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const pre2 = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p.md', approval_ref: `episode:${planId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+  // pre2 has higher counter → lex larger → terminal.
+  const terminal = r.json.episodes.find(e => e.id === pre2)
+  assert.strictEqual(terminal.in_chain, true, 'pre2 (lex-larger id) should be terminal')
+  const other = r.json.episodes.find(e => e.id === pre1)
+  assert.strictEqual(other.in_chain, false, 'pre1 (lex-smaller) should be out-of-chain')
+})
+
+test('T102-15 head disambiguation: multiple terminals, --head selects matching one', () => {
+  // Two post-checkpoints at different heads. push-allowed --head selects the
+  // matching post via head-equality (mediated by post_checkpoint_ref + the
+  // existing head-equality enforcement at validateChain). Test that both ARE
+  // referenced via separate push-alloweds and selectChain picks the head-match.
+  // Simplification: build chain with one post at abc1234 (chain.postId) and one
+  // parallel push-allowed referencing a parallel post at differenthead.
+  const chain = mkBaseChainForReview()
+  const lId = mkWitness({ summary: 'log-h' })
+  const rId = mkWitness({ summary: 'review-h' })
+  const eId = mkWitness({ summary: 'e2e-h' })
+  const altPostId = mkEpisode({
+    event: 'post-checkpoint',
+    head: 'differenthead',
+    extra: {
+      pre_checkpoint_ref: `episode:${chain.preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+  // Two push-allowed terminals at different heads. selectChain prefers
+  // ctx.head === --head exact match.
+  const paAlt = mkEpisode({ event: 'push-allowed', head: 'differenthead', extra: { post_checkpoint_ref: `episode:${altPostId}` } })
+  const paGood = mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${chain.postId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+  // paGood has matching head → terminal.
+  const goodIn = r.json.episodes.find(e => e.id === paGood).in_chain
+  const altIn = r.json.episodes.find(e => e.id === paAlt).in_chain
+  assert.strictEqual(goodIn, true)
+  assert.strictEqual(altIn, false)
+})
+
+test('T102-16 review-request coalescence: rr.pre_checkpoint_ref diverges from post.pre_checkpoint_ref', () => {
+  // Build two complete chains, then create a review-request whose
+  // post_checkpoint_ref points at chain1.postId BUT pre_checkpoint_ref points
+  // at chain2.preId. Both refs are individually same-task / right event-type
+  // — but they don't coalesce. Pre-#102 + Gap#1 fix would silently accept;
+  // post-fix coalescence assertion must reject.
+  const chain1 = mkBaseChainForReview()
+  const planId2 = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p2.md' } })
+  const preId2 = mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'p2.md', approval_ref: `episode:${planId2}` } })
+  const lId2 = mkWitness({ summary: 'log2' })
+  const rId2 = mkWitness({ summary: 'review2' })
+  const eId2 = mkWitness({ summary: 'e2e2' })
+  mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      pre_checkpoint_ref: `episode:${preId2}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId2}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId2}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId2}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+  // rr: post points to chain1.postId, but pre points to chain2's preId2.
+  mkReviewRequest({
+    chain: { ...chain1, preId: preId2 }, // splice pre, keep post=chain1.postId, approval=chain1.planId
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false, `coalescence violation must reject; errors: ${JSON.stringify(r.json.errors)}`)
+  assert.ok(r.json.errors.some(e => e.includes('pre_checkpoint_ref') && e.includes('coalesce')),
+    `expected coalescence error on pre_checkpoint_ref, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-17 review-request coalescence: rr.approval_ref diverges from pre.approval_ref', () => {
+  // Two plan-approveds for same task, both same task. rr.approval_ref points
+  // at planId2 while the walked path (rr → post → pre → approval) lands at
+  // planId1. Coalescence assertion must reject.
+  const chain = mkBaseChainForReview()
+  const planId2 = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'p2.md' } })
+  // rr.approval_ref points at planId2 (NOT chain.planId).
+  mkReviewRequest({
+    chain,
+    extra: { approval_ref: `episode:${planId2}` },
+  })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, false, `coalescence violation must reject; errors: ${JSON.stringify(r.json.errors)}`)
+  assert.ok(r.json.errors.some(e => e.includes('approval_ref') && e.includes('coalesce')),
+    `expected coalescence error on approval_ref, got: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-18 review-request coalescence: all three refs coherent → passes', () => {
+  // Regression guard: a properly-formed review-request with all three chain
+  // refs converging on the same chain must still pass post-#102.
+  const chain = mkBaseChainForReview()
+  mkReviewRequest({ chain })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `coherent chain must pass; errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-19 in_chain flag: classified episode not in chain (not required for any gate)', () => {
+  const chain = mkBaseChainForReview()
+  // classified is not a chain-link event for any gate per workflow-lifecycle.md:407.
+  const classifiedId = mkEpisode({ event: 'classified', extra: { classification: 'full' } })
+  mkEpisode({ event: 'push-allowed', extra: { post_checkpoint_ref: `episode:${chain.postId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'push-allowed', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+  // classified appears in episodes[] (backward-compat) with in_chain: false.
+  const classified = r.json.episodes.find(e => e.id === classifiedId)
+  assert.ok(classified, 'classified should appear in episodes[]')
+  assert.strictEqual(classified.in_chain, false)
+})
+
+test('T102-20 single coherent chain: regression — gate passes, all events in_chain', () => {
+  // The simplest case: one chain, one terminal, no parallels. Must continue
+  // passing post-refactor.
+  const chain = mkBaseChainForReview()
+  const r = runValidate(['--task', 'TEST', '--gate', 'post-checkpoint', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `errors: ${JSON.stringify(r.json.errors)}`)
+  const inChainEvents = r.json.episodes.filter(e => e.in_chain).map(e => e.event).sort()
+  assert.deepStrictEqual(inChainEvents.sort(), ['plan-approved', 'post-checkpoint', 'pre-checkpoint'].sort())
+})
+
+test('T102-22 review-request: legitimate episode-shaped plan_ref (plan-doc episode) PASSES', () => {
+  // Codex PR #171 review repro: rr.plan_ref points at a separate non-lifecycle
+  // plan-document episode (which the plan-approved + pre-checkpoint also
+  // reference as their plan_ref). This is a legitimate pattern per spec
+  // workflow-lifecycle.md:151. plan_ref is the plan artifact, NOT the
+  // plan-approved lifecycle episode. An earlier (incorrect) coalescence
+  // assertion conflated these and false-rejected this shape; this test locks
+  // the correct semantics.
+  //
+  // Build chain manually (mkBaseChainForReview hardcodes plan_ref='p.md').
+  const planDocId = mkWitness({ category: 'discovery', summary: 'plan doc as episode' })
+  const lId = mkWitness({ summary: 'log-pd' })
+  const rId = mkWitness({ summary: 'review-pd' })
+  const eId = mkWitness({ summary: 'e2e-pd' })
+  const planId = mkEpisode({
+    event: 'plan-approved',
+    extra: { plan_ref: `episode:${planDocId}` },
+  })
+  const preId = mkEpisode({
+    event: 'pre-checkpoint',
+    extra: { plan_ref: `episode:${planDocId}`, approval_ref: `episode:${planId}` },
+  })
+  const postId = mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+  // rr with all chain refs coherent + episode-shaped plan_ref to the doc.
+  const chain = { planId, preId, postId, logId: lId, reviewId: rId, e2eId: eId }
+  mkReviewRequest({ chain, extra: { plan_ref: `episode:${planDocId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `legitimate episode-shaped plan_ref must pass; errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-23 review-request: rr.plan_ref as file/URL (free-form) PASSES', () => {
+  // Regression guard: free-form plan_ref (file path or URL) is the most common
+  // case per spec.
+  const chain = mkBaseChainForReview()
+  mkReviewRequest({ chain, extra: { plan_ref: 'docs/plan-with-different-text.md' } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `free-form plan_ref must pass; errors: ${JSON.stringify(r.json.errors)}`)
+})
+
+test('T102-21 semantic-flip vs T58: chain-walk picks DIFFERENT rr than latest-by-timestamp would', () => {
+  // Pre-#102 latest-by-timestamp would always pick the newest rr. Post-#102
+  // chain-walk picks the rr identified as the gate's terminal. To exercise
+  // the difference: build two rr's where the OLDER rr has valid refs and the
+  // NEWER rr has invalid refs. T58b already locks "newer (terminal) wins" as
+  // contract; this test confirms that under multi-rr selection, the terminal-
+  // anchor identity is what gates, not "any chain that happens to validate."
+  //
+  // Setup: chain has plan/pre/post. Older rr is valid. Newer rr has bogus
+  // post_checkpoint_ref. With pre-#102 latest-by-timestamp on multi-rr, newer
+  // rr is terminal → fail. With post-#102 chain-walk, terminal = pickTerminal
+  // (latest by timestamp under same conditions) → newer rr → fail. Both pass
+  // the same test; behavior unchanged for this specific axis.
+  //
+  // The genuine semantic-flip happens when --head differentiates: build two
+  // rr's at different heads, --head matching the OLDER one. Pre-#102 latest-
+  // by-timestamp ignored --head for terminal selection. Post-#102 head-match
+  // wins, so the older rr is terminal.
+  const chain = mkBaseChainForReview()
+  // Older rr at head=abc1234 (matches --head). Newer rr at differenthead.
+  // Use mkReviewRequest to build the older one with default ctx.head abc1234.
+  // Then build a newer rr at differenthead via direct mkEpisode.
+  mkReviewRequest({ chain }) // older rr at default 12:00
+  // Newer rr at later time, different head. Built directly to control time.
+  counter++
+  const newerId = `20260502-1300${String(counter).padStart(2, '0')}-rr-newer-${counter.toString(16).padStart(4, '0')}`
+  const newerPayload = {
+    event: 'review-request',
+    pattern_id: 'bp-001-implementation-workflow',
+    task: 'TEST',
+    context: { worktree: tmpCwd, branch: 'main', head: 'differenthead' },
+    plan_ref: 'p.md',
+    approval_ref: `episode:${chain.planId}`,
+    pre_checkpoint_ref: `episode:${chain.preId}`,
+    post_checkpoint_ref: `episode:${chain.postId}`,
+    evidence: {
+      tests_ref: `episode:${chain.logId}`,
+      code_review_ref: `episode:${chain.reviewId}`,
+      bug_logging: { status: 'no-new-bugs' },
+    },
+  }
+  const newerFm = `---\nid: ${newerId}\ndate: 2026-05-02\ntime: "13:00"\nproject: test\ncategory: workflow.lifecycle\nstatus: active\ntags: []\nsummary: rr newer differenthead\n---\n`
+  const newerBody = `# x\n\n\`\`\`json\n${JSON.stringify(newerPayload)}\n\`\`\`\n`
+  fs.writeFileSync(path.join(episodesDir, `${newerId}.md`), newerFm + '\n' + newerBody)
+  fs.appendFileSync(indexFile, JSON.stringify({
+    id: newerId, date: '2026-05-02', time: '13:00', project: 'test',
+    category: 'workflow.lifecycle', status: 'active', supersedes: null, tags: [], summary: 'newer rr',
+  }) + '\n')
+  // Run with --head abc1234. Post-#102 chain-walk picks the older rr (head match).
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `older rr at matching --head must be terminal; errors: ${JSON.stringify(r.json.errors)}`)
+  // The newer rr (differenthead) is out-of-chain.
+  const newer = r.json.episodes.find(e => e.id === newerId)
+  assert.strictEqual(newer.in_chain, false, 'newer rr at differenthead should NOT be terminal under --head=abc1234')
 })
 
 // ---------------------------------------------------------------------------
