@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.8
+version: 3.9
 supersedes: ~
 superseded_by: ~
 ---
@@ -40,7 +40,7 @@ A multi-agent automation pipeline that drives RFCs through Rule 18 end-to-end. C
 - **One blocking-poll agent** — human-input-watcher (no timeout; resumes only on explicit override episode).
 - **One existing agent reused** — `negative-scenario-planner` for plan-time adversarial review.
 - **One lesson agent** — emits global lesson episodes per resolved bug + per-run synthesis, growing the corpus on every run.
-- **Eleven scripts** — RFC scanner (fail-closed), event-table renderer, replay walker, snapshot emitter, run-lock, marker validator, crash classifier, ghost-run archival, token-budget calculator, em-review-request extension, orchestrator runtime.
+- **Thirteen scripts** — RFC scanner (fail-closed), event-table renderer, replay walker, snapshot emitter, run-lock, marker validator, crash classifier, ghost-run archival, token-budget calculator, em-review-request extension, orchestrator runtime, canonicalize helper (NEW v3.8), naked-entry sweep (NEW v3.8).
 - **One SessionStart hook** — bp1-approval-check, ordered after handoff-prompt.
 - **Three scheduled tasks** — `bp1-deadline-tick` (5-min cron, request-issued timeout per Path A), `bp1-naked-entry-sweep` (5-min cron, naked-entry recovery per Path B — NEW v3.8), and `bp1-security-audit-weekly` (Sunday meta-audit + ghost-run archival). All principle-conformant per P6 (visible, listable, episode-emitting).
 - **One slash command** — `/bp1-auto <rfc-id>` for manual entry.
@@ -150,7 +150,7 @@ Every gated artifact reads via `bp1-flag-check.mjs --project <root>` (or auto-de
 
 1. Map entry exists for canonicalized current project root
 2. `enabled === true`
-3. `artifact_version_hash` matches the installed scripts' recomputed hash
+3. `artifact_version_hash` matches the recomputed hash over the FULL runtime-artifact manifest (scripts + hooks + filtered settings.json + filtered plugin.json + agent loaders + canonical-prompt episode IDs — see "Runtime-artifact manifest contents" above)
 4. `verify_key_id` matches the live verify-key fingerprint (catches key-rotation drift)
 
 Any mismatch → exit non-zero + emit `bp1-disabled-refusal` (or `bp1-flag-version-drift` / `bp1-flag-key-drift` for the more specific cases). Hard refuse to advance state.
@@ -497,7 +497,7 @@ flowchart TD
 
 All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_canonical_prompt_as_episode.md`). Agent loader files are thin (~30 lines); the prompt body lives as a global episode revisable via `em-revise`.
 
-### Scripts (11 total — 1 extension, 10 new)
+### Scripts (13 total — 1 extension, 12 new)
 
 | # | Script | Role | Validation |
 |---|---|---|---|
@@ -535,7 +535,7 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 
 1. Call `mcp__scheduled-tasks__list_scheduled_tasks` (any mode — even an empty list confirms the capability is wired).
 2. On success: orchestrator records `scheduled_tasks_capability: native` in the activation episode.
-3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. Both T1 and T2 must run via fallback path until the next probe succeeds.
+3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. **T1 (deadline-tick / Path A) and T1b (naked-entry-sweep / Path B)** must run via the unified fallback `bp1-deadline-sweep.mjs --once` until the next probe succeeds. **T2 (weekly meta-audit) does NOT have a fallback path** — when scheduled-tasks are unavailable, T2 degrades to a manual `node scripts/bp1-security-audit.mjs --once` invocation surfaced in the operator runbook (see below); operators are explicitly informed of the degraded mode in the activation episode body.
 
 **Fallback: `scripts/bp1-deadline-sweep.mjs --once`** (M0 deliverable, EXTENDED v3.8 to also cover Path B naked-entry sweep):
 
