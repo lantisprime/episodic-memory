@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.10
+version: 3.11
 supersedes: ~
 superseded_by: ~
 ---
@@ -113,6 +113,16 @@ artifact_manifest:
     - path: "scripts/bp1-rfc-scan.mjs"
       sha256: "<file-sha256>"
     # ... all scripts/bp1-*.mjs
+    # NEW v3.11 per CLI v3.10 F3: include non-bp1-prefixed runtime extensions
+    # that BP1 depends on for safety contracts. The em-review-request extension
+    # carries the idempotency-key enforcement (per I4 invariant); a change to
+    # this script must trigger artifact-version drift even if no bp1-* file changed.
+    - path: "scripts/em-review-request.mjs"
+      sha256: "<file-sha256>"
+    # Future-extensibility: any script BP1 depends on for a load-bearing safety
+    # contract (idempotency, signing, validation) must be enumerated here, even
+    # if its filename doesn't start with bp1-. The list is closed (no glob);
+    # additions require RFC update + M0 builder update + activation re-run.
   hooks:
     - path: ".claude/hooks/bp1-approval-check.sh"
       sha256: "<file-sha256>"
@@ -191,6 +201,7 @@ A reverse `bp1-flag-flip.mjs --disable` removes only the named project's entry (
 | A7 | Two `--disable` calls race on same project | one wins, other emits `bp1-disable-already` (no-op idempotent) |
 | A8 | Map file corrupted / partial write recovery | `bp1-flag-config-corrupt` emitted; all projects refuse until repair |
 | A9 (NEW v3.4) | Stale `.claude/hooks/bp1-approval-check.sh` (modified) with unchanged scripts/bp1-*.mjs | `bp1-flag-version-drift` (artifact-manifest hash recomputes; differs from stored value) |
+| A15 (NEW v3.11 per CLI v3.10 F3) | Modified `scripts/em-review-request.mjs` (extension) with unchanged bp1-*.mjs files | `bp1-flag-version-drift` (manifest now explicitly lists em-review-request.mjs in `scripts:`; recomputed sha256 differs) |
 | A10 (NEW v3.4) | Modified `.claude/settings.json` bp1 wiring (e.g., hook removed from SessionStart array) | `bp1-flag-version-drift` (filtered-settings-lines sha256 differs) |
 | A11 (NEW v3.4) | Modified `.claude-plugin/plugin.json` (e.g., scheduled-task definition changed) | `bp1-flag-version-drift` (filtered-plugin-entries sha256 differs) |
 | A12 (NEW v3.4) | Canonical prompt episode for a bp1 agent superseded since install | `bp1-flag-version-drift` (latest_prompt_episode_id resolution differs from stored value) |
@@ -545,7 +556,9 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 
 - Stateless one-shot sweep — replays the same logic T1 + T1b would have run (Path A request-issued deadline check + Path B naked-entry recovery, both across active runs).
 - Invocable manually: `node scripts/bp1-deadline-sweep.mjs --once`.
-- Auto-wired as a SessionStart hook (`.claude/hooks/bp1-sweep-on-session.sh`, hook H2 — added to inventory v3.10 per CLI v3.9 F2) so any human session triggers a sweep — provides best-effort liveness when the scheduled-task capability is missing. The hook is **activation-gated**: it calls `bp1-flag-check.mjs` FIRST and exits 0 silently if the project is disabled/inactive (per the gated-artifacts table above).
+- Auto-wired as a SessionStart hook (`.claude/hooks/bp1-sweep-on-session.sh`, hook H2 — added to inventory v3.10 per CLI v3.9 F2) so any human session triggers a sweep — provides best-effort liveness when the scheduled-task capability is missing.
+
+- **Activation gating with M5 dry-run bypass (REVISED v3.11 per CLI v3.10 F1):** the hook + `--once` invocation call `bp1-flag-check.mjs` FIRST and exit 0 silently if the project is disabled/inactive. **Exception:** when `BP1_DRY_RUN_MODE=1` is set in the environment OR a `<project>/.episodic-memory/.bp1-dry-run.lock` file exists (containing the dry-run run_id and a TTL), the sweep dispatches even when activation is false. This bypass is set by `bp1-flag-flip.mjs --dry-run-on <run_id>` at M5 dry-run start and cleared by `--dry-run-off` after dry-run completion. Without this bypass, fallback-only environments (no `mcp__scheduled-tasks` capability) would deadlock M5 — the dry-run needs to exercise Path A/B sweeps to verify them, but activation can only flip after the dry-run passes. The dry-run mode is single-project-scoped (the lock file's run_id binds it to one project's M5 attempt) and TTL-bounded (default 30 min — generous enough for a dry run, short enough to fail closed if M5 crashes mid-run).
 - Records each invocation as a `bp1-sweep-tick` episode for audit-trail parity with T1.
 - Does NOT replicate T2 (weekly meta-audit) — that degrades to a manual `node scripts/bp1-security-audit.mjs --once`, surfaced in the operator runbook.
 
@@ -737,7 +750,9 @@ The records hold everything replay needs to detect tampering **without `run.key`
 2. Recomputes `episodes_records_root` from the records and compares (rejects record-list tampering within the manifest).
 3. For each record: re-derives `canonical_sha256` from on-disk frontmatter fields and re-derives `body_sha256` from on-disk body bytes; compares both to the stored record values. Mismatch → `bp1-manifest-fail`.
 4. (Defence-in-depth, key-not-required) cross-checks on-disk frontmatter `hmac_signature` matches manifest's stored `hmac_signature`. This catches one specific case: someone tampering BOTH body and frontmatter hmac to a self-consistent forgery — the on-disk `hmac_signature` value would mismatch the manifest's record.
-5. **(NEW v3.10 — on-disk-set equality check, addresses CLI v3.9 F1)** Scan the on-disk episode set for this `run_id` (all files in `<project>/.episodic-memory/episodes/` with frontmatter `run_id` matching). Compute the set of episode IDs. **Require exact equality** with the set of `episode_id` values in `per_episode_records`. Any extra-on-disk episode (in the run but not in the manifest) → `bp1-manifest-fail` with reason `extra-episode`. Any missing-on-disk episode (in the manifest but not on disk) → `bp1-manifest-fail` with reason `missing-episode`. This closes the post-terminal append attack: an attacker adding a new episode file to the run's directory after finalize would change the on-disk set without changing the signed manifest.
+5. **(REVISED v3.11 per CLI v3.10 F2 — cross-store equality check)** Scan the on-disk episode set for this `run_id` across **BOTH** stores: `<project>/.episodic-memory/episodes/` (local) AND `~/.episodic-memory/episodes/` (global). Per the storage policy, `bp1-lesson` episodes are emitted to global scope, but they ARE part of this run's audit trail and ARE included in the manifest's `per_episode_records`. The equality check compares the union of (local-store run-episodes ∪ global-store run-episodes) against `per_episode_records`. Any extra-on-disk episode (in either store, matching `run_id`, but not in the manifest) → `bp1-manifest-fail` with reason `extra-episode`. Any missing-on-disk episode (in the manifest but not on disk in either store) → `bp1-manifest-fail` with reason `missing-episode`. This closes both the local post-terminal append attack AND the global lessons-tampering attack.
+
+   The manifest builder at `finalize-run` step 2 was updated v3.11 to scan BOTH stores when collecting per-episode records (was local-only in v3.7-v3.10).
 
 Verification failure → `bp1-hmac-fail` (live, row 16) or `bp1-manifest-fail` (post-terminal, row 30).
 
