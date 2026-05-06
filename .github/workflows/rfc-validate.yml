@@ -4,15 +4,37 @@ on:
   pull_request:
     paths:
       - 'docs/rfcs/**'
+      - 'install.mjs'
       - 'scripts/em-rfc-validate.mjs'
+      - 'scripts/validate-rfc-failure-table.mjs'
+      - 'scripts/validate-rfc-artifact-manifest.mjs'
+      - 'scripts/lib/bp1-manifest.mjs'
+      - 'scripts/bp1-build-artifact-manifest.mjs'
+      - 'scripts/bp1-flag-check.mjs'
       - 'tests/test-em-rfc-validate.mjs'
+      - 'tests/test-validate-rfc-failure-table.mjs'
+      - 'tests/test-validate-rfc-artifact-manifest.mjs'
+      - 'tests/test-bp1-flag-check.mjs'
+      - 'tests/test-bp1-build-artifact-manifest.mjs'
+      - 'tests/test-install-bp1.sh'
       - '.github/workflows/rfc-validate.yml'
   push:
     branches: [main]
     paths:
       - 'docs/rfcs/**'
+      - 'install.mjs'
       - 'scripts/em-rfc-validate.mjs'
+      - 'scripts/validate-rfc-failure-table.mjs'
+      - 'scripts/validate-rfc-artifact-manifest.mjs'
+      - 'scripts/lib/bp1-manifest.mjs'
+      - 'scripts/bp1-build-artifact-manifest.mjs'
+      - 'scripts/bp1-flag-check.mjs'
       - 'tests/test-em-rfc-validate.mjs'
+      - 'tests/test-validate-rfc-failure-table.mjs'
+      - 'tests/test-validate-rfc-artifact-manifest.mjs'
+      - 'tests/test-bp1-flag-check.mjs'
+      - 'tests/test-bp1-build-artifact-manifest.mjs'
+      - 'tests/test-install-bp1.sh'
 
 jobs:
   validate:
@@ -27,5 +49,26 @@ jobs:
       - name: Run RFC registry validator
         run: node scripts/em-rfc-validate.mjs
 
-      - name: Run validator self-tests
+      - name: Run RFC registry self-tests
         run: node tests/test-em-rfc-validate.mjs
+
+      - name: Validate RFC failure-table prose↔YAML mirror
+        run: node scripts/validate-rfc-failure-table.mjs
+
+      - name: Run failure-table validator self-tests
+        run: node tests/test-validate-rfc-failure-table.mjs
+
+      - name: Validate RFC artifact-manifest contract surfaces
+        run: node scripts/validate-rfc-artifact-manifest.mjs
+
+      - name: Run artifact-manifest validator self-tests
+        run: node tests/test-validate-rfc-artifact-manifest.mjs
+
+      - name: Run bp1-flag-check self-tests
+        run: node tests/test-bp1-flag-check.mjs
+
+      - name: Run bp1-build-artifact-manifest self-tests
+        run: node tests/test-bp1-build-artifact-manifest.mjs
+
+      - name: Run install.mjs BP-1 idempotence tests
+        run: bash tests/test-install-bp1.sh

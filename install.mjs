@@ -17,6 +17,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -114,14 +115,59 @@ if (fs.existsSync(repoPatternsIndex)) {
 const localDir = path.join(projectDir, '.episodic-memory')
 fs.mkdirSync(path.join(localDir, 'episodes'), { recursive: true })
 
-// Add to .gitignore if it exists
+// Add to .gitignore if it exists. Guards are line-anchored (not substring)
+// so a stale comment mention does not silently suppress a real append.
+function gitignoreHasPattern(content, pattern) {
+  return content.split('\n').some(line => {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) return false
+    return t === pattern
+  })
+}
 const gitignorePath = path.join(projectDir, '.gitignore')
 if (fs.existsSync(gitignorePath)) {
   const content = fs.readFileSync(gitignorePath, 'utf8')
-  if (!content.includes('.episodic-memory')) {
+  if (!gitignoreHasPattern(content, '.episodic-memory/') &&
+      !gitignoreHasPattern(content, '.episodic-memory')) {
     fs.appendFileSync(gitignorePath, '\n# Episodic memory data\n.episodic-memory/\n')
     console.log('Added .episodic-memory/ to .gitignore')
   }
+  // RFC-004 §656 — per-run HMAC key file is project-local but must never be
+  // committed. Pattern is stable across the BP-1 lifecycle.
+  const runKeyPattern = '**/.episodic-memory/runs/*/run.key'
+  const refreshed = fs.readFileSync(gitignorePath, 'utf8')
+  if (!gitignoreHasPattern(refreshed, runKeyPattern)) {
+    fs.appendFileSync(gitignorePath, `\n# BP-1 per-run HMAC key (RFC-004)\n${runKeyPattern}\n`)
+    console.log(`Added ${runKeyPattern} to .gitignore`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2b. BP-1 long-lived verify-key + activation map skeleton (RFC-004 §660-668).
+// Generated once on first install; persists across runs and projects.
+// ---------------------------------------------------------------------------
+const verifyKeyPath = path.join(GLOBAL_DIR, '.verify-key')
+if (!fs.existsSync(verifyKeyPath)) {
+  const key = crypto.randomBytes(32)
+  fs.writeFileSync(verifyKeyPath, key, { mode: 0o600 })
+  // Defensive chmod: writeFileSync mode is umask-sensitive on some platforms.
+  fs.chmodSync(verifyKeyPath, 0o600)
+  console.log(`Created BP-1 verify-key at ${verifyKeyPath} (mode 0600)`)
+} else {
+  // Enforce mode invariant on every install — drift surfaces here, not at first
+  // call to bp1-flag-check. Failure mode 29 (bp1-hmac-keyfile-fail).
+  const mode = fs.statSync(verifyKeyPath).mode & 0o777
+  if (mode !== 0o600) {
+    fs.chmodSync(verifyKeyPath, 0o600)
+    console.log(`Re-chmod'd ${verifyKeyPath} from 0${mode.toString(8)} to 0600`)
+  }
+}
+
+const bp1ConfigPath = path.join(GLOBAL_DIR, 'config.json')
+if (!fs.existsSync(bp1ConfigPath)) {
+  const skeleton = { bp1: { schema_version: 1, activations: {} } }
+  fs.writeFileSync(bp1ConfigPath, JSON.stringify(skeleton, null, 2) + '\n')
+  console.log(`Created BP-1 config skeleton at ${bp1ConfigPath}`)
 }
 
 // ---------------------------------------------------------------------------

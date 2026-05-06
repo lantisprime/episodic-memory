@@ -4,3 +4,14 @@ node_modules/
 .env
 .env.*
 .episodic-memory/
+
+# Claude Code runtime markers (managed by hooks, never committed)
+.claude/.pre-checkpoint-done
+.claude/.post-checkpoint-done
+.claude/.checkpoint-required
+.claude/.post-checkpoint-required
+.claude/.plan-approval-pending
+.claude/settings.local.json
+
+# BP-1 per-run HMAC key (RFC-004)
+**/.episodic-memory/runs/*/run.key
