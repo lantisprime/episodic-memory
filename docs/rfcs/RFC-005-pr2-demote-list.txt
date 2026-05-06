@@ -1,0 +1,51 @@
+# RFC-005 PR-2 demote list — 46 episodes flagged 2026-05-06 as project-specific contamination in global scope.
+# Source: scan-and-demote audit run on 2026-05-06.
+# All IDs verified against MEMORY.md tier-3 anchors (`1eaf, 09e5, 54ea, 7de4, 85a8, d179, 2e50, 9f6f, 8457, 90c7, f047`) — no overlap.
+# Format: one full episode ID per line; lines starting with # are comments.
+
+20260503-140322-em-backup-feature-context-opt-in-persona-0677
+20260501-070306-rfc-002-phase-2-shipped-pattern-refineme-3067
+20260501-023456-rfc-001-phase-2-implemented-relevance-sc-8750
+20260502-020005-claude-code-docs-kb-cache-stored-for-hoo-7871
+20260502-014751-codex-docs-kb-cache-stored-for-hooks-age-4b81
+20260506-001809-rfc-004-second-opinion-8-axis-matrix-4-g-4d4a
+20260501-071257-rfc-002-phase-3-plan-2nd-opinion-review--2a67
+20260501-052806-session-3-milestone-rfc-001-phase-3-ship-a86a
+20260501-054854-session-3-final-rfc-002-phase-4-designed-9a8d
+20260501-020243-rfc-001-phase-2-p3-findings-to-address-d-7970
+20260501-013352-rfc-002-p3-findings-to-address-during-im-3d0c
+20260501-012728-rfc-implementation-priority-order-decide-f3bf
+20260430-230557-claude-consensus-report-on-rfc-001-post--315c
+20260430-144807-rfc-001-memory-improvements-accepted-rea-e079
+20260430-144856-rfc-infrastructure-created-and-rfc-001-a-0eff
+20260430-143800-rfc-001-codex-review-addressed-all-8-fin-1715
+20260430-100008-rfc-001-guided-entry-ingest-v1-shipped-a-5624
+20260430-100009-rfc-003-hook-enforcement-alignment-shipp-d490
+20260430-100331-rfc-docs-workflow-lifecycle-spec-driven--4761
+20260430-103902-you-re-welcome-claude-reply-to-codex-tha-0082
+20260430-103743-thank-you-to-claude-for-the-episodic-mem-49bf
+20260430-103246-upstream-pr-1-merged-install-mjs-path-wi-71e5
+20260430-103251-upstream-episodic-memory-pr-1-merged-nex-1929
+20260501-064211-phase-2-post-implementation-checkpoint-m-d8ce
+20260501-063203-ran-e2e-test-before-code-review-rule-18--3d26
+20260501-063154-skipped-step-2-second-opinion-review-aft-e4f2
+20260501-055320-stored-local-episodic-memories-but-forgo-32d5
+20260501-053936-bp-001-light-scope-works-correct-classif-b2ff
+20260501-053344-session-wrap-up-consistently-incomplete--22ee
+20260501-052845-violations-are-design-inputs-not-failure-dc5b
+20260501-052154-workflow-compliance-is-fractal-fixing-vi-2809
+20260501-052022-push-gate-2nd-opinion-fixes-skipped-appr-65d4
+20260501-051536-push-gate-addition-to-phase-3b-skipped-p-7fa8
+20260501-051229-rfc-002-phase-3b-code-review-fixes-skipp-28dd
+20260501-050944-rfc-002-phase-3b-amendment-classified-as-4cb5
+20260501-050042-memory-md-and-docs-are-cognitive-enforce-324b
+20260501-045608-phase-3-implementation-skipped-pre-post--6808
+20260501-045624-superseded-by-structured-violation-see-v-15b5
+20260501-045223-plan-gate-fix-misclassified-as-light-sco-770e
+20260501-005114-discovery-building-enforcement-while-vio-bb62
+20260505-002323-bp-001-violation-filed-closed-145-withou-bf56
+20260501-090848-skipped-second-opinion-review-offer-on-r-753e
+20260503-022730-codex-analysis-prevent-bp-001-step-6-and-27c4
+20260503-115734-weekly-digest-2026-05-03-episodic-memory-51d3
+20260430-105340-branch-protection-enabled-on-lantisprime-acfc
+20260501-124338-codex-review-request-peer-system-synthes-5095
