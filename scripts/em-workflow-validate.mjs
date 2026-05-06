@@ -756,20 +756,16 @@ function validateChain(events, errors, warnings, gateArg, headArg, selectedChain
         if (walkedApprovalRef && rrApprovalRef && walkedApprovalRef !== rrApprovalRef) {
           errors.push(`episode:${rr.entry.id}: approval_ref "${rrApprovalRef}" does not coalesce with pre-checkpoint's approval_ref "${walkedApprovalRef}" (chain refs must converge — divergent refs indicate splice or cross-chain forgery)`)
         }
-        // plan_ref coalescence (review M1: 4-member class, was 3-member).
-        // When rr.plan_ref is episode-shaped, it must equal the walked
-        // plan-approved id (i.e., pre.approval_ref). free-form plan_ref
-        // (file/URL) is not coalescence-checked — only episode-shaped refs
-        // can carry chain identity. Closes the same forgery vector as the
-        // pre/approval coalescence: rr could otherwise carry plan_ref:
-        // episode:<unrelated-plan-approved> while the walked path lands at
-        // the canonical chain (PR #156 F1 same-class shape, full sweep).
-        const rrPlanRef = rr.payload.plan_ref
-        if (typeof rrPlanRef === 'string' && rrPlanRef.startsWith('episode:') &&
-            walkedApprovalRef && rrPlanRef !== walkedApprovalRef) {
-          errors.push(`episode:${rr.entry.id}: plan_ref "${rrPlanRef}" does not coalesce with walked plan-approved "${walkedApprovalRef}" (when plan_ref is episode-shaped, chain refs must converge)`)
-        }
       }
+      // NOTE: plan_ref is NOT coalescence-checked. plan_ref points to the plan
+      // artifact (a doc, episode, or URL) — distinct from approval_ref which
+      // points to the plan-approved lifecycle episode. Spec workflow-lifecycle.md:151
+      // explicitly allows rr.plan_ref to be episode-shaped pointing to a
+      // separate plan-document episode. Codex review on PR #171 caught a
+      // false-rejection where I had treated plan_ref as a chain-identity ref;
+      // the correct semantics is "witness/artifact ref, resolved via
+      // checkEpisodeRefs but not bound to chain identity." See T102-22 for
+      // the legitimate episode-shaped plan_ref pattern.
     }
   }
   for (const rr of reviewRequests) {

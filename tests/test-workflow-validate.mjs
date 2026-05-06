@@ -2139,34 +2139,54 @@ test('T102-20 single coherent chain: regression — gate passes, all events in_c
   assert.deepStrictEqual(inChainEvents.sort(), ['plan-approved', 'post-checkpoint', 'pre-checkpoint'].sort())
 })
 
-test('T102-22 review-request coalescence: rr.plan_ref (episode-shaped) diverges from walked plan-approved', () => {
-  // Review M1 catch: plan_ref is the 4th member of the rr-coalescence class.
-  // When rr.plan_ref is episode-shaped, it must equal the walked plan-approved.
-  // Forgery vector: a parallel plan-approved exists for the same task; rr's
-  // chain refs (post→pre→approval) point at canonical chain, but rr.plan_ref
-  // points at the rogue plan. Without this assertion, divergent plan_ref
-  // would silently pass.
-  const chain = mkBaseChainForReview()
-  const rogueePlanId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'rogue.md' } })
-  // rr's chain refs are coherent (point at chain), but plan_ref points elsewhere.
-  mkReviewRequest({
-    chain,
-    extra: { plan_ref: `episode:${rogueePlanId}` },
+test('T102-22 review-request: legitimate episode-shaped plan_ref (plan-doc episode) PASSES', () => {
+  // Codex PR #171 review repro: rr.plan_ref points at a separate non-lifecycle
+  // plan-document episode (which the plan-approved + pre-checkpoint also
+  // reference as their plan_ref). This is a legitimate pattern per spec
+  // workflow-lifecycle.md:151. plan_ref is the plan artifact, NOT the
+  // plan-approved lifecycle episode. An earlier (incorrect) coalescence
+  // assertion conflated these and false-rejected this shape; this test locks
+  // the correct semantics.
+  //
+  // Build chain manually (mkBaseChainForReview hardcodes plan_ref='p.md').
+  const planDocId = mkWitness({ category: 'discovery', summary: 'plan doc as episode' })
+  const lId = mkWitness({ summary: 'log-pd' })
+  const rId = mkWitness({ summary: 'review-pd' })
+  const eId = mkWitness({ summary: 'e2e-pd' })
+  const planId = mkEpisode({
+    event: 'plan-approved',
+    extra: { plan_ref: `episode:${planDocId}` },
   })
+  const preId = mkEpisode({
+    event: 'pre-checkpoint',
+    extra: { plan_ref: `episode:${planDocId}`, approval_ref: `episode:${planId}` },
+  })
+  const postId = mkEpisode({
+    event: 'post-checkpoint',
+    extra: {
+      pre_checkpoint_ref: `episode:${preId}`,
+      evidence: {
+        tests: [{ command: 'x', status: 'passed', log_ref: `episode:${lId}` }],
+        code_review: { status: 'done', reply_ref: `episode:${rId}` },
+        e2e: { status: 'passed', log_ref: `episode:${eId}` },
+        bug_logging: { status: 'done', issues: [] },
+      },
+    },
+  })
+  // rr with all chain refs coherent + episode-shaped plan_ref to the doc.
+  const chain = { planId, preId, postId, logId: lId, reviewId: rId, e2eId: eId }
+  mkReviewRequest({ chain, extra: { plan_ref: `episode:${planDocId}` } })
   const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
-  assert.strictEqual(r.json.valid, false, `plan_ref divergence must reject; errors: ${JSON.stringify(r.json.errors)}`)
-  assert.ok(r.json.errors.some(e => e.includes('plan_ref') && e.includes('coalesce')),
-    `expected coalescence error on plan_ref, got: ${JSON.stringify(r.json.errors)}`)
+  assert.strictEqual(r.json.valid, true, `legitimate episode-shaped plan_ref must pass; errors: ${JSON.stringify(r.json.errors)}`)
 })
 
-test('T102-23 review-request: rr.plan_ref as file/URL (free-form) does NOT trigger coalescence', () => {
-  // Regression guard: free-form plan_ref (file path or URL) must continue to
-  // pass — only episode-shaped plan_ref triggers coalescence (since only
-  // episode refs carry chain identity).
+test('T102-23 review-request: rr.plan_ref as file/URL (free-form) PASSES', () => {
+  // Regression guard: free-form plan_ref (file path or URL) is the most common
+  // case per spec.
   const chain = mkBaseChainForReview()
   mkReviewRequest({ chain, extra: { plan_ref: 'docs/plan-with-different-text.md' } })
   const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
-  assert.strictEqual(r.json.valid, true, `free-form plan_ref must not trigger coalescence; errors: ${JSON.stringify(r.json.errors)}`)
+  assert.strictEqual(r.json.valid, true, `free-form plan_ref must pass; errors: ${JSON.stringify(r.json.errors)}`)
 })
 
 test('T102-21 semantic-flip vs T58: chain-walk picks DIFFERENT rr than latest-by-timestamp would', () => {

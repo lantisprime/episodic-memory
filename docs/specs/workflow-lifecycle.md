@@ -318,11 +318,11 @@ When multiple events match `TERMINAL_FOR_GATE[gate]`:
 
 #### `review-request` coalescence (Gap #1, PR #156 F1 same-class)
 
-A `review-request` carries three independent chain refs (`approval_ref`,
-`pre_checkpoint_ref`, `post_checkpoint_ref`). Walking via `post_checkpoint_ref`
-alone would silently accept divergent refs that all happen to be same-task /
-right-event-type but don't form a coherent chain. The validator additionally
-asserts:
+A `review-request` carries three independent chain identity refs
+(`approval_ref`, `pre_checkpoint_ref`, `post_checkpoint_ref`). Walking via
+`post_checkpoint_ref` alone would silently accept divergent refs that all
+happen to be same-task / right-event-type but don't form a coherent chain.
+The validator additionally asserts:
 
 - `rr.pre_checkpoint_ref === post.pre_checkpoint_ref` (where `post` is the
   walked target of `rr.post_checkpoint_ref`)
@@ -331,6 +331,14 @@ asserts:
 
 Mismatch produces a coalescence error keyed to the review-request, blocking
 the gate.
+
+`plan_ref` is **NOT** coalescence-checked. It points to the plan artifact (a
+file, URL, or arbitrary episode containing the plan), distinct from
+`approval_ref` which points to the `plan-approved` lifecycle episode. Per
+spec above, episode-shaped `plan_ref` MAY point at a non-lifecycle plan-doc
+episode used consistently across `plan-approved`, `pre-checkpoint`, and
+`review-request`. Treating it as a chain identity ref would false-reject this
+legitimate pattern (Codex PR #171 review catch).
 
 This closes the same-class gap that bit PR #156 review F1 (lesson
 `20260505-070434-...-90c7`): fixing one chain-ref check requires auditing all
