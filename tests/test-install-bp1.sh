@@ -22,6 +22,16 @@ PASS=0
 FAIL=0
 SKIP_GIT=0
 
+# Cross-platform file mode reader. macOS BSD stat uses -f; GNU stat uses -c.
+# Selecting on `uname` is more reliable than `stat -f x || stat -c x` because
+# Linux `stat -f` is filesystem-stat (returns info, no error) — the || would
+# never fall through.
+if [ "$(uname)" = "Darwin" ]; then
+  stat_mode() { stat -f '%Lp' "$1"; }
+else
+  stat_mode() { stat -c '%a' "$1"; }
+fi
+
 check() {
   local label="$1" expected="$2" actual="$3"
   if [ "$expected" = "$actual" ]; then
@@ -47,7 +57,7 @@ check "verify-key exists" "1" "$([ -f "$HOME1/.episodic-memory/.verify-key" ] &&
 check "config.json exists" "1" "$([ -f "$HOME1/.episodic-memory/config.json" ] && echo 1)"
 
 # Mode 0600 — stat -f on macOS, stat -c on linux. Try macOS first.
-MODE=$(stat -f '%Lp' "$HOME1/.episodic-memory/.verify-key" 2>/dev/null || stat -c '%a' "$HOME1/.episodic-memory/.verify-key" 2>/dev/null)
+MODE=$(stat_mode "$HOME1/.episodic-memory/.verify-key")
 check "verify-key mode 0600" "600" "$MODE"
 
 SIZE=$(wc -c < "$HOME1/.episodic-memory/.verify-key" | tr -d ' ')
@@ -81,7 +91,7 @@ check ".gitignore line count stable across re-install" "$LINES_BEFORE" "$LINES_A
 # ---------------------------------------------------------------------------
 chmod 0644 "$HOME1/.episodic-memory/.verify-key"
 HOME="$HOME1" node "$REPO_DIR/install.mjs" --tool claude-code --project "$PROJ1" >/dev/null 2>&1
-MODE_AFTER=$(stat -f '%Lp' "$HOME1/.episodic-memory/.verify-key" 2>/dev/null || stat -c '%a' "$HOME1/.episodic-memory/.verify-key" 2>/dev/null)
+MODE_AFTER=$(stat_mode "$HOME1/.episodic-memory/.verify-key")
 check "verify-key mode healed back to 0600" "600" "$MODE_AFTER"
 
 # ---------------------------------------------------------------------------
