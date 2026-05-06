@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.2
+version: 3.3
 supersedes: ~
 superseded_by: ~
 ---
@@ -77,49 +77,81 @@ Two distinct scopes, with strict assignment per artifact type.
 
 ## Activation flag (M2-safety envelope)
 
-All side-effecting bp1 artifacts are gated on a single boolean runtime flag, **disabled by default** until M5 proves the safety envelope end-to-end via a dry run.
+All side-effecting bp1 artifacts are gated on a **per-project activation entry**, **disabled by default** until M5 proves that project's safety envelope end-to-end via a dry run.
 
-### Flag location
+### Flag location and shape (v3.3 — per-project keyed map)
 
-`~/.episodic-memory/config.json`:
+`~/.episodic-memory/config.json` holds a global *map* of project activations, keyed by canonical project root + installed-artifact version hash. M5's dry run only proves one project; flipping must not affect other projects that have M2-M4 artifacts installed without their own M5.
 
 ```json
 {
   "bp1": {
-    "enabled": false,
-    "enabled_at": null,
-    "enabled_via": null
+    "schema_version": 1,
+    "activations": {
+      "<canonical_project_root>": {
+        "enabled": true,
+        "artifact_version_hash": "sha256:abc123...",
+        "enabled_at": "2026-05-06T03:30:00Z",
+        "enabled_via": "<dry-run-run_id>",
+        "verify_key_id": "<verify-key-fingerprint>"
+      }
+    }
   }
 }
 ```
 
-`enabled_at` is an ISO-8601 timestamp; `enabled_via` records the dry-run episode id that flipped the flag (audit trail). The file is the single source of truth — no env-var override, no per-project flag (cross-project corpus invariant).
+- `<canonical_project_root>` = `git rev-parse --show-toplevel`, then `realpath` (resolves symlinks). Worktrees and submodules each canonicalize to the toplevel of their containing repo. Per-worktree activation is intentionally NOT a separate scope: a single project shares one safety envelope.
+- `artifact_version_hash` = sha256 of the concatenated `bp1-*.mjs` script contents at install time. `bp1-flag-check.mjs` recomputes this on every read; mismatch → fail closed (`bp1-flag-version-drift` episode), even if `enabled: true`. This blocks partial upgrades — a script update without re-running the M5 dry-run resets the project to inert.
+- `verify_key_id` = HMAC-SHA256 fingerprint of the long-lived verify-key (see HMAC §) at activation time — provides forensic linkage between activation and the key used to sign manifests during the dry run.
+- The file is read/written through a shared helper that takes a per-file `flock` (Node.js `fcntl` advisory lock or fallback `O_EXCL` create-and-rename), defending against multi-writer drift (lesson `20260505-130716-...`). Concurrent activations across projects are safe by construction: each writer takes the lock, reads the current map, mutates only its own key, atomically renames the temp file.
 
-### Gated artifacts (must check flag and no-op when false)
+### `bp1-flag-check.mjs` semantics
 
-| Artifact | Milestone | No-op behavior when `enabled=false` |
+Every gated artifact reads via `bp1-flag-check.mjs --project <root>` (or auto-derives root from cwd). The check passes iff **all** of:
+
+1. Map entry exists for canonicalized current project root
+2. `enabled === true`
+3. `artifact_version_hash` matches the installed scripts' recomputed hash
+4. `verify_key_id` matches the live verify-key fingerprint (catches key-rotation drift)
+
+Any mismatch → exit non-zero + emit `bp1-disabled-refusal` (or `bp1-flag-version-drift` / `bp1-flag-key-drift` for the more specific cases). Hard refuse to advance state.
+
+### Gated artifacts (must check flag and no-op when entry is missing or disabled)
+
+| Artifact | Milestone | No-op behavior when check fails |
 |---|---|---|
-| `bp1-rfc-scan.mjs` | M2 | Print `bp1 disabled — no scan` to stderr, exit 0 |
-| `bp1-deadline-tick` scheduled task (T1) | M2 | Emit a single tick episode tagged `bp1-disabled-tick`, no orchestrator dispatch |
+| `bp1-rfc-scan.mjs` | M2 | Print `bp1 inert for project <root>: <reason>` to stderr, exit 0 |
+| `bp1-deadline-tick` scheduled task (T1) | M2 | Emit a single tick episode tagged `bp1-disabled-tick` per project root that lacks activation, no orchestrator dispatch |
 | `bp1-approval-check.sh` hook (H1) | M2 | Return exit 0 immediately, no marker read |
-| `bp1-orchestrator` agent | M1/M3 | Hard-refuse to dispatch any sub-agent if flag is false; emit `bp1-disabled-refusal` episode |
+| `bp1-orchestrator` agent | M1/M3 | Hard-refuse to dispatch any sub-agent; emit `bp1-disabled-refusal` episode with `reason` field |
 | `/bp1-auto` slash command | M5 | Print disabled message and the M5 dry-run instructions; exit non-zero |
 
-Reads happen via a shared helper `bp1-flag-check.mjs` (M1 deliverable) so the check is uniform and unit-testable.
+### Flip mechanism (per-project)
 
-### Flip mechanism
+The map entry for a project flips `enabled: false` (or absent) → `enabled: true` only as the final step of *that project's* M5 dry run, after:
 
-The flag flips `false → true` only as the final step of M5's dry run, after:
+1. Branch-protection assertion passes at orchestrator startup against *this project's* GitHub remote
+2. End-to-end happy-path dry run completes against a fixture RFC (`docs/rfcs/RFC-fixture-trivial-dryrun.md` in this project) without merging any PR
+3. `bp1-flag-flip.mjs` takes the global config lock, writes the entry for `<canonical_project_root>` (sets enabled, artifact-hash, enabled_at, enabled_via, verify_key_id), and emits a `bp1-activation` episode (local scope; per-project audit trail)
 
-1. Branch-protection assertion passes at orchestrator startup
-2. End-to-end happy-path dry-run completes against a fixture RFC (`docs/rfcs/RFC-fixture-trivial-dryrun.md`) without merging any PR
-3. `bp1-flag-flip.mjs` writes `enabled: true` + `enabled_at` + `enabled_via=<dry-run-run_id>` and emits a `bp1-activation` episode (global, immutable)
+A reverse `bp1-flag-flip.mjs --disable` removes only the named project's entry (M5 deliverable). Other projects' entries are untouched.
 
-A reverse `bp1-flag-flip.mjs --disable` exists for emergency rollback (M5 deliverable).
+### Negative tests for the activation map (M5)
+
+| # | Scenario | Expected outcome |
+|---|---|---|
+| A1 | Project A activated, B has scripts installed but no entry | A advances; B emits `bp1-disabled-refusal` per scan/tick |
+| A2 | Project root symlinked or renamed mid-run | canonicalize() resolves; activation persists |
+| A3 | Concurrent activations from two projects' M5 runs | both succeed; lock serializes writes; final map contains both entries |
+| A4 | Script content changes without re-running M5 dry-run | `bp1-flag-version-drift` emitted; project flips back to inert |
+| A5 | Verify-key rotated without re-running M5 | `bp1-flag-key-drift` emitted; project flips back to inert |
+| A6 | `--disable <project A>` with project B active | A entry removed; B unaffected |
+| A7 | Two `--disable` calls race on same project | one wins, other emits `bp1-disable-already` (no-op idempotent) |
+| A8 | Map file corrupted / partial write recovery | `bp1-flag-config-corrupt` emitted; all projects refuse until repair |
 
 ### Why this matters
 
-The Mermaid sequencing in §13 makes M4→M5 a *soft* dependency. Without an activation gate, M2 ships scanner + deadline-tick + approval-check before M5's branch-protection assertion + dry-run land — meaning a partial install could detect an ACCEPTED RFC and advance through approval before the safety envelope is in place. The flag converts a sequencing assumption into a runtime invariant. (Codex round-2 finding 1.)
+The Mermaid sequencing makes M4→M5 a *hard* dependency (per v3.2). The per-project activation entry now ensures the M5 dry-run safety proof binds to the project that proved it: cross-project flag flipping is impossible. The artifact-version-hash check additionally ensures partial upgrades (one project bumps its bp1-*.mjs scripts) re-trigger M5 dry-run before that project re-activates. (Codex round-1 finding 1; round-2 finding 1.)
 
 ---
 
@@ -526,28 +558,43 @@ Every external-state read by orchestrator runtime or hooks emits a `bp1-evidence
 
 This makes the replayability invariant honest: *given run_id alone, the entire run can be reconstructed from episodes — no file system markers, no in-memory state, no hook ordering required.*
 
-### HMAC key management & canonicalization
+### HMAC key management, canonicalization, and durable replay (v3.3)
 
-`hmac_signature` (frontmatter field above) is the splice/authorization boundary for cross-actor episodes (decision pre/post pairs, override episodes, plan-approved episodes). Without a precise key-management spec, the field is theatre. This subsection closes that gap (Codex round-2 finding 3).
+`hmac_signature` (frontmatter field above) is the splice/authorization boundary for cross-actor episodes (decision pre/post pairs, override episodes, plan-approved episodes). v3.3 splits the verification model into **two phases**: live-run verification via per-run HMAC, and post-terminal verification via a signed `bp1-run-manifest`. The replayability invariant remains intact across both phases (Codex round-1 finding 3; round-2 finding 2).
 
-#### Key generation
+#### Two-phase verification model
+
+| Phase | Verifier | Material used |
+|---|---|---|
+| Live-run (run not yet at terminal state) | `bp1-auditor`, orchestrator pre-dispatch checks | per-run `run.key` (32B) recomputes per-episode HMAC |
+| Post-terminal (replay after `complete`/`aborted`/`abandoned`/`archived`) | `bp1-replay.mjs`, weekly meta-audit | `bp1-run-manifest` episode signed by long-lived `~/.episodic-memory/.verify-key`; manifest contains the per-episode HMACs |
+
+Replay is durable indefinitely without retaining the per-run key. The per-run key is shredded at finalize (closes the live-attack window); the manifest preserves verifiability via the long-lived verify-key.
+
+#### Per-run key (live-run phase)
 
 - Algorithm: `HMAC-SHA256` (Node.js `crypto.createHmac('sha256', key)`).
 - Key size: 32 bytes from `crypto.randomBytes(32)`.
 - Generated once at run start (M1 deliverable: `bp1-orchestrator.mjs init-run`), stamped immediately after `run_id` is minted.
-- Per-run only — never reused across runs, never reused after `complete`/`aborted`/`abandoned`/`archived` terminal states.
-
-#### Storage
-
 - Path: `<project>/.episodic-memory/runs/<run_id>/run.key` (binary file, 32 bytes).
-- File mode: `0600` (owner read/write only). The orchestrator asserts mode on every read; chmod drift fails closed (`bp1-hmac-keyfile-fail`, failure-table row 20).
+- File mode: `0600` (owner read/write only). Orchestrator asserts mode on every read; chmod drift fails closed (`bp1-hmac-keyfile-fail`).
 - `.gitignore` entry mandatory: `**/.episodic-memory/runs/*/run.key`. Installer (`install.mjs`) appends if missing.
-- Never echoed: the key MUST NOT appear in any episode body, log, stderr, or replay output. The orchestrator unit tests assert this by grep across all emitted artifacts in M1.
-- Deleted on terminal state — `bp1-orchestrator.mjs finalize-run` shreds the key (overwrite then unlink).
+- Never echoed: the key MUST NOT appear in any episode body, log, stderr, or replay output. M1 unit tests assert this by grep across all emitted artifacts.
+- Shredded by `bp1-orchestrator.mjs finalize-run` (overwrite with random bytes, then unlink) once the manifest is written and signature-verified.
 
-#### Canonical bytes (what gets signed)
+#### Long-lived verify-key (post-terminal phase)
 
-The HMAC signs a deterministic byte string derived from the episode's authorization-bearing fields, NOT the raw episode body (which may have whitespace/key-order drift across writers):
+- Algorithm: `HMAC-SHA256` (same primitive — single crypto surface).
+- Key size: 32 bytes from `crypto.randomBytes(32)`.
+- Path: `~/.episodic-memory/.verify-key` (binary file, 32 bytes), single file shared across all projects' runs.
+- File mode: `0600`. `bp1-flag-check.mjs` and orchestrator startup assert mode on every read.
+- Generated once on first install (`install.mjs` creates if missing); persists across runs and across projects.
+- Fingerprint (`HMAC-SHA256(key, "verify-key-fingerprint-v1")` — first 16 hex chars) recorded as `verify_key_id` in the activation map and in every `bp1-run-manifest`. Mismatch → `bp1-flag-key-drift` (failure-table); orchestrator refuses to advance.
+- **Rotation procedure (M5 deliverable, `bp1-rotate-verify-key.mjs`):** (a) refuse if any run is in non-terminal state; (b) generate new key; (c) re-sign each existing `bp1-run-manifest` with the new key, emitting `bp1-manifest-resigned` evidence per manifest; (d) atomically replace the verify-key file; (e) update `verify_key_id` in every project's activation entry; (f) emit `bp1-verify-key-rotated` (global). Active runs are blocked from starting during the rotation window via the global config lock.
+
+#### Canonical bytes (what each HMAC signs)
+
+Per-episode HMAC (live-run + stored verbatim into manifest):
 
 ```
 canonical = sha256(JSON.stringify(payload, Object.keys(payload).sort()))
@@ -562,25 +609,73 @@ payload = {
 hmac_signature = HMAC-SHA256(run.key, canonical)
 ```
 
-`Object.keys(payload).sort()` enforces key-order stability. `body_sha256` is computed over the body bytes only (frontmatter excluded) so re-serialization of frontmatter doesn't invalidate signatures. Replays recompute `canonical` from the on-disk episode and compare against the stored `hmac_signature`.
+Manifest signature (terminal artifact, signed by verify-key):
 
-#### Verification
+```
+manifest_payload = {
+  run_id,
+  project_root,                  // canonicalized; binds manifest to project
+  terminal_state,                // complete | aborted | abandoned | archived
+  finalized_at,                  // ISO-8601 UTC
+  episode_count,
+  per_episode_hmacs: [           // ordered by emission time
+    { episode_id, hmac_signature_bytes_hex },
+    ...
+  ],
+  episodes_merkle_root           // sha256 over sorted (episode_id, hmac) pairs — defends against missing-episode insertion
+}
+manifest_signature = HMAC-SHA256(verify_key, sha256(JSON.stringify(manifest_payload, sortedKeys)))
+```
 
-Auditor (`bp1-auditor` agent) and replay (`bp1-replay.mjs`) verify HMAC before accepting any authorization-bearing episode. Verification failure → `bp1-hmac-fail` (terminal C), already row 15 of failure-table.
+`run_id` and `project_root` in `manifest_payload` block manifest-from-run-A used as run-B's terminal proof (splice). The `episodes_merkle_root` defends against tampering with the per-episode list (drop / insert / reorder).
+
+`Object.keys(payload).sort()` enforces key-order stability. `body_sha256` is computed over body bytes only (frontmatter excluded) so re-serialization of frontmatter doesn't invalidate signatures.
+
+#### Verification flow
+
+**Live-run** — auditor + orchestrator recompute `canonical` from on-disk episode, recompute `HMAC-SHA256(run.key, canonical)`, compare against `hmac_signature` field.
+
+**Post-terminal** — `bp1-replay.mjs` reads the run's `bp1-run-manifest` episode, verifies `manifest_signature` with the verify-key, then for each episode in the run recomputes its `canonical` and looks up the recorded `hmac_signature` in `per_episode_hmacs`. Mismatch on either layer → `bp1-hmac-fail` or `bp1-manifest-fail` (failure-table).
+
+Verification failure → `bp1-hmac-fail` (live, row 15) or `bp1-manifest-fail` (post-terminal, new failure row).
+
+#### Finalize-run sequence
+
+`bp1-orchestrator.mjs finalize-run` (atomic-on-success):
+
+1. Quiesce: refuse if any pre-decision episode lacks a matching post-decision (decision-log fence); emit `bp1-finalize-fence-fail` and abort if violated.
+2. Iterate run's episodes in emission order; collect `{episode_id, hmac_signature_bytes_hex}` pairs.
+3. Compute `episodes_merkle_root`.
+4. Build `manifest_payload`, sign with verify-key, emit `bp1-run-manifest` episode (local scope, immutable).
+5. Verify the manifest can be successfully read back and signature-verified (gates step 6).
+6. Shred the per-run key (overwrite + unlink). Now post-terminal replay relies on the manifest only.
+7. Mark run as terminal in run-state index.
+
+If steps 1-5 fail, the run remains in non-terminal state and the per-run key is preserved (safe rollback). Step 6 shred only happens after step 5 success.
 
 #### Negative tests (M1, alongside the implementation)
 
-| # | Scenario | Expected outcome |
-|---|---|---|
-| H1 | Forged signature (wrong key) | `bp1-hmac-fail` |
-| H2 | Swapped `run_id` (TASK-A signature in TASK-B episode) | `bp1-hmac-fail` (canonical includes `run_id`) |
-| H3 | Re-serialized payload (whitespace + key-order changed) | PASS (canonical normalizes) |
-| H4 | Replayed signature from earlier same-run episode | `bp1-hmac-fail` (`parent_episode` in canonical) |
-| H5 | Stripped `hmac_signature` field | `bp1-hmac-fail` (auditor refuses unsigned) |
-| H6 | Key file mode drift to `0644` | `bp1-hmac-keyfile-fail` (refuse to read) |
-| H7 | Key file deleted mid-run | `bp1-hmac-keyfile-fail` |
+| # | Scenario | Expected outcome | Phase |
+|---|---|---|---|
+| H1 | Forged signature (wrong run.key) | `bp1-hmac-fail` | live |
+| H2 | Swapped `run_id` (TASK-A signature in TASK-B episode) | `bp1-hmac-fail` (canonical includes `run_id`) | live |
+| H3 | Re-serialized payload (whitespace + key-order changed) | PASS (canonical normalizes) | both |
+| H4 | Replayed signature from earlier same-run episode | `bp1-hmac-fail` (`parent_episode` in canonical) | live |
+| H5 | Stripped `hmac_signature` field | `bp1-hmac-fail` (auditor refuses unsigned) | both |
+| H6 | run.key file mode drift to `0644` | `bp1-hmac-keyfile-fail` (refuse to read) | live |
+| H7 | run.key file deleted mid-run | `bp1-hmac-keyfile-fail` | live |
+| **H8** | **Replay after `finalize-run` (key shredded, manifest exists)** | **PASS via manifest** | **post-terminal** |
+| **H9** | **Tampered episode body post-terminal** | `bp1-hmac-fail` (per-episode `body_sha256` mismatch in manifest) | post-terminal |
+| **H10** | **Manifest from run-A used as run-B's terminal proof** | `bp1-manifest-fail` (manifest_payload includes `run_id` + `project_root`) | post-terminal |
+| **H11** | **Episode dropped from manifest after finalize** | `bp1-manifest-fail` (merkle root mismatch on replay) | post-terminal |
+| **H12** | **Episode inserted into manifest after finalize** | `bp1-manifest-fail` (signature invalidates) | post-terminal |
+| **H13** | **Verify-key rotated; replay against pre-rotation manifest** | PASS (manifests re-signed during rotation) | post-terminal |
+| **H14** | **Verify-key rotation attempted while run in non-terminal state** | rotation refused; emit `bp1-rotate-blocked` | live |
+| **H15** | **Verify-key file mode drift to `0644`** | `bp1-flag-key-drift` (refuse to use) | both |
+| **H16** | **Verify-key fingerprint mismatch between activation entry and live key** | `bp1-flag-key-drift` (project flips to inert) | live |
+| **H17** | **Finalize crashes between manifest write and key shred** | recovery: manifest exists + key file exists; replay still works; next session detects state and completes shred via `bp1-finalize-recover` | crash |
 
-These tests ship in M1 as `tests/bp1-hmac.test.mjs` and are gating for M1 → M2 transition.
+Tests H1-H7 ship as `tests/bp1-hmac-live.test.mjs`; H8-H17 ship as `tests/bp1-hmac-manifest.test.mjs`. Both are gating for M1 → M2 transition.
 
 ---
 
@@ -615,6 +710,52 @@ These tests ship in M1 as `tests/bp1-hmac.test.mjs` and are gating for M1 → M2
 | any state | sentinel HALT | `terminal_halt` | bp1-sentinel |
 | `needs_human` | override episode | `resolved` → resume | bp1-human-input-watcher |
 | `needs_human` | 7 days | `abandoned` → `archived` | bp1-archive-ghosts.mjs |
+
+### Codex-timeout retry counter — persistence (v3.3)
+
+The retry budget on `codex_review` (state-machine self-loop, max 2 retries before routing to `needs_human`) MUST be sourced from the **decision log itself**, not from in-memory orchestrator state. Otherwise an orchestrator crash mid-retry resets the counter, keeping a run in `codex_review` indefinitely instead of advancing to `needs_human`. (Codex round-2 finding 4.)
+
+**Counter derivation** (computed at every timeout-tick fire, via `bp1-orchestrator.mjs codex-retry-count <run_id>`):
+
+```
+retry_count(run_id, codex_review_entry_episode) =
+  count of `bp1-codex-timeout-retry` episodes E such that:
+    E.run_id == run_id
+    AND
+    E.parent_episode chain contains codex_review_entry_episode
+        (no intermediate `codex_complete` / `needs_human` / `aborted` episode in the chain)
+    AND
+    E.parent_episode is unique within the result set
+        (dedupe by parent_episode handles concurrent timeout-tick fires —
+         see Race/TOCTOU coverage below)
+```
+
+The `codex_review_entry_episode` is the most recent transition INTO `codex_review` (either initial `adversarial_reviewed → codex_review` or any `codex_review → codex_review` self-loop entry). Parent_episode chain anchoring isolates the count to the current retry sequence; deduping by parent_episode ensures two timeout-ticks racing do not count as two retries.
+
+**On every timeout fire:**
+
+1. `bp1-deadline-tick` (or fallback sweep) detects the 30-min deadline elapsed for a `codex_review` entry.
+2. Compute `retry_count` per the formula above.
+3. Emit `bp1-codex-timeout-retry` episode with `parent_episode = current codex_review entry`, `attempt_number = retry_count + 1`.
+4. If `retry_count >= 2`: route to `needs_human` (emit `bp1-codex-unreachable`). Else: re-issue the em-review-request (re-enter `codex_review`).
+
+This makes retry tracking naturally crash-safe: orchestrator restart re-derives the count by scanning on-disk episodes; no process memory required.
+
+**Race / TOCTOU coverage:** if `bp1-deadline-tick` fires twice for the same `codex_review` entry within milliseconds (e.g., scheduled task + fallback sweep both fire), both writers attempt to emit `bp1-codex-timeout-retry`. The second writer SHOULD detect via the parent_episode dedupe (step 2's count includes the first writer's already-emitted episode) and either skip or emit a `bp1-tick-deduped` evidence episode. The retry count remains accurate.
+
+**Negative tests (M1, gating M1→M2):**
+
+| # | Scenario | Expected outcome |
+|---|---|---|
+| R1 | Single 30min timeout → retry as attempt 1 | `bp1-codex-timeout-retry` episode with attempt_number=1 |
+| R2 | Two timeouts → second routes to needs_human | second tick: `retry_count == 1`, attempt 2; on its completion, `retry_count == 2` triggers needs_human |
+| R3 | Crash after first timeout, restart, second timeout | second timeout still recognizes the first as already-counted (chain anchor); routes to needs_human (NOT retry as attempt 1) |
+| R4 | Two concurrent timeout-ticks for same `codex_review` entry | second writer detects dupe via parent_episode, emits `bp1-tick-deduped`; retry count stays at 1 |
+| R5 | `codex_complete` arrives between two ticks | second tick sees `codex_complete` in the chain → does NOT count; chain anchor moved past entry |
+| R6 | Manually-injected fake `bp1-codex-timeout-retry` from earlier run-id | filtered by `E.run_id == run_id`; ignored |
+| R7 | parent_episode forged to point at wrong codex_review entry | manifest verification at finalize catches HMAC mismatch (this is splice — already covered by HMAC) |
+
+These ship as `tests/bp1-codex-retry.test.mjs`, gating M1→M2.
 
 ---
 
@@ -651,6 +792,8 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 
 ### §11.5 Failure modes & recovery table
 
+> **Contract identifier note (v3.3):** Failure-row IDs are a machine-oriented contract — auditor + replay + lesson-generator reference rows by ID. The prose table below MUST stay in sync with the YAML block that follows it. Row IDs MUST be unique. CI validator `scripts/validate-rfc-failure-table.mjs` (M0 deliverable) parses both representations and rejects duplicate IDs, prose↔YAML drift, or unknown evidence-tag references. (Rule 14 from user-prefs: machine-readable blocks for drift-prone state.)
+
 | # | Failure | Detector | Terminal | Evidence | Lesson? |
 |---|---|---|---|---|---|
 | 1 | Token cap hit | sentinel | C | `bp1-halt` reason=token-cap | yes |
@@ -659,26 +802,239 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 | 4 | RFC class = risky | classifier | B | `bp1-needs-human` reason=risky-class | no |
 | 5 | Adversarial planner REJECT | orchestrator | A→B (2× same-sig) | `bp1-plan-revision` | yes |
 | 6 | Codex plan-review 30min timeout (retry < 2) | em-watch-codex | A (self-loop retry) | `bp1-codex-timeout-retry` | no |
-| 6b | Codex plan-review timeout retry ≥ 2 (all classes — incl. trivial) | em-watch-codex | B | `bp1-codex-unreachable` → `bp1-needs-human` | yes |
-| 7 | Plan-approval timeout (trivial) | hook | A | `bp1-auto-proceed` violation | no |
-| 8 | Plan-approval timeout (risky) | classifier upstream | B | `bp1-needs-human` | no |
-| 9 | Code-reviewer findings | reviewer | A→B (2× same-sig) | `bp1-review-finding` | yes |
-| 10 | Test failures | test-runner | A→B (2× same-sig) | `bp1-test-failure` | yes |
-| 11 | Security-reviewer HIGH finding | security-reviewer | B | `bp1-security-finding` | yes |
-| 12 | Auditor 2× same-signature | auditor | B | `bp1-audit-loop-stuck` | yes |
-| 13 | Run-lock collision (F7a) | run-lock script | C (no-op) | `bp1-run-lock-conflict` | no |
-| 14 | Marker validation fail (F2) | marker-validate | C | `bp1-marker-invalid` | no |
-| 15 | HMAC verification fail (F1) | auditor / orchestrator | C | `bp1-hmac-fail` | yes |
-| 16 | run_id collision (F5) | run-lock script | A (regen) | `bp1-runid-regen` | no |
-| 17 | Decision-log orphan (F3) | replay | B | `bp1-orphan-detected` | yes |
-| 18 | `mcp__scheduled-tasks` unavailable | M0 probe | A (fallback) | `bp1-scheduled-tasks-fallback` | yes |
-| 19 | Activation flag refusal (M2-M4 install w/o M5) | flag-check helper | C (no-op) | `bp1-disabled-refusal` | no |
-| 20 | HMAC key file missing/unreadable | orchestrator startup | C | `bp1-hmac-keyfile-fail` | yes |
-| 18 | Branch-protection fail (Gap 4) | orchestrator startup | C | `bp1-rule17-violation` | yes |
-| 19 | Orchestrator crash | crash-classify | A or B | `bp1-crash-recovered` | yes (if A) |
-| 20 | `gh pr create` fails | orchestrator | A→B (retry fail) | `bp1-pr-create-fail` | yes |
-| 21 | Codex PR-review request fails | em-review-request | A | `bp1-codex-request-fail` | no |
-| 22 | Abandoned >7 days | archive-ghosts | D | `bp1-ghost-archived` | yes |
+| 7 | Codex plan-review timeout retry ≥ 2 (all classes — incl. trivial) | em-watch-codex | B | `bp1-codex-unreachable` → `bp1-needs-human` | yes |
+| 8 | Plan-approval timeout (trivial) | hook | A | `bp1-auto-proceed` violation | no |
+| 9 | Plan-approval timeout (risky) | classifier upstream | B | `bp1-needs-human` | no |
+| 10 | Code-reviewer findings | reviewer | A→B (2× same-sig) | `bp1-review-finding` | yes |
+| 11 | Test failures | test-runner | A→B (2× same-sig) | `bp1-test-failure` | yes |
+| 12 | Security-reviewer HIGH finding | security-reviewer | B | `bp1-security-finding` | yes |
+| 13 | Auditor 2× same-signature | auditor | B | `bp1-audit-loop-stuck` | yes |
+| 14 | Run-lock collision (F7a) | run-lock script | C (no-op) | `bp1-run-lock-conflict` | no |
+| 15 | Marker validation fail (F2) | marker-validate | C | `bp1-marker-invalid` | no |
+| 16 | HMAC verification fail live-run (F1) | auditor / orchestrator | C | `bp1-hmac-fail` | yes |
+| 17 | run_id collision (F5) | run-lock script | A (regen) | `bp1-runid-regen` | no |
+| 18 | Decision-log orphan (F3) | replay | B | `bp1-orphan-detected` | yes |
+| 19 | Branch-protection fail (Gap 4) | orchestrator startup | C | `bp1-rule17-violation` | yes |
+| 20 | Orchestrator crash | crash-classify | A or B | `bp1-crash-recovered` | yes (if A) |
+| 21 | `gh pr create` fails | orchestrator | A→B (retry fail) | `bp1-pr-create-fail` | yes |
+| 22 | Codex PR-review request fails | em-review-request | A | `bp1-codex-request-fail` | no |
+| 23 | Abandoned >7 days | archive-ghosts | D | `bp1-ghost-archived` | yes |
+| 24 | `mcp__scheduled-tasks` unavailable | M0 probe | A (fallback) | `bp1-scheduled-tasks-fallback` | yes |
+| 25 | Activation flag refusal (M2-M4 install w/o M5) | flag-check helper | C (no-op) | `bp1-disabled-refusal` | no |
+| 26 | Activation artifact-version drift | flag-check helper | C (no-op) | `bp1-flag-version-drift` | yes |
+| 27 | Activation verify-key drift | flag-check helper | C (no-op) | `bp1-flag-key-drift` | yes |
+| 28 | Activation map config corrupt | flag-check helper | C | `bp1-flag-config-corrupt` | yes |
+| 29 | HMAC key file missing/unreadable (live-run) | orchestrator startup | C | `bp1-hmac-keyfile-fail` | yes |
+| 30 | `bp1-run-manifest` signature verification fail (post-terminal) | replay | C | `bp1-manifest-fail` | yes |
+| 31 | Finalize-run quiescence fence violated | finalize-run | rollback | `bp1-finalize-fence-fail` | yes |
+| 32 | Finalize-run crash between manifest write and key shred | next-session recovery | A (auto-recover) | `bp1-finalize-recover` | no |
+| 33 | Verify-key rotation attempted while run non-terminal | rotate-verify-key | rollback | `bp1-rotate-blocked` | no |
+
+Machine-readable mirror (CI-validated source of truth):
+
+```yaml
+# Mirror of the prose table above. CI: scripts/validate-rfc-failure-table.mjs
+# rejects duplicate IDs, prose↔YAML drift, or unknown evidence-tag references.
+failure_modes:
+  - id: 1
+    failure: Token cap hit
+    detector: sentinel
+    terminal: C
+    evidence: bp1-halt
+    lesson: true
+  - id: 2
+    failure: Prompt-injection in RFC
+    detector: sentinel
+    terminal: C
+    evidence: bp1-halt
+    lesson: true
+  - id: 3
+    failure: RFC YAML parse error
+    detector: rfc-scan
+    terminal: C
+    evidence: bp1-rfc-malformed
+    lesson: false
+  - id: 4
+    failure: RFC class = risky
+    detector: classifier
+    terminal: B
+    evidence: bp1-needs-human
+    lesson: false
+  - id: 5
+    failure: Adversarial planner REJECT
+    detector: orchestrator
+    terminal: A→B
+    evidence: bp1-plan-revision
+    lesson: true
+  - id: 6
+    failure: Codex plan-review 30min timeout (retry < 2)
+    detector: em-watch-codex
+    terminal: A
+    evidence: bp1-codex-timeout-retry
+    lesson: false
+  - id: 7
+    failure: Codex plan-review timeout retry ≥ 2 (all classes)
+    detector: em-watch-codex
+    terminal: B
+    evidence: bp1-codex-unreachable
+    lesson: true
+  - id: 8
+    failure: Plan-approval timeout (trivial)
+    detector: hook
+    terminal: A
+    evidence: bp1-auto-proceed
+    lesson: false
+  - id: 9
+    failure: Plan-approval timeout (risky)
+    detector: classifier-upstream
+    terminal: B
+    evidence: bp1-needs-human
+    lesson: false
+  - id: 10
+    failure: Code-reviewer findings
+    detector: reviewer
+    terminal: A→B
+    evidence: bp1-review-finding
+    lesson: true
+  - id: 11
+    failure: Test failures
+    detector: test-runner
+    terminal: A→B
+    evidence: bp1-test-failure
+    lesson: true
+  - id: 12
+    failure: Security-reviewer HIGH finding
+    detector: security-reviewer
+    terminal: B
+    evidence: bp1-security-finding
+    lesson: true
+  - id: 13
+    failure: Auditor 2× same-signature
+    detector: auditor
+    terminal: B
+    evidence: bp1-audit-loop-stuck
+    lesson: true
+  - id: 14
+    failure: Run-lock collision
+    detector: run-lock-script
+    terminal: C
+    evidence: bp1-run-lock-conflict
+    lesson: false
+  - id: 15
+    failure: Marker validation fail
+    detector: marker-validate
+    terminal: C
+    evidence: bp1-marker-invalid
+    lesson: false
+  - id: 16
+    failure: HMAC verification fail (live-run)
+    detector: auditor
+    terminal: C
+    evidence: bp1-hmac-fail
+    lesson: true
+  - id: 17
+    failure: run_id collision
+    detector: run-lock-script
+    terminal: A
+    evidence: bp1-runid-regen
+    lesson: false
+  - id: 18
+    failure: Decision-log orphan
+    detector: replay
+    terminal: B
+    evidence: bp1-orphan-detected
+    lesson: true
+  - id: 19
+    failure: Branch-protection fail
+    detector: orchestrator-startup
+    terminal: C
+    evidence: bp1-rule17-violation
+    lesson: true
+  - id: 20
+    failure: Orchestrator crash
+    detector: crash-classify
+    terminal: A_or_B
+    evidence: bp1-crash-recovered
+    lesson: conditional
+  - id: 21
+    failure: gh pr create fails
+    detector: orchestrator
+    terminal: A→B
+    evidence: bp1-pr-create-fail
+    lesson: true
+  - id: 22
+    failure: Codex PR-review request fails
+    detector: em-review-request
+    terminal: A
+    evidence: bp1-codex-request-fail
+    lesson: false
+  - id: 23
+    failure: Abandoned >7 days
+    detector: archive-ghosts
+    terminal: D
+    evidence: bp1-ghost-archived
+    lesson: true
+  - id: 24
+    failure: mcp__scheduled-tasks unavailable
+    detector: M0-probe
+    terminal: A
+    evidence: bp1-scheduled-tasks-fallback
+    lesson: true
+  - id: 25
+    failure: Activation flag refusal (M2-M4 without M5)
+    detector: flag-check
+    terminal: C
+    evidence: bp1-disabled-refusal
+    lesson: false
+  - id: 26
+    failure: Activation artifact-version drift
+    detector: flag-check
+    terminal: C
+    evidence: bp1-flag-version-drift
+    lesson: true
+  - id: 27
+    failure: Activation verify-key drift
+    detector: flag-check
+    terminal: C
+    evidence: bp1-flag-key-drift
+    lesson: true
+  - id: 28
+    failure: Activation map config corrupt
+    detector: flag-check
+    terminal: C
+    evidence: bp1-flag-config-corrupt
+    lesson: true
+  - id: 29
+    failure: HMAC key file missing/unreadable (live-run)
+    detector: orchestrator-startup
+    terminal: C
+    evidence: bp1-hmac-keyfile-fail
+    lesson: true
+  - id: 30
+    failure: bp1-run-manifest signature verification fail (post-terminal)
+    detector: replay
+    terminal: C
+    evidence: bp1-manifest-fail
+    lesson: true
+  - id: 31
+    failure: Finalize-run quiescence fence violated
+    detector: finalize-run
+    terminal: rollback
+    evidence: bp1-finalize-fence-fail
+    lesson: true
+  - id: 32
+    failure: Finalize-run crash between manifest write and key shred
+    detector: next-session-recovery
+    terminal: A
+    evidence: bp1-finalize-recover
+    lesson: false
+  - id: 33
+    failure: Verify-key rotation attempted while run non-terminal
+    detector: rotate-verify-key
+    terminal: rollback
+    evidence: bp1-rotate-blocked
+    lesson: false
+```
 
 Lessons emitted contribute to global corpus per `feedback_check_episodes_before_analysis.md` and feed weekly digest synthesis.
 
@@ -727,7 +1083,7 @@ Lessons emitted contribute to global corpus per `feedback_check_episodes_before_
 
 ```mermaid
 graph TD
-    M0[M0 — Capability probe<br/>mcp__scheduled-tasks availability check<br/>+ bp1-deadline-sweep.mjs fallback<br/>+ flag-check helper + activation episode schema<br/>~3k]
+    M0[M0 — Capability probe + contract validators<br/>mcp__scheduled-tasks availability check<br/>+ bp1-deadline-sweep.mjs fallback<br/>+ flag-check helper + activation episode schema<br/>+ validate-rfc-failure-table.mjs CI script<br/>~4k]
     M1[M1 — Foundation<br/>orchestrator runtime + episode schema<br/>+ event-table + replay + snapshot<br/>+ HMAC key mgmt &amp; canonicalization<br/>~16k]
     M2[M2 — Trigger + safety (FLAG-GATED)<br/>rfc-scan + classifier + run-lock<br/>+ marker-validate + crash-classify<br/>+ approval-check hook + deadline-tick<br/>all artifacts no-op when bp1.enabled=false<br/>~12k]
     M3[M3 — Planning team<br/>orchestrator agent + sentinel + token-budget<br/>+ em-review-request extension<br/>~10k]
@@ -822,6 +1178,57 @@ Re-walk of 8-axis matrix after v3.2 fixes:
 - **Boundary (axis 8):** `codex_review` retry-then-needs_human closes the trivial-class auto-approval loophole; row F8 (DEFER) still valid (token-cap-only).
 - **No new axes opened** by activation flag, M0 probe, key file, or retry budget. Activation flag itself is an authorization mechanism but is single-direction (false→true once, audit-trailed); reverse `--disable` is operator-explicit and emits an episode.
 
-**Status:** still `draft`. Re-request Codex review on these four resolutions before flipping to `accepted`.
+**Status (v3.2):** still `draft`. Re-request Codex review on these four resolutions before flipping to `accepted`.
+
+### v3.3 — Codex round-2 re-review findings (2026-05-06)
+
+Codex re-review of v3.2 (episode `20260506-032457-codex-re-review-rfc-004-v3-2-hold-on-act-861f`) returned **HOLD** again — the v3.2 fixes opened new surface that wasn't walked. Plus process meta-feedback (`20260506-033116-codex-feedback-to-claude-missing-second--d32b`) named the recurring failure mode: implementer ships first-order patches, second-order surface stays unwalked. Promoted to toolkit v9 discipline #17 (`feedback_implementer_second_order_review.md`); applied here.
+
+#### Round-2 finding disposition
+
+| # | Pri | Codex finding | Verdict | Resolution location |
+|---|---|---|---|---|
+| 1 | P1 | Activation flag global vs project-local safety proof | ACCEPT | New per-project map keyed by canonical project root + artifact-version-hash; per-file flock against multi-writer drift; new failure rows 26/27/28; M5 negative tests A1-A8 |
+| 2 | P1 | Terminal key deletion breaks replayability invariant | ACCEPT (option b) | Two-phase verification: per-run `run.key` for live, signed `bp1-run-manifest` for post-terminal; long-lived `~/.episodic-memory/.verify-key` (32B HMAC, mode 0600); rotation procedure spec'd; new failure rows 30-33; new negative tests H8-H17 |
+| 3 | P2 | Failure-table row IDs duplicated | ACCEPT | Renumbered to unique 1-33; added machine-readable YAML mirror; CI validator `validate-rfc-failure-table.mjs` (M0 deliverable) checks uniqueness + prose↔YAML drift |
+| 4 | P2 | Codex retry budget needs persisted source of truth | ACCEPT | New *Codex-timeout retry counter — persistence* subsection; counter derived from `bp1-codex-timeout-retry` episode count anchored to current `codex_review` entry via parent_episode chain; deduped by parent_episode (race coverage); 7 negative tests R1-R7 |
+
+#### New integration surface introduced by v3.3 fixes (per discipline #17)
+
+| Fix | New thing introduced | Scope | Persists across | Terminal | Cross-process | Rollback | Negative test |
+|---|---|---|---|---|---|---|---|
+| F1 | `bp1.activations` map in `~/.episodic-memory/config.json` | global (file), per-project (entries) | restart, indefinitely | n/a (operator-controlled) | flock-serialized writes | `--disable <project>` removes entry | A1-A8 |
+| F1 | Canonical project root resolution (`git rev-parse --show-toplevel` + `realpath`) | run-time derived | each call | n/a | each session re-derives | n/a | A2 (symlink), A6/A7 (rollback) |
+| F1 | Artifact version hash field | per-project entry | invalidated on script update | n/a | each install re-stamps | revert install → flips to inert | A4 |
+| F1 | `bp1-flag-version-drift` / `bp1-flag-key-drift` / `bp1-flag-config-corrupt` failure rows | static | n/a | n/a | n/a | n/a | A4/A5/A8 + failure-table CI check |
+| F2 | `~/.episodic-memory/.verify-key` (long-lived) | global, single | indefinitely | n/a | shared across all runs/projects | rotation procedure (M5) | H14/H15/H16 |
+| F2 | `bp1-run-manifest` episode at `finalize-run` | per-run, local | indefinitely | the terminal artifact | replay reads | manifest is immutable; rerun creates new | H8/H9/H10/H11/H12 |
+| F2 | `episodes_merkle_root` field inside manifest | per-run | with manifest | n/a | n/a | n/a | H11/H12 |
+| F2 | `verify_key_id` fingerprint in activation entry + manifest | global (verify-key file) + per-project | with key | n/a | each read re-fingerprints | rotation rewrites | A5/H13/H16 |
+| F2 | Verify-key rotation procedure (`bp1-rotate-verify-key.mjs`) | global | n/a (one-shot) | n/a | blocks all active runs | rotation is the rollback path itself | H13/H14 |
+| F2 | Finalize-run quiescence fence | per-run | n/a (live op) | gates terminal | n/a | failed fence → rollback to non-terminal | failure row 31 |
+| F3 | YAML failure-table mirror block | RFC text | indefinitely | n/a | n/a | regenerate from prose | `validate-rfc-failure-table.mjs` (M0) |
+| F3 | `validate-rfc-failure-table.mjs` CI script (M0 deliverable) | repo | repo lifetime | n/a | n/a | n/a | self-test: insert dup → fail; drift prose → fail |
+| F4 | Retry-counter derivation function `bp1-codex-retry-count` | per-run, computed | naturally crash-safe (re-derives from episodes) | retained until run terminal | concurrent ticks deduped by parent_episode | n/a (immutable episodes) | R1-R7 |
+| F4 | `bp1-tick-deduped` evidence-episode tag (race-coverage) | per-tick | with episode | retained | concurrent-tick race witness | n/a | R4 |
+
+8-axis matrix re-walk on the new surfaces:
+
+- **Splice (axis 1):** F1 activation map: project-A entry can't activate project-B (canonical-root key match). F2 manifest: `manifest_payload` includes `run_id` + `project_root` (H10 covers). F4 retry counter: `run_id` filter + parent_episode chain prevents cross-run / cross-entry splice (R6 covers).
+- **Forge / Stale (axis 2):** F2 manifest: tampering triggers signature failure (H9); merkle root prevents drop/insert (H11/H12). F4 retry: `bp1-codex-timeout-retry` episodes are HMAC-signed (live) and manifest-signed (post-terminal) — can't forge.
+- **Orphan (axis 3):** F1 activation entry with no installed scripts: artifact-hash mismatch fails closed (A4). F2 finalize-run quiescence fence: pre-decision without post-decision blocks finalize (failure row 31).
+- **Empty (axis 4):** F1 missing required fields (`enabled`, `artifact_version_hash`, `verify_key_id`): `bp1-flag-config-corrupt` (A8). F2 manifest missing fields: signature verification fails on canonical-bytes mismatch.
+- **Wrong-shape (axis 5):** F1 activation entry with non-string project root: parser rejects pre-write. F3 YAML block with non-int IDs: validator rejects.
+- **Wrong-semantic (axis 6):** F1 canonicalized-root vs raw-root mismatch (e.g., symlink): canonicalize() resolves (A2). F2 manifest `terminal_state` enum constrained.
+- **Race / TOCTOU (axis 7):** F1 concurrent activations: flock serializes (A3, A7). F2 finalize-run + replay race: replay reads only after manifest committed (atomic rename). F4 concurrent timeout-ticks: parent_episode dedupe (R4).
+- **Boundary (axis 8):** F1 missing project entry vs disabled entry vs corrupt entry: distinct failure rows. F2 finalize crash mid-sequence: H17 recovery procedure. F4 retry exactly at boundary (count=2): routes to needs_human (R2).
+
+**No new axes opened** — every new surface has explicit coverage.
+
+#### Intentionally deferred new surfaces (5-field per discipline #8)
+
+None this round. All identified second-order surfaces have negative-test coverage in M1 or M5 (gated by failure-table CI check from M0).
+
+**Status (v3.3):** still `draft`. Re-request Codex review on these resolutions plus the new-integration-surface table above before flipping to `accepted`.
 
 ---
