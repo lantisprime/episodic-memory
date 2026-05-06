@@ -1,5 +1,5 @@
 ---
-rfc_id: RFC-005
+rfc_id: RFC-006
 slug: codex-review-adapter
 title: "Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback"
 status: draft
@@ -10,7 +10,9 @@ supersedes: ~
 superseded_by: ~
 ---
 
-# RFC-005 — Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback
+# RFC-006 — Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback
+
+> **Note on numbering:** originally drafted as RFC-005; renumbered to RFC-006 after collision detected with [PR #175](https://github.com/lantisprime/episodic-memory/pull/175) (em-move episode relocation) which was opened ~6 hours earlier and holds the RFC-005 slot. Episode tags in the round-by-round audit trail below still read `rfc-005` — those are historical and intentionally not rewritten.
 
 ## AI context
 
