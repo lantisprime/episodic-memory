@@ -6,7 +6,7 @@ status: draft
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06
-version: 3.9
+version: 3.10
 supersedes: ~
 superseded_by: ~
 ---
@@ -40,7 +40,7 @@ A multi-agent automation pipeline that drives RFCs through Rule 18 end-to-end. C
 - **One blocking-poll agent** — human-input-watcher (no timeout; resumes only on explicit override episode).
 - **One existing agent reused** — `negative-scenario-planner` for plan-time adversarial review.
 - **One lesson agent** — emits global lesson episodes per resolved bug + per-run synthesis, growing the corpus on every run.
-- **Thirteen scripts** — RFC scanner (fail-closed), event-table renderer, replay walker, snapshot emitter, run-lock, marker validator, crash classifier, ghost-run archival, token-budget calculator, em-review-request extension, orchestrator runtime, canonicalize helper (NEW v3.8), naked-entry sweep (NEW v3.8).
+- **Fourteen scripts** — RFC scanner (fail-closed), event-table renderer, replay walker, snapshot emitter, run-lock, marker validator, crash classifier, ghost-run archival, token-budget calculator, em-review-request extension, orchestrator runtime, canonicalize helper (NEW v3.8), naked-entry sweep (NEW v3.8), unified deadline-sweep fallback `bp1-deadline-sweep.mjs` (NEW v3.10 — explicit inventory entry per CLI v3.9 F2; was previously only documented in the fallback section).
 - **One SessionStart hook** — bp1-approval-check, ordered after handoff-prompt.
 - **Three scheduled tasks** — `bp1-deadline-tick` (5-min cron, request-issued timeout per Path A), `bp1-naked-entry-sweep` (5-min cron, naked-entry recovery per Path B — NEW v3.8), and `bp1-security-audit-weekly` (Sunday meta-audit + ghost-run archival). All principle-conformant per P6 (visible, listable, episode-emitting).
 - **One slash command** — `/bp1-auto <rfc-id>` for manual entry.
@@ -162,6 +162,8 @@ Any mismatch → exit non-zero + emit `bp1-disabled-refusal` (or `bp1-flag-versi
 | `bp1-rfc-scan.mjs` | M2 | Print `bp1 inert for project <root>: <reason>` to stderr, exit 0 |
 | `bp1-deadline-tick` scheduled task (T1) | M2 | Emit a single tick episode tagged `bp1-disabled-tick` per project root that lacks activation, no orchestrator dispatch |
 | `bp1-naked-entry-sweep` scheduled task (T1b, NEW v3.8) | M2 | Emit a single tick episode tagged `bp1-disabled-sweep` per project root that lacks activation, no orchestrator dispatch |
+| `bp1-deadline-sweep.mjs` fallback (NEW v3.10) | M0 | Both `--once` invocation and the auto-wired SessionStart hook (H2) consult `bp1-flag-check.mjs` FIRST; on disabled/inactive project, emit `bp1-disabled-sweep` evidence and exit 0 without dispatch |
+| `.claude/hooks/bp1-sweep-on-session.sh` hook (H2, NEW v3.10) | M0 | Activation-gated; flag-check refusal exits 0 silently |
 | `bp1-approval-check.sh` hook (H1) | M2 | Return exit 0 immediately, no marker read |
 | `bp1-orchestrator` agent | M1/M3 | Hard-refuse to dispatch any sub-agent; emit `bp1-disabled-refusal` episode with `reason` field |
 | `/bp1-auto` slash command | M5 | Print disabled message and the M5 dry-run instructions; exit non-zero |
@@ -497,7 +499,7 @@ flowchart TD
 
 All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_canonical_prompt_as_episode.md`). Agent loader files are thin (~30 lines); the prompt body lives as a global episode revisable via `em-revise`.
 
-### Scripts (13 total — 1 extension, 12 new)
+### Scripts (14 total — 1 extension, 13 new)
 
 | # | Script | Role | Validation |
 |---|---|---|---|
@@ -514,12 +516,14 @@ All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_cano
 | 11 | `scripts/em-review-request.mjs` (extension) | Adds `--target plan-episode:<id>` mode + `--idempotency-key <hex>` (NEW v3.8 — local idempotency enforcement per I4) | ✅ existing pattern extension |
 | 12 (NEW v3.8) | `scripts/bp1-canonicalize.mjs` | Per-episode canonical-bytes builder; projects frontmatter to canonical payload spec (generic + episode-type-specific fields) and emits sha256. Called by HMAC-signing path. | ✅ pure deterministic |
 | 13 (NEW v3.8) | `scripts/bp1-naked-entry-sweep.mjs` | Path B sweep: scans active runs for naked `codex_review` entries (no `bp1-codex-request-sent` evidence) older than 5min. Called by T1b scheduled task. Emits `bp1-naked-sweep-tick` per fire. | ✅ deterministic data walk |
+| 14 (NEW v3.10) | `scripts/bp1-deadline-sweep.mjs` | Unified fallback for T1 + T1b when `mcp__scheduled-tasks` unavailable. Invocable manually (`--once`) and auto-wired as a SessionStart hook (see hook H2 below). Activation-gated (no-op if project's flag-check fails). Emits `bp1-sweep-tick` per invocation. | ✅ deterministic; activation-gated |
 
 ### Hooks, scheduled tasks, and manifest
 
 | # | Artifact | Trigger | Role |
 |---|---|---|---|
 | H1 | `.claude/hooks/bp1-approval-check.sh` | SessionStart, after handoff-prompt | Calls `bp1-marker-validate.mjs`; routes by class + deadline |
+| H2 (NEW v3.10) | `.claude/hooks/bp1-sweep-on-session.sh` | SessionStart (after H1) | Calls `bp1-deadline-sweep.mjs --once` when `scheduled_tasks_capability == fallback`. **Activation-gated** (calls `bp1-flag-check` first; no-op if flag-check fails). Best-effort liveness for T1 + T1b when scheduled-tasks unavailable. Added v3.10 per CLI v3.9 F2. |
 | T1 | `bp1-deadline-tick` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs check-deadlines` (Path A — request-issued timeout); emits tick episode |
 | T1b (NEW v3.8) | `bp1-naked-entry-sweep` (scheduled task) | every 5 min | Calls `bp1-orchestrator.mjs sweep-naked-entries` (Path B — naked-entry recovery, 5-min from entry created_at); emits sweep episode. Activation-gated; flag-check refuses if project not active. |
 | T2 | `bp1-security-audit-weekly` (scheduled task) | Sunday 09:00 PHT | Meta-audit + ghost archival; emits weekly digest |
@@ -541,7 +545,7 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 
 - Stateless one-shot sweep — replays the same logic T1 + T1b would have run (Path A request-issued deadline check + Path B naked-entry recovery, both across active runs).
 - Invocable manually: `node scripts/bp1-deadline-sweep.mjs --once`.
-- Auto-wired as a SessionStart hook (`.claude/hooks/bp1-sweep-on-session.sh`) so any human session triggers a sweep — provides best-effort liveness when the scheduled-task capability is missing.
+- Auto-wired as a SessionStart hook (`.claude/hooks/bp1-sweep-on-session.sh`, hook H2 — added to inventory v3.10 per CLI v3.9 F2) so any human session triggers a sweep — provides best-effort liveness when the scheduled-task capability is missing. The hook is **activation-gated**: it calls `bp1-flag-check.mjs` FIRST and exits 0 silently if the project is disabled/inactive (per the gated-artifacts table above).
 - Records each invocation as a `bp1-sweep-tick` episode for audit-trail parity with T1.
 - Does NOT replicate T2 (weekly meta-audit) — that degrades to a manual `node scripts/bp1-security-audit.mjs --once`, surfaced in the operator runbook.
 
@@ -730,11 +734,19 @@ The records hold everything replay needs to detect tampering **without `run.key`
 **Post-terminal** — `bp1-replay.mjs` reads the run's `bp1-run-manifest` episode and:
 
 1. Verifies `manifest_signature` with the verify-key (rejects manifest-level tampering).
-2. Recomputes `episodes_records_root` from the records and compares (rejects record-list tampering).
-3. For each episode: re-derives `canonical_sha256` from on-disk frontmatter fields and re-derives `body_sha256` from on-disk body bytes; compares both to the stored record values. Mismatch → `bp1-manifest-fail`.
-4. (Optional defence-in-depth, key-not-required) cross-checks on-disk frontmatter `hmac_signature` matches manifest's stored `hmac_signature`. This catches one specific case: someone tampering BOTH body and frontmatter hmac to a self-consistent forgery — the on-disk `hmac_signature` value would mismatch the manifest's record. (Codex round-3 confirmed this is sufficient since the records are signed by verify-key.)
+2. Recomputes `episodes_records_root` from the records and compares (rejects record-list tampering within the manifest).
+3. For each record: re-derives `canonical_sha256` from on-disk frontmatter fields and re-derives `body_sha256` from on-disk body bytes; compares both to the stored record values. Mismatch → `bp1-manifest-fail`.
+4. (Defence-in-depth, key-not-required) cross-checks on-disk frontmatter `hmac_signature` matches manifest's stored `hmac_signature`. This catches one specific case: someone tampering BOTH body and frontmatter hmac to a self-consistent forgery — the on-disk `hmac_signature` value would mismatch the manifest's record.
+5. **(NEW v3.10 — on-disk-set equality check, addresses CLI v3.9 F1)** Scan the on-disk episode set for this `run_id` (all files in `<project>/.episodic-memory/episodes/` with frontmatter `run_id` matching). Compute the set of episode IDs. **Require exact equality** with the set of `episode_id` values in `per_episode_records`. Any extra-on-disk episode (in the run but not in the manifest) → `bp1-manifest-fail` with reason `extra-episode`. Any missing-on-disk episode (in the manifest but not on disk) → `bp1-manifest-fail` with reason `missing-episode`. This closes the post-terminal append attack: an attacker adding a new episode file to the run's directory after finalize would change the on-disk set without changing the signed manifest.
 
 Verification failure → `bp1-hmac-fail` (live, row 16) or `bp1-manifest-fail` (post-terminal, row 30).
+
+**Negative test (NEW v3.10 — addresses CLI v3.9 F1):**
+
+| # | Scenario | Expected outcome |
+|---|---|---|
+| H27 (NEW v3.10) | Post-terminal: attacker adds an extra episode file to `<project>/.episodic-memory/episodes/` with the same `run_id` as a finalized run, but the manifest is unchanged | Replay step 5 (on-disk-set equality check) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
+| H28 (NEW v3.10) | Post-terminal: attacker deletes an on-disk episode file that IS listed in the manifest's records | Replay step 5 detects missing episode; `bp1-manifest-fail` with reason `missing-episode` |
 
 #### Finalize-run sequence
 
