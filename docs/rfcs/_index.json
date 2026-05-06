@@ -1,0 +1,54 @@
+{
+  "$schema_version": "1.0.0",
+  "_comment": "Machine-readable RFC registry. Source of truth for RFC IDs, paired with each RFC's frontmatter and the Active RFCs table in README.md. Validator: scripts/em-rfc-validate.mjs. Drift between any two of (this file | frontmatter | README) is a CI failure.",
+  "rfcs": [
+    {
+      "id": "RFC-001",
+      "slug": "memory-improvements",
+      "title": "Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, and Semantic Consolidation",
+      "status": "accepted",
+      "champion": "Charlton Ho",
+      "file": "RFC-001-memory-improvements.md"
+    },
+    {
+      "id": "RFC-002",
+      "slug": "learning-loop",
+      "title": "Learning Loop: Violation Tracking, Pattern Refinement, and Actionable Recall",
+      "status": "accepted",
+      "champion": "Charlton Ho",
+      "file": "RFC-002-learning-loop.md"
+    },
+    {
+      "id": "RFC-003",
+      "slug": "pluggable-tool-adapters",
+      "title": "Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging",
+      "status": "accepted",
+      "champion": "Charlton Ho",
+      "file": "RFC-003-pluggable-tool-adapters.md"
+    },
+    {
+      "id": "RFC-004",
+      "slug": "bp1-auto-pilot",
+      "title": "BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow",
+      "status": "accepted",
+      "champion": "Charlton Ho",
+      "file": "RFC-004-bp1-auto-pilot.md"
+    },
+    {
+      "id": "RFC-005",
+      "slug": "em-move",
+      "title": "em-move — atomic episode relocation between scopes",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-005-em-move.md"
+    },
+    {
+      "id": "RFC-006",
+      "slug": "codex-review-adapter",
+      "title": "Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-006-codex-review-adapter.md"
+    }
+  ]
+}

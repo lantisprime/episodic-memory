@@ -1,7 +1,7 @@
 ---
 rfc_id: RFC-004
 slug: bp1-auto-pilot
-title: BP-1 Auto-Pilot — Automated Rule-18 Implementation Workflow
+title: "BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow"
 status: accepted
 champion: Charlton Ho
 created: 2026-05-06
