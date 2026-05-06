@@ -23,7 +23,7 @@ function makeTempDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `rfc-mfst-${label}-`))
 }
 
-function fixture({ surfaces, includeEmReviewRequest = true }) {
+function fixture({ surfaces, includeEmReviewRequest = true, schemaVersion = 1 }) {
   let scriptsBlock = '  scripts:\n    - path: "scripts/bp1-orchestrator.mjs"\n      sha256: "<file-sha256>"\n'
   if (includeEmReviewRequest) {
     scriptsBlock += '    - path: "scripts/em-review-request.mjs"\n      sha256: "<file-sha256>"\n'
@@ -37,6 +37,7 @@ function fixture({ surfaces, includeEmReviewRequest = true }) {
     canonical_prompts: '  canonical_prompts:\n    - loader: ".claude/agents/bp1-orchestrator.md"\n      latest_prompt_episode_id: "20260506-X"\n',
   }
   let yaml = '```yaml\nartifact_manifest:\n'
+  if (schemaVersion !== null) yaml += `  schema_version: ${schemaVersion}\n`
   for (const s of surfaces) yaml += surfaceBlocks[s]
   yaml += '```\n'
   return `# Fixture\n\n## Activation flag\n\n${yaml}`
@@ -83,6 +84,34 @@ tap('skip files without an artifact_manifest yaml block', () => {
   const r = run(file)
   assert.equal(r.exitCode, 0)
   assert.ok(r.parsed.results[0].skipped)
+})
+
+tap('schema_version drift between RFC and builder → schema-version-drift', () => {
+  const file = writeFixture(fixture({ surfaces: ALL, schemaVersion: 99 }))
+  const r = run(file)
+  assert.equal(r.exitCode, 1)
+  const kinds = r.parsed.results[0].violations.map(v => v.kind)
+  assert.ok(kinds.includes('schema-version-drift'))
+})
+
+tap('RFC missing schema_version → rfc-missing-schema-version', () => {
+  const file = writeFixture(fixture({ surfaces: ALL, schemaVersion: null }))
+  const r = run(file)
+  assert.equal(r.exitCode, 1)
+  const kinds = r.parsed.results[0].violations.map(v => v.kind)
+  assert.ok(kinds.includes('rfc-missing-schema-version'))
+})
+
+tap('hasSurfaceKey: a key appearing only OUTSIDE artifact_manifest does not satisfy presence', () => {
+  // Sibling-context fence: artifact_manifest has only 5 surfaces, but a
+  // sibling root_block uses the same key name. Validator must NOT count it.
+  const yaml = '```yaml\nartifact_manifest:\n  schema_version: 1\n  scripts:\n    - path: "scripts/bp1-orchestrator.mjs"\n      sha256: "<sha>"\n    - path: "scripts/em-review-request.mjs"\n      sha256: "<sha>"\n  hooks:\n    - path: ".claude/hooks/bp1-approval-check.sh"\n      sha256: "<sha>"\n  settings_lines:\n    sha256: "<sha>"\n  plugin_entries:\n    sha256: "<sha>"\n  agent_loaders:\n    - path: ".claude/agents/bp1-orchestrator.md"\n      sha256: "<sha>"\n\n# sibling root block, NOT a child of artifact_manifest:\nother_block:\n  canonical_prompts:\n    - loader: "decoy"\n      latest_prompt_episode_id: "X"\n```\n'
+  const file = writeFixture(`# Fixture\n\n${yaml}`)
+  const r = run(file)
+  assert.equal(r.exitCode, 1)
+  const kinds = r.parsed.results[0].violations.map(v => v.kind)
+  assert.ok(kinds.includes('missing-surface-in-rfc'),
+    `expected missing-surface-in-rfc, got ${JSON.stringify(kinds)}`)
 })
 
 tap('real RFC-004 spec validates', () => {

@@ -239,6 +239,36 @@ tap('row 29: verify-key chmod 0644 → bp1-hmac-keyfile-fail', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Regression: manifest builder error during recomputation must surface as
+// bp1-flag-version-drift, not raw Node exit. Codex P2 finding (round 2).
+// ---------------------------------------------------------------------------
+tap('regression: manifest builder error → bp1-flag-version-drift exit 2', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  const { fingerprint } = writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  // Make the scripts dir unreadable so buildArtifactManifest throws on its
+  // first readdirSync. Skip on roots that can read anything (tests run as
+  // root in some CI containers); use chmod 0000.
+  fs.chmodSync(path.join(proj, 'scripts'), 0o000)
+  try {
+    writeConfig(configPath, proj, {
+      enabled: true,
+      artifact_version_hash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+      verify_key_id: fingerprint,
+    })
+    const r = runFlagCheck({ projectRoot: proj, configPath, env: { HOME: homeDir } })
+    // Either the builder throws (preferred path under a non-root user) or
+    // it returns a hash that doesn't match the all-zero placeholder. Both
+    // paths must surface as version-drift, exit 2, structured JSON.
+    assert.equal(r.exitCode, 2)
+    assert.equal(r.parsed.code, 'bp1-flag-version-drift')
+  } finally {
+    fs.chmodSync(path.join(proj, 'scripts'), 0o755)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Regression: --project pointing to nonexistent path must fail-closed with
 // structured exit 2 (not throw a raw ENOENT). Finding 1, MAJOR, code-review.
 // ---------------------------------------------------------------------------

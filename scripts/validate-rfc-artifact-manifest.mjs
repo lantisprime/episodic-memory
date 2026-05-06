@@ -104,10 +104,14 @@ function validateFile(file) {
     }
   }
 
-  // (3) Builder output structural parity
+  // (3) Builder output structural parity. Compare both surface set AND
+  // top-level metadata keys (e.g. schema_version) — a future builder bump
+  // that adds/removes a metadata field must update the RFC YAML in lockstep.
   let manifestKeys = []
+  let manifestSchemaVersion = null
   try {
     const { manifest } = buildArtifactManifest({ projectRoot: REPO })
+    manifestSchemaVersion = manifest.schema_version
     manifestKeys = Object.keys(manifest).filter(k => k !== 'schema_version').sort()
   } catch (e) {
     violations.push({ kind: 'builder-error', detail: `bp1-build-artifact-manifest failed: ${e.message}` })
@@ -121,6 +125,18 @@ function validateFile(file) {
   for (const k of manifestKeys) {
     if (!required.includes(k)) {
       violations.push({ kind: 'unexpected-surface-in-builder', detail: `builder output has unspec'd surface: ${k}` })
+    }
+  }
+
+  // (4) schema_version parity — RFC YAML must declare the same schema_version
+  // value the builder emits. Without this, a builder bump can silently pass CI.
+  if (manifestSchemaVersion !== null) {
+    const rfcSchemaMatch = block.match(/^\s{2}schema_version:\s*(\d+)\s*$/m)
+    const rfcSchemaVersion = rfcSchemaMatch ? parseInt(rfcSchemaMatch[1], 10) : null
+    if (rfcSchemaVersion === null) {
+      violations.push({ kind: 'rfc-missing-schema-version', detail: `builder emits schema_version=${manifestSchemaVersion}; RFC artifact_manifest block does not declare schema_version` })
+    } else if (rfcSchemaVersion !== manifestSchemaVersion) {
+      violations.push({ kind: 'schema-version-drift', detail: `builder schema_version=${manifestSchemaVersion} != RFC declared ${rfcSchemaVersion}` })
     }
   }
 
@@ -140,9 +156,18 @@ function extractArtifactManifestBlock(text) {
 }
 
 function hasSurfaceKey(yamlBody, key) {
-  // Two-space indent under artifact_manifest:
-  const re = new RegExp(`^\\s{2}${key}:`, 'm')
-  return re.test(yamlBody)
+  // Scope the match to children of the `artifact_manifest:` root (two-space
+  // indent, but only inside that block). Codex P2: a sibling-context
+  // appearance with two-space indent could otherwise satisfy the check.
+  const lines = yamlBody.split('\n')
+  let inRoot = false
+  for (const raw of lines) {
+    if (/^artifact_manifest:\s*$/.test(raw)) { inRoot = true; continue }
+    if (!inRoot) continue
+    if (/^\S/.test(raw)) break // exited the root block on a sibling root key
+    if (new RegExp(`^\\s{2}${key}:`).test(raw)) return true
+  }
+  return false
 }
 
 function extractSurfaceBlock(yamlBody, surface) {

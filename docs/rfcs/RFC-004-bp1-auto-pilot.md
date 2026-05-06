@@ -108,6 +108,7 @@ All side-effecting bp1 artifacts are gated on a **per-project activation entry**
 
 ```yaml
 artifact_manifest:
+  schema_version: 1
   scripts:
     - path: "scripts/bp1-orchestrator.mjs"
       sha256: "<file-sha256>"

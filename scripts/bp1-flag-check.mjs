@@ -163,9 +163,18 @@ if (entry.enabled !== true) {
 }
 
 // ---------------------------------------------------------------------------
-// Recompute artifact manifest hash
+// Recompute artifact manifest hash. Manifest-build can throw on permission /
+// IO errors when reading installed scripts/hooks/agents/settings; treat any
+// such throw as fail-closed version-drift rather than a raw Node exit.
 // ---------------------------------------------------------------------------
-const { sha256: liveHash } = buildArtifactManifest({ projectRoot })
+let liveHash
+try {
+  ;({ sha256: liveHash } = buildArtifactManifest({ projectRoot }))
+} catch (e) {
+  fail('bp1-flag-version-drift',
+    `Artifact manifest recomputation failed: ${e.message}`,
+    { project_root: projectRoot, builder_error: e.message })
+}
 const expected = entry.artifact_version_hash
 const expectedSha = typeof expected === 'string' && expected.startsWith('sha256:')
   ? expected.slice('sha256:'.length)
