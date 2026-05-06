@@ -181,6 +181,63 @@ tap('manifest has all six contract surfaces (even when empty)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Round-3 regression: em-search subprocess error must propagate, not be
+// swallowed by a bare catch in resolveLatestEpisodeId. Closes Codex round-3
+// finding: I-P2-1 invariant must cover the canonical_prompts em-search path.
+// ---------------------------------------------------------------------------
+tap('Codex round-3: em-search returning {episodes:[]} falls back, does not throw', () => {
+  // Exercises the legitimate fallback path: agent loader references an
+  // episode id em-search has no history for. Pre-fix bare-catch and post-fix
+  // explicit case both fall back to referencedId without throwing.
+  const proj = makeProj()
+  fs.writeFileSync(path.join(proj, '.claude', 'agents', 'bp1-fake.md'),
+    'Canonical prompt episode 20260506-100000-fake-slug-abcd.\n')
+  const r = run(proj)
+  assert.equal(r.status, 'ok')
+  // canonical_prompts populated with the fallback referencedId.
+  const cps = r.manifest.canonical_prompts
+  assert.equal(cps.length, 1)
+  assert.equal(cps[0].latest_prompt_episode_id, '20260506-100000-fake-slug-abcd')
+})
+
+tap('Codex round-3: em-search subprocess malformed-output error propagates', () => {
+  // Direct unit test on the lib via dynamic import — exercises the throw path
+  // when em-search returns unexpected shape. Stubs the em-search.mjs file in
+  // a temp scripts dir and points the lib at it via a copied lib + symlink
+  // strategy is too fragile; instead we do a focused process-level test:
+  // create a project that has its OWN scripts/em-search.mjs that prints
+  // garbage, and copy the bp1-* lib + scripts over to that scratch project.
+  const proj = makeProj()
+  // Loader referencing a non-existent id
+  fs.writeFileSync(path.join(proj, '.claude', 'agents', 'bp1-fake.md'),
+    'Canonical prompt episode 20260506-100000-fake-slug-abcd.\n')
+  // Copy the real lib + builder + a stubbed em-search into proj/scripts/
+  fs.mkdirSync(path.join(proj, 'scripts', 'lib'), { recursive: true })
+  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'bp1-manifest.mjs'),
+    path.join(proj, 'scripts', 'lib', 'bp1-manifest.mjs'))
+  fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
+    path.join(proj, 'scripts', 'bp1-build-artifact-manifest.mjs'))
+  // Stub em-search to return malformed JSON (no episodes array)
+  fs.writeFileSync(path.join(proj, 'scripts', 'em-search.mjs'),
+    `#!/usr/bin/env node
+console.log(JSON.stringify({status:'error', message:'simulated bad shape'}))
+`)
+  let threw = false
+  try {
+    execFileSync('node', [
+      path.join(proj, 'scripts', 'bp1-build-artifact-manifest.mjs'),
+      '--project', proj,
+      '--json',
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (e) {
+    threw = true
+    assert.ok(/unexpected shape/.test(e.message + (e.stderr || '')),
+      `expected "unexpected shape" in error; got ${e.message}`)
+  }
+  assert.ok(threw, 'builder must propagate em-search malformed-output error')
+})
+
+// ---------------------------------------------------------------------------
 // Sorted ordering: scripts always come back in path order
 // ---------------------------------------------------------------------------
 tap('scripts are returned in sorted order', () => {

@@ -140,25 +140,41 @@ function buildCanonicalPrompts(projectRoot, agentLoaders) {
 }
 
 function resolveLatestEpisodeId(referencedId) {
-  // Walk supersedes chain via em-search --history. Defensive: if unavailable,
-  // fall back to the referenced id (drift later detected by hash mismatch).
-  try {
-    const repoScripts = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-    const script = path.join(repoScripts, 'em-search.mjs')
-    if (!fs.existsSync(script)) return referencedId
-    const out = execFileSync('node', [script, '--history', referencedId, '--no-track'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5000,
-    })
-    const parsed = JSON.parse(out)
-    if (parsed && Array.isArray(parsed.episodes) && parsed.episodes.length) {
-      // History is ordered chain; terminal is the one not superseded.
-      const terminal = parsed.episodes.find(e => !e.superseded_by) || parsed.episodes[parsed.episodes.length - 1]
-      return terminal.id
-    }
-  } catch {
-    // fall through
+  // Walk supersedes chain via em-search --history.
+  //
+  // Two distinct failure classes:
+  //   - em-search not present (script file missing): expected legitimate
+  //     fallback to the referenced id. Tracked by #180 for M3 hardening.
+  //   - em-search present but the subprocess errored or returned malformed
+  //     JSON: a real signal that propagates. The outer try/catch in
+  //     bp1-flag-check.mjs catches it and surfaces as bp1-flag-version-drift.
+  //
+  // Codex round-3 finding: bare catch{} swallowing ALL errors made the
+  // I-P2-1 fail-closed invariant overbroad. Narrowed here.
+  const repoScripts = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+  const script = path.join(repoScripts, 'em-search.mjs')
+  if (!fs.existsSync(script)) return referencedId
+
+  // From here on, throw — flag-check's outer try/catch surfaces as drift.
+  const out = execFileSync('node', [script, '--history', referencedId, '--no-track'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 5000,
+  })
+  const parsed = JSON.parse(out)
+  // em-search --history emits {status, count, chain: [...]} — NOT episodes.
+  // (Round-3 bug: original lib checked parsed.episodes, masked by bare catch.)
+  // Three valid cases:
+  //   - {chain: [...]} non-empty → use terminal id
+  //   - {chain: []}            → id not in store, legitimate fallback
+  //   - parsed has no chain array at all → malformed, propagate
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.chain)) {
+    throw new Error(`em-search returned unexpected shape for history of ${referencedId}`)
+  }
+  if (parsed.chain.length) {
+    // History is ordered chain; terminal is the one not superseded.
+    const terminal = parsed.chain.find(e => !e.superseded_by) || parsed.chain[parsed.chain.length - 1]
+    return terminal.id
   }
   return referencedId
 }
