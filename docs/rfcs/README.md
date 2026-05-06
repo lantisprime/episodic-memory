@@ -11,6 +11,7 @@ RFCs document proposed changes to the episodic-memory system. Every non-trivial 
 | RFC-001 | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, and Semantic Consolidation | accepted | Charlton Ho |
 | RFC-002 | Learning Loop: Violation Tracking, Pattern Refinement, and Actionable Recall | accepted | Charlton Ho |
 | RFC-003 | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | accepted | Charlton Ho |
+| RFC-004 | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | draft | Charlton Ho |
 
 ---
 
