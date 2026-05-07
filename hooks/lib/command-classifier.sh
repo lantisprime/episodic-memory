@@ -484,12 +484,27 @@ _classify_segment() {
   # If any output redirect targets a non-marker → has_nonmarker_redirect, which
   # forces shared_write later (overrides read-only command classification —
   # `echo hello > file.txt` is a write even though `echo` is read-only).
+  #
+  # Exception: device pseudo-files in /dev/ that are non-persistent sinks/sources
+  # (/dev/null, /dev/stdout, /dev/stderr, /dev/tty, /dev/zero) never affect
+  # shared state, so they must NOT upgrade the redirect-source command. A
+  # read-only command such as `ls >/dev/null` remains read_only; other commands
+  # keep their normal classification (e.g. `git push >/dev/null` still
+  # classifies as push_or_pr_create via its own command rule). Exact-string
+  # match — symlinks to /dev/null fall through to the conservative shared_write
+  # default.
   local r
   local has_nonmarker_redirect=0
   for r in ${REDIRS[@]+"${REDIRS[@]}"}; do
     local rop="${r%%	*}"
     local rtarget="${r#*	}"
     local rbase="$(basename "$rtarget")"
+    case "$rtarget" in
+      /dev/null|/dev/stdout|/dev/stderr|/dev/tty|/dev/zero)
+        # Benign device sink — skip the has_nonmarker_redirect upgrade.
+        continue
+        ;;
+    esac
     case "$rbase" in
       .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending)
         local abs_target

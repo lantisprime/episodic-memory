@@ -289,6 +289,51 @@ assert_label "T207 gh pr update-branch" "gh pr update-branch 113" "push_or_pr_cr
 assert_label "T208 gh pr revert" "gh pr revert 113" "push_or_pr_create"
 
 echo ""
+echo "--- /dev/null sink (issue: 2>/dev/null false-positive) ---"
+# Bug: any output redirect to a non-marker forced shared_write, even when
+# the redirect target was /dev/null (the universal sink). This made every
+# defensive `cmd 2>/dev/null` block under plan-gate, which was the dominant
+# false-positive trigger for permission prompts during planning sessions.
+# Fix: /dev/null targets bypass the has_nonmarker_redirect upgrade.
+assert_label "T220 ls 2>/dev/null" "ls /tmp 2>/dev/null" "read_only"
+assert_label "T221 ls >/dev/null" "ls /tmp >/dev/null" "read_only"
+assert_label "T222 ls &>/dev/null" "ls /tmp &>/dev/null" "read_only"
+assert_label "T223 cat 2>/dev/null" "cat /etc/hosts 2>/dev/null" "read_only"
+assert_label "T224 git status 2>/dev/null" "git status 2>/dev/null" "read_only"
+assert_label "T225 grep with stderr sink" "grep -r foo . 2>/dev/null" "read_only"
+# Compound: each segment classified independently, /dev/null exception applies.
+assert_label "T226 compound /dev/null" \
+  "ls /tmp 2>/dev/null; ls /var 2>/dev/null" "read_only"
+assert_label "T227 compound mixed sinks" \
+  "git status 2>/dev/null; ls /tmp 2>/dev/null" "read_only"
+# Negative: real writes (non-/dev/null targets) still upgrade to shared_write.
+assert_label "T228 echo to real file" "echo hello > /tmp/foo" "shared_write"
+assert_label "T229 ls to real file" "ls > /tmp/listing.txt" "shared_write"
+# Most-restrictive: /dev/null segment + real-write segment → shared_write.
+assert_label "T230 dev-null then write" \
+  "git status > /dev/null; echo x > /tmp/foo" "shared_write"
+# Most-restrictive: /dev/null read + push still pushes.
+assert_label "T231 dev-null then push" \
+  "git status 2>/dev/null && git push" "push_or_pr_create"
+# Marker-write redirect not masked by a sibling /dev/null redirect on the
+# same command. The marker check fires regardless of redirect order.
+assert_label "T232 write to marker + dev-null" \
+  "echo ok > .plan-approval-pending 2>/dev/null" "marker_write"
+assert_label "T233 dev-null + write to marker" \
+  "echo ok 2>/dev/null > .plan-approval-pending" "marker_write"
+# unsafe_complex still wins when a sink redirect is present.
+assert_label "T234 unsafe + dev-null" "eval foo 2>/dev/null" "unsafe_complex"
+assert_label "T235 backticks + dev-null" "echo \`whoami\` 2>/dev/null" "unsafe_complex"
+# Other benign device sinks — same exemption applies to read-only commands.
+assert_label "T236 ls >/dev/stdout" "ls /tmp >/dev/stdout" "read_only"
+assert_label "T237 ls 2>/dev/stderr" "ls /tmp 2>/dev/stderr" "read_only"
+assert_label "T238 cat >/dev/tty" "cat /etc/hosts >/dev/tty" "read_only"
+assert_label "T239 ls >/dev/zero" "ls /tmp >/dev/zero" "read_only"
+# Negative: /dev/null with similar but different path is still a real write.
+assert_label "T240 dev-null look-alike" "ls /tmp >/dev/null2" "shared_write"
+assert_label "T241 dev-not-null" "ls /tmp >/devnull" "shared_write"
+
+echo ""
 echo "--- classify_path ---"
 assert_path() {
   local desc="$1"
