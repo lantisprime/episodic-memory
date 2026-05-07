@@ -1,0 +1,163 @@
+#!/usr/bin/env node
+/**
+ * test-transcript-walker.mjs — unit tests for scripts/lib/transcript-walker.mjs.
+ *
+ * Builds a temporary projects dir with hand-crafted JSONL transcripts, points
+ * the walker at it via a mocked PROJECTS_DIR-equivalent, then asserts shape
+ * and classification.
+ *
+ * The walker hardcodes ~/.claude/projects, so we cannot inject a path. To
+ * test in isolation we override HOME for the duration of the test (the walker
+ * computes PROJECTS_DIR at module-load time, so we have to require it AFTER
+ * setting HOME).
+ *
+ * Zero deps; Node stdlib only.
+ */
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import assert from 'node:assert/strict'
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'em-walker-test-'))
+process.env.HOME = TMP
+
+const projectsDir = path.join(TMP, '.claude', 'projects')
+fs.mkdirSync(projectsDir, { recursive: true })
+
+// --- fixtures --------------------------------------------------------------
+const slug1 = '-Users-test-projects-foo'
+const slug2 = '-Users-test-projects-bar--claude-worktrees-feature-x'
+const sid1 = '11111111-1111-1111-1111-111111111111'
+const sid2 = '22222222-2222-2222-2222-222222222222'
+
+const session1 = [
+  { type: 'queue-operation', operation: 'enqueue', timestamp: '2026-05-01T10:00:00Z', sessionId: sid1, content: 'hey can you fix the auth bug' },
+  { type: 'queue-operation', operation: 'dequeue', timestamp: '2026-05-01T10:00:01Z', sessionId: sid1 },
+  { type: 'attachment', timestamp: '2026-05-01T10:00:02Z', sessionId: sid1, attachment: { type: 'hook_success', hookName: 'SessionStart' }, cwd: '/Users/test/foo' },
+  { type: 'assistant', timestamp: '2026-05-01T10:00:05Z', sessionId: sid1, cwd: '/Users/test/foo', message: { content: [{ type: 'text', text: 'looking at the auth code now' }] } },
+  { type: 'assistant', timestamp: '2026-05-01T10:00:06Z', sessionId: sid1, cwd: '/Users/test/foo', message: { content: [{ type: 'tool_use', name: 'Read', id: 't1', input: { file: 'auth.js' } }] } },
+  { type: 'user', timestamp: '2026-05-01T10:00:07Z', sessionId: sid1, message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'file content here' }] } },
+  { type: 'assistant', timestamp: '2026-05-01T10:00:10Z', sessionId: sid1, cwd: '/Users/test/foo', message: { content: [{ type: 'text', text: 'we decided to use bcrypt' }] } },
+]
+fs.mkdirSync(path.join(projectsDir, slug1), { recursive: true })
+fs.writeFileSync(
+  path.join(projectsDir, slug1, sid1 + '.jsonl'),
+  session1.map((r) => JSON.stringify(r)).join('\n') + '\n'
+)
+
+const session2 = [
+  { type: 'queue-operation', operation: 'enqueue', timestamp: '2026-05-02T10:00:00Z', sessionId: sid2, content: 'in a worktree session' },
+  { type: 'assistant', timestamp: '2026-05-02T10:00:01Z', sessionId: sid2, cwd: '/Users/test/bar/.claude/worktrees/feature-x', message: { content: [{ type: 'text', text: 'on it' }] } },
+]
+fs.mkdirSync(path.join(projectsDir, slug2), { recursive: true })
+fs.writeFileSync(
+  path.join(projectsDir, slug2, sid2 + '.jsonl'),
+  session2.map((r) => JSON.stringify(r)).join('\n') + '\n'
+)
+
+// Empty dir (should not break)
+fs.mkdirSync(path.join(projectsDir, '-Users-empty-project'), { recursive: true })
+
+// Garbage line (should not crash)
+fs.appendFileSync(path.join(projectsDir, slug1, sid1 + '.jsonl'), '{not valid json\n')
+
+// --- import after HOME is set ---------------------------------------------
+const walker = await import('../scripts/lib/transcript-walker.mjs')
+
+// --- TAP harness -----------------------------------------------------------
+let pass = 0, fail = 0
+async function tap(name, fn) {
+  try { await fn(); pass++; console.log(`ok ${pass + fail} - ${name}`) }
+  catch (e) { fail++; console.log(`not ok ${pass + fail} - ${name}\n  ${e.message}`); console.log(e.stack) }
+}
+
+await tap('listSlugs() returns all dirs sorted', () => {
+  const slugs = walker.listSlugs()
+  assert.deepEqual(slugs, [
+    '-Users-empty-project',
+    slug1,
+    slug2,
+  ].sort())
+})
+
+await tap('listSlugs({ excludeWorktrees }) drops worktree slugs', () => {
+  const slugs = walker.listSlugs({ excludeWorktrees: true })
+  assert.ok(slugs.includes(slug1))
+  assert.ok(!slugs.includes(slug2), 'worktree slug should be excluded')
+})
+
+await tap('listSlugs({ slugFilter }) substring-matches', () => {
+  const slugs = walker.listSlugs({ slugFilter: 'foo' })
+  assert.deepEqual(slugs, [slug1])
+})
+
+await tap('listTranscripts() finds JSONLs across slugs', () => {
+  const ts = walker.listTranscripts()
+  assert.equal(ts.length, 2)
+  const ids = ts.map((t) => t.sessionId).sort()
+  assert.deepEqual(ids, [sid1, sid2].sort())
+})
+
+await tap('walkTranscripts yields normalized records and skips garbage lines', async () => {
+  const recs = []
+  for await (const r of walker.walkTranscripts()) recs.push(r)
+  // Garbage line skipped, queue-op dequeue skipped
+  // session1: enqueue(user) + attachment(meta) + asst-text + asst-tool_use + user-tool_result + asst-text = 6
+  // session2: enqueue(user) + asst-text = 2
+  assert.equal(recs.length, 8, `expected 8 records, got ${recs.length}`)
+})
+
+await tap('classify: enqueue → user, asst tool_use → tool_use, tool_result wrapper → tool_result', async () => {
+  const recs = []
+  for await (const r of walker.walkTranscripts({ slugFilter: 'foo' })) recs.push(r)
+  assert.equal(recs[0].role, 'user')
+  assert.equal(recs[0].text, 'hey can you fix the auth bug')
+  const toolUse = recs.find((r) => r.role === 'tool_use')
+  assert.ok(toolUse, 'expected a tool_use record')
+  assert.equal(toolUse.toolName, 'Read')
+  const toolResult = recs.find((r) => r.role === 'tool_result')
+  assert.ok(toolResult, 'expected a tool_result record')
+})
+
+await tap('walkTranscripts honors slugFilter', async () => {
+  const recs = []
+  for await (const r of walker.walkTranscripts({ slugFilter: 'foo' })) recs.push(r)
+  assert.ok(recs.every((r) => r.slug === slug1))
+})
+
+await tap('walkTranscripts honors excludeWorktrees', async () => {
+  const recs = []
+  for await (const r of walker.walkTranscripts({ excludeWorktrees: true })) recs.push(r)
+  assert.ok(recs.every((r) => r.slug !== slug2))
+})
+
+await tap('walkTranscripts honors since filter', async () => {
+  const recs = []
+  for await (const r of walker.walkTranscripts({ since: '2026-05-02T00:00:00Z' })) recs.push(r)
+  // Only session2's transcript should pass
+  assert.ok(recs.every((r) => r.sessionId === sid2), 'since should drop older transcripts')
+})
+
+await tap('groupBySession buckets correctly', async () => {
+  const grouped = await walker.groupBySession(walker.walkTranscripts())
+  assert.equal(grouped.size, 2)
+  assert.ok(grouped.get(sid1).length >= 5)
+  assert.ok(grouped.get(sid2).length >= 2)
+})
+
+await tap('sessionSnapshot summarizes a session', async () => {
+  const grouped = await walker.groupBySession(walker.walkTranscripts({ slugFilter: 'foo' }))
+  const snap = walker.sessionSnapshot(grouped.get(sid1))
+  assert.equal(snap.sessionId, sid1)
+  assert.equal(snap.slug, slug1)
+  assert.ok(snap.userMessages >= 1)
+  assert.ok(snap.assistantMessages >= 2)
+  assert.equal(snap.cwd, '/Users/test/foo')
+})
+
+// --- cleanup ---------------------------------------------------------------
+fs.rmSync(TMP, { recursive: true, force: true })
+
+console.log(`\n# ${pass} passed, ${fail} failed`)
+process.exit(fail ? 1 : 0)
