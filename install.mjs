@@ -171,6 +171,162 @@ if (!fs.existsSync(bp1ConfigPath)) {
 }
 
 // ---------------------------------------------------------------------------
+// 2c. BP-1 H2 SessionStart hook + settings.json wiring (RFC-004 §559 H-cfg).
+//
+// PR-1b-B / M0 part 2. Project-local: writes <projectDir>/.claude/settings.json
+// (NEVER ~/.claude/settings.json — that's the legacy --install-hooks block in
+// section 5 below). Invariant I10: this code path does NOT mutate HOME settings.
+// If the user combines --install-hooks with this install, HOME settings may
+// change only because of the legacy block; this block stays project-local.
+//
+// Only fires for tool=claude-code or tool=all (other tools don't use the
+// Claude Code SessionStart hook system).
+//
+// H2 wiring contract decisions (RFC-004 §559 H-cfg):
+//  - Target file: <projectRoot>/.claude/settings.json (project-local; NEVER HOME).
+//  - Ordering: H2 appended to SessionStart end. M2 inserts H1 just-before this
+//    H2 entry (relative-positioning, NOT SessionStart[0]) — preserves any
+//    unrelated pre-existing SessionStart entries.
+//  - Idempotence: re-run preserves H2 entry count = 1; mergeSessionStartH2Hook
+//    in scripts/lib/bp1-install-helpers.mjs deep-clones input (invariant I2).
+//  - cwd-binding: projectDir resolved from --project flag (line 37); fallback
+//    is process.cwd(). Test fixtures cover caller-cwd ≠ --project (F1, F2, F3).
+//  - Manifest hash: adding H2 changes settings_lines sha256; warn user once on
+//    add only (B8 — suppress on no-op re-run).
+//  - HOME isolation: ~/.claude/settings.json is NEVER touched here (I10).
+// ---------------------------------------------------------------------------
+if (tool === 'claude-code' || tool === 'all') {
+  const { mergeSessionStartH2Hook } = await import(
+    new URL('./scripts/lib/bp1-install-helpers.mjs', import.meta.url).href
+  )
+
+  const repoH2HookSrc = path.join(REPO_DIR, '.claude', 'hooks', 'bp1-sweep-on-session.sh')
+  const projHooksDir = path.join(projectDir, '.claude', 'hooks')
+  const projH2HookDst = path.join(projHooksDir, 'bp1-sweep-on-session.sh')
+  const projSettingsPath = path.join(projectDir, '.claude', 'settings.json')
+
+  if (!fs.existsSync(repoH2HookSrc)) {
+    console.log(`Warning: BP-1 H2 hook source not found at ${repoH2HookSrc}; skipping wiring.`)
+  } else {
+    fs.mkdirSync(projHooksDir, { recursive: true })
+    let h2HookCopied = false
+    let h2DivergentSkipped = false
+    if (!fs.existsSync(projH2HookDst)) {
+      fs.copyFileSync(repoH2HookSrc, projH2HookDst)
+      fs.chmodSync(projH2HookDst, 0o755)
+      console.log(`Installed BP-1 H2 SessionStart hook at ${projH2HookDst}`)
+      h2HookCopied = true
+    } else {
+      const a = fs.readFileSync(repoH2HookSrc)
+      const b = fs.readFileSync(projH2HookDst)
+      if (!a.equals(b)) {
+        // Codex code-review round-2 Finding 1 fix: gate force-overwrite on
+        // BOTH --install-hooks AND --install-hooks-force, matching the
+        // legacy contract (`install.mjs:42-47` warns that force-alone has no
+        // effect; T11 in tests/test-install-hooks.sh enforces). This keeps
+        // a single coherent meaning of --install-hooks-force across legacy
+        // HOME hooks and the new project-local H2 path.
+        if (installHooks && installHooksForce) {
+          // Operator opted in via --install-hooks --install-hooks-force.
+          // Overwrite + register.
+          fs.copyFileSync(repoH2HookSrc, projH2HookDst)
+          fs.chmodSync(projH2HookDst, 0o755)
+          console.log(`Overwrote divergent ${projH2HookDst} (--install-hooks-force).`)
+          h2HookCopied = true
+        } else {
+          // Codex code-review round-1 B2 fix: mirror legacy installHookFile
+          // skipped-divergent semantics — withhold settings registration AS
+          // WELL AS file overwrite. Otherwise install would wire a stale or
+          // user-edited H2 path into settings.json. Re-run with
+          // --install-hooks --install-hooks-force to overwrite + register.
+          console.log(`Note: ${projH2HookDst} differs from repo source; not overwriting AND withholding settings registration. Re-run with --install-hooks --install-hooks-force to accept.`)
+          h2DivergentSkipped = true
+        }
+      }
+    }
+
+    let existingSettings = {}
+    let parseFailed = false
+    if (fs.existsSync(projSettingsPath)) {
+      try {
+        existingSettings = JSON.parse(fs.readFileSync(projSettingsPath, 'utf8'))
+      } catch (e) {
+        // Class 4 (Empty / malformed) fixture from planner — refuse to silently
+        // overwrite the user's malformed JSON; surface and skip.
+        console.log(`Error: ${projSettingsPath} is not valid JSON (${e.message}); skipping H2 settings wiring.`)
+        parseFailed = true
+      }
+    }
+
+    if (!parseFailed && !h2DivergentSkipped) {
+      // Codex code-review B1 fix: migrate any flat-shape entries (top-level
+      // {command, ...}) to canonical nested ({hooks: [{type, command, ...}]})
+      // BEFORE the idempotence check. Otherwise a pre-existing flat-shape H2
+      // canonical entry would be detected as "already present" and skip the
+      // merge — leaving a non-executable hook entry in settings.json. Mirrors
+      // the legacy hook-install path which calls migrateMalformedEntries
+      // before its idempotence check (install.mjs:542).
+      let migratedCount = 0
+      if (existingSettings && typeof existingSettings === 'object' &&
+          existingSettings.hooks && typeof existingSettings.hooks === 'object') {
+        migratedCount = migrateMalformedEntries(existingSettings.hooks)
+        if (migratedCount > 0) {
+          console.log(`Migrated ${migratedCount} flat-shape SessionStart entr${migratedCount === 1 ? 'y' : 'ies'} to canonical shape in ${projSettingsPath}`)
+        }
+      }
+
+      const result = mergeSessionStartH2Hook(existingSettings, projH2HookDst, { timeout: 30 })
+      const needsWrite = result.changed || migratedCount > 0
+      if (needsWrite) {
+        writeJSONAtomic(projSettingsPath, result.settings)
+        if (result.changed) {
+          console.log(`Wired BP-1 H2 SessionStart hook into ${projSettingsPath}`)
+          console.log('Note: artifact_version_hash changed; activated projects must re-run M5 to regenerate.')
+        }
+      } else if (h2HookCopied) {
+        // Hook file was newly copied but settings already had the canonical
+        // entry — unusual mid-state, surface for visibility.
+        console.log(`BP-1 H2 entry already present in ${projSettingsPath}.`)
+      }
+
+      // Codex code-review R6 follow-up: surface stale-canonical entries
+      // explicitly so operators see them rather than only via cat settings.json.
+      // detectStaleCanonicalEntries scans for entries that reference the H2
+      // basename but at a different path than the canonical install location.
+      // We do NOT auto-delete (preserves operator visibility); just warn.
+      if (result.settings && result.settings.hooks &&
+          typeof result.settings.hooks === 'object') {
+        const stale = detectStaleCanonicalEntries(result.settings.hooks, {
+          'bp1-sweep-on-session.sh': projH2HookDst,
+        })
+        for (const s of stale) {
+          console.log(`Note: stale BP-1 H2 entry in ${s.event} → ${s.command} (canonical: ${projH2HookDst}). Operator can remove the stale entry; not auto-deleted.`)
+        }
+      }
+      // Otherwise: silent no-op (B8 — regen warning suppressed on re-run).
+    }
+
+    // §559 partial-coverage TODO:
+    //
+    // RFC §559 (H-cfg row) v3.12 calls for install.mjs to wire BOTH H1
+    // (bp1-approval-check.sh) AND H2 (bp1-sweep-on-session.sh) into the
+    // SessionStart array. PR-1b-B (M0 part 2) ships H2 only. H1 depends on
+    // bp1-marker-validate.mjs which lands in M2 (per RFC §552 / artifact-
+    // table H1 row).
+    //
+    // Insertion semantics for M2: M2's install.mjs MUST find the existing H2
+    // entry's index in SessionStart and splice H1 just-before it (relative
+    // positioning). NOT unconditional SessionStart[0] — that reading would
+    // reorder unrelated pre-existing SessionStart entries (e.g. em-recall-
+    // sessionstart). The §559 ordering invariant ("approval-check FIRST,
+    // sweep SECOND") is read as relative ordering between the two BP-1
+    // hooks, not absolute index in the global SessionStart array.
+    //
+    // TODO(M2): wire H1 bp1-approval-check.sh per RFC §559 (H-cfg).
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 3. Install tool-specific instructions
 // ---------------------------------------------------------------------------
 const tools = tool === 'all' ? ['claude-code', 'cursor', 'codex', 'windsurf'] : [tool]
