@@ -9,13 +9,20 @@ on:
       - 'scripts/em-rfc-validate.mjs'
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
+      - 'scripts/validate-rfc-canonical-fields.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
       - 'scripts/lib/bp1-install-helpers.mjs'
+      - 'scripts/lib/bp1-hmac.mjs'
+      - 'scripts/lib/bp1-keys.mjs'
+      - 'scripts/lib/bp1-canonicalize.mjs'
+      - 'scripts/lib/bp1-run-state.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
       - 'scripts/bp1-deadline-sweep.mjs'
+      - 'scripts/bp1-canonicalize.mjs'
+      - 'scripts/bp1-orchestrator.mjs'
       - 'tests/test-em-rfc-validate.mjs'
       - 'tests/test-validate-rfc-failure-table.mjs'
       - 'tests/test-validate-rfc-artifact-manifest.mjs'
@@ -24,8 +31,13 @@ on:
       - 'tests/test-bp1-deadline-sweep.mjs'
       - 'tests/test-bp1-probe.mjs'
       - 'tests/test-bp1-sweep-on-session.mjs'
+      - 'tests/test-bp1-hmac-live.mjs'
+      - 'tests/test-bp1-canonicalize.mjs'
+      - 'tests/test-bp1-run-state.mjs'
+      - 'tests/test-bp1-orchestrator-init-run.mjs'
       - 'tests/test-install-bp1.sh'
       - 'tests/test-install-bp1-wiring.mjs'
+      - 'tests/test-install-bp1-runkey-gitignore.mjs'
       - '.github/workflows/rfc-validate.yml'
   push:
     branches: [main]
@@ -36,13 +48,20 @@ on:
       - 'scripts/em-rfc-validate.mjs'
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
+      - 'scripts/validate-rfc-canonical-fields.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
       - 'scripts/lib/bp1-install-helpers.mjs'
+      - 'scripts/lib/bp1-hmac.mjs'
+      - 'scripts/lib/bp1-keys.mjs'
+      - 'scripts/lib/bp1-canonicalize.mjs'
+      - 'scripts/lib/bp1-run-state.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
       - 'scripts/bp1-deadline-sweep.mjs'
+      - 'scripts/bp1-canonicalize.mjs'
+      - 'scripts/bp1-orchestrator.mjs'
       - 'tests/test-em-rfc-validate.mjs'
       - 'tests/test-validate-rfc-failure-table.mjs'
       - 'tests/test-validate-rfc-artifact-manifest.mjs'
@@ -51,8 +70,13 @@ on:
       - 'tests/test-bp1-deadline-sweep.mjs'
       - 'tests/test-bp1-probe.mjs'
       - 'tests/test-bp1-sweep-on-session.mjs'
+      - 'tests/test-bp1-hmac-live.mjs'
+      - 'tests/test-bp1-canonicalize.mjs'
+      - 'tests/test-bp1-run-state.mjs'
+      - 'tests/test-bp1-orchestrator-init-run.mjs'
       - 'tests/test-install-bp1.sh'
       - 'tests/test-install-bp1-wiring.mjs'
+      - 'tests/test-install-bp1-runkey-gitignore.mjs'
 
 jobs:
   validate:
@@ -102,3 +126,21 @@ jobs:
 
       - name: Run install.mjs BP-1 H2 wiring self-tests
         run: node tests/test-install-bp1-wiring.mjs
+
+      - name: Validate RFC canonical-fields spec block
+        run: node scripts/validate-rfc-canonical-fields.mjs
+
+      - name: Run bp1-hmac live tests (H1-H7 + I3a/b + TB1/TB2)
+        run: node tests/test-bp1-hmac-live.mjs
+
+      - name: Run bp1-canonicalize tests (H21-H26 + Issue #185 + AC1)
+        run: node tests/test-bp1-canonicalize.mjs
+
+      - name: Run bp1-run-state tests (lockdir mutex + RC-LOCK1-4b)
+        run: node tests/test-bp1-run-state.mjs
+
+      - name: Run bp1-orchestrator init-run E2E tests
+        run: node tests/test-bp1-orchestrator-init-run.mjs
+
+      - name: Run install.mjs BP-1 run.key gitignore tests
+        run: node tests/test-install-bp1-runkey-gitignore.mjs
