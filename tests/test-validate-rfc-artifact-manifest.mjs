@@ -23,13 +23,14 @@ function makeTempDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `rfc-mfst-${label}-`))
 }
 
-function fixture({ surfaces, includeEmReviewRequest = true, schemaVersion = 1 }) {
+function fixture({ surfaces, includeEmReviewRequest = true, schemaVersion = 2 }) {
   let scriptsBlock = '  scripts:\n    - path: "scripts/bp1-orchestrator.mjs"\n      sha256: "<file-sha256>"\n'
   if (includeEmReviewRequest) {
     scriptsBlock += '    - path: "scripts/em-review-request.mjs"\n      sha256: "<file-sha256>"\n'
   }
   const surfaceBlocks = {
     scripts: scriptsBlock,
+    scripts_lib: '  scripts_lib:\n    - path: "scripts/lib/bp1-manifest.mjs"\n      sha256: "<sha>"\n',
     hooks: '  hooks:\n    - path: ".claude/hooks/bp1-approval-check.sh"\n      sha256: "<sha>"\n',
     settings_lines: '  settings_lines:\n    sha256: "<filtered-sha>"\n',
     plugin_entries: '  plugin_entries:\n    sha256: "<filtered-sha>"\n',
@@ -55,9 +56,9 @@ function run(file) {
   return { exitCode: r.status, parsed: JSON.parse(r.stdout) }
 }
 
-const ALL = ['scripts', 'hooks', 'settings_lines', 'plugin_entries', 'agent_loaders', 'canonical_prompts']
+const ALL = ['scripts', 'scripts_lib', 'hooks', 'settings_lines', 'plugin_entries', 'agent_loaders', 'canonical_prompts']
 
-tap('happy path: all 6 surfaces present + em-review-request listed → exit 0', () => {
+tap('happy path: all 7 surfaces present + em-review-request listed → exit 0', () => {
   const file = writeFixture(fixture({ surfaces: ALL }))
   const r = run(file)
   assert.equal(r.exitCode, 0, JSON.stringify(r.parsed.results[0].violations))
