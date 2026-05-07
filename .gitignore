@@ -13,5 +13,8 @@ node_modules/
 .claude/.plan-approval-pending
 .claude/settings.local.json
 
+# Per-session scratch (mining staging, codex requests/replies, etc.)
+.claude/scratch/
+
 # BP-1 per-run HMAC key (RFC-004)
 **/.episodic-memory/runs/*/run.key
