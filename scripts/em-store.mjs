@@ -4,7 +4,13 @@
  *
  * Usage:
  *   node em-store.mjs --project <name> --category <cat> --tags <t1,t2>
- *                     --summary <text> --body <text> [--scope local|global]
+ *                     --summary <text> (--body <text> | --body-file <path>)
+ *                     [--scope local|global]
+ *
+ * `--body-file` reads body content from a file (UTF-8, BOM stripped, exactly
+ * one trailing newline stripped). Mutually exclusive with `--body`. Use it
+ * when the body is long enough that `--body "$(cat …)"` would trigger
+ * Claude Code's unsafe-substitution permission gate.
  *
  * Writes a markdown episode file and appends an index entry.
  * Outputs JSON: { status, id, file, scope }
@@ -15,6 +21,7 @@ import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { readBodyFile } from './lib/body-file.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -34,16 +41,32 @@ const project = flag('--project')
 const category = flag('--category')
 const tagsRaw = flag('--tags')
 const summary = flag('--summary')
-const body = flag('--body')
+const bodyArg = flag('--body')
+const bodyFile = flag('--body-file')
 const url = flag('--url')
 const scope = flag('--scope') || 'global'
 
 const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation', 'workflow.lifecycle']
 
+const USAGE = `--project <name> --category <${VALID_CATEGORIES.join('|')}> --tags <t1,t2> --summary <text> (--body <text> | --body-file <path>) [--scope local|global]`
+
+if (bodyArg !== undefined && bodyFile !== undefined) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--body and --body-file are mutually exclusive; pass only one.'
+  }))
+  process.exit(1)
+}
+
+let body = bodyArg
+if (bodyFile !== undefined) {
+  body = readBodyFile(bodyFile)
+}
+
 if (!project || !category || !summary || !body) {
   console.log(JSON.stringify({
     status: 'error',
-    message: `Missing required args. Usage: --project <name> --category <${VALID_CATEGORIES.join('|')}> --tags <t1,t2> --summary <text> --body <text> [--scope local|global]`
+    message: `Missing required args. Usage: ${USAGE}`
   }))
   process.exit(1)
 }

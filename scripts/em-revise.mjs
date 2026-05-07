@@ -4,10 +4,14 @@
  *
  * Usage:
  *   node em-revise.mjs --original <id> --project <name> --tags <t1,t2>
- *                      --summary <text> --body <text> [--scope inherit|local|global]
+ *                      --summary <text> (--body <text> | --body-file <path>)
+ *                      [--scope inherit|local|global]
  *
  * --scope defaults to "inherit" (write the revision to the same store as the
  * original). Pass "local" or "global" only to force a cross-scope revision.
+ *
+ * `--body-file` reads body content from a file (UTF-8, BOM stripped, exactly
+ * one trailing newline stripped). Mutually exclusive with `--body`.
  *
  * Creates a new episode that supersedes the original. Marks the original
  * episode as superseded in both its file and the index.
@@ -19,6 +23,7 @@ import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { readBodyFile } from './lib/body-file.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -38,7 +43,8 @@ const originalId = flag('--original')
 const project = flag('--project')
 const tagsRaw = flag('--tags')
 const summary = flag('--summary')
-const body = flag('--body')
+const bodyArg = flag('--body')
+const bodyFile = flag('--body-file')
 const scope = flag('--scope') || 'inherit'
 
 const VALID_SCOPES_REVISE = ['inherit', 'local', 'global']
@@ -47,10 +53,23 @@ if (!VALID_SCOPES_REVISE.includes(scope)) {
   process.exit(1)
 }
 
+if (bodyArg !== undefined && bodyFile !== undefined) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--body and --body-file are mutually exclusive; pass only one.'
+  }))
+  process.exit(1)
+}
+
+let body = bodyArg
+if (bodyFile !== undefined) {
+  body = readBodyFile(bodyFile)
+}
+
 if (!originalId || !summary || !body) {
   console.log(JSON.stringify({
     status: 'error',
-    message: 'Missing required args. Usage: --original <id> --project <name> --tags <t1,t2> --summary <text> --body <text> [--scope inherit|local|global]'
+    message: 'Missing required args. Usage: --original <id> --project <name> --tags <t1,t2> --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global]'
   }))
   process.exit(1)
 }

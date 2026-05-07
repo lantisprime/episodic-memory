@@ -66,5 +66,6 @@ const scriptsDir = path.join(os.homedir(), '.episodic-memory', 'scripts')
 console.log(JSON.stringify({
   prompt: 'Were any behavioral patterns violated this session?',
   known_patterns: knownPatterns,
-  store_command: `node ${path.join(scriptsDir, 'em-violation.mjs')} --pattern <id> --summary "..." --body "..."`
+  store_command: `node ${path.join(scriptsDir, 'em-violation.mjs')} --pattern <id> --summary "..." --body "..."`,
+  store_command_long_body: `node ${path.join(scriptsDir, 'em-violation.mjs')} --pattern <id> --summary "..." --body-file <path>  # for multi-paragraph bodies (avoids unsafe-substitution permission gate)`
 }, null, 2))
