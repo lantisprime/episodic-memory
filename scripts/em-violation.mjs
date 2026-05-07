@@ -3,13 +3,18 @@
  * em-violation.mjs — Store a structured behavioral pattern violation.
  *
  * Usage:
- *   node em-violation.mjs --pattern <pattern_id> --summary "<text>" --body "<text>"
+ *   node em-violation.mjs --pattern <pattern_id> --summary "<text>"
+ *                         (--body "<text>" | --body-file <path>)
  *                         [--sequence "<action1,action2>"] [--correct "<action1,action2>"]
  *                         [--project <name>] [--tags "<extra_tags>"] [--scope global|local]
  *
+ * `--body-file` reads the "what happened" body from a file (UTF-8, BOM stripped,
+ * exactly one trailing newline stripped). Mutually exclusive with `--body`.
+ *
  * Validates pattern exists in patterns/_index.json, auto-tags with
  * violation + behavioral-pattern + violated:<pattern_id>, builds structured
- * body, then delegates to em-store.mjs.
+ * body, then delegates to em-store.mjs (always via `--body`, never forwards
+ * `--body-file` to the subprocess).
  *
  * Outputs JSON: { status, id, violated_pattern, file, scope }
  */
@@ -18,6 +23,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { execFileSync } from 'child_process'
+import { readBodyFile } from './lib/body-file.mjs'
 
 const SCRIPTS_DIR = path.dirname(new URL(import.meta.url).pathname)
 const STORE_SCRIPT = path.join(SCRIPTS_DIR, 'em-store.mjs')
@@ -35,12 +41,23 @@ function flag(name) {
 
 const patternId = flag('--pattern')
 const summary = flag('--summary')
-const bodyText = flag('--body')
+const bodyArg = flag('--body')
+const bodyFile = flag('--body-file')
 const sequence = flag('--sequence')
 const correct = flag('--correct')
 const project = flag('--project') || path.basename(process.cwd())
 const extraTags = flag('--tags')
 const scope = flag('--scope') || 'global'
+
+if (bodyArg !== undefined && bodyFile !== undefined) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--body and --body-file are mutually exclusive; pass only one.'
+  }))
+  process.exit(1)
+}
+
+const bodyText = bodyFile !== undefined ? readBodyFile(bodyFile) : bodyArg
 
 // ---------------------------------------------------------------------------
 // Validate scope
@@ -57,7 +74,7 @@ if (!VALID_SCOPES.includes(scope)) {
 if (!patternId || !summary || !bodyText) {
   console.log(JSON.stringify({
     status: 'error',
-    message: 'Missing required args. Usage: --pattern <pattern_id> --summary "<text>" --body "<text>" [--sequence "<actions>"] [--correct "<actions>"] [--project <name>] [--tags "<extra>"] [--scope global|local]'
+    message: 'Missing required args. Usage: --pattern <pattern_id> --summary "<text>" (--body "<text>" | --body-file <path>) [--sequence "<actions>"] [--correct "<actions>"] [--project <name>] [--tags "<extra>"] [--scope global|local]'
   }))
   process.exit(1)
 }
