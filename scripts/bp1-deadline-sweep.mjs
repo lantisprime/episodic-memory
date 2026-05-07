@@ -468,6 +468,11 @@ function emitEpisode({ category, tags, summary, body }) {
     return { ok: false, reason: 'missing_em_store' }
   }
   try {
+    // cwd: projectRoot — Codex follow-up bug (PR-186 post-ACCEPT): em-store
+    // resolves --scope local from cwd, NOT from --project. Without setting
+    // cwd here, evidence lands in the CALLER's .episodic-memory store, not
+    // the target project's. Same bug class as the worktree/local-store miss
+    // logged in episode 20260501-125543-...-9bb0.
     execFileSync('node', [
       EM_STORE,
       '--project', path.basename(projectRoot),
@@ -476,7 +481,7 @@ function emitEpisode({ category, tags, summary, body }) {
       '--scope', 'local',
       '--summary', summary,
       '--body', body,
-    ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 5000 })
+    ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 5000, cwd: projectRoot })
     emissionStats.succeeded++
     return { ok: true }
   } catch (e) {

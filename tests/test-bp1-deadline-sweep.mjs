@@ -274,6 +274,45 @@ tap('activation: no entry + no bypass → bp1-disabled-sweep, exit 0', () => {
   assert.equal(r.parsed.reason, 'bp1-disabled-refusal')
 })
 
+// Codex post-PR-186 follow-up (episode 20260507-021838-...-4c0f): when
+// caller cwd != --project, evidence MUST land under target project root,
+// not caller cwd. Pre-fix `em-store --scope local` resolved the local
+// store from cwd. Same class as the worktree/local-store miss.
+tap('cwd != --project: evidence lands under TARGET project, not caller cwd', () => {
+  const callerCwd = makeProjectRoot()
+  const targetProj = makeProjectRoot()
+  const home = makeTempDir('home')
+  // No verify-key → bp1-hmac-keyfile-fail refusal path, which still emits
+  // bp1-disabled-sweep evidence per RFC §177. Perfect for proving the
+  // emission path lands under --project, not cwd.
+  const r = spawnSync('node', [
+    SWEEP, '--once', '--project', targetProj, '--json',
+  ], {
+    cwd: callerCwd,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home },
+  })
+  const parsed = safeParse(r.stdout)
+  assert.equal(r.status, 0)
+  assert.equal(parsed.evidence_emission.succeeded, 1,
+    'emission must succeed (em-store path is reachable)')
+
+  // Caller cwd MUST NOT have an episodes dir
+  const callerEpisodesDir = path.join(callerCwd, '.episodic-memory', 'episodes')
+  assert.ok(!fs.existsSync(callerEpisodesDir),
+    `evidence must NOT land in caller cwd; found dir: ${callerEpisodesDir}`)
+
+  // Target project MUST have at least one episode
+  const targetEpisodesDir = path.join(targetProj, '.episodic-memory', 'episodes')
+  assert.ok(fs.existsSync(targetEpisodesDir),
+    `evidence must land in target --project's .episodic-memory/episodes`)
+  const targetEpisodes = fs.readdirSync(targetEpisodesDir)
+  assert.ok(targetEpisodes.length >= 1,
+    `target project must have at least one disabled-sweep episode; got ${targetEpisodes.length}`)
+  assert.ok(targetEpisodes.some(e => /bp1-disabled-sweep|bp1-hmac-keyfile-fail/.test(e)),
+    'expected bp1-disabled-sweep evidence in target episodes')
+})
+
 // Codex code-review round 2 Finding 1: production-mode (non-`--no-emit`)
 // disabled-sweep path must not crash on TDZ. Pre-fix this hit
 // "Cannot access 'emissionStats' before initialization". Regression test.

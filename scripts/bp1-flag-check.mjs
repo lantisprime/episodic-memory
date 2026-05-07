@@ -148,6 +148,11 @@ function tryEmitEpisode(code, reason, extra) {
     const summary = `bp1-flag-check ${code}: ${reason}`
     const body = `# ${code}\n\n${reason}\n\n` +
       '```json\n' + JSON.stringify(extra, null, 2) + '\n```\n'
+    // cwd: extra.project_root — em-store --scope local resolves the local
+    // store from cwd, NOT from --project. Without this, evidence lands in
+    // the caller's .episodic-memory store, not the target project's.
+    // Codex follow-up post-PR-186-ACCEPT (episode ...4c0f).
+    const cwdForEmit = extra.project_root || process.cwd()
     execFileSync('node', [
       emStore,
       '--project', projectName,
@@ -156,7 +161,7 @@ function tryEmitEpisode(code, reason, extra) {
       '--scope', 'local',
       '--summary', summary,
       '--body', body,
-    ], { stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 })
+    ], { stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000, cwd: cwdForEmit })
   } catch {
     // swallow
   }
@@ -242,7 +247,7 @@ if (bypass.ok) {
               ttl_until: bypass.ttl_until, ttl_remaining_ms: bypass.ttl_remaining_ms,
               artifact_version_hash: liveHash,
             }, null, 2) + '\n```\n',
-        ], { stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 })
+        ], { stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000, cwd: projectRoot })
       }
     } catch {
       // forensics best-effort; never let an emit failure mask the bypass
