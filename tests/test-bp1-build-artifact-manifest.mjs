@@ -166,18 +166,57 @@ tap('A15: em-review-request.mjs is in the manifest scripts when present', () => 
 })
 
 // ---------------------------------------------------------------------------
-// Surface contract: empty manifest has expected six surfaces
+// Surface contract: empty manifest has expected SEVEN surfaces (PR-1b-A added
+// scripts_lib per Codex plan-review consensus round 1 Q3.2)
 // ---------------------------------------------------------------------------
-tap('manifest has all six contract surfaces (even when empty)', () => {
+tap('manifest has all seven contract surfaces (even when empty)', () => {
   const proj = makeProj()
   const r = run(proj)
   const m = r.manifest
+  assert.equal(m.schema_version, 2,
+    'schema_version=2 since PR-1b-A added scripts_lib surface')
   assert.ok(Array.isArray(m.scripts))
+  assert.ok(Array.isArray(m.scripts_lib))
   assert.ok(Array.isArray(m.hooks))
   assert.ok(typeof m.settings_lines.sha256 === 'string')
   assert.ok(typeof m.plugin_entries.sha256 === 'string')
   assert.ok(Array.isArray(m.agent_loaders))
   assert.ok(Array.isArray(m.canonical_prompts))
+})
+
+// ---------------------------------------------------------------------------
+// PR-1b-A: scripts_lib surface scopes to scripts/lib/bp1-*.mjs only
+// (Codex plan-review round 1 Q3.2 — closes the load-bearing-helper drift hole)
+// ---------------------------------------------------------------------------
+tap('PR-1b-A: scripts_lib picks up scripts/lib/bp1-*.mjs files', () => {
+  const proj = makeProj()
+  fs.mkdirSync(path.join(proj, 'scripts', 'lib'), { recursive: true })
+  fs.writeFileSync(path.join(proj, 'scripts', 'lib', 'bp1-helper.mjs'), '// helper\n')
+  const r = run(proj)
+  const found = r.manifest.scripts_lib.find(s => s.path === 'scripts/lib/bp1-helper.mjs')
+  assert.ok(found, 'bp1-helper.mjs must be in scripts_lib')
+})
+
+tap('PR-1b-A: scripts_lib excludes non-bp1 lib files (closed glob)', () => {
+  const proj = makeProj()
+  fs.mkdirSync(path.join(proj, 'scripts', 'lib'), { recursive: true })
+  fs.writeFileSync(path.join(proj, 'scripts', 'lib', 'bp1-keep.mjs'), '// keep\n')
+  fs.writeFileSync(path.join(proj, 'scripts', 'lib', 'local-dir.mjs'), '// not bp1\n')
+  fs.writeFileSync(path.join(proj, 'scripts', 'lib', 'helper.mjs'), '// not bp1\n')
+  const r = run(proj)
+  const paths = r.manifest.scripts_lib.map(s => s.path)
+  assert.deepEqual(paths.sort(), ['scripts/lib/bp1-keep.mjs'])
+})
+
+tap('PR-1b-A: scripts_lib drift changes artifact_version_hash', () => {
+  const proj = makeProj()
+  fs.mkdirSync(path.join(proj, 'scripts', 'lib'), { recursive: true })
+  fs.writeFileSync(path.join(proj, 'scripts', 'lib', 'bp1-thing.mjs'), '// v1\n')
+  const a = run(proj)
+  fs.writeFileSync(path.join(proj, 'scripts', 'lib', 'bp1-thing.mjs'), '// v2\n')
+  const b = run(proj)
+  assert.notEqual(a.sha256, b.sha256,
+    'changing scripts/lib/bp1-*.mjs MUST trigger artifact-version drift')
 })
 
 // ---------------------------------------------------------------------------

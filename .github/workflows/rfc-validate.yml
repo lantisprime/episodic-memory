@@ -9,13 +9,18 @@ on:
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
+      - 'scripts/lib/bp1-sweep.mjs'
+      - 'scripts/lib/bp1-probe.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
+      - 'scripts/bp1-deadline-sweep.mjs'
       - 'tests/test-em-rfc-validate.mjs'
       - 'tests/test-validate-rfc-failure-table.mjs'
       - 'tests/test-validate-rfc-artifact-manifest.mjs'
       - 'tests/test-bp1-flag-check.mjs'
       - 'tests/test-bp1-build-artifact-manifest.mjs'
+      - 'tests/test-bp1-deadline-sweep.mjs'
+      - 'tests/test-bp1-probe.mjs'
       - 'tests/test-install-bp1.sh'
       - '.github/workflows/rfc-validate.yml'
   push:
@@ -27,13 +32,18 @@ on:
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
+      - 'scripts/lib/bp1-sweep.mjs'
+      - 'scripts/lib/bp1-probe.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
+      - 'scripts/bp1-deadline-sweep.mjs'
       - 'tests/test-em-rfc-validate.mjs'
       - 'tests/test-validate-rfc-failure-table.mjs'
       - 'tests/test-validate-rfc-artifact-manifest.mjs'
       - 'tests/test-bp1-flag-check.mjs'
       - 'tests/test-bp1-build-artifact-manifest.mjs'
+      - 'tests/test-bp1-deadline-sweep.mjs'
+      - 'tests/test-bp1-probe.mjs'
       - 'tests/test-install-bp1.sh'
 
 jobs:
@@ -69,6 +79,12 @@ jobs:
 
       - name: Run bp1-build-artifact-manifest self-tests
         run: node tests/test-bp1-build-artifact-manifest.mjs
+
+      - name: Run bp1-deadline-sweep self-tests
+        run: node tests/test-bp1-deadline-sweep.mjs
+
+      - name: Run bp1-probe self-tests
+        run: node tests/test-bp1-probe.mjs
 
       - name: Run install.mjs BP-1 idempotence tests
         run: bash tests/test-install-bp1.sh

@@ -5,8 +5,9 @@
  * `bp1-flag-check.mjs` (recompute on every read) and
  * `bp1-build-artifact-manifest.mjs` (CLI wrapper for install + ops).
  *
- * Six surfaces (sorted, deterministic):
+ * Seven surfaces (sorted, deterministic):
  *   scripts          — scripts/bp1-*.mjs + explicit non-bp1 extensions
+ *   scripts_lib      — scripts/lib/bp1-*.mjs (load-bearing helpers; PR-1b-A added)
  *   hooks            — .claude/hooks/bp1-*.sh
  *   settings_lines   — bp1-mentioning lines in .claude/settings.json (case-insensitive)
  *   plugin_entries   — bp1-related entries in .claude-plugin/plugin.json
@@ -67,6 +68,21 @@ function buildScripts(projectRoot) {
     }
   }
   return out.sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function buildScriptsLib(projectRoot) {
+  // PR-1b-A: load-bearing helpers under scripts/lib/. Only bp1-*.mjs files
+  // are hashed — other lib files (e.g. local-dir.mjs) are not BP1-runtime
+  // critical and not subject to drift detection here.
+  // Codex plan-review round 1 Q3.2: prior manifest scanned only top-level
+  // scripts/bp1-*.mjs, so changes to lib helpers (probe stub → real probe at
+  // M1, sweep helper logic) would NOT have triggered bp1-flag-version-drift.
+  // This surface closes that hole.
+  const libDir = path.join(projectRoot, 'scripts', 'lib')
+  return listMatching(libDir, /^bp1-.*\.mjs$/).map(f => {
+    const rel = `scripts/lib/${f}`
+    return { path: rel, sha256: sha256File(path.join(projectRoot, rel)) }
+  })
 }
 
 function buildHooks(projectRoot) {
@@ -192,6 +208,7 @@ export function buildArtifactManifest({ projectRoot }) {
   if (!projectRoot) throw new Error('buildArtifactManifest: projectRoot required')
 
   const scripts = buildScripts(projectRoot)
+  const scripts_lib = buildScriptsLib(projectRoot)
   const hooks = buildHooks(projectRoot)
   const settings_lines = { sha256: buildSettingsLinesSha(projectRoot) }
   const plugin_entries = { sha256: buildPluginEntriesSha(projectRoot) }
@@ -199,8 +216,9 @@ export function buildArtifactManifest({ projectRoot }) {
   const canonical_prompts = buildCanonicalPrompts(projectRoot, agent_loaders)
 
   const manifest = {
-    schema_version: 1,
+    schema_version: 2,
     scripts,
+    scripts_lib,
     hooks,
     settings_lines,
     plugin_entries,

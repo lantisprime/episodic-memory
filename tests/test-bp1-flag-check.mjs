@@ -302,6 +302,199 @@ tap('row 29: verify-key missing → bp1-hmac-keyfile-fail', () => {
   assert.equal(r.parsed.verify_key_state.reason, 'missing')
 })
 
+// ============================================================================
+// PR-1b-A: M5 dry-run bypass matrix (RFC §563-571 v3.12)
+// Cross-project bypass safety per Codex plan-review consensus round 1 Q1.3.
+// Both halves must match canonical project root sha to bypass.
+// ============================================================================
+function projectSha(projectRoot) {
+  return crypto.createHash('sha256').update(projectRoot, 'utf8').digest('hex')
+}
+
+function writeLock(projectRoot, contents) {
+  const dir = path.join(projectRoot, '.episodic-memory')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, '.bp1-dry-run.lock'), contents)
+}
+
+tap('bypass: env unset → no bypass (regular activation gate runs)', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  writeLock(proj, JSON.stringify({
+    run_id: 'no-env', ttl_until: Date.now() + 60_000,
+    project_root_sha256: projectSha(proj),
+  }))
+  // No BP1_DRY_RUN_MODE in env → bypass declines, gate refuses (no entry)
+  const r = runFlagCheck({ projectRoot: proj, configPath, env: { HOME: homeDir } })
+  assert.equal(r.exitCode, 2)
+  assert.equal(r.parsed.code, 'bp1-disabled-refusal')
+  assert.notEqual(r.parsed.bypass, 'dry-run')
+})
+
+tap('bypass: lock missing → no bypass even with matching env', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: projectSha(proj) },
+  })
+  assert.equal(r.exitCode, 2)
+  assert.equal(r.parsed.code, 'bp1-disabled-refusal')
+})
+
+tap('bypass: env value for ANOTHER project → no bypass (cross-project safety)', () => {
+  const proj = makeProjectRoot()
+  const otherProj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  // Lock and env both contain the OTHER project's sha — cannot bypass THIS project
+  writeLock(proj, JSON.stringify({
+    run_id: 'cross', ttl_until: Date.now() + 60_000,
+    project_root_sha256: projectSha(otherProj),
+  }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: projectSha(otherProj) },
+  })
+  assert.equal(r.exitCode, 2)
+  assert.equal(r.parsed.code, 'bp1-disabled-refusal',
+    'cross-project env inheritance must not enable bypass (CLI v3.11 F3 fix)')
+})
+
+tap('bypass: env mismatched (wrong sha but lock right) → no bypass', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  writeLock(proj, JSON.stringify({
+    run_id: 'env-bad', ttl_until: Date.now() + 60_000,
+    project_root_sha256: projectSha(proj),
+  }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: 'wrong-sha-value' },
+  })
+  assert.equal(r.exitCode, 2)
+})
+
+tap('bypass: malformed lock JSON → no bypass', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  writeLock(proj, '{not valid json')
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: projectSha(proj) },
+  })
+  assert.equal(r.exitCode, 2)
+})
+
+tap('bypass: TTL expired → no bypass', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  writeLock(proj, JSON.stringify({
+    run_id: 'expired', ttl_until: Date.now() - 60_000,  // already past
+    project_root_sha256: projectSha(proj),
+  }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: projectSha(proj) },
+  })
+  assert.equal(r.exitCode, 2)
+})
+
+tap('bypass: lock missing run_id → no bypass', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  writeLock(proj, JSON.stringify({
+    ttl_until: Date.now() + 60_000,
+    project_root_sha256: projectSha(proj),
+    // run_id missing
+  }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: projectSha(proj) },
+  })
+  assert.equal(r.exitCode, 2)
+})
+
+tap('bypass diagnostic: env mismatch → bypass_declined surfaces in activation refusal extras (Codex round 1 Finding 4)', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  writeLock(proj, JSON.stringify({
+    run_id: 'env-mismatch', ttl_until: Date.now() + 60_000,
+    project_root_sha256: projectSha(proj),
+  }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: 'wrong-value-but-non-empty' },
+  })
+  assert.equal(r.exitCode, 2)
+  assert.equal(r.parsed.code, 'bp1-disabled-refusal')
+  assert.ok(r.parsed.bypass_declined,
+    'bypass-declined diagnostic must be plumbed to refusal extras')
+  assert.equal(r.parsed.bypass_declined.reason, 'env_mismatch')
+  assert.equal(typeof r.parsed.bypass_declined.env_len, 'number',
+    'env_len is the safe diagnostic — do not log the value itself')
+  assert.ok(!('value' in r.parsed.bypass_declined),
+    'never echo the env value into the artifact')
+})
+
+tap('bypass diagnostic: env_unset (no signal) → no bypass_declined in refusal', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  // No env set, no lock → bypass declines silently as env_unset
+  const r = runFlagCheck({ projectRoot: proj, configPath, env: { HOME: homeDir } })
+  assert.equal(r.exitCode, 2)
+  assert.ok(!r.parsed.bypass_declined,
+    'env_unset is a non-signal — refusal stays clean')
+})
+
+tap('bypass: both halves match → bypass passes (status=ok, bypass=dry-run, no entry needed)', () => {
+  const proj = makeProjectRoot()
+  const homeDir = makeTempDir('home')
+  writeVerifyKey(path.join(homeDir, '.episodic-memory', '.verify-key'))
+  const configPath = path.join(homeDir, '.episodic-memory', 'config.json')
+  // No activation entry — bypass is the only path that succeeds.
+  fs.writeFileSync(configPath, JSON.stringify({ bp1: { activations: {} } }))
+  const sha = projectSha(proj)
+  writeLock(proj, JSON.stringify({
+    run_id: 'happy-bypass', ttl_until: Date.now() + 60_000,
+    project_root_sha256: sha,
+  }))
+  const r = runFlagCheck({
+    projectRoot: proj, configPath,
+    env: { HOME: homeDir, BP1_DRY_RUN_MODE: sha },
+  })
+  assert.equal(r.exitCode, 0, `expected exit 0; stdout=${r.stdout}`)
+  assert.equal(r.parsed.status, 'ok')
+  assert.equal(r.parsed.bypass, 'dry-run')
+  assert.equal(r.parsed.run_id, 'happy-bypass')
+})
+
 console.log(`\n1..${pass + fail}`)
 if (fail) {
   console.log(`# FAILED ${fail} of ${pass + fail}`)

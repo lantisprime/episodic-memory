@@ -32,6 +32,7 @@ import { NON_BP1_SCRIPTS, buildArtifactManifest } from './lib/bp1-manifest.mjs'
 
 const REQUIRED_SURFACES = [
   'scripts',
+  'scripts_lib',
   'hooks',
   'settings_lines',
   'plugin_entries',

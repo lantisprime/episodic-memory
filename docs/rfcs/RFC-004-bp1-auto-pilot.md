@@ -108,7 +108,7 @@ All side-effecting bp1 artifacts are gated on a **per-project activation entry**
 
 ```yaml
 artifact_manifest:
-  schema_version: 1
+  schema_version: 2
   scripts:
     - path: "scripts/bp1-orchestrator.mjs"
       sha256: "<file-sha256>"
@@ -125,6 +125,20 @@ artifact_manifest:
     # contract (idempotency, signing, validation) must be enumerated here, even
     # if its filename doesn't start with bp1-. The list is closed (no glob);
     # additions require RFC update + M0 builder update + activation re-run.
+  scripts_lib:
+    # NEW v3.13 per PR-1b plan-review consensus (Codex round 1 Q3.2). Closes
+    # the load-bearing-helper drift hole: scripts/lib/bp1-*.mjs (e.g. the
+    # manifest builder itself, sweep helper, probe helper) MUST be in the
+    # artifact-version hash so that an M1 swap of probe-stub → real probe
+    # triggers bp1-flag-version-drift. Scope is exactly scripts/lib/bp1-*.mjs;
+    # other lib files (local-dir.mjs, etc.) are not BP1-runtime critical.
+    - path: "scripts/lib/bp1-manifest.mjs"
+      sha256: "<file-sha256>"
+    - path: "scripts/lib/bp1-sweep.mjs"
+      sha256: "<file-sha256>"
+    - path: "scripts/lib/bp1-probe.mjs"
+      sha256: "<file-sha256>"
+    # ... all scripts/lib/bp1-*.mjs
   hooks:
     - path: ".claude/hooks/bp1-approval-check.sh"
       sha256: "<file-sha256>"
