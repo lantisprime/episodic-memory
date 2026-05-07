@@ -246,6 +246,51 @@ test('leading whitespace preserved', () => {
   } finally { sb.cleanup() }
 })
 
+test('file exceeding MAX_BODY_BYTES → JSON error', () => {
+  const sb = makeSandbox()
+  try {
+    const bodyFile = path.join(sb.cwd, 'huge.md')
+    // Write 1 MB + 1 byte
+    fs.writeFileSync(bodyFile, 'x'.repeat(1024 * 1024 + 1))
+    const r = runJSON(STORE, [
+      '--project', 'p', '--category', 'decision', '--tags', 't',
+      '--summary', 's', '--body-file', bodyFile,
+    ], sb)
+    assert.strictEqual(r.code, 1)
+    assert.strictEqual(r.json.status, 'error')
+    assert.match(r.json.message, /max is 1048576 bytes/)
+  } finally { sb.cleanup() }
+})
+
+test('file at exactly MAX_BODY_BYTES → ok', () => {
+  const sb = makeSandbox()
+  try {
+    const bodyFile = path.join(sb.cwd, 'maxed.md')
+    fs.writeFileSync(bodyFile, 'x'.repeat(1024 * 1024))
+    const r = runJSON(STORE, [
+      '--project', 'p', '--category', 'decision', '--tags', 't',
+      '--summary', 's', '--body-file', bodyFile,
+    ], sb)
+    assert.strictEqual(r.code, 0, `expected exit 0, got ${r.code}: ${r.stderr}`)
+    assert.strictEqual(r.json.status, 'ok')
+  } finally { sb.cleanup() }
+})
+
+test('relative path resolves against cwd', () => {
+  const sb = makeSandbox()
+  try {
+    const bodyFile = path.join(sb.cwd, 'rel.md')
+    fs.writeFileSync(bodyFile, 'relative-path body')
+    // Pass just the basename — script should resolve against process.cwd() (sb.cwd)
+    const r = runJSON(STORE, [
+      '--project', 'p', '--category', 'decision', '--tags', 't',
+      '--summary', 's', '--body-file', 'rel.md',
+    ], sb)
+    assert.strictEqual(r.code, 0, `expected exit 0, got ${r.code}: ${r.stderr}`)
+    assert.strictEqual(readEpisodeBody(r.json.file), 'relative-path body')
+  } finally { sb.cleanup() }
+})
+
 // ---------------------------------------------------------------------------
 // em-revise
 // ---------------------------------------------------------------------------

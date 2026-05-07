@@ -8,9 +8,20 @@
 //
 // Strips a leading BOM and exactly one trailing `\n` or `\r\n`. Rejects
 // directories (statSync follows symlinks; symlink-to-file is allowed),
-// missing/unreadable paths, and empty post-strip content.
+// missing/unreadable paths, files exceeding MAX_BODY_BYTES, and empty
+// post-strip content.
+//
+// Path semantics: relative paths resolve against the calling script's
+// process.cwd() — same as fs.statSync's default. Pass an absolute path or
+// run from the directory containing the body file.
+//
+// Size cap: MAX_BODY_BYTES guards against accidental 1GB-file blowups and
+// keeps em-violation's structuredBody within the OS argv limit when it
+// shells out to em-store via execFileSync.
 
 import fs from 'fs'
+
+export const MAX_BODY_BYTES = 1024 * 1024  // 1 MB
 
 export function readBodyFile(p) {
   if (!p) {
@@ -26,6 +37,10 @@ export function readBodyFile(p) {
   }
   if (!st.isFile()) {
     console.log(JSON.stringify({ status: 'error', message: `--body-file: "${p}" is not a regular file` }))
+    process.exit(1)
+  }
+  if (st.size > MAX_BODY_BYTES) {
+    console.log(JSON.stringify({ status: 'error', message: `--body-file: "${p}" is ${st.size} bytes; max is ${MAX_BODY_BYTES} bytes (1 MB)` }))
     process.exit(1)
   }
   let text
