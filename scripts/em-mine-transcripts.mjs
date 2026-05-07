@@ -124,13 +124,23 @@ function addIndexToCorpus(file, corpus) {
 }
 
 function alreadyCaptured(candidatePhrase, corpus) {
-  // Substring match in either direction; accommodates minor rephrases.
-  const lc = candidatePhrase.toLowerCase()
+  // Two-way containment on the FULL phrase (not a 60-char prefix). The prior
+  // prefix-containment branch over-suppressed candidates that shared
+  // boilerplate openings (e.g. canonical-prompt-as-episode, codex-review-*)
+  // with existing summaries — Codex F3, PR #187 round 1.
+  // Whitespace is normalized so trivial wrapping differences don't dodge
+  // the check.
+  const norm = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim()
+  const lc = norm(candidatePhrase)
+  if (lc.length < 12) return false
   if (corpus.has(lc)) return true
   for (const summary of corpus) {
-    if (summary.length < 12) continue
-    // require at least 12 chars overlap to count as duplicate
-    if (lc.includes(summary) || summary.includes(lc.slice(0, 60))) return true
+    const ns = norm(summary)
+    if (ns.length < 12) continue
+    if (lc === ns) return true
+    // Full-phrase bidirectional containment only: candidate contained in an
+    // existing summary, or existing summary contained in candidate.
+    if (lc.includes(ns) || ns.includes(lc)) return true
   }
   return false
 }
@@ -247,8 +257,13 @@ function renderMarkdown(candidates, since) {
 
   const sections = candidates.map((c, i) => {
     const tagsStr = c.tags.join(',')
-    const escaped = c.salient.replace(/"/g, '\\"')
-    const cmd = `node scripts/em-store.mjs --project episodic-memory --scope local --category ${c.category} --tags "${tagsStr}" --summary "${escaped.slice(0, 120)}" --body "<expand from context>"`
+    // POSIX single-quote escape: wrap in '...', encode embedded ' as '\''.
+    // Resists $(...), backticks, $VAR, and backslash interpolation in the
+    // surrounding double-quoted form previously used. (Codex F2, PR #187.)
+    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"
+    const summarySq = sq(c.salient.slice(0, 120))
+    const tagsSq = sq(tagsStr)
+    const cmd = `node scripts/em-store.mjs --project episodic-memory --scope local --category ${c.category} --tags ${tagsSq} --summary ${summarySq} --body '<expand from context>'`
     return [
       `## Candidate ${i + 1} — ${c.category}`,
       '',

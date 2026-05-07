@@ -138,6 +138,88 @@ tap('eligibility denominators exclude inapplicable sessions', () => {
   }
 })
 
+tap('prior window strictly excludes current window (Δ trend correct)', () => {
+  // Codex F4 regression: prior window must be [priorSince, since), not
+  // [priorSince, now]. Build a 4th session in the prior window so the prior
+  // aggregate has its own classifications distinct from current.
+  const sid4 = 'dddd4444-0000-0000-0000-000000000000'
+  // Place session4 entirely in the prior window: timestamps in 2098, before
+  // the current window's 2099-01-01.
+  function priorTs(min) {
+    return new Date(Date.UTC(2098, 11, 25, 10, min, 0)).toISOString()
+  }
+  function priorAsst(text, min) {
+    return { type: 'assistant', timestamp: priorTs(min), sessionId: sid4, message: { content: [{ type: 'text', text }] } }
+  }
+  function priorTU(name, input, min) {
+    return { type: 'assistant', timestamp: priorTs(min), sessionId: sid4, message: { content: [{ type: 'tool_use', name, id: `t${min}`, input }] } }
+  }
+  const session4 = []
+  for (let i = 0; i < 25; i++) session4.push(priorAsst(`prior step ${i}`, i))
+  session4.push(priorAsst('plan: do thing', 26))
+  session4.push(priorTU('Edit', { file_path: '/repo/scripts/foo.mjs', old_string: 'a', new_string: 'b' }, 27))
+  // No marker, no tests, no issue -> skipper in prior window
+  fs.writeFileSync(path.join(projectsDir, '-Users-test-bar', sid4 + '.jsonl'),
+    session4.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  // Audit with --since 2099 and --prior-since 2098. Prior window should
+  // capture session4 only (and exclude the 2099 sessions).
+  const out = runScript([
+    '--since', '2099-01-01T00:00:00Z',
+    '--prior-since', '2098-01-01T00:00:00Z',
+    '--slug', 'test-bar',
+  ])
+  const r = JSON.parse(out)
+  // Prior should have exactly 1 session (the new prior-window one), not 4.
+  assert.ok(r.priorWindowStats, 'priorWindowStats should be present when --prior-since differs')
+  assert.equal(r.priorWindowStats.totalSessions, 1, `prior window must exclude current; got ${r.priorWindowStats.totalSessions}`)
+  // Current should have the 3 original sessions.
+  assert.equal(r.totalSessions, 3)
+  // Trend should be computed against the prior-only window.
+  assert.ok(r.trendVsPriorWindow, 'trend must be present')
+})
+
+tap('rising rate visible when prior had zero eligible (Codex F4 anchor)', () => {
+  // Build an isolated fixture: prior window has only a CLEAN session (no
+  // impl, no plan, short). Current window has a SKIPPER.
+  // We need a fresh tmp dir so prior fixtures don't bleed in.
+  const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'em-audit-test-f4-'))
+  const pd2 = path.join(TMP2, '.claude', 'projects', '-Users-test-iso')
+  fs.mkdirSync(pd2, { recursive: true })
+  const sidP = 'eeee5555-0000-0000-0000-000000000000'
+  const sidC = 'ffff6666-0000-0000-0000-000000000000'
+  // Prior: clean short session, no impl edits => zero eligible for any rule
+  const priorRecs = [
+    { type: 'queue-operation', operation: 'enqueue', timestamp: '2098-12-25T10:00:00Z', sessionId: sidP, content: 'hello' },
+    { type: 'assistant', timestamp: '2098-12-25T10:00:01Z', sessionId: sidP, message: { content: [{ type: 'text', text: 'hi' }] } },
+  ]
+  fs.writeFileSync(path.join(pd2, sidP + '.jsonl'), priorRecs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  // Current: long skipper
+  const curRecs = []
+  for (let i = 0; i < 25; i++) {
+    curRecs.push({ type: 'assistant', timestamp: new Date(Date.UTC(2099, 0, 1, 10, i, 0)).toISOString(), sessionId: sidC, message: { content: [{ type: 'text', text: `step ${i}` }] } })
+  }
+  curRecs.push({ type: 'assistant', timestamp: '2099-01-01T11:00:00Z', sessionId: sidC, message: { content: [{ type: 'text', text: 'plan: x' }] } })
+  curRecs.push({ type: 'assistant', timestamp: '2099-01-01T11:01:00Z', sessionId: sidC, message: { content: [{ type: 'tool_use', name: 'Edit', id: 't1', input: { file_path: '/repo/x.mjs', old_string: 'a', new_string: 'b' } }] } })
+  fs.writeFileSync(path.join(pd2, sidC + '.jsonl'), curRecs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  const out = execFileSync('node', [SCRIPT,
+    '--since', '2099-01-01T00:00:00Z',
+    '--prior-since', '2098-01-01T00:00:00Z',
+    '--slug', 'test-iso',
+  ], { encoding: 'utf8', env: { ...process.env, HOME: TMP2 }, cwd: TMP2 })
+  const r = JSON.parse(out)
+  // With the bug: prior window includes current, so prior rate matches current,
+  // delta is ~0, hiding the rise.
+  // With the fix: prior eligible = 0 for every rule, current has skips, delta
+  // should be POSITIVE (rate went from 0 to >0).
+  assert.ok(r.trendVsPriorWindow['rule-8-plan-gate'] > 0,
+    `rule-8 delta should be positive (rising); got ${r.trendVsPriorWindow['rule-8-plan-gate']}`)
+  assert.ok(r.trendVsPriorWindow['rule-18-e2e'] > 0,
+    `rule-18 delta should be positive (rising); got ${r.trendVsPriorWindow['rule-18-e2e']}`)
+  fs.rmSync(TMP2, { recursive: true, force: true })
+})
+
 // --- cleanup -------------------------------------------------------------
 fs.rmSync(TMP, { recursive: true, force: true })
 

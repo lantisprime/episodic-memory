@@ -188,11 +188,16 @@ function countEligible(rule, classifications) {
   }
 }
 
-async function audit(sinceVal) {
-  const generator = walkTranscripts({ slugFilter, excludeWorktrees, since: sinceVal })
+async function audit({ from, to } = {}) {
+  // Walker filters records by `since` (>= from). For an upper bound we filter
+  // sessions after grouping by their lastTs being strictly before `to`.
+  const generator = walkTranscripts({ slugFilter, excludeWorktrees, since: from })
   const grouped = await groupBySession(generator)
+  const toMs = to ? new Date(to).getTime() : Infinity
   const classifications = []
   for (const [, records] of grouped) {
+    const lastTs = records[records.length - 1].ts
+    if (lastTs && new Date(lastTs).getTime() >= toMs) continue
     classifications.push(classifySession(records))
   }
   return aggregate(classifications)
@@ -216,15 +221,13 @@ function computeTrend(current, prior) {
 // Main
 // ---------------------------------------------------------------------------
 
-const current = await audit(since)
+const current = await audit({ from: since })
 let trend = null
+let prior = null
 if (priorSince && priorSince !== since) {
-  // Prior window = [priorSince, since)
-  const priorAll = await audit(priorSince)
-  // Subtract current window's sessions to get just the prior window.
-  // For simplicity in v1 we just report rates over [priorSince, now];
-  // the delta is approximate but useful for direction. Documented as such.
-  trend = computeTrend(current, priorAll)
+  // Prior window: [priorSince, since) — strictly excludes the current window.
+  prior = await audit({ from: priorSince, to: since })
+  trend = computeTrend(current, prior)
 }
 
 const result = {
@@ -236,7 +239,8 @@ const result = {
   excludeWorktrees,
   ...current,
   trendVsPriorWindow: trend,
-  notes: 'Heuristic; false positives expected. Trend compares current window to broader [priorSince, now] window.',
+  priorWindowStats: prior ? { totalSessions: prior.totalSessions, rules: prior.rules } : null,
+  notes: 'Heuristic; false positives expected. Trend compares current window [since, now] vs prior window [priorSince, since).',
 }
 
 if (format === 'markdown') {

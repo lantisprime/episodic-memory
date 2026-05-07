@@ -118,6 +118,102 @@ tap('--since after all records yields zero', () => {
   assert.equal(status.candidates, 0)
 })
 
+tap('dedupe does NOT over-suppress shared-prefix candidates (Codex F3)', () => {
+  // Build an isolated tmp HOME with:
+  //   - existing index entry: a 90-char summary starting with a common
+  //     boilerplate prefix
+  //   - transcript: a NEW candidate that shares the first 60 chars but has
+  //     a divergent tail (different decision content)
+  const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'em-mine-f3-'))
+  const pd2 = path.join(TMP2, '.claude', 'projects', '-Users-test-zoo')
+  const md2 = path.join(TMP2, '.episodic-memory')
+  fs.mkdirSync(pd2, { recursive: true })
+  fs.mkdirSync(md2, { recursive: true })
+  const sid = '99999999-aaaa-aaaa-aaaa-999999999999'
+  // Existing entry — first 60 chars are a common boilerplate.
+  const boilerplate = 'codex review request for pr-NNN of the foo project '
+  const existing = boilerplate + 'with focus on cwd-binding axis and same-class completeness'
+  fs.writeFileSync(path.join(md2, 'index.jsonl'),
+    JSON.stringify({ id: 'e1', date: '2099-01-01', time: '09:00', project: 'x', category: 'context', status: 'active', summary: existing }) + '\n')
+  // New candidate — same first 60 chars but a substantively different tail.
+  // The whole sentence must contain the trigger phrase to be picked up.
+  const newSalient = boilerplate + "we decided to ship without staging because the dedupe gate is the bottleneck"
+  const recs = [
+    { type: 'queue-operation', operation: 'enqueue', timestamp: '2099-06-01T10:00:00Z', sessionId: sid, content: newSalient },
+  ]
+  fs.writeFileSync(path.join(pd2, sid + '.jsonl'), recs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  const out = execFileSync('node', [SCRIPT,
+    '--since', '2099-01-01T00:00:00Z', '--slug', 'test-zoo', '--dry-run',
+  ], { encoding: 'utf8', env: { ...process.env, HOME: TMP2 }, cwd: TMP2 })
+  const status = JSON.parse(out.slice(out.indexOf('{\n  "status"')))
+  // With the bug: dedupe matches first 60 chars and suppresses -> 0 candidates.
+  // With the fix: full-phrase bidirectional check -> tail differs -> 1 candidate.
+  assert.equal(status.candidates, 1, `expected 1 candidate (divergent tail); got ${status.candidates}`)
+  fs.rmSync(TMP2, { recursive: true, force: true })
+})
+
+tap('generated em-store command is shell-safe for transcript metacharacters (Codex F2)', () => {
+  const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'em-mine-f2-'))
+  const pd2 = path.join(TMP2, '.claude', 'projects', '-Users-test-zoo')
+  fs.mkdirSync(pd2, { recursive: true })
+  const sid = 'cccccccc-dddd-eeee-ffff-000000000000'
+  // Transcript salient containing $(..), backticks, $VAR, backslash, single-quote
+  const evilTail = "we decided to run $(rm -rf /) and `whoami` with $HOME and \\backslash and 'quote'"
+  const recs = [
+    { type: 'queue-operation', operation: 'enqueue', timestamp: '2099-06-01T10:00:00Z', sessionId: sid, content: evilTail },
+  ]
+  fs.writeFileSync(path.join(pd2, sid + '.jsonl'), recs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  const out = execFileSync('node', [SCRIPT,
+    '--since', '2099-01-01T00:00:00Z', '--slug', 'test-zoo', '--dry-run',
+  ], { encoding: 'utf8', env: { ...process.env, HOME: TMP2 }, cwd: TMP2 })
+
+  // Find the suggested em-store command line in the markdown body
+  const m = out.match(/node scripts\/em-store\.mjs[^\n]*/)
+  assert.ok(m, 'expected an em-store command in the markdown body')
+  const cmd = m[0]
+  // Metacharacters must NOT appear unquoted
+  assert.ok(!/\$\(/.test(cmd.replace(/'[^']*'/g, '')),
+    `unquoted $( found in: ${cmd}`)
+  assert.ok(!/`/.test(cmd.replace(/'[^']*'/g, '')),
+    `unquoted backtick found in: ${cmd}`)
+  // The single-quote in the salient must be encoded as '\''
+  assert.ok(/'\\''/.test(cmd), `single-quote not encoded as '\\'' in: ${cmd}`)
+  // sh -n parse-check: the command must be syntactically valid shell.
+  // Use bash -n if available, fall back to sh -n.
+  try {
+    execFileSync('bash', ['-n', '-c', cmd], { stdio: 'pipe' })
+  } catch (e) {
+    throw new Error(`generated command is not shell-parseable: ${e.stderr || e.message}\nCMD: ${cmd}`)
+  }
+  fs.rmSync(TMP2, { recursive: true, force: true })
+})
+
+tap('dedupe DOES suppress true duplicates after normalization', () => {
+  // Existing summary and candidate identical except for whitespace + casing.
+  const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'em-mine-f3-dup-'))
+  const pd2 = path.join(TMP2, '.claude', 'projects', '-Users-test-zoo')
+  const md2 = path.join(TMP2, '.episodic-memory')
+  fs.mkdirSync(pd2, { recursive: true })
+  fs.mkdirSync(md2, { recursive: true })
+  const sid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const text = "we decided to use the existing weekly digest task instead of a new one"
+  fs.writeFileSync(path.join(md2, 'index.jsonl'),
+    JSON.stringify({ id: 'd1', date: '2099-01-01', time: '09:00', project: 'x', category: 'decision', status: 'active', summary: text }) + '\n')
+  // Candidate has extra whitespace + uppercase
+  const recs = [
+    { type: 'queue-operation', operation: 'enqueue', timestamp: '2099-06-01T10:00:00Z', sessionId: sid, content: '  WE DECIDED  TO  USE the existing weekly digest task instead of a new one' },
+  ]
+  fs.writeFileSync(path.join(pd2, sid + '.jsonl'), recs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  const out = execFileSync('node', [SCRIPT,
+    '--since', '2099-01-01T00:00:00Z', '--slug', 'test-zoo', '--dry-run',
+  ], { encoding: 'utf8', env: { ...process.env, HOME: TMP2 }, cwd: TMP2 })
+  const status = JSON.parse(out.slice(out.indexOf('{\n  "status"')))
+  assert.equal(status.candidates, 0, `expected 0 (true duplicate suppressed); got ${status.candidates}`)
+  fs.rmSync(TMP2, { recursive: true, force: true })
+})
+
 // --- cleanup ---------------------------------------------------------------
 fs.rmSync(TMP, { recursive: true, force: true })
 
