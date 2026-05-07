@@ -195,10 +195,10 @@ tap('generated em-store command strips NUL + control bytes (Codex F5 round 2)', 
   const pd2 = path.join(TMP2, '.claude', 'projects', '-Users-test-zoo')
   fs.mkdirSync(pd2, { recursive: true })
   const sid = 'eeeeffff-1111-2222-3333-444444444444'
-  // Salient containing NUL ( ), bell (), backspace (), DEL ().
+  // Salient containing NUL (
   // Whitespace controls \t \n \r are preserved (extractText already collapses
   // some of them but the dedupe key keeps them).
-  const evilTail = "we decided to add  NUL and bell and bs and DEL to the salient"
+  const evilTail = `we decided to add ${String.fromCharCode(0)} NUL and ${String.fromCharCode(7)} bell and ${String.fromCharCode(8)} bs and ${String.fromCharCode(0x7f)} DEL to the salient`
   const recs = [
     { type: 'queue-operation', operation: 'enqueue', timestamp: '2099-06-01T10:00:00Z', sessionId: sid, content: evilTail },
   ]
