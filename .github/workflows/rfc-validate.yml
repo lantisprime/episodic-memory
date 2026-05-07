@@ -5,12 +5,14 @@ on:
     paths:
       - 'docs/rfcs/**'
       - 'install.mjs'
+      - '.claude/hooks/bp1-sweep-on-session.sh'
       - 'scripts/em-rfc-validate.mjs'
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
+      - 'scripts/lib/bp1-install-helpers.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
       - 'scripts/bp1-deadline-sweep.mjs'
@@ -21,19 +23,23 @@ on:
       - 'tests/test-bp1-build-artifact-manifest.mjs'
       - 'tests/test-bp1-deadline-sweep.mjs'
       - 'tests/test-bp1-probe.mjs'
+      - 'tests/test-bp1-sweep-on-session.mjs'
       - 'tests/test-install-bp1.sh'
+      - 'tests/test-install-bp1-wiring.mjs'
       - '.github/workflows/rfc-validate.yml'
   push:
     branches: [main]
     paths:
       - 'docs/rfcs/**'
       - 'install.mjs'
+      - '.claude/hooks/bp1-sweep-on-session.sh'
       - 'scripts/em-rfc-validate.mjs'
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
+      - 'scripts/lib/bp1-install-helpers.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
       - 'scripts/bp1-deadline-sweep.mjs'
@@ -44,7 +50,9 @@ on:
       - 'tests/test-bp1-build-artifact-manifest.mjs'
       - 'tests/test-bp1-deadline-sweep.mjs'
       - 'tests/test-bp1-probe.mjs'
+      - 'tests/test-bp1-sweep-on-session.mjs'
       - 'tests/test-install-bp1.sh'
+      - 'tests/test-install-bp1-wiring.mjs'
 
 jobs:
   validate:
@@ -88,3 +96,9 @@ jobs:
 
       - name: Run install.mjs BP-1 idempotence tests
         run: bash tests/test-install-bp1.sh
+
+      - name: Run bp1-sweep-on-session H2 hook self-tests
+        run: node tests/test-bp1-sweep-on-session.mjs
+
+      - name: Run install.mjs BP-1 H2 wiring self-tests
+        run: node tests/test-install-bp1-wiring.mjs
