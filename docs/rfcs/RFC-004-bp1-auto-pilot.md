@@ -711,11 +711,24 @@ payload = {
   lock_state_tag,                  // e.g., "codex_review"
   lock_ttl_seconds,                // numeric
 
+  // For type == "state-transition" with state == "run-started" (NEW v3.13 —
+  // PR-1c-A `bp1-orchestrator.mjs init-run` writes this episode at run cold-start;
+  // closes Issue #185 / Resolution 4):
+  // state,                                // "run-started" (already declared above)
+  scheduled_tasks_capability,      // "native" | "fallback"
+  probe_reason,                    // one of bp1-probe.mjs VALID_REASONS_M1
+  degraded_mode_statement,         // operator runbook text (string | null)
+  native_probe_performed,          // boolean
+  t2_fallback,                     // boolean (always false per §573-575)
+
   // Future-extensibility: any episode-type-specific authorization-bearing field
-  // MUST be added here at the time the field is introduced. Failure-table CI gate
-  // (validate-rfc-failure-table.mjs) extension v3.7: also validates that every
-  // schema-specific frontmatter field appearing in the RFC is named here OR
-  // explicitly documented as non-load-bearing.
+  // MUST be added here at the time the field is introduced. Two CI gates enforce:
+  //   - validate-rfc-failure-table.mjs (v3.7) — failure-row evidence-tag drift.
+  //   - validate-rfc-canonical-fields.mjs (v3.13) — every field registered in
+  //     `scripts/lib/bp1-canonicalize.mjs` GENERIC_CANONICAL_FIELDS or
+  //     TYPE_SPECIFIC_CANONICAL_FIELDS must appear in this block (BL1 deletion-
+  //     detection too). Adding a field requires updating BOTH the lib table and
+  //     this RFC block in the same change.
 }
 hmac_signature = HMAC-SHA256(run.key, canonical)
 ```
