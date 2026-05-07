@@ -190,6 +190,34 @@ tap('generated em-store command is shell-safe for transcript metacharacters (Cod
   fs.rmSync(TMP2, { recursive: true, force: true })
 })
 
+tap('generated em-store command strips NUL + control bytes (Codex F5 round 2)', () => {
+  const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'em-mine-f5-'))
+  const pd2 = path.join(TMP2, '.claude', 'projects', '-Users-test-zoo')
+  fs.mkdirSync(pd2, { recursive: true })
+  const sid = 'eeeeffff-1111-2222-3333-444444444444'
+  // Salient containing NUL ( ), bell (), backspace (), DEL ().
+  // Whitespace controls \t \n \r are preserved (extractText already collapses
+  // some of them but the dedupe key keeps them).
+  const evilTail = "we decided to add  NUL and bell and bs and DEL to the salient"
+  const recs = [
+    { type: 'queue-operation', operation: 'enqueue', timestamp: '2099-06-01T10:00:00Z', sessionId: sid, content: evilTail },
+  ]
+  fs.writeFileSync(path.join(pd2, sid + '.jsonl'), recs.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  const out = execFileSync('node', [SCRIPT,
+    '--since', '2099-01-01T00:00:00Z', '--slug', 'test-zoo', '--dry-run',
+  ], { encoding: 'utf8', env: { ...process.env, HOME: TMP2 }, cwd: TMP2 })
+  const m = out.match(/node scripts\/em-store\.mjs[^\n]*/)
+  assert.ok(m, 'expected an em-store command in the markdown body')
+  const cmd = m[0]
+  // No control bytes survive
+  assert.ok(!/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(cmd),
+    `control byte leaked into generated command`)
+  // bash -n still parses
+  execFileSync('bash', ['-n', '-c', cmd], { stdio: 'pipe' })
+  fs.rmSync(TMP2, { recursive: true, force: true })
+})
+
 tap('dedupe DOES suppress true duplicates after normalization', () => {
   // Existing summary and candidate identical except for whitespace + casing.
   const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'em-mine-f3-dup-'))

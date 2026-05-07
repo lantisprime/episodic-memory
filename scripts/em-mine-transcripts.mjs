@@ -260,7 +260,11 @@ function renderMarkdown(candidates, since) {
     // POSIX single-quote escape: wrap in '...', encode embedded ' as '\''.
     // Resists $(...), backticks, $VAR, and backslash interpolation in the
     // surrounding double-quoted form previously used. (Codex F2, PR #187.)
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"
+    // Strip NUL and other C0 control bytes (except \t \n \r) before quoting:
+    // POSIX shell cannot represent NUL inside argv, and other control bytes
+    // make the rendered command unreadable. (Codex F5, PR #187 round 2.)
+    const stripCtl = (s) => String(s).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    const sq = (s) => "'" + stripCtl(s).replace(/'/g, "'\\''") + "'"
     const summarySq = sq(c.salient.slice(0, 120))
     const tagsSq = sq(tagsStr)
     const cmd = `node scripts/em-store.mjs --project episodic-memory --scope local --category ${c.category} --tags ${tagsSq} --summary ${summarySq} --body '<expand from context>'`
