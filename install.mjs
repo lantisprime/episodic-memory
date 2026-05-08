@@ -125,21 +125,29 @@ function gitignoreHasPattern(content, pattern) {
   })
 }
 const gitignorePath = path.join(projectDir, '.gitignore')
-if (fs.existsSync(gitignorePath)) {
-  const content = fs.readFileSync(gitignorePath, 'utf8')
-  if (!gitignoreHasPattern(content, '.episodic-memory/') &&
-      !gitignoreHasPattern(content, '.episodic-memory')) {
-    fs.appendFileSync(gitignorePath, '\n# Episodic memory data\n.episodic-memory/\n')
-    console.log('Added .episodic-memory/ to .gitignore')
-  }
-  // RFC-004 §656 — per-run HMAC key file is project-local but must never be
-  // committed. Pattern is stable across the BP-1 lifecycle.
-  const runKeyPattern = '**/.episodic-memory/runs/*/run.key'
-  const refreshed = fs.readFileSync(gitignorePath, 'utf8')
-  if (!gitignoreHasPattern(refreshed, runKeyPattern)) {
-    fs.appendFileSync(gitignorePath, `\n# BP-1 per-run HMAC key (RFC-004)\n${runKeyPattern}\n`)
-    console.log(`Added ${runKeyPattern} to .gitignore`)
-  }
+// RFC-004 §671 mandates these patterns be present even on fresh repos that
+// don't yet have a .gitignore. Codex code-review A1 (PR-1c-A): the prior
+// `if (fs.existsSync(gitignorePath))` gate left fresh installs vulnerable
+// to committing `<project>/.episodic-memory/runs/<run_id>/run.key` (a
+// per-run HMAC secret). Now we ensure the file exists, then idempotently
+// append the two BP-1 patterns.
+if (!fs.existsSync(gitignorePath)) {
+  fs.writeFileSync(gitignorePath, '')
+  console.log(`Created empty .gitignore at ${gitignorePath} (RFC-004 §671)`)
+}
+const content = fs.readFileSync(gitignorePath, 'utf8')
+if (!gitignoreHasPattern(content, '.episodic-memory/') &&
+    !gitignoreHasPattern(content, '.episodic-memory')) {
+  fs.appendFileSync(gitignorePath, '\n# Episodic memory data\n.episodic-memory/\n')
+  console.log('Added .episodic-memory/ to .gitignore')
+}
+// RFC-004 §671 — per-run HMAC key file is project-local but must never be
+// committed. Pattern is stable across the BP-1 lifecycle.
+const runKeyPattern = '**/.episodic-memory/runs/*/run.key'
+const refreshed = fs.readFileSync(gitignorePath, 'utf8')
+if (!gitignoreHasPattern(refreshed, runKeyPattern)) {
+  fs.appendFileSync(gitignorePath, `\n# BP-1 per-run HMAC key (RFC-004)\n${runKeyPattern}\n`)
+  console.log(`Added ${runKeyPattern} to .gitignore`)
 }
 
 // ---------------------------------------------------------------------------
