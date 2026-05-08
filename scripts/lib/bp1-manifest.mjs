@@ -477,13 +477,6 @@ export function verifyManifest(payload, signatureHex, verifyKey32B) {
 import { parseBp1Frontmatter } from './bp1-frontmatter.mjs'
 import { canonicalize } from './bp1-canonicalize.mjs'
 
-// Episode-id sortability invariant. Every BP-1 episode emitted by the
-// orchestrator MUST begin with `<8-digit-date>-<6-digit-time>-` so that
-// lex sort yields a deterministic order. Round-2 codex FU-1: this is a
-// deterministic-order invariant only — not a chronological-authority claim
-// (same-second ids tie on the suffix, which the replay observer accepts).
-export const BP1_EPISODE_ID_PREFIX_RE = /^\d{8}-\d{6}-/
-
 function readEpisodesIn(dir) {
   if (!fs.existsSync(dir)) return []
   return fs.readdirSync(dir)
@@ -491,11 +484,38 @@ function readEpisodesIn(dir) {
     .map(f => path.join(dir, f))
 }
 
+// Detect whether raw episode bytes "look like" a BP-1-tagged run-related
+// episode. Used so the strict parser cannot silently swallow a corrupted
+// run-tagged file (round-1 codex code-review MAJOR finding 2): if the raw
+// file mentions our target run_id or carries any bp1- tag, parser failure
+// must propagate as a hard error, not a silent skip.
+function looksLikeBp1Run(buf, runId) {
+  // Buffer.includes accepts a string and tests UTF-8 byte-equality — the
+  // signal we want here is purely textual presence, not a parse.
+  if (buf.includes(`run_id: ${runId}`)) return true
+  // Tag-array search: bare-token `bp1-` prefix anywhere in a `tags: [...]`
+  // line. We bound the search to limit pathological inputs.
+  const head = buf.slice(0, Math.min(buf.length, 8192)).toString('utf8')
+  return /^tags:\s*\[[^\]]*\bbp1-/m.test(head)
+}
+
 /**
  * Collect bp1-run records for a given run_id from BOTH stores (RFC-004
  * §777-789 v3.12). Local store: <projectRoot>/.episodic-memory/episodes.
  * Global store: <homedir>/.episodic-memory/episodes. Excludes the
  * `bp1-run-manifest` itself (would be self-referential).
+ *
+ * Round-1 code-review fixes:
+ *   - Drop the date-time-prefix predicate. The orchestrator's actual ids
+ *     start with `bp1-run-...` (mintRunId + episodeId), not `YYYYMMDD-...`.
+ *     Any string sorts deterministically; a regex is unnecessary.
+ *   - Hard-fail when a strict-parse error hits a file that "looks BP-1-run-
+ *     tagged" by raw bytes, instead of silently skipping it.
+ *   - Hard-fail when local/global stores hold the same id with different
+ *     content (canonical_sha256 / body_sha256 / hmac_signature mismatch).
+ *     Exact duplicates are idempotent; conflicts surface as
+ *     `bp1-finalize-duplicate-id-conflict`-class errors.
+ *   - Read files as Buffer so the strict parser's fatal UTF-8 decode runs.
  *
  * @param {string} runId
  * @param {string} projectRoot
@@ -511,13 +531,13 @@ export function collectEpisodeRecords(runId, projectRoot) {
     path.join(projectRoot, '.episodic-memory', 'episodes'),
     path.join(os.homedir(), '.episodic-memory', 'episodes'),
   ]
-  const seen = new Set()
+  const seenRecords = new Map()
   const records = []
   for (const store of stores) {
     for (const filePath of readEpisodesIn(store)) {
-      let text
+      let buf
       try {
-        text = fs.readFileSync(filePath, 'utf8')
+        buf = fs.readFileSync(filePath)
       } catch {
         // Unreadable file is a hard failure for finalize: a run's records must
         // be enumerable. The orchestrator surfaces this as bp1-finalize-fence-fail.
@@ -525,11 +545,14 @@ export function collectEpisodeRecords(runId, projectRoot) {
       }
       let parsed
       try {
-        parsed = parseBp1Frontmatter(text)
+        parsed = parseBp1Frontmatter(buf)
       } catch (e) {
-        // Non-BP1 episodes in the same store may not match the strict parser
-        // (e.g. workplan, lessons). Skip silently: only run-tagged episodes
-        // matter for finalize. We re-scan with run_id check after parse.
+        // If the raw bytes look like a BP-1 run-tagged episode for THIS run,
+        // a parser failure is a corruption — surface it. Otherwise skip
+        // (workplan, lessons, etc. share the store).
+        if (looksLikeBp1Run(buf, runId)) {
+          throw new Error(`collectEpisodeRecords: BP-1-tagged episode at ${filePath} failed strict parse: ${e.message}`)
+        }
         continue
       }
       const fm = parsed.frontmatter
@@ -542,19 +565,31 @@ export function collectEpisodeRecords(runId, projectRoot) {
           throw new Error(`collectEpisodeRecords: episode ${filePath} missing required field ${f}`)
         }
       }
-      if (!BP1_EPISODE_ID_PREFIX_RE.test(fm.id)) {
-        throw new Error(`collectEpisodeRecords: episode ${filePath} has non-sortable id: ${fm.id}`)
-      }
-      if (seen.has(fm.id)) continue
-      seen.add(fm.id)
       const { canonicalBytes } = canonicalize(fm, parsed.body)
       const canonicalSha = crypto.createHash('sha256').update(canonicalBytes).digest('hex')
-      records.push({
+      const record = {
         episode_id: fm.id,
         canonical_sha256: canonicalSha,
         body_sha256: fm.body_sha256,
         hmac_signature: fm.hmac_signature,
-      })
+      }
+      const prev = seenRecords.get(fm.id)
+      if (prev) {
+        if (
+          prev.canonical_sha256 !== record.canonical_sha256 ||
+          prev.body_sha256 !== record.body_sha256 ||
+          prev.hmac_signature !== record.hmac_signature
+        ) {
+          throw new Error(
+            `collectEpisodeRecords: duplicate episode_id ${fm.id} with conflicting content ` +
+            `between stores (file ${filePath})`,
+          )
+        }
+        // Exact duplicate — idempotent dedupe.
+        continue
+      }
+      seenRecords.set(fm.id, record)
+      records.push(record)
     }
   }
   records.sort((a, b) => {

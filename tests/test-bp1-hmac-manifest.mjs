@@ -383,6 +383,40 @@ tap('tamper-table list: appending a record after sign breaks verify', () => {
   assert.equal(verifyManifest(tampered, sig, key), false)
 })
 
+// Round-1 code-review MINOR (FU): key removal + insertion cases
+tap('tamper-table key-remove: deleting top-level episode_count breaks verify', () => {
+  const key = makeKey()
+  const payload = buildManifestPayload(
+    [makeRecord('e1')], VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 1,
+  )
+  const sig = signManifest(payload, key)
+  const tampered = { ...payload }
+  delete tampered.episode_count
+  assert.equal(verifyManifest(tampered, sig, key), false)
+})
+
+tap('tamper-table key-remove: deleting per_episode_records[0].body_sha256 breaks verify', () => {
+  const key = makeKey()
+  const payload = buildManifestPayload(
+    [makeRecord('e1')], VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 1,
+  )
+  const sig = signManifest(payload, key)
+  const tamperedRecord = { ...payload.per_episode_records[0] }
+  delete tamperedRecord.body_sha256
+  const tampered = { ...payload, per_episode_records: [tamperedRecord] }
+  assert.equal(verifyManifest(tampered, sig, key), false)
+})
+
+tap('tamper-table key-insert: adding unknown sibling field breaks verify', () => {
+  const key = makeKey()
+  const payload = buildManifestPayload(
+    [makeRecord('e1')], VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 1,
+  )
+  const sig = signManifest(payload, key)
+  const tampered = { ...payload, injected_field: 'forger-here' }
+  assert.equal(verifyManifest(tampered, sig, key), false)
+})
+
 // =============================================================================
 // Summary
 // =============================================================================

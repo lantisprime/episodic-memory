@@ -17,7 +17,6 @@ import {
   collectEpisodeRecords,
   verifyOnDiskEqualsManifest,
   buildManifestPayload,
-  BP1_EPISODE_ID_PREFIX_RE,
 } from '../scripts/lib/bp1-manifest.mjs'
 
 let pass = 0, fail = 0
@@ -178,13 +177,81 @@ t('skips non-BP1 episodes (parser silently rejects them)', () => {
   })
 })
 
-t('throws on episode with non-sortable id (invariant violation)', () => {
+t('collects actual orchestrator-shaped episode ids', () => {
+  // Round-1 codex code-review BLOCKER: the prior predicate `^\d{8}-\d{6}-`
+  // rejected real ids like `bp1-run-<ts>-<rfc>-<rand>-run-started-<rand4>`.
+  // After dropping the predicate, real ids must round-trip cleanly.
   const project = mkTempProject()
   const home = mkHomeSandbox()
   withHome(home, () => {
     const localDir = path.join(project, '.episodic-memory', 'episodes')
-    writeEpisode(localDir, 'not-sortable-id', bp1Frontmatter('not-sortable-id', 'rfc-004-001'))
-    assert.throws(() => collectEpisodeRecords('rfc-004-001', project), /non-sortable id/)
+    const realId = 'bp1-run-1700000000000-rfc-004-abcdef-run-started-1234'
+    writeEpisode(localDir, realId, bp1Frontmatter(realId, 'rfc-004-001'))
+    const records = collectEpisodeRecords('rfc-004-001', project)
+    assert.equal(records.length, 1)
+    assert.equal(records[0].episode_id, realId)
+  })
+})
+
+t('hard-fails when a BP-1-tagged run-related episode fails strict parse', () => {
+  // Round-1 codex code-review MAJOR finding 2: corrupt run-tagged episode
+  // must NOT silently disappear from the manifest.
+  const project = mkTempProject()
+  const home = mkHomeSandbox()
+  withHome(home, () => {
+    const localDir = path.join(project, '.episodic-memory', 'episodes')
+    // Valid frontmatter mentions the target run_id, but the body has malformed
+    // frontmatter syntax (duplicate-key would also do; here we use an
+    // unquoted summary with whitespace which the strict parser rejects).
+    fs.writeFileSync(
+      path.join(localDir, 'corrupt.md'),
+      [
+        '---',
+        'id: corrupt-id',
+        'run_id: rfc-004-001',
+        'tags: [bp1-run-started]',
+        'summary: this has whitespace and is not quoted',
+        '---',
+        'body',
+      ].join('\n'),
+    )
+    assert.throws(
+      () => collectEpisodeRecords('rfc-004-001', project),
+      /BP-1-tagged episode .* failed strict parse/,
+    )
+  })
+})
+
+t('hard-fails on duplicate episode_id across stores with conflicting content', () => {
+  // Round-1 codex code-review MAJOR finding 3: same id with different
+  // canonical/body/hmac in local vs global must not silently collapse.
+  const project = mkTempProject()
+  const home = mkHomeSandbox()
+  withHome(home, () => {
+    const localDir = path.join(project, '.episodic-memory', 'episodes')
+    const globalDir = path.join(home, '.episodic-memory', 'episodes')
+    const sharedId = '20260508-103000-shared-aaaa'
+    writeEpisode(localDir, sharedId, bp1Frontmatter(sharedId, 'rfc-004-001', { body_sha256: 'aa'.repeat(32) }), 'local body')
+    writeEpisode(globalDir, sharedId, bp1Frontmatter(sharedId, 'rfc-004-001', { body_sha256: 'cc'.repeat(32) }), 'global body — DIFFERENT')
+    assert.throws(
+      () => collectEpisodeRecords('rfc-004-001', project),
+      /duplicate episode_id .* with conflicting content/,
+    )
+  })
+})
+
+t('idempotent dedup when both stores hold byte-equal episode files', () => {
+  const project = mkTempProject()
+  const home = mkHomeSandbox()
+  withHome(home, () => {
+    const localDir = path.join(project, '.episodic-memory', 'episodes')
+    const globalDir = path.join(home, '.episodic-memory', 'episodes')
+    const sharedId = '20260508-103000-shared-aaaa'
+    const fm = bp1Frontmatter(sharedId, 'rfc-004-001')
+    writeEpisode(localDir, sharedId, fm, 'identical body')
+    writeEpisode(globalDir, sharedId, fm, 'identical body')
+    const records = collectEpisodeRecords('rfc-004-001', project)
+    assert.equal(records.length, 1)
   })
 })
 
@@ -204,20 +271,6 @@ t('throws on invalid runId shape', () => {
 
 t('throws on relative projectRoot', () => {
   assert.throws(() => collectEpisodeRecords('rfc-004-001', 'relative/path'), /absolute path/)
-})
-
-// ---------------------------------------------------------------------------
-// Sortable-id invariant
-// ---------------------------------------------------------------------------
-t('BP1_EPISODE_ID_PREFIX_RE matches orchestrator-style ids', () => {
-  assert.match('20260508-103030-foo-1234', BP1_EPISODE_ID_PREFIX_RE)
-  assert.match('99991231-235959-bar-deadbeef', BP1_EPISODE_ID_PREFIX_RE)
-})
-
-t('BP1_EPISODE_ID_PREFIX_RE rejects malformed ids', () => {
-  assert.doesNotMatch('foo-bar-baz', BP1_EPISODE_ID_PREFIX_RE)
-  assert.doesNotMatch('2026-05-08-foo', BP1_EPISODE_ID_PREFIX_RE)
-  assert.doesNotMatch('1234-103030-foo', BP1_EPISODE_ID_PREFIX_RE)
 })
 
 // ---------------------------------------------------------------------------

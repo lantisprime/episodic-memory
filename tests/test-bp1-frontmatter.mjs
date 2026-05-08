@@ -126,8 +126,39 @@ t('throws on lone surrogate (non-UTF-8)', () => {
   assert.throws(() => parseBp1Frontmatter(text), /non-UTF-8/)
 })
 
-t('throws on non-string input', () => {
-  assert.throws(() => parseBp1Frontmatter(null), /text must be a string/)
+t('throws on non-string/buffer input', () => {
+  assert.throws(() => parseBp1Frontmatter(null), /must be string, Buffer/)
+  assert.throws(() => parseBp1Frontmatter(123), /must be string, Buffer/)
+})
+
+// ---------------------------------------------------------------------------
+// Buffer input + fatal UTF-8 decode (round-1 code-review MAJOR finding 4)
+// ---------------------------------------------------------------------------
+t('accepts Buffer input and decodes valid UTF-8', () => {
+  const buf = Buffer.from('---\nid: a\n---\n', 'utf8')
+  const { frontmatter } = parseBp1Frontmatter(buf)
+  assert.equal(frontmatter.id, 'a')
+})
+
+t('throws on Buffer with invalid UTF-8 bytes (0xc3 0x28)', () => {
+  // 0xc3 followed by 0x28 is a malformed UTF-8 sequence (0xc3 starts a 2-byte
+  // sequence that requires a continuation byte 0x80-0xbf, not 0x28). Node's
+  // fatal TextDecoder must reject it instead of substituting U+FFFD.
+  const buf = Buffer.concat([
+    Buffer.from('---\nid: ', 'utf8'),
+    Buffer.from([0xc3, 0x28]),
+    Buffer.from('\n---\n', 'utf8'),
+  ])
+  assert.throws(() => parseBp1Frontmatter(buf), /invalid UTF-8 in input bytes/)
+})
+
+t('throws on Uint8Array with invalid UTF-8 bytes', () => {
+  const u8 = new Uint8Array([
+    ...Buffer.from('---\nid: ', 'utf8'),
+    0xc3, 0x28,
+    ...Buffer.from('\n---\n', 'utf8'),
+  ])
+  assert.throws(() => parseBp1Frontmatter(u8), /invalid UTF-8 in input bytes/)
 })
 
 // ---------------------------------------------------------------------------
@@ -175,6 +206,14 @@ t('JSON-quoted strings round-trip escape sequences', () => {
 // ---------------------------------------------------------------------------
 // Round-trip invariant against the writer's full schema (FU-1 anchor)
 // ---------------------------------------------------------------------------
+t('JSON-quoted project field with spaces parses (writer fix per code-review MAJOR 5)', () => {
+  // path.basename of `/Users/me/My Project/.git`'s parent is `My Project`.
+  // The orchestrator now JSON-quotes the project field; the parser accepts.
+  const text = '---\nid: a\nproject: "My Project With Spaces"\n---\nbody'
+  const { frontmatter } = parseBp1Frontmatter(text)
+  assert.equal(frontmatter.project, 'My Project With Spaces')
+})
+
 t('round-trip: writer-style frontmatter parses to equivalent object', () => {
   // This mirrors bp1-orchestrator.mjs:175-201 buildEpisodeFile output for an
   // init-run episode. Ensures the strict parser accepts the writer's exact
@@ -199,7 +238,7 @@ t('round-trip: writer-style frontmatter parses to equivalent object', () => {
     'category: workflow.lifecycle',
     'date: 2026-05-08',
     'time: "10:30"',
-    'project: episodic-memory',
+    'project: "episodic-memory"',
     '---',
     '',
     '# Body content',

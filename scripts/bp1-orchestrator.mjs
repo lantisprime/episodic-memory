@@ -195,7 +195,10 @@ function buildEpisodeFile(frontmatter, body, runId, episodeIdValue, hmacHex) {
   fmLines.push(`category: workflow.lifecycle`)
   fmLines.push(`date: ${new Date().toISOString().slice(0, 10)}`)
   fmLines.push(`time: "${new Date().toISOString().slice(11, 16)}"`)
-  fmLines.push(`project: ${path.basename(frontmatter.project_root || 'unknown')}`)
+  // JSON-quoted: path.basename can yield names with spaces, which the strict
+  // bp1-frontmatter parser rejects as bare values (round-1 codex code-review
+  // MAJOR finding 5). The strict parser accepts JSON-quoted strings.
+  fmLines.push(`project: ${JSON.stringify(path.basename(frontmatter.project_root || 'unknown'))}`)
   fmLines.push('---')
   fmLines.push('')
   return fmLines.join('\n') + body

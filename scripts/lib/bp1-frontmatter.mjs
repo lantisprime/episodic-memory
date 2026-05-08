@@ -45,6 +45,8 @@ function isUtf8Encodable(s) {
   }
 }
 
+const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false })
+
 function parseValue(raw, key, lineNo) {
   const v = raw.trim()
   if (v === 'null') return null
@@ -90,13 +92,27 @@ function parseValue(raw, key, lineNo) {
 /**
  * Parse a BP-1 episode file (frontmatter + body).
  *
- * @param {string} text — full file contents
+ * Accepts Buffer or string. Buffer input is decoded with a fatal UTF-8 decoder
+ * (round-1 codex code-review MAJOR: invalid UTF-8 bytes from `fs.readFileSync(p, 'utf8')`
+ * silently normalize to U+FFFD; reading the file as a Buffer and decoding here
+ * with `fatal: true` makes the read path truly fail-closed).
+ *
+ * @param {string|Buffer|Uint8Array} input — full file contents
  * @returns {{frontmatter: object, body: string}}
  * @throws {Error} on any malformed input (fail-closed)
  */
-export function parseBp1Frontmatter(text) {
-  if (typeof text !== 'string') {
-    throw new TypeError('parseBp1Frontmatter: text must be a string')
+export function parseBp1Frontmatter(input) {
+  let text
+  if (Buffer.isBuffer(input) || input instanceof Uint8Array) {
+    try {
+      text = STRICT_UTF8_DECODER.decode(input)
+    } catch (e) {
+      throw new Error(`parseBp1Frontmatter: invalid UTF-8 in input bytes: ${e.message}`)
+    }
+  } else if (typeof input === 'string') {
+    text = input
+  } else {
+    throw new TypeError('parseBp1Frontmatter: input must be string, Buffer, or Uint8Array')
   }
   if (!isUtf8Encodable(text)) {
     throw new Error('parseBp1Frontmatter: input contains lone surrogates / non-UTF-8 sequences')
