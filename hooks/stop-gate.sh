@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+# episodic-memory-hook-version: 2026-05-08.1
 # stop-gate.sh — Stop / SubagentStop hook for bp-001 wrap-up enforcement.
 #
 # Closes shape-4 docs-only-summarize-as-done hole (issue #128). When the

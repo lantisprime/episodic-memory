@@ -86,6 +86,18 @@ assert_eq "T1b4 hooks/lib/repo-root.sh installed (Session 1)" "true" "$r"
 HOME="$TEST_HOME" bash -c "source $TEST_HOME/.claude/hooks/lib/command-classifier.sh && type classify_command >/dev/null 2>&1" && r=true || r=false
 assert_eq "T1b5 installed lib sources successfully and exports classify_command" "true" "$r"
 
+[ -f "$TEST_HOME/.episodic-memory/hook-install.json" ] && r=true || r=false
+assert_eq "T1b6 hook freshness manifest written (#103)" "true" "$r"
+
+manifest_source=$(jq -r '.source_repo' "$TEST_HOME/.episodic-memory/hook-install.json")
+assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT" "$manifest_source"
+
+managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
+assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "6" "$managed_count"
+
+pg_manifest=$(jq -r '.files[] | select(.relative_path == "hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
+assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"
+
 cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T1c PreToolUse contains exactly one checkpoint-gate entry" "1" "$cg_count"
 

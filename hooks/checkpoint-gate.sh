@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+# episodic-memory-hook-version: 2026-05-08.1
 # checkpoint-gate.sh — RFC-002 Phase 3b PreToolUse hook.
 #
 # Session 1 rewrite (#86 PR-B / #89 / #101): replaces the regex-based
