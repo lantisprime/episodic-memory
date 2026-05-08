@@ -294,6 +294,96 @@ tap('canonicalProjectRootStrict: throws when not in a git repo', () => {
 })
 
 // =============================================================================
+// Table-driven manifest tampering (PR-1c-B Slice 2 round-2 codex backfill)
+// =============================================================================
+//
+// Class-completeness: every signed payload field gets a post-sign mutation
+// test. Mutations to verifyManifest(tampered, sig, key) MUST return false.
+// Reverse direction is implied by B1 roundtrip + C2 nested-shuffle tests.
+
+const TOP_LEVEL_MUTATIONS = [
+  // [field, override-value]
+  ['manifest_schema_version', '99.0'],          // also covered by N3, kept for table completeness
+  ['run_id', 'bp1-run-9999999999999-tampered'],
+  ['project_root', '/tmp/some-other-project'],
+  ['terminal_state', 'aborted'],
+  ['finalized_at', '2099-01-01T00:00:00.000Z'],
+  ['episode_count', 0],
+  ['episodes_records_root', 'd'.repeat(64)],    // also covered by H8 single-record case
+]
+
+for (const [field, badValue] of TOP_LEVEL_MUTATIONS) {
+  tap(`tamper-table top-level: flipping ${field} after sign breaks verify`, () => {
+    const key = makeKey()
+    const records = [makeRecord('e1'), makeRecord('e2'), makeRecord('e3')]
+    const payload = buildManifestPayload(
+      records, VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 3,
+    )
+    const sig = signManifest(payload, key)
+    assert.equal(verifyManifest(payload, sig, key), true, 'baseline must verify')
+    const tampered = { ...payload, [field]: badValue }
+    assert.equal(
+      verifyManifest(tampered, sig, key), false,
+      `flipping ${field} after sign should break verify`,
+    )
+  })
+}
+
+const RECORD_MUTATIONS = [
+  // [field, override-value]
+  ['episode_id', 'tampered-episode-id'],
+  ['canonical_sha256', 'a'.repeat(64)],         // also covered by H8
+  ['body_sha256', 'b'.repeat(64)],
+  ['hmac_signature', 'c'.repeat(64)],
+]
+
+for (const [field, badValue] of RECORD_MUTATIONS) {
+  tap(`tamper-table record-field: flipping per_episode_records[1].${field} breaks verify`, () => {
+    const key = makeKey()
+    const records = [makeRecord('e1'), makeRecord('e2'), makeRecord('e3')]
+    const payload = buildManifestPayload(
+      records, VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 3,
+    )
+    const sig = signManifest(payload, key)
+    assert.equal(verifyManifest(payload, sig, key), true, 'baseline must verify')
+    const tamperedRecords = payload.per_episode_records.map((r, i) =>
+      i === 1 ? { ...r, [field]: badValue } : r,
+    )
+    const tampered = { ...payload, per_episode_records: tamperedRecords }
+    assert.equal(
+      verifyManifest(tampered, sig, key), false,
+      `flipping per_episode_records[1].${field} after sign should break verify`,
+    )
+  })
+}
+
+// Record-list shape mutations: drop, reorder (same content), append, swap-id
+tap('tamper-table list: dropping a record after sign breaks verify', () => {
+  const key = makeKey()
+  const records = [makeRecord('e1'), makeRecord('e2'), makeRecord('e3')]
+  const payload = buildManifestPayload(
+    records, VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 3,
+  )
+  const sig = signManifest(payload, key)
+  const tampered = { ...payload, per_episode_records: payload.per_episode_records.slice(0, 2) }
+  assert.equal(verifyManifest(tampered, sig, key), false)
+})
+
+tap('tamper-table list: appending a record after sign breaks verify', () => {
+  const key = makeKey()
+  const records = [makeRecord('e1'), makeRecord('e2')]
+  const payload = buildManifestPayload(
+    records, VALID_RUN_ID, VALID_PROJECT_ROOT, 'complete', VALID_FINALIZED_AT, 2,
+  )
+  const sig = signManifest(payload, key)
+  const tampered = {
+    ...payload,
+    per_episode_records: [...payload.per_episode_records, makeRecord('e3')],
+  }
+  assert.equal(verifyManifest(tampered, sig, key), false)
+})
+
+// =============================================================================
 // Summary
 // =============================================================================
 
