@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+# episodic-memory-hook-version: 2026-05-08.1
 # em-recall-sessionstart.sh — RFC-002 Phase 3b SessionStart hook
 #
 # Mechanically invokes em-recall at session start. The effective side effect
@@ -36,6 +37,77 @@ CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
 EM_RECALL="$HOME/.episodic-memory/scripts/em-recall.mjs"
+
+_em_join_list() {
+  local out=""
+  local item
+  for item in "$@"; do
+    [ -n "$out" ] && out="$out, "
+    out="$out$item"
+  done
+  printf '%s' "$out"
+}
+
+warn_hook_freshness() {
+  local manifest="$HOME/.episodic-memory/hook-install.json"
+  [ -f "$manifest" ] || return 0
+
+  local source_repo
+  if ! source_repo="$(jq -r '.source_repo // empty' "$manifest" 2>/dev/null)"; then
+    echo "episodic-memory: hook freshness warning: could not parse $manifest"
+    return 0
+  fi
+  [ -n "$source_repo" ] || return 0
+
+  if [ ! -d "$source_repo/hooks" ]; then
+    echo "episodic-memory: hook freshness warning: source repo unavailable: $source_repo"
+    echo "episodic-memory: installed Claude hooks may be stale; re-run install.mjs --install-hooks from the current episodic-memory repo."
+    return 0
+  fi
+
+  local rows
+  if ! rows="$(jq -r '.files[]? | select((.relative_path // "") != "" and (.installed_path // "") != "") | [.relative_path, .installed_path] | @tsv' "$manifest" 2>/dev/null)"; then
+    echo "episodic-memory: hook freshness warning: could not read file list from $manifest"
+    return 0
+  fi
+  [ -n "$rows" ] || return 0
+
+  local stale=()
+  local missing_installed=()
+  local missing_source=()
+  local rel installed src
+  while IFS=$'\t' read -r rel installed; do
+    [ -n "$rel" ] || continue
+    src="$source_repo/$rel"
+    if [ ! -f "$src" ]; then
+      missing_source+=("$rel")
+    elif [ ! -f "$installed" ]; then
+      missing_installed+=("$rel")
+    elif ! cmp -s "$src" "$installed"; then
+      stale+=("$rel")
+    fi
+  done <<< "$rows"
+
+  if [ "${#stale[@]}" -eq 0 ] \
+    && [ "${#missing_installed[@]}" -eq 0 ] \
+    && [ "${#missing_source[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ "${#stale[@]}" -gt 0 ]; then
+    echo "episodic-memory: installed Claude hooks differ from source repo: $(_em_join_list "${stale[@]}")"
+  fi
+  if [ "${#missing_installed[@]}" -gt 0 ]; then
+    echo "episodic-memory: installed Claude hooks are missing: $(_em_join_list "${missing_installed[@]}")"
+  fi
+  if [ "${#missing_source[@]}" -gt 0 ]; then
+    echo "episodic-memory: hook freshness manifest references missing source files: $(_em_join_list "${missing_source[@]}")"
+  fi
+  echo "episodic-memory: no files were overwritten. Inspect the diff or opt in with:"
+  echo "episodic-memory: node \"$source_repo/install.mjs\" --tool claude-code --project \"$CWD\" --install-hooks --install-hooks-force"
+}
+
+warn_hook_freshness
 
 # Soft-fail if em-recall isn't installed — sessions without episodic-memory
 # should still start cleanly.

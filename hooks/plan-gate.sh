@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+# episodic-memory-hook-version: 2026-05-08.1
 # plan-gate.sh — PreToolUse hook
 #
 # Blocks write tools while .claude/.plan-approval-pending exists in the

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# episodic-memory-hook-version: 2026-05-08.1
 # repo-root.sh — Resolve the canonical repo root for marker-path resolution.
 #
 # Mirrors scripts/lib/local-dir.mjs (PR #105 / #85 algorithm). Source from a

@@ -460,6 +460,59 @@ function writeJSONAtomic(filePath, obj) {
   fs.renameSync(tmp, filePath)
 }
 
+function writeJSONAtomicIfChanged(filePath, obj) {
+  const next = JSON.stringify(obj, null, 2)
+  if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8') === next) {
+    return false
+  }
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const tmp = filePath + '.tmp'
+  fs.writeFileSync(tmp, next, 'utf8')
+  fs.renameSync(tmp, filePath)
+  return true
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+}
+
+function hookVersion(filePath) {
+  const text = fs.readFileSync(filePath, 'utf8')
+  const m = text.match(/^# episodic-memory-hook-version:\s*(.+)$/m)
+  return m ? m[1].trim() : null
+}
+
+function buildHookFreshnessManifest(hookSpecs, libFiles, userHooksDir, userHooksLibDir) {
+  const filesByRelativePath = new Map()
+  const add = (relativePath, installedPath) => {
+    const sourcePath = path.join(REPO_DIR, relativePath)
+    if (!fs.existsSync(sourcePath)) return
+    const installedExists = fs.existsSync(installedPath)
+    filesByRelativePath.set(relativePath, {
+      relative_path: relativePath,
+      installed_path: installedPath,
+      source_sha256: sha256File(sourcePath),
+      installed_sha256: installedExists ? sha256File(installedPath) : null,
+      source_version: hookVersion(sourcePath)
+    })
+  }
+
+  for (const spec of hookSpecs) {
+    add(path.join('hooks', spec.file), path.join(userHooksDir, spec.file))
+  }
+  for (const file of libFiles) {
+    add(path.join('hooks', 'lib', file), path.join(userHooksLibDir, file))
+  }
+
+  return {
+    schema_version: 1,
+    source_repo: REPO_DIR,
+    hooks_dir: userHooksDir,
+    files: [...filesByRelativePath.values()].sort((a, b) =>
+      a.relative_path.localeCompare(b.relative_path))
+  }
+}
+
 function entryReferencesSubstring(entry, substring) {
   if (entry.command && entry.command.includes(substring)) return true
   if (Array.isArray(entry.hooks)) {
@@ -594,11 +647,12 @@ if (installHooks) {
     // lib at runtime and fail loud (or worse, silently behave wrong if user's
     // divergent lib is incomplete).
     const libResults = {}
+    let hookLibFiles = []
     let anyLibSkippedDivergent = false
     if (fs.existsSync(REPO_HOOKS_LIB)) {
       fs.mkdirSync(userHooksLibDir, { recursive: true })
-      const libFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh'))
-      for (const file of libFiles) {
+      hookLibFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh')).sort()
+      for (const file of hookLibFiles) {
         const src = path.join(REPO_HOOKS_LIB, file)
         const dst = path.join(userHooksLibDir, file)
         const result = installHookFile(src, dst, installHooksForce)
@@ -799,6 +853,13 @@ if (installHooks) {
 
     writeJSONAtomic(settingsPath, settings)
     if (touched.settings.length > 0) touched.hooks.push(settingsPath)
+
+    const manifestPath = path.join(GLOBAL_DIR, 'hook-install.json')
+    const manifest = buildHookFreshnessManifest(hookSpecs, hookLibFiles, userHooksDir, userHooksLibDir)
+    if (writeJSONAtomicIfChanged(manifestPath, manifest)) {
+      console.log(`Wrote hook freshness manifest: ${manifestPath}`)
+      touched.hooks.push(manifestPath)
+    }
 
     // 5d. Consent legibility (Codex non-blocking guidance): list everything
     // touched so the user can audit the install.

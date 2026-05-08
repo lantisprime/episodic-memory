@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# episodic-memory-hook-version: 2026-05-08.1
 # command-classifier.sh — Quote/heredoc-aware Bash command classifier.
 #
 # Closes #86 PR-B + #89 + #101 via a shared helper. Replaces ad-hoc regex

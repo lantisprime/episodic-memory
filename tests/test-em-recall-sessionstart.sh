@@ -30,6 +30,11 @@ run_hook() {
   HOME="$TEST_HOME" bash -c "echo '{\"cwd\": \"$cwd\"}' | bash '$HOOK'" 2>/dev/null
 }
 
+run_hook_capture() {
+  local cwd="${1:-$TEST_DIR}"
+  HOME="$TEST_HOME" bash -c "echo '{\"cwd\": \"$cwd\"}' | bash '$HOOK'" 2>&1
+}
+
 assert_exit_zero() {
   local test_name="$1"
   local cwd="${2:-$TEST_DIR}"
@@ -161,6 +166,94 @@ if [ "$REPO_ROOT_BEFORE" = "$REPO_ROOT_AFTER" ]; then
 else
   echo "  ✗ 7. Hook polluted REPO_ROOT (regression of #63):"
   echo "    diff: $(diff <(echo "$REPO_ROOT_BEFORE") <(echo "$REPO_ROOT_AFTER"))"
+  ((failed++))
+fi
+
+# ============================================================================
+echo ""
+echo "--- #103 hook freshness warnings ---"
+# ============================================================================
+FRESH_SRC="$TEST_DIR/fresh-source-repo"
+FRESH_INSTALLED="$TEST_HOME/.claude/hooks"
+mkdir -p "$FRESH_SRC/hooks/lib" "$FRESH_INSTALLED/lib" "$TEST_HOME/.episodic-memory"
+cp "$REPO_ROOT/hooks/plan-gate.sh" "$FRESH_SRC/hooks/plan-gate.sh"
+cp "$REPO_ROOT/hooks/em-recall-sessionstart.sh" "$FRESH_SRC/hooks/em-recall-sessionstart.sh"
+cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$FRESH_SRC/hooks/lib/command-classifier.sh"
+cp "$FRESH_SRC/hooks/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
+cp "$FRESH_SRC/hooks/em-recall-sessionstart.sh" "$FRESH_INSTALLED/em-recall-sessionstart.sh"
+cp "$FRESH_SRC/hooks/lib/command-classifier.sh" "$FRESH_INSTALLED/lib/command-classifier.sh"
+
+cat > "$TEST_HOME/.episodic-memory/hook-install.json" <<EOF
+{
+  "schema_version": 1,
+  "source_repo": "$FRESH_SRC",
+  "hooks_dir": "$FRESH_INSTALLED",
+  "files": [
+    {
+      "relative_path": "hooks/plan-gate.sh",
+      "installed_path": "$FRESH_INSTALLED/plan-gate.sh",
+      "source_sha256": "unused-in-runtime",
+      "source_version": "2026-05-08.1"
+    },
+    {
+      "relative_path": "hooks/em-recall-sessionstart.sh",
+      "installed_path": "$FRESH_INSTALLED/em-recall-sessionstart.sh",
+      "source_sha256": "unused-in-runtime",
+      "source_version": "2026-05-08.1"
+    },
+    {
+      "relative_path": "hooks/lib/command-classifier.sh",
+      "installed_path": "$FRESH_INSTALLED/lib/command-classifier.sh",
+      "source_sha256": "unused-in-runtime",
+      "source_version": "2026-05-08.1"
+    }
+  ]
+}
+EOF
+
+output="$(run_hook_capture)"
+if ! echo "$output" | grep -q "hook freshness warning" \
+  && ! echo "$output" | grep -q "installed Claude hooks differ"; then
+  echo "  ✓ 10. Current installed hooks are quiet"
+  ((passed++))
+else
+  echo "  ✗ 10. Current installed hooks produced a freshness warning"
+  echo "    output: $output"
+  ((failed++))
+fi
+
+printf '\n# local edit without version bump\n' >> "$FRESH_INSTALLED/plan-gate.sh"
+output="$(run_hook_capture)"
+if echo "$output" | grep -q "hooks/plan-gate.sh" \
+  && echo "$output" | grep -q -- "--install-hooks-force"; then
+  echo "  ✓ 11. Manual installed hook edit is reported without overwrite"
+  ((passed++))
+else
+  echo "  ✗ 11. Manual installed hook edit was not reported clearly"
+  echo "    output: $output"
+  ((failed++))
+fi
+
+cp "$FRESH_SRC/hooks/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
+printf '\n# local lib edit without version bump\n' >> "$FRESH_INSTALLED/lib/command-classifier.sh"
+output="$(run_hook_capture)"
+if echo "$output" | grep -q "hooks/lib/command-classifier.sh"; then
+  echo "  ✓ 12. Managed hook lib drift is reported"
+  ((passed++))
+else
+  echo "  ✗ 12. Managed hook lib drift was not reported"
+  echo "    output: $output"
+  ((failed++))
+fi
+
+mv "$FRESH_SRC" "$FRESH_SRC.moved"
+output="$(run_hook_capture)"
+if echo "$output" | grep -q "source repo unavailable"; then
+  echo "  ✓ 13. Missing source repo is reported"
+  ((passed++))
+else
+  echo "  ✗ 13. Missing source repo was not reported"
+  echo "    output: $output"
   ((failed++))
 fi
 
