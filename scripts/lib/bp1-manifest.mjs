@@ -469,3 +469,147 @@ export function verifyManifest(payload, signatureHex, verifyKey32B) {
   if (a.length !== b.length) return false
   return crypto.timingSafeEqual(a, b)
 }
+
+// ===========================================================================
+// On-disk record collection + manifest equality (M1 finalize-run / replay)
+// ===========================================================================
+
+import { parseBp1Frontmatter } from './bp1-frontmatter.mjs'
+import { canonicalize } from './bp1-canonicalize.mjs'
+
+// Episode-id sortability invariant. Every BP-1 episode emitted by the
+// orchestrator MUST begin with `<8-digit-date>-<6-digit-time>-` so that
+// lex sort yields a deterministic order. Round-2 codex FU-1: this is a
+// deterministic-order invariant only — not a chronological-authority claim
+// (same-second ids tie on the suffix, which the replay observer accepts).
+export const BP1_EPISODE_ID_PREFIX_RE = /^\d{8}-\d{6}-/
+
+function readEpisodesIn(dir) {
+  if (!fs.existsSync(dir)) return []
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => path.join(dir, f))
+}
+
+/**
+ * Collect bp1-run records for a given run_id from BOTH stores (RFC-004
+ * §777-789 v3.12). Local store: <projectRoot>/.episodic-memory/episodes.
+ * Global store: <homedir>/.episodic-memory/episodes. Excludes the
+ * `bp1-run-manifest` itself (would be self-referential).
+ *
+ * @param {string} runId
+ * @param {string} projectRoot
+ * @returns {Array<{episode_id:string, canonical_sha256:string, body_sha256:string, hmac_signature:string}>}
+ *          Sorted by episode_id (deterministic order).
+ */
+export function collectEpisodeRecords(runId, projectRoot) {
+  assertRunIdShape(runId)
+  if (typeof projectRoot !== 'string' || !projectRoot.startsWith('/')) {
+    throw new TypeError('projectRoot must be absolute path string')
+  }
+  const stores = [
+    path.join(projectRoot, '.episodic-memory', 'episodes'),
+    path.join(os.homedir(), '.episodic-memory', 'episodes'),
+  ]
+  const seen = new Set()
+  const records = []
+  for (const store of stores) {
+    for (const filePath of readEpisodesIn(store)) {
+      let text
+      try {
+        text = fs.readFileSync(filePath, 'utf8')
+      } catch {
+        // Unreadable file is a hard failure for finalize: a run's records must
+        // be enumerable. The orchestrator surfaces this as bp1-finalize-fence-fail.
+        throw new Error(`collectEpisodeRecords: unreadable episode file ${filePath}`)
+      }
+      let parsed
+      try {
+        parsed = parseBp1Frontmatter(text)
+      } catch (e) {
+        // Non-BP1 episodes in the same store may not match the strict parser
+        // (e.g. workplan, lessons). Skip silently: only run-tagged episodes
+        // matter for finalize. We re-scan with run_id check after parse.
+        continue
+      }
+      const fm = parsed.frontmatter
+      if (fm.run_id !== runId) continue
+      // Self-exclusion: bp1-run-manifest tagged episodes (RFC §777 v3.12).
+      if (Array.isArray(fm.tags) && fm.tags.includes('bp1-run-manifest')) continue
+      // Required fields for a record:
+      for (const f of ['id', 'body_sha256', 'hmac_signature']) {
+        if (typeof fm[f] !== 'string' || fm[f] === '') {
+          throw new Error(`collectEpisodeRecords: episode ${filePath} missing required field ${f}`)
+        }
+      }
+      if (!BP1_EPISODE_ID_PREFIX_RE.test(fm.id)) {
+        throw new Error(`collectEpisodeRecords: episode ${filePath} has non-sortable id: ${fm.id}`)
+      }
+      if (seen.has(fm.id)) continue
+      seen.add(fm.id)
+      const { canonicalBytes } = canonicalize(fm, parsed.body)
+      const canonicalSha = crypto.createHash('sha256').update(canonicalBytes).digest('hex')
+      records.push({
+        episode_id: fm.id,
+        canonical_sha256: canonicalSha,
+        body_sha256: fm.body_sha256,
+        hmac_signature: fm.hmac_signature,
+      })
+    }
+  }
+  records.sort((a, b) => {
+    if (a.episode_id < b.episode_id) return -1
+    if (a.episode_id > b.episode_id) return 1
+    return 0
+  })
+  return records
+}
+
+/**
+ * Verify the on-disk records match the records embedded in a manifest payload.
+ * Re-collects from disk, sorts both sides by episode_id, compares each field
+ * exactly. Returns { ok: boolean, mismatches: Array<{episode_id, field, disk, manifest}> }.
+ *
+ * Used by the step-5 disk re-read fence: after the manifest is signed and
+ * persisted, re-read is more than just "parse + verify signature" — the
+ * records must still describe what's actually on disk now.
+ *
+ * @param {object} manifestPayload — output of buildManifestPayload
+ * @param {string} runId
+ * @param {string} projectRoot
+ * @returns {{ ok: boolean, mismatches: Array<{episode_id:string, field:string, disk:any, manifest:any}> }}
+ */
+export function verifyOnDiskEqualsManifest(manifestPayload, runId, projectRoot) {
+  if (!manifestPayload || typeof manifestPayload !== 'object') {
+    throw new TypeError('manifestPayload must be an object')
+  }
+  if (!Array.isArray(manifestPayload.per_episode_records)) {
+    throw new TypeError('manifestPayload.per_episode_records must be an array')
+  }
+  const onDisk = collectEpisodeRecords(runId, projectRoot)
+  const expected = manifestPayload.per_episode_records.slice().sort((a, b) => {
+    if (a.episode_id < b.episode_id) return -1
+    if (a.episode_id > b.episode_id) return 1
+    return 0
+  })
+  const mismatches = []
+  if (onDisk.length !== expected.length) {
+    mismatches.push({
+      episode_id: '<count>',
+      field: 'episode_count',
+      disk: onDisk.length,
+      manifest: expected.length,
+    })
+    return { ok: false, mismatches }
+  }
+  for (let i = 0; i < expected.length; i++) {
+    const e = expected[i]
+    const d = onDisk[i]
+    for (const f of ['episode_id', 'canonical_sha256', 'body_sha256', 'hmac_signature']) {
+      if (e[f] !== d[f]) {
+        mismatches.push({ episode_id: e.episode_id, field: f, disk: d[f], manifest: e[f] })
+      }
+    }
+  }
+  return { ok: mismatches.length === 0, mismatches }
+}
