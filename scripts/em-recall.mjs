@@ -518,12 +518,6 @@ allEntries = allEntries.filter(e => {
 const activeEntries = allEntries.filter(e => e.status !== 'superseded')
 
 // ---------------------------------------------------------------------------
-// Context
-// ---------------------------------------------------------------------------
-const context = inferContext()
-const preflight_warnings = []
-
-// ---------------------------------------------------------------------------
 // SessionStart orphan-clear (#146 P1-2 + P1-3). MUST run BEFORE arming so
 // a freshly armed .checkpoint-required isn't a cleanup candidate.
 //
@@ -611,7 +605,21 @@ if (sessionStartFlag) {
     // this session (gate falls back to original behavior — original
     // bp-001 enforcement still works without the carve-out).
   }
+
+  // SessionStart fast path: hook redirects stdout to /dev/null, so the
+  // recall-output formatting below is dead work. All side effects above
+  // (orphan cleanup, bp-001 arm, baseline write) are synchronous and
+  // already complete. Skipping inferContext() here also avoids two git
+  // execs (~35 ms) that only feed the discarded output.
+  process.exit(0)
 }
+
+// ---------------------------------------------------------------------------
+// Context (recall-output path only; inferContext() runs git subprocesses
+// that are unnecessary in --session-start mode).
+// ---------------------------------------------------------------------------
+const context = inferContext()
+const preflight_warnings = []
 
 // ---------------------------------------------------------------------------
 // Task type: explicit flag wins; otherwise infer from branch tokens.
