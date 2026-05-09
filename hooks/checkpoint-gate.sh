@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-05-08.1
+# episodic-memory-hook-version: 2026-05-09.1
 # checkpoint-gate.sh — RFC-002 Phase 3b PreToolUse hook.
 #
 # Session 1 rewrite (#86 PR-B / #89 / #101): replaces the regex-based
@@ -9,60 +9,92 @@ set -e
 # git-push / gh-pr-create regex (lines ~125-141) with the shared classifier
 # from hooks/lib/command-classifier.sh.
 #
-# Two gates with shared marker state in <repo-root>/.claude/:
+# 2026-05-09 .checkpoints/ migration: marker WRITES now go to
+# <repo-root>/.checkpoints/ via hooks/lib/marker-paths.sh, while READS check
+# .checkpoints/ first then fall back to .claude/ (until the legacy branch is
+# removed in a follow-up commit). CLEANUP sweeps BOTH roots. Closes the
+# Claude Code sensitive-file-guard prompt class for marker writes.
+#
+# Two gates with shared marker state:
 #
 #   pre-checkpoint:
 #     Blocks Edit/Write/MultiEdit/Bash/NotebookEdit when .checkpoint-required
-#     exists AND .pre-checkpoint-done is missing/empty. Activator:
-#     em-recall.mjs touches .checkpoint-required when bp-001 violations
-#     surface in pre-flight (Phase 3, em-recall.mjs:347-369).
+#     exists (either root) AND .pre-checkpoint-done is missing/empty (both
+#     roots). Activator: em-recall.mjs touches .checkpoint-required when
+#     bp-001 violations surface in pre-flight.
 #
 #   push-gate:
 #     Blocks Bash classified as push_or_pr_create OR shared_write that mutates
-#     external GitHub state when .post-checkpoint-required exists AND
-#     .post-checkpoint-done is missing/empty. Allowed pushes clean all 4
-#     markers (task complete).
+#     external GitHub state when .post-checkpoint-required exists (either
+#     root) AND .post-checkpoint-done is missing/empty (both roots). Allowed
+#     pushes clean all task-signal markers across BOTH roots.
 #
-# .post-checkpoint-required is armed on every allowed write that passed the
-# pre-gate (idempotent touch).
+# .post-checkpoint-required is armed (always at PRIMARY) on every allowed
+# write that passed the pre-gate (idempotent touch).
 #
-# Marker-write allowlist (deadlock prevention) is now classifier-driven:
+# Marker-write allowlist (deadlock prevention) is classifier-driven:
 # Bash classified as marker_write whose TARGET is one of the repo-root
-# checkpoint markers passes the pre-gate iff:
-#   - .pre-checkpoint-done write: requires .checkpoint-required exists AND
-#     .pre-checkpoint-done is missing/empty (writing into the gate's expected
-#     state, not bypassing it).
+# checkpoint markers AT EITHER ROOT passes the pre-gate iff:
+#   - .pre-checkpoint-done write: requires .checkpoint-required exists
+#     (either root) AND .pre-checkpoint-done is missing/empty (both roots).
 #   - .post-checkpoint-done write: requires .post-checkpoint-required exists
 #     AND .post-checkpoint-done is missing/empty.
 # Cross-gate invariant (Codex ...3503 P1): checkpoint marker writes are
-# blocked while the repo-root .plan-approval-pending marker exists. Both
-# gates independently enforce the invariant; do not rely on Claude hook
-# order.
+# blocked while .plan-approval-pending exists (either root). Both gates
+# independently enforce.
 
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-# Source classifier + repo-root resolver. Use BASH_SOURCE for symlink safety.
+# Source classifier + repo-root resolver + shared marker paths. Use
+# BASH_SOURCE for symlink safety.
 HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 LIB_DIR="$HOOK_DIR/lib"
-if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ]; then
-  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook. Re-run install.mjs --install-hooks."}'
+if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ]; then
+  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh). Re-run install.mjs --install-hooks."}'
   exit 0
 fi
 # shellcheck disable=SC1091
 source "$LIB_DIR/repo-root.sh"
 # shellcheck disable=SC1091
 source "$LIB_DIR/command-classifier.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/marker-paths.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
-MARKER_DIR="$REPO_ROOT/.claude"
-PRE_REQ="$MARKER_DIR/.checkpoint-required"
-PRE_DONE="$MARKER_DIR/.pre-checkpoint-done"
-POST_REQ="$MARKER_DIR/.post-checkpoint-required"
-POST_DONE="$MARKER_DIR/.post-checkpoint-done"
-PLAN_PENDING="$MARKER_DIR/.plan-approval-pending"
+
+# Canonical WRITE paths (always primary). Used in block-message paths so the
+# agent knows where to write the checkpoint block.
+PRE_DONE_W="$(write_marker_path "$REPO_ROOT" .pre-checkpoint-done)"
+POST_DONE_W="$(write_marker_path "$REPO_ROOT" .post-checkpoint-done)"
+PLAN_PENDING_W="$(write_marker_path "$REPO_ROOT" .plan-approval-pending)"
+
+PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
+LEGACY_DIR="$REPO_ROOT/$LEGACY_MARKER_DIR"
+
+# ---------------------------------------------------------------------------
+# Dual-root marker helpers (burn-in only; collapse to primary-only when the
+# fallback branch is removed).
+# ---------------------------------------------------------------------------
+# marker_exists <basename> — true if the marker exists at either root.
+marker_exists() {
+  [ -e "$PRIMARY_DIR/$1" ] || [ -e "$LEGACY_DIR/$1" ]
+}
+# marker_nonempty <basename> — true if either root's copy is non-empty.
+marker_nonempty() {
+  [ -s "$PRIMARY_DIR/$1" ] || [ -s "$LEGACY_DIR/$1" ]
+}
+# marker_basename_for_target <abs-path> — echoes the basename if the path
+# is under either marker dir, else echoes nothing (caller branches on empty).
+marker_basename_for_target() {
+  local target="$1"
+  case "$target" in
+    "$PRIMARY_DIR"/*|"$LEGACY_DIR"/*) basename "$target" ;;
+    *) printf '' ;;
+  esac
+}
 
 # Read-only tools — always allowed
 case "$TOOL_NAME" in
@@ -72,22 +104,20 @@ case "$TOOL_NAME" in
 esac
 
 # Helper: emit a block decision.
-# Reason strings include the ABSOLUTE marker path (#146 B1). Worktree-cwd
-# sessions resolve relative paths against the worktree, but markers live at
-# the main-repo .claude/. Without the absolute path the agent guesses wrong
-# and deadlocks (issue #146 live reproducer comment 4378971459).
+# Reason strings include the canonical WRITE path (always primary —
+# .checkpoints/) so the agent writes to the new location.
 _block_pre() {
-  jq -nc --arg path "$PRE_DONE" \
+  jq -nc --arg path "$PRE_DONE_W" \
     '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
 _block_post() {
-  jq -nc --arg path "$POST_DONE" \
+  jq -nc --arg path "$POST_DONE_W" \
     '{decision: "block", reason: ("Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to " + $path + " (must be non-empty) before pushing. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
 _block_plan_pending() {
-  jq -nc --arg path "$PLAN_PENDING" \
+  jq -nc --arg path "$PLAN_PENDING_W" \
     '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
@@ -112,28 +142,34 @@ if [ "$TOOL_NAME" = "Bash" ]; then
   # marker_write deadlock-prevention allowlist. Only allow when the gate's
   # state expects that specific marker write. All other marker_write Bash
   # falls through to the pre-gate as a normal write.
+  #
+  # Dual-root acceptance: TARGET is an absolute path that may point at
+  # either .checkpoints/.X (new canonical) or .claude/.X (legacy fallback,
+  # tolerated during burn-in for backward compat).
   if [ "$LABEL" = "marker_write" ]; then
+    TARGET_BN="$(marker_basename_for_target "$TARGET")"
+
     # Cross-gate invariant: checkpoint marker writes are blocked while
     # .plan-approval-pending exists (Codex ...3503 P1).
-    if [ -f "$PLAN_PENDING" ]; then
-      if [ "$TARGET" = "$PLAN_PENDING" ]; then
+    if marker_exists .plan-approval-pending; then
+      if [ "$TARGET_BN" = ".plan-approval-pending" ]; then
         # Allow plan-marker removal — plan-gate.sh is what cares about this.
         exit 0
       fi
       _block_plan_pending
     fi
-    case "$TARGET" in
-      "$PRE_DONE")
-        if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
+    case "$TARGET_BN" in
+      .pre-checkpoint-done)
+        if marker_exists .checkpoint-required && ! marker_nonempty .pre-checkpoint-done; then
           exit 0
         fi
         ;;
-      "$POST_DONE")
-        if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
+      .post-checkpoint-done)
+        if marker_exists .post-checkpoint-required && ! marker_nonempty .post-checkpoint-done; then
           exit 0
         fi
         ;;
-      "$PLAN_PENDING")
+      .plan-approval-pending)
         exit 0
         ;;
     esac
@@ -155,22 +191,23 @@ case "$TOOL_NAME" in
       REST="${RESULT#*	}"
       TARGET="${REST%%	*}"
       if [ "$LABEL" = "marker_write" ]; then
+        TARGET_BN="$(marker_basename_for_target "$TARGET")"
         # Cross-gate invariant
-        if [ -f "$PLAN_PENDING" ] && [ "$TARGET" != "$PLAN_PENDING" ]; then
+        if marker_exists .plan-approval-pending && [ "$TARGET_BN" != ".plan-approval-pending" ]; then
           _block_plan_pending
         fi
-        case "$TARGET" in
-          "$PRE_DONE")
-            if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
+        case "$TARGET_BN" in
+          .pre-checkpoint-done)
+            if marker_exists .checkpoint-required && ! marker_nonempty .pre-checkpoint-done; then
               exit 0
             fi
             ;;
-          "$POST_DONE")
-            if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
+          .post-checkpoint-done)
+            if marker_exists .post-checkpoint-required && ! marker_nonempty .post-checkpoint-done; then
               exit 0
             fi
             ;;
-          "$PLAN_PENDING")
+          .plan-approval-pending)
             exit 0
             ;;
         esac
@@ -179,7 +216,7 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-if [ -f "$PRE_REQ" ] && [ ! -s "$PRE_DONE" ]; then
+if marker_exists .checkpoint-required && ! marker_nonempty .pre-checkpoint-done; then
   _block_pre
 fi
 
@@ -187,7 +224,7 @@ fi
 # Push-gate: only fires for Bash classified as push_or_pr_create.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
-  if [ -f "$POST_REQ" ] && [ ! -s "$POST_DONE" ]; then
+  if marker_exists .post-checkpoint-required && ! marker_nonempty .post-checkpoint-done; then
     _block_post
   fi
   # Audit P1: marker cleanup is gated on plan-gate not pending. PreToolUse
@@ -196,20 +233,30 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   # tool will not actually run). Cleanup only when plan-gate is clear —
   # in that case, push_or_pr_create has reached the user's intended
   # task-complete moment.
-  if [ ! -f "$PLAN_PENDING" ]; then
-    rm -f "$PRE_REQ" "$PRE_DONE" "$POST_REQ" "$POST_DONE" 2>/dev/null || true
+  #
+  # Dual-root sweep (Codex round-1 F2): rm at BOTH .checkpoints/ and
+  # .claude/ until fallback is removed. Iteration over the shared
+  # TASK_SIGNAL_MARKERS array keeps the cleanup set in lockstep with the
+  # carve-out's marker set in em-recall.mjs.
+  if ! marker_exists .plan-approval-pending; then
+    for _m in "${CHECKPOINT_CLEANUP_MARKERS[@]}"; do
+      rm -f "$PRIMARY_DIR/$_m" "$LEGACY_DIR/$_m" 2>/dev/null || true
+    done
+    unset _m
   fi
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# Allowed write — arm post-tracking if pre-checkpoint was satisfied
+# Allowed write — arm post-tracking if pre-checkpoint was satisfied.
+# Always armed at PRIMARY (write-side never touches legacy); dual-root
+# cleanup later removes both.
 # ---------------------------------------------------------------------------
 case "$TOOL_NAME" in
   Edit|Write|MultiEdit|Bash|NotebookEdit)
-    if [ -f "$PRE_REQ" ] && [ -s "$PRE_DONE" ]; then
-      mkdir -p "$MARKER_DIR" 2>/dev/null || true
-      touch "$POST_REQ" 2>/dev/null || true
+    if marker_exists .checkpoint-required && marker_nonempty .pre-checkpoint-done; then
+      ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
+      touch "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)" 2>/dev/null || true
     fi
     ;;
 esac

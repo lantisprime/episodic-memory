@@ -12,13 +12,27 @@
 # `.checkpoints/` first, fallback `.claude/` second) until the legacy
 # branch is removed in a follow-up commit.
 #
-# Six markers in scope (5 task-signal + 1 baseline):
-#   .checkpoint-required          (activator, armed by em-recall.mjs)
-#   .post-checkpoint-required     (activator, armed by checkpoint-gate.sh)
-#   .plan-approval-pending        (Rule 8 plan-approval gate)
-#   .pre-checkpoint-done          (Rule 18 pre-impl checkpoint)
-#   .post-checkpoint-done         (Rule 18 post-impl checkpoint)
-#   .session-baseline             (stop-gate carve-out reference mtime)
+# Six markers in migration scope:
+#
+#   Marker name                    | Set membership
+#   ---                            | ---
+#   .checkpoint-required           | TASK_SIGNAL + CHECKPOINT_CLEANUP
+#   .post-checkpoint-required      | TASK_SIGNAL + CHECKPOINT_CLEANUP
+#   .plan-approval-pending         | TASK_SIGNAL only (not cleared by push)
+#   .pre-checkpoint-done           | CHECKPOINT_CLEANUP only
+#   .post-checkpoint-done          | CHECKPOINT_CLEANUP only
+#   .session-baseline              | BASELINE only
+#
+# Set semantics:
+#   TASK_SIGNAL_MARKERS         3 markers — em-recall stop-gate carve-out
+#                               class (mid-session mtime > baseline = task
+#                               work in progress). Mirrors em-recall.mjs:97.
+#   CHECKPOINT_CLEANUP_MARKERS  4 markers — push-gate clears on successful
+#                               push (Codex round-1 F2: must sweep BOTH
+#                               .checkpoints/ AND .claude/ during burn-in).
+#                               Mirrors prior checkpoint-gate.sh:200.
+#   ALL_MIGRATED_MARKERS        6 names — full migration scope used by
+#                               tests, sweep tools, and SessionEnd cleanup.
 #
 # Codex round-2 ACCEPT (episode 20260509-044331-...-bc1c) per plan v3 §B.
 
@@ -26,20 +40,29 @@ PRIMARY_MARKER_DIR=".checkpoints"
 LEGACY_MARKER_DIR=".claude"
 BASELINE_NAME=".session-baseline"
 
-# Task-signal markers (per em-recall.mjs:97-101 + the two -done markers).
-# Used by stop-gate carve-out, push cleanup, SessionStart orphan-clear.
-# Bash 3.2 indexed array (no associative arrays per macOS portability lesson
-# 20260508-021131).
+# Task-signal markers — em-recall stop-gate carve-out class. Mirrors
+# em-recall.mjs:97-101 (TASK_SIGNAL_MARKERS in JS). Bash 3.2 indexed array
+# (no associative arrays per macOS portability lesson 20260508-021131).
 TASK_SIGNAL_MARKERS=(
   ".checkpoint-required"
   ".post-checkpoint-required"
   ".plan-approval-pending"
+)
+
+# Push-gate cleanup class — markers cleared on a successful push that has
+# satisfied the post-checkpoint. .plan-approval-pending is intentionally
+# NOT here (its lifecycle is plan-gate's marker_write allowance, not
+# checkpoint cleanup). Mirrors the prior checkpoint-gate.sh:200 list.
+CHECKPOINT_CLEANUP_MARKERS=(
+  ".checkpoint-required"
   ".pre-checkpoint-done"
+  ".post-checkpoint-required"
   ".post-checkpoint-done"
 )
 
-# All migrated markers = task-signal + baseline.
-ALL_MARKERS=(
+# Full migration scope = task-signal + done markers + baseline = 6 names.
+# Used by sweep tools and tests to validate completeness.
+ALL_MIGRATED_MARKERS=(
   ".checkpoint-required"
   ".post-checkpoint-required"
   ".plan-approval-pending"

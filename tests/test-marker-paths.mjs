@@ -19,7 +19,8 @@ import {
   LEGACY_MARKER_DIR,
   BASELINE_NAME,
   TASK_SIGNAL_MARKERS,
-  ALL_MARKERS,
+  CHECKPOINT_CLEANUP_MARKERS,
+  ALL_MIGRATED_MARKERS,
   primaryMarkerPath,
   legacyMarkerPath,
   resolveMarkerRead,
@@ -57,13 +58,23 @@ console.log('Constants:')
 test('PRIMARY_MARKER_DIR is .checkpoints', () => eq(PRIMARY_MARKER_DIR, '.checkpoints'))
 test('LEGACY_MARKER_DIR is .claude', () => eq(LEGACY_MARKER_DIR, '.claude'))
 test('BASELINE_NAME is .session-baseline', () => eq(BASELINE_NAME, '.session-baseline'))
-test('TASK_SIGNAL_MARKERS length is 5', () => eq(TASK_SIGNAL_MARKERS.length, 5))
-test('ALL_MARKERS length is 6', () => eq(ALL_MARKERS.length, 6))
+test('TASK_SIGNAL_MARKERS length is 3 (em-recall carve-out class)', () => eq(TASK_SIGNAL_MARKERS.length, 3))
+test('CHECKPOINT_CLEANUP_MARKERS length is 4 (push-gate cleanup class)', () => eq(CHECKPOINT_CLEANUP_MARKERS.length, 4))
+test('ALL_MIGRATED_MARKERS length is 6 (full migration scope)', () => eq(ALL_MIGRATED_MARKERS.length, 6))
 test('TASK_SIGNAL_MARKERS contains .checkpoint-required', () => {
   if (!TASK_SIGNAL_MARKERS.includes('.checkpoint-required')) throw new Error('missing')
 })
-test('ALL_MARKERS contains .session-baseline', () => {
-  if (!ALL_MARKERS.includes('.session-baseline')) throw new Error('missing')
+test('TASK_SIGNAL_MARKERS does NOT contain .pre-checkpoint-done', () => {
+  if (TASK_SIGNAL_MARKERS.includes('.pre-checkpoint-done')) throw new Error('leaked into carve-out class')
+})
+test('CHECKPOINT_CLEANUP_MARKERS contains .pre-checkpoint-done', () => {
+  if (!CHECKPOINT_CLEANUP_MARKERS.includes('.pre-checkpoint-done')) throw new Error('missing')
+})
+test('CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approval-pending', () => {
+  if (CHECKPOINT_CLEANUP_MARKERS.includes('.plan-approval-pending')) throw new Error('leaked into push cleanup')
+})
+test('ALL_MIGRATED_MARKERS contains .session-baseline', () => {
+  if (!ALL_MIGRATED_MARKERS.includes('.session-baseline')) throw new Error('missing')
 })
 
 console.log('\nPath helpers:')

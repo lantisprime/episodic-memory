@@ -155,18 +155,28 @@ test('resolveRepoRoot: submodule resolves to SUBMODULE working tree, not superpr
 // Layer 2 — Integration regression tests for #106
 // ---------------------------------------------------------------------------
 
-const mainClaudeDir = path.join(mainRepoReal, '.claude')
-const worktreeClaudeDir = path.join(worktreeRootReal, '.claude')
-const mainMarker = path.join(mainClaudeDir, '.checkpoint-required')
-const worktreeMarker = path.join(worktreeClaudeDir, '.checkpoint-required')
+// 2026-05-09 .checkpoints/ migration: em-recall writes/arms at PRIMARY
+// (.checkpoints/) and reads at PRIMARY-then-LEGACY. The #106 invariant
+// (marker lands at MAIN repo, NOT WORKTREE) is preserved — the marker
+// just lives at .checkpoints/ now instead of .claude/. Tests assert the
+// new write path; legacy paths still exercised by clearMarkers (sweep).
+const mainPrimaryDir = path.join(mainRepoReal, '.checkpoints')
+const mainLegacyDir = path.join(mainRepoReal, '.claude')
+const worktreePrimaryDir = path.join(worktreeRootReal, '.checkpoints')
+const worktreeLegacyDir = path.join(worktreeRootReal, '.claude')
+const mainMarker = path.join(mainPrimaryDir, '.checkpoint-required')
+const mainMarkerLegacy = path.join(mainLegacyDir, '.checkpoint-required')
+const worktreeMarker = path.join(worktreePrimaryDir, '.checkpoint-required')
+const worktreeMarkerLegacy = path.join(worktreeLegacyDir, '.checkpoint-required')
 
 function clearMarkers() {
-  for (const dir of [mainClaudeDir, worktreeClaudeDir]) {
+  for (const dir of [mainPrimaryDir, mainLegacyDir, worktreePrimaryDir, worktreeLegacyDir]) {
     for (const m of [
       '.checkpoint-required',
       '.pre-checkpoint-done',
       '.post-checkpoint-required',
       '.post-checkpoint-done',
+      '.session-baseline',
     ]) {
       try { fs.unlinkSync(path.join(dir, m)) } catch {}
     }
@@ -217,39 +227,46 @@ test('em-recall from nested cwd inside worktree still writes marker at <main>/.c
   assert.ok(!fs.existsSync(worktreeMarker), `marker leaked into worktree from nested cwd`)
 })
 
-test('em-session-end-prompt from worktree cleans markers at <main>/.claude/, not worktree', () => {
+test('em-session-end-prompt from worktree cleans markers at <main>, not worktree', () => {
   clearMarkers()
-  // Seed both stores with the full marker set so we can prove which one
-  // gets swept.
-  fs.mkdirSync(mainClaudeDir, { recursive: true })
-  fs.mkdirSync(worktreeClaudeDir, { recursive: true })
+  // Seed both stores at LEGACY (.claude/) — the dual-root sweep clears both
+  // .checkpoints/ AND .claude/ at the resolved root. Seeding at legacy
+  // proves the fallback-sweep branch executes; if we seeded only at
+  // primary we wouldn't catch a regression that drops the legacy sweep.
+  fs.mkdirSync(mainLegacyDir, { recursive: true })
+  fs.mkdirSync(worktreeLegacyDir, { recursive: true })
   for (const m of [
     '.checkpoint-required',
     '.pre-checkpoint-done',
     '.post-checkpoint-required',
     '.post-checkpoint-done',
   ]) {
-    fs.writeFileSync(path.join(mainClaudeDir, m), 'seed')
-    fs.writeFileSync(path.join(worktreeClaudeDir, m), 'worktree-seed')
+    fs.writeFileSync(path.join(mainLegacyDir, m), 'seed')
+    fs.writeFileSync(path.join(worktreeLegacyDir, m), 'worktree-seed')
   }
 
   // Confirm setup is real (defensive — guards against a refactor that
   // accidentally clears the seed before the cleanup runs).
-  assert.ok(fs.existsSync(mainMarker), 'pre-condition: main marker seeded')
-  assert.ok(fs.existsSync(worktreeMarker), 'pre-condition: worktree marker seeded')
+  assert.ok(fs.existsSync(mainMarkerLegacy), 'pre-condition: main legacy marker seeded')
+  assert.ok(fs.existsSync(worktreeMarkerLegacy), 'pre-condition: worktree legacy marker seeded')
 
   execSync(`node ${SESSION_END}`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
-  // Positive: main markers swept.
-  assert.ok(!fs.existsSync(mainMarker), `expected ${mainMarker} cleaned after SessionEnd from worktree`)
-  // Negative: worktree markers untouched (proves the sweep targeted main).
-  // After #106, em-session-end-prompt should NOT touch worktree-local markers
-  // unless the worktree is a non-git cwd (which it isn't here).
+  // Positive: main markers swept (both .claude/ legacy and .checkpoints/
+  // primary if any existed).
+  assert.ok(!fs.existsSync(mainMarkerLegacy),
+    `expected ${mainMarkerLegacy} cleaned after SessionEnd from worktree`)
+  assert.ok(!fs.existsSync(mainMarker),
+    `expected ${mainMarker} cleaned after SessionEnd from worktree`)
+  // Negative: worktree markers untouched (proves the sweep targeted MAIN
+  // via resolveRepoRoot, not the worktree-local dir). After #106,
+  // em-session-end-prompt should NOT touch worktree-local markers unless
+  // the worktree is a non-git cwd (which it isn't here).
   assert.ok(
-    fs.existsSync(worktreeMarker),
-    `worktree marker swept unexpectedly — em-session-end-prompt resolved to worktree, not main (regressed #106)`,
+    fs.existsSync(worktreeMarkerLegacy),
+    `worktree legacy marker swept unexpectedly — em-session-end-prompt resolved to worktree, not main (regressed #106)`,
   )
 })
 
@@ -263,25 +280,28 @@ test('em-session-end-prompt from worktree cleans markers at <main>/.claude/, not
 test('NEG: stale worktree-local marker (pre-fix legacy state) is preserved, not migrated', () => {
   clearMarkers()
   // Simulate a user who ran em-recall from this worktree BEFORE PR #106 landed.
-  // The pre-fix bug left a marker in <worktree>/.claude/. After the fix:
-  //   - new arming writes to <main>/.claude/ (correct)
+  // The pre-fix bug left a marker in <worktree>/.claude/. After the fix
+  // AND the .checkpoints/ migration:
+  //   - new arming writes to <main>/.checkpoints/ (correct, primary)
   //   - the legacy worktree-local marker is OUT OF BAND — we do not auto-migrate
-  //   - em-session-end-prompt now sweeps main-only, so the worktree marker
-  //     persists forever (acceptable: hooks read from main, so it's inert)
-  fs.mkdirSync(worktreeClaudeDir, { recursive: true })
-  fs.writeFileSync(worktreeMarker, 'legacy-from-pre-106')
-  assert.ok(fs.existsSync(worktreeMarker), 'pre-condition: legacy worktree marker seeded')
+  //   - em-session-end-prompt sweeps MAIN's roots (both .checkpoints/ and
+  //     .claude/), so the worktree-local marker persists forever (acceptable:
+  //     hooks resolve to main, so it's inert)
+  fs.mkdirSync(worktreeLegacyDir, { recursive: true })
+  fs.writeFileSync(worktreeMarkerLegacy, 'legacy-from-pre-106')
+  assert.ok(fs.existsSync(worktreeMarkerLegacy), 'pre-condition: legacy worktree marker seeded')
 
   execSync(`node ${RECALL} --scope local --project test --no-track`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
-  // New behavior: marker now lives at main.
-  assert.ok(fs.existsSync(mainMarker), 'new arming should land at main')
-  // Legacy marker preserved verbatim — we don't read or modify worktree state.
-  assert.ok(fs.existsSync(worktreeMarker), 'legacy worktree marker should be untouched')
+  // New behavior: marker now lives at main, in the PRIMARY (.checkpoints/) dir.
+  assert.ok(fs.existsSync(mainMarker), 'new arming should land at main/.checkpoints/')
+  // Legacy worktree marker preserved verbatim — we don't read or modify
+  // worktree-local state.
+  assert.ok(fs.existsSync(worktreeMarkerLegacy), 'legacy worktree marker should be untouched')
   assert.strictEqual(
-    fs.readFileSync(worktreeMarker, 'utf8'),
+    fs.readFileSync(worktreeMarkerLegacy, 'utf8'),
     'legacy-from-pre-106',
     'legacy marker contents should not be rewritten',
   )
@@ -330,7 +350,11 @@ test('NEG: em-recall with no recent bp-001 violation does NOT arm marker (activa
   git(cleanRepo, 'commit -q -m init')
 
   const cleanRepoReal = fs.realpathSync(cleanRepo)
-  const cleanMarker = path.join(cleanRepoReal, '.claude', '.checkpoint-required')
+  // .checkpoints/ migration: new arming writes to .checkpoints/, so the
+  // negative assertion targets the primary path. Legacy .claude/ is also
+  // checked to guard against a regression that re-introduces legacy writes.
+  const cleanMarkerPrimary = path.join(cleanRepoReal, '.checkpoints', '.checkpoint-required')
+  const cleanMarkerLegacy = path.join(cleanRepoReal, '.claude', '.checkpoint-required')
 
   // No --project test → don't pick up the seeded violation in mainRepo.
   execSync(`node ${RECALL} --scope local --no-track`, {
@@ -338,16 +362,24 @@ test('NEG: em-recall with no recent bp-001 violation does NOT arm marker (activa
   })
 
   assert.ok(
-    !fs.existsSync(cleanMarker),
-    `unexpected marker at ${cleanMarker} — activator armed without violation evidence`,
+    !fs.existsSync(cleanMarkerPrimary),
+    `unexpected marker at ${cleanMarkerPrimary} — activator armed without violation evidence`,
   )
-  // Defensive: prove the dir would have existed if marker WERE written
-  // (the parent .claude/ dir would have been mkdir'd by armCheckpointMarker).
-  // We assert .claude/ doesn't exist either — proves armCheckpointMarker
-  // never ran, not just that the marker file was missing.
+  assert.ok(
+    !fs.existsSync(cleanMarkerLegacy),
+    `unexpected legacy marker at ${cleanMarkerLegacy} — activator wrote to legacy path`,
+  )
+  // Defensive: prove neither dir was mkdir'd by armCheckpointMarker. After
+  // .checkpoints/ migration, ensurePrimaryDir is the gate; if armCheckpoint
+  // had run we'd see .checkpoints/. Legacy .claude/ also asserted absent
+  // because armCheckpointMarker should never touch it.
+  assert.ok(
+    !fs.existsSync(path.join(cleanRepoReal, '.checkpoints')),
+    `.checkpoints/ dir created without arming — armCheckpointMarker ran spuriously`,
+  )
   assert.ok(
     !fs.existsSync(path.join(cleanRepoReal, '.claude')),
-    `.claude/ dir created without arming — armCheckpointMarker ran spuriously`,
+    `.claude/ dir created without arming — legacy write path live`,
   )
 })
 

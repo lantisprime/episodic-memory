@@ -20,6 +20,16 @@ import path from 'path'
 import os from 'os'
 import { execSync } from 'child_process'
 import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
+import {
+  TASK_SIGNAL_MARKERS,
+  BASELINE_NAME,
+  primaryMarkerPath,
+  legacyMarkerPath,
+  resolveMarkerRead,
+  writeMarkerPath,
+  ensurePrimaryDir,
+  bothMarkerPaths
+} from './lib/marker-paths.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -89,16 +99,16 @@ if (sessionStartFlag && gateFlag !== undefined) {
 }
 
 // ---------------------------------------------------------------------------
-// Task-signal markers (#146 P3-3): the closed set of files whose mtime
-// distinguishes "fresh task work this session" from "stale from prior".
-// Extended class members (e.g. a future .review-pending) MUST be added here
-// to keep stopGateCarveOutApplies and the SessionStart orphan-clear in sync.
+// Task-signal markers — the closed set of files whose mtime distinguishes
+// "fresh task work this session" from "stale from prior". Imported from
+// scripts/lib/marker-paths.mjs (single source of truth shared with hook).
+// Extended class members MUST be added there.
+//
+// 2026-05-09 .checkpoints/ migration: marker writes go to PRIMARY (.checkpoints/)
+// only; reads check PRIMARY first then fall back to LEGACY (.claude/) until
+// burn-in completes. Carve-out, orphan-clear, and baseline checks all use
+// the shared marker-paths helpers — see scripts/lib/marker-paths.mjs.
 // ---------------------------------------------------------------------------
-const TASK_SIGNAL_MARKERS = [
-  '.checkpoint-required',
-  '.post-checkpoint-required',
-  '.plan-approval-pending'
-]
 
 // ---------------------------------------------------------------------------
 // Stop-gate carve-out (#146 A2). Pure function — testable in isolation.
@@ -107,13 +117,19 @@ const TASK_SIGNAL_MARKERS = [
 // real task signal (e.g. session-start handoff y/n + workplan display) and
 // allow stop despite an armed .checkpoint-required.
 //
-// Invariant: every TASK_SIGNAL_MARKERS member must be either absent or
-// have mtime <= .session-baseline mtime. A signal mtime > baseline means it
-// was created/touched mid-session, which is the case the gate must catch.
+// Invariant: every TASK_SIGNAL_MARKERS member at EITHER root (primary or
+// legacy) must be either absent or have mtime <= .session-baseline mtime.
+// A signal mtime > baseline means it was created/touched mid-session,
+// which is the case the gate must catch.
+//
+// Dual-root semantics (.checkpoints/ migration): baselineMtime is the MAX
+// of primary and legacy baseline mtimes (whichever is most recent).
+// Per-marker mtime is the MAX across both roots.
 //
 // .session-baseline is written/touched by em-recall --session-start (called
-// from hooks/em-recall-sessionstart.sh). If it's missing, the carve-out does
-// not apply (conservative — pre-existing sessions before this fix shipped).
+// from hooks/em-recall-sessionstart.sh). If missing at both roots, the
+// carve-out does not apply (conservative — pre-existing sessions before
+// this fix shipped).
 //
 // SubagentStop semantics (P1-1): the same predicate runs for SubagentStop.
 // A subagent that wrote files would have caused checkpoint-gate to arm
@@ -122,36 +138,42 @@ const TASK_SIGNAL_MARKERS = [
 // as the parent's no-task-signal turn, which is the desired behavior.
 //
 // Symlink defense (P2-2): uses lstatSync so a symlink to an old file cannot
-// trick the carve-out into firing. ANY symlink — baseline or marker —
-// causes the carve-out to FAIL CLOSED (return false / deny). Same-class
-// symmetry per feedback_same_class_completeness.md: a symlinked marker
-// could represent an active mid-session signal masked behind the symlink,
-// so treating it as absent (skip) is unsafe. Codex round-1 P2 finding
-// (episode 20260505-124511-...-845f) reproduced the asymmetry. Threat
-// model is honest-agent self-discipline, not adversarial.
+// trick the carve-out into firing. ANY symlink — baseline or marker, at
+// EITHER root — causes the carve-out to FAIL CLOSED. Same-class symmetry
+// per feedback_same_class_completeness.md. Codex round-1 P2 finding
+// (episode 20260505-124511-...-845f) reproduced the asymmetry.
 // ---------------------------------------------------------------------------
-function stopGateCarveOutApplies(claudeDir) {
-  const baseline = path.join(claudeDir, '.session-baseline')
-  let baselineMtime
-  try {
-    const st = fs.lstatSync(baseline)
-    if (st.isSymbolicLink()) return false
-    baselineMtime = st.mtimeMs
-  } catch {
-    return false
-  }
-  for (const name of TASK_SIGNAL_MARKERS) {
-    const p = path.join(claudeDir, name)
-    let mt
+function _maxMtimeAcrossRoots(repoRoot, basename) {
+  // Returns { mtime, hadSymlink, anyExisted }. mtime is the max across both
+  // roots. If either side is a symlink, hadSymlink=true (caller fails closed).
+  let mtime = -Infinity
+  let hadSymlink = false
+  let anyExisted = false
+  for (const p of [primaryMarkerPath(repoRoot, basename), legacyMarkerPath(repoRoot, basename)]) {
     try {
       const st = fs.lstatSync(p)
-      // Symmetric with baseline: any marker symlink fails carve-out closed.
-      // SessionStart cleanup still skips symlinks (won't unlink them), but
-      // gate evaluation must not treat them as absent.
-      if (st.isSymbolicLink()) return false
-      mt = st.mtimeMs
-    } catch { continue }
-    if (mt > baselineMtime) return false
+      if (st.isSymbolicLink()) { hadSymlink = true; continue }
+      anyExisted = true
+      if (st.mtimeMs > mtime) mtime = st.mtimeMs
+    } catch {}
+  }
+  return { mtime, hadSymlink, anyExisted }
+}
+
+function stopGateCarveOutApplies(repoRoot) {
+  const base = _maxMtimeAcrossRoots(repoRoot, BASELINE_NAME)
+  if (base.hadSymlink) return false
+  if (!base.anyExisted) return false
+  const baselineMtime = base.mtime
+
+  for (const name of TASK_SIGNAL_MARKERS) {
+    const m = _maxMtimeAcrossRoots(repoRoot, name)
+    // Symlink at either root → fail closed.
+    if (m.hadSymlink) return false
+    // Marker absent at both roots → no signal; skip.
+    if (!m.anyExisted) continue
+    // Mid-session signal → fail closed.
+    if (m.mtime > baselineMtime) return false
   }
   return true
 }
@@ -161,14 +183,21 @@ if (gateFlag === 'stop') {
   // from scripts/lib/local-dir.mjs. This converges with the hook readers in
   // hooks/checkpoint-gate.sh + hooks/plan-gate.sh that use repo-root.sh.
   // Closes #106's worktree-orphan class for this gate.
-  const claudeDir = path.join(REPO_ROOT, '.claude')
-  const preReq = path.join(claudeDir, '.checkpoint-required')
-  const postDone = path.join(claudeDir, '.post-checkpoint-done')
+  //
+  // Dual-root .checkpoints/ migration: PRE_REQ existence is checked at
+  // EITHER root (resolveMarkerRead returns the path of whichever exists,
+  // primary preferred). POST_DONE non-empty check uses the resolved path.
+  // The carve-out helper handles both roots internally.
+  const preReqPath = resolveMarkerRead(REPO_ROOT, '.checkpoint-required')
+  const postDonePath = resolveMarkerRead(REPO_ROOT, '.post-checkpoint-done')
   let postDoneSize = 0
-  try { postDoneSize = fs.statSync(postDone).size } catch {}
-  if (fs.existsSync(preReq) && postDoneSize === 0) {
-    if (!stopGateCarveOutApplies(claudeDir)) {
-      const reason = 'Post-implementation checkpoint required. Write the Rule 18 post-implementation checkpoint block to .claude/.post-checkpoint-done (must be non-empty), then end your turn again. Hook: stop-gate.sh.'
+  if (postDonePath) {
+    try { postDoneSize = fs.statSync(postDonePath).size } catch {}
+  }
+  if (preReqPath && postDoneSize === 0) {
+    if (!stopGateCarveOutApplies(REPO_ROOT)) {
+      const writePath = writeMarkerPath(REPO_ROOT, '.post-checkpoint-done')
+      const reason = `Post-implementation checkpoint required. Write the Rule 18 post-implementation checkpoint block to ${writePath} (must be non-empty), then end your turn again. Hook: stop-gate.sh.`
       console.log(JSON.stringify({ decision: 'block', reason }))
     }
     // else: carve-out applies — emit nothing (allow stop).
@@ -380,14 +409,18 @@ function shouldArmBp001Checkpoint(activeEntries, now) {
 
 // ---------------------------------------------------------------------------
 // Idempotent marker arming. Best-effort — failures are swallowed so a
-// non-writable .claude dir doesn't take down the whole recall.
+// non-writable .checkpoints/ dir doesn't take down the whole recall.
+//
+// Writes go to PRIMARY (.checkpoints/) only. If the legacy marker exists
+// at .claude/, it's still honored by readers via resolveMarkerRead during
+// burn-in. So "armed" here is satisfied if EITHER root has the marker.
 // ---------------------------------------------------------------------------
 function armCheckpointMarker(repoRoot) {
   try {
-    const claudeDir = path.join(repoRoot, '.claude')
-    fs.mkdirSync(claudeDir, { recursive: true })
-    const markerPath = path.join(claudeDir, '.checkpoint-required')
-    if (!fs.existsSync(markerPath)) fs.writeFileSync(markerPath, '')
+    // Already armed at either root → no-op.
+    if (resolveMarkerRead(repoRoot, '.checkpoint-required')) return
+    ensurePrimaryDir(repoRoot)
+    fs.writeFileSync(writeMarkerPath(repoRoot, '.checkpoint-required'), '')
   } catch {
     // Best-effort: marker creation failure leaves Phase 3b gate inactive
     // for this session.
@@ -494,31 +527,42 @@ const preflight_warnings = []
 // SessionStart orphan-clear (#146 P1-2 + P1-3). MUST run BEFORE arming so
 // a freshly armed .checkpoint-required isn't a cleanup candidate.
 //
-// For every TASK_SIGNAL_MARKERS member that exists with mtime <= prior
-// baseline: rm. Skipped entirely if no prior baseline (first session ever).
+// Dual-root sweep (.checkpoints/ migration): for every TASK_SIGNAL_MARKERS
+// member at EITHER root that exists with mtime <= prior baseline: rm at
+// THAT root (don't touch the other side; iterate independently).
+//
+// priorBaselineMtime is the MAX of primary and legacy baseline mtimes
+// (whichever is most recent). If neither baseline exists (first session
+// ever after migration), skipped entirely.
+//
 // Symlinks ignored (lstat-based; threat-model: honest-agent only).
 // ---------------------------------------------------------------------------
 let priorBaselineMtime = null
 if (sessionStartFlag) {
   try {
-    const claudeDir = path.join(REPO_ROOT, '.claude')
-    fs.mkdirSync(claudeDir, { recursive: true })
-    const baseline = path.join(claudeDir, '.session-baseline')
-    try {
-      const st = fs.lstatSync(baseline)
-      if (!st.isSymbolicLink()) priorBaselineMtime = st.mtimeMs
-    } catch {}
+    ensurePrimaryDir(REPO_ROOT)
+    // Read baseline mtime from BOTH roots; take the most recent.
+    for (const baselinePath of [primaryMarkerPath(REPO_ROOT, BASELINE_NAME), legacyMarkerPath(REPO_ROOT, BASELINE_NAME)]) {
+      try {
+        const st = fs.lstatSync(baselinePath)
+        if (st.isSymbolicLink()) continue
+        if (priorBaselineMtime === null || st.mtimeMs > priorBaselineMtime) {
+          priorBaselineMtime = st.mtimeMs
+        }
+      } catch {}
+    }
 
     if (priorBaselineMtime !== null) {
       for (const name of TASK_SIGNAL_MARKERS) {
-        const p = path.join(claudeDir, name)
-        try {
-          const st = fs.lstatSync(p)
-          if (st.isSymbolicLink()) continue
-          if (st.mtimeMs <= priorBaselineMtime) {
-            fs.rmSync(p, { force: true })
-          }
-        } catch {}
+        for (const p of bothMarkerPaths(REPO_ROOT, name)) {
+          try {
+            const st = fs.lstatSync(p)
+            if (st.isSymbolicLink()) continue
+            if (st.mtimeMs <= priorBaselineMtime) {
+              fs.rmSync(p, { force: true })
+            }
+          } catch {}
+        }
       }
     }
   } catch {
@@ -546,17 +590,19 @@ if (shouldArmBp001Checkpoint(activeEntries, new Date())) {
 // so a fresh `.checkpoint-required` armed for this session has mtime <=
 // baseline mtime (carve-out treats it as "armed at session start").
 //
+// .checkpoints/ migration: baseline written at PRIMARY only. Carve-out
+// reader takes the MAX of primary + legacy baseline mtimes, so a stale
+// .claude/.session-baseline with newer mtime would still be honored
+// (defensive). Once burn-in completes and fallback drops, only primary
+// is read.
+//
 // fs.utimesSync forces baseline mtime to Date.now() — guarantees ordering
 // against the arm above regardless of filesystem mtime resolution (P2-1).
-// The orphan-clear for stale TASK_SIGNAL_MARKERS members ran earlier
-// (before arming) using the *prior* baseline mtime as the staleness
-// threshold.
 // ---------------------------------------------------------------------------
 if (sessionStartFlag) {
   try {
-    const claudeDir = path.join(REPO_ROOT, '.claude')
-    fs.mkdirSync(claudeDir, { recursive: true })
-    const baseline = path.join(claudeDir, '.session-baseline')
+    ensurePrimaryDir(REPO_ROOT)
+    const baseline = writeMarkerPath(REPO_ROOT, BASELINE_NAME)
     fs.writeFileSync(baseline, '')
     const now = Date.now() / 1000
     fs.utimesSync(baseline, now, now)

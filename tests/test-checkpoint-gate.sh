@@ -25,7 +25,12 @@ TEST_HOME="$(cd -P "$TEST_HOME" && pwd)"
 # Session 1 (#86 PR-B): checkpoint-gate sources hooks/lib/command-classifier.sh
 # and resolves repo-root via git-common-dir. Initialize TEST_DIR as a git repo.
 git -C "$TEST_DIR" init -q 2>/dev/null
-MARKER_DIR="$TEST_DIR/.claude"
+# 2026-05-09 .checkpoints/ migration: hook now writes/arms at PRIMARY
+# (.checkpoints/) and reads at PRIMARY-then-LEGACY. Tests target the
+# primary path for write-side assertions and arming-state setup. Legacy
+# paths are still exercised by tests/test-checkpoints-migration.mjs.
+MARKER_DIR="$TEST_DIR/.checkpoints"
+LEGACY_MARKER_DIR="$TEST_DIR/.claude"
 PRE_REQ="$MARKER_DIR/.checkpoint-required"
 PRE_DONE="$MARKER_DIR/.pre-checkpoint-done"
 POST_REQ="$MARKER_DIR/.post-checkpoint-required"
@@ -38,7 +43,7 @@ cleanup() { rm -rf "$TEST_DIR" "$TEST_HOME"; }
 trap cleanup EXIT
 
 reset_state() {
-  rm -rf "$MARKER_DIR"
+  rm -rf "$MARKER_DIR" "$LEGACY_MARKER_DIR"
   mkdir -p "$MARKER_DIR"
 }
 
@@ -606,7 +611,11 @@ if [ -z "$PLAN_GATE" ]; then
   echo "  ⊘ Skipping composition tests — plan-gate.sh not found at $PLAN_GATE_REPO or $PLAN_GATE_USER"
 else
   reset_state
+  # .checkpoints/ migration: setup writes plan-marker at LEGACY (.claude/) to
+  # exercise the dual-root fallback read; checkpoint-gate's reset_state no
+  # longer mkdirs the legacy dir, so create it here.
   PLAN_MARKER="$TEST_DIR/.claude/.plan-approval-pending"
+  mkdir -p "$TEST_DIR/.claude"
   touch "$PRE_REQ"
   touch "$PLAN_MARKER"
 
@@ -673,7 +682,9 @@ echo "--- #146 B1: block-reason includes ABSOLUTE marker path ---"
 reset_state
 touch "$PRE_REQ"
 b1_out=$(echo "$(mock_json 'Edit')" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null || true)
-B1_EXPECTED="$TEST_DIR/.claude/.pre-checkpoint-done"
+# .checkpoints/ migration: block reason embeds the PRIMARY write path so
+# the agent writes to the new location.
+B1_EXPECTED="$TEST_DIR/.checkpoints/.pre-checkpoint-done"
 if echo "$b1_out" | grep -qF "$B1_EXPECTED"; then
   echo "  ✓ B1.pre. _block_pre reason embeds absolute pre-checkpoint path"
   ((passed++))
@@ -690,27 +701,31 @@ else
   echo "  ✗ B1.pre defensive: trigger=$([ -f "$PRE_REQ" ] && echo Y || echo N) PRE_DONE=$PRE_DONE expected=$B1_EXPECTED"
   ((failed++))
 fi
-# Plan-pending block reason also gets absolute path
+# Plan-pending block reason also gets absolute path. Setup writes the
+# legacy-path marker (exercises fallback read); block message references
+# the PRIMARY write path (where the agent should put any new marker).
 reset_state
 touch "$PRE_REQ"
-PLAN_MARKER="$TEST_DIR/.claude/.plan-approval-pending"
-touch "$PLAN_MARKER"
+PLAN_MARKER_LEGACY="$TEST_DIR/.claude/.plan-approval-pending"
+PLAN_MARKER_PRIMARY="$TEST_DIR/.checkpoints/.plan-approval-pending"
+mkdir -p "$TEST_DIR/.claude"
+touch "$PLAN_MARKER_LEGACY"
 # A Bash command targeting the pre-checkpoint marker fires the
 # plan-pending block (cross-gate invariant). Reason should embed
-# absolute plan-pending path.
+# the absolute PRIMARY plan-pending path.
 plan_block_json=$(jq -nc \
-  --arg cmd "echo block > $TEST_DIR/.claude/.pre-checkpoint-done" \
+  --arg cmd "echo block > $PRE_DONE" \
   --arg cwd "$TEST_DIR" \
   '{tool_name: "Bash", cwd: $cwd, tool_input: {command: $cmd}}')
 plan_out=$(echo "$plan_block_json" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null || true)
-if echo "$plan_out" | grep -qF "$PLAN_MARKER"; then
-  echo "  ✓ B1.plan. _block_plan_pending reason embeds absolute plan-pending path"
+if echo "$plan_out" | grep -qF "$PLAN_MARKER_PRIMARY"; then
+  echo "  ✓ B1.plan. _block_plan_pending reason embeds absolute plan-pending path (primary)"
   ((passed++))
 else
-  echo "  ✗ B1.plan. expected absolute path '$PLAN_MARKER' in: $plan_out"
+  echo "  ✗ B1.plan. expected absolute path '$PLAN_MARKER_PRIMARY' in: $plan_out"
   ((failed++))
 fi
-rm -f "$PLAN_MARKER"
+rm -f "$PLAN_MARKER_LEGACY"
 
 # ============================================================================
 echo ""

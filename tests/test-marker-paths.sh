@@ -54,17 +54,32 @@ echo "Constants:"
 assert_eq "PRIMARY_MARKER_DIR is .checkpoints" ".checkpoints" "$PRIMARY_MARKER_DIR"
 assert_eq "LEGACY_MARKER_DIR is .claude" ".claude" "$LEGACY_MARKER_DIR"
 assert_eq "BASELINE_NAME is .session-baseline" ".session-baseline" "$BASELINE_NAME"
-assert_eq "TASK_SIGNAL_MARKERS count is 5" "5" "${#TASK_SIGNAL_MARKERS[@]}"
-assert_eq "ALL_MARKERS count is 6" "6" "${#ALL_MARKERS[@]}"
+assert_eq "TASK_SIGNAL_MARKERS count is 3 (em-recall carve-out class)" "3" "${#TASK_SIGNAL_MARKERS[@]}"
+assert_eq "CHECKPOINT_CLEANUP_MARKERS count is 4 (push-gate cleanup class)" "4" "${#CHECKPOINT_CLEANUP_MARKERS[@]}"
+assert_eq "ALL_MIGRATED_MARKERS count is 6 (full migration scope)" "6" "${#ALL_MIGRATED_MARKERS[@]}"
 
-# Spot-check membership (any one acts as a contract sentinel).
+# Spot-check membership of each set.
 case " ${TASK_SIGNAL_MARKERS[*]} " in
   *" .checkpoint-required "*) pass "TASK_SIGNAL_MARKERS contains .checkpoint-required" ;;
   *) fail "TASK_SIGNAL_MARKERS contains .checkpoint-required" "missing" ;;
 esac
-case " ${ALL_MARKERS[*]} " in
-  *" .session-baseline "*) pass "ALL_MARKERS contains .session-baseline" ;;
-  *) fail "ALL_MARKERS contains .session-baseline" "missing" ;;
+case " ${TASK_SIGNAL_MARKERS[*]} " in
+  *" .pre-checkpoint-done "*)
+    fail "TASK_SIGNAL_MARKERS does NOT contain .pre-checkpoint-done" "leaked into carve-out class" ;;
+  *) pass "TASK_SIGNAL_MARKERS does NOT contain .pre-checkpoint-done" ;;
+esac
+case " ${CHECKPOINT_CLEANUP_MARKERS[*]} " in
+  *" .pre-checkpoint-done "*) pass "CHECKPOINT_CLEANUP_MARKERS contains .pre-checkpoint-done" ;;
+  *) fail "CHECKPOINT_CLEANUP_MARKERS contains .pre-checkpoint-done" "missing" ;;
+esac
+case " ${CHECKPOINT_CLEANUP_MARKERS[*]} " in
+  *" .plan-approval-pending "*)
+    fail "CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approval-pending" "leaked into push cleanup" ;;
+  *) pass "CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approval-pending" ;;
+esac
+case " ${ALL_MIGRATED_MARKERS[*]} " in
+  *" .session-baseline "*) pass "ALL_MIGRATED_MARKERS contains .session-baseline" ;;
+  *) fail "ALL_MIGRATED_MARKERS contains .session-baseline" "missing" ;;
 esac
 
 echo
