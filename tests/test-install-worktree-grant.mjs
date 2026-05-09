@@ -29,7 +29,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { execSync } from 'child_process'
+import { execSync, spawnSync } from 'child_process'
 import assert from 'assert'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
@@ -263,6 +263,54 @@ test('re-run idempotence: second install does not duplicate the grant', () => {
   const dirs2 = additionalDirsOf(ws2)
   assert.strictEqual(countGrantsFor(dirs2, f.canonicalCheckpoints), 1, 'second install: still exactly one grant entry (idempotent)')
   assert.deepStrictEqual(dirs1, dirs2, 'array contents identical across re-runs')
+})
+
+test('concurrent installs do not crash on shared atomic temp path', () => {
+  // Codex PR-level review (PR #214) found the fixed `.tmp` filename in
+  // writeJSONAtomic was not multi-writer safe: 5 concurrent installers
+  // against the same worktree settings.local.json produced ENOENT on
+  // rename. Fix uses pid + random in the temp filename. This regression
+  // launches N parallel installers via a tiny driver script (the test
+  // body is sync; the driver uses Promise.all to truly parallelize).
+  const f = freshFixture('concurrent')
+  fs.mkdirSync(path.dirname(f.worktreeSettingsLocal), { recursive: true })
+  const manualEntry = '/some/manual/dir'
+  fs.writeFileSync(
+    f.worktreeSettingsLocal,
+    JSON.stringify({ permissions: { additionalDirectories: [manualEntry] } }, null, 2)
+  )
+
+  const N = 5
+  const driver = path.join(f.root, 'concurrent-driver.mjs')
+  fs.writeFileSync(driver, [
+    `import { spawn } from 'child_process'`,
+    `const procs = Array.from({ length: ${N} }, () => new Promise((resolve) => {`,
+    `  const p = spawn(${JSON.stringify(process.execPath)}, [${JSON.stringify(INSTALL)}, '--tool', 'claude-code', '--project', ${JSON.stringify(f.worktreeRoot)}], {`,
+    `    cwd: ${JSON.stringify(f.worktreeRoot)},`,
+    `    env: { ...process.env, HOME: ${JSON.stringify(tmpHome)} },`,
+    `    stdio: ['ignore', 'pipe', 'pipe'],`,
+    `  })`,
+    `  let stderr = ''`,
+    `  p.stderr.on('data', d => { stderr += d })`,
+    `  p.on('exit', code => resolve({ code, stderr }))`,
+    `}))`,
+    `const results = await Promise.all(procs)`,
+    `console.log(JSON.stringify(results))`,
+  ].join('\n'))
+
+  const out = execSync(`node "${driver}"`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const results = JSON.parse(out.trim())
+  for (const r of results) {
+    assert.strictEqual(r.code, 0, `concurrent install exited ${r.code}; stderr=${r.stderr}`)
+  }
+  // Final file invariants: manual entry preserved + exactly one grant.
+  const ws = readSettings(f.worktreeSettingsLocal)
+  const dirs = additionalDirsOf(ws)
+  assert.ok(dirs.includes(manualEntry), 'manual entry must be preserved across concurrent installs')
+  assert.strictEqual(
+    countGrantsFor(dirs, f.canonicalCheckpoints), 1,
+    `exactly one grant after ${N} concurrent installs; got ${dirs.length} entries: ${JSON.stringify(dirs)}`
+  )
 })
 
 // ---------------------------------------------------------------------------

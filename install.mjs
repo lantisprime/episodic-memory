@@ -559,11 +559,35 @@ function shellQuote(s) {
   return `'${s.replace(/'/g, "'\\''")}'`
 }
 
+// Per-writer unique temp suffix. The fixed `.tmp` form is not safe under
+// concurrent installer runs against the same target file: writer A's
+// rename can race writer B's write, producing ENOENT on rename. Codex
+// PR-level review of #214 reproduced this with 5 concurrent installers
+// against the same worktree settings.local.json. process.pid + random
+// is unique enough across local installer processes.
+function uniqueTmpPath(filePath) {
+  return `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+}
+
+// Best-effort sweep of the legacy fixed-temp orphan `<filePath>.tmp`. With
+// unique-temp names (uniqueTmpPath), no live writer uses this exact path, so
+// removing it is safe and matches the prior contract that crashed-prior-run
+// orphans don't accumulate (test-install-hooks.sh T9a).
+function sweepLegacyOrphanTmp(filePath) {
+  try { fs.unlinkSync(filePath + '.tmp') } catch {}
+}
+
 function writeJSONAtomic(filePath, obj) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  const tmp = filePath + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8')
-  fs.renameSync(tmp, filePath)
+  const tmp = uniqueTmpPath(filePath)
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8')
+    fs.renameSync(tmp, filePath)
+    sweepLegacyOrphanTmp(filePath)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch {}
+    throw e
+  }
 }
 
 function writeJSONAtomicIfChanged(filePath, obj) {
@@ -572,9 +596,15 @@ function writeJSONAtomicIfChanged(filePath, obj) {
     return false
   }
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  const tmp = filePath + '.tmp'
-  fs.writeFileSync(tmp, next, 'utf8')
-  fs.renameSync(tmp, filePath)
+  const tmp = uniqueTmpPath(filePath)
+  try {
+    fs.writeFileSync(tmp, next, 'utf8')
+    fs.renameSync(tmp, filePath)
+    sweepLegacyOrphanTmp(filePath)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch {}
+    throw e
+  }
   return true
 }
 
