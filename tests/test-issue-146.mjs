@@ -55,7 +55,7 @@ function mkRepo(label) {
   execSync(`git -C "${d}" config user.name t`)
   fs.writeFileSync(path.join(d, 'README.md'), 'x\n')
   execSync(`git -C "${d}" add . && git -C "${d}" commit -q -m init`)
-  fs.mkdirSync(path.join(d, '.claude'), { recursive: true })
+  fs.mkdirSync(path.join(d, '.checkpoints'), { recursive: true })
   return d
 }
 
@@ -120,13 +120,13 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 // SessionStart hook has shipped on this machine).
 {
   const d = mkRepo('1-1'); cleanupDirs.push(d)
-  fs.writeFileSync(path.join(d, '.claude', '.checkpoint-required'), '')
+  fs.writeFileSync(path.join(d, '.checkpoints', '.checkpoint-required'), '')
   const r = runGateStop(d)
   if (isBlock(r) && r.status === 0) ok('1.1: armed + no baseline → block (back-compat)')
   else bad('1.1: armed + no baseline → block', `got: ${JSON.stringify(r)}`)
 
   // Defensive: marker still present after gate runs
-  if (fs.existsSync(path.join(d, '.claude', '.checkpoint-required')))
+  if (fs.existsSync(path.join(d, '.checkpoints', '.checkpoint-required')))
     ok('1.1 (defensive): marker still present at check time')
   else bad('1.1 defensive', 'marker disappeared')
 }
@@ -134,7 +134,7 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 // 1.2 baseline + all-stale → allow (carve-out fires)
 {
   const d = mkRepo('1-2'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   // Make checkpoint-required older
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
@@ -148,7 +148,7 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 // 1.3 baseline + plan-pending newer than baseline → block
 {
   const d = mkRepo('1-3'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
@@ -166,7 +166,7 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 // 1.4 .checkpoint-required re-armed mid-session (newer than baseline) → block
 {
   const d = mkRepo('1-4'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
   const preReq = path.join(claudeDir, '.checkpoint-required')
   fs.writeFileSync(preReq, '')
@@ -179,7 +179,7 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 // 1.5 .post-checkpoint-required newer than baseline → block
 {
   const d = mkRepo('1-5'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
@@ -194,7 +194,7 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 // 1.6 plan-pending OLDER than baseline (orphan) → allow
 {
   const d = mkRepo('1-6'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
   const planP = path.join(claudeDir, '.plan-approval-pending')
@@ -213,7 +213,7 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
 // 2.1 first run creates .session-baseline
 {
   const d = mkRepo('2-1'); cleanupDirs.push(d)
-  const baseline = path.join(d, '.claude', '.session-baseline')
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
   if (fs.existsSync(baseline)) bad('2.1 setup', 'baseline pre-existed')
   const r = runSessionStart(d)
   if (r.status === 0 && fs.existsSync(baseline)) ok('2.1: --session-start creates .session-baseline')
@@ -224,7 +224,7 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
 {
   const d = mkRepo('2-2'); cleanupDirs.push(d)
   runSessionStart(d)
-  const baseline = path.join(d, '.claude', '.session-baseline')
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
   const m1 = fs.statSync(baseline).mtimeMs
   // Force temporal separation
   setMtime(baseline, m1 - 60_000)
@@ -239,8 +239,8 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
 {
   const d = mkRepo('2-3'); cleanupDirs.push(d)
   runSessionStart(d) // creates baseline
-  const baseline = path.join(d, '.claude', '.session-baseline')
-  const planP = path.join(d, '.claude', '.plan-approval-pending')
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
+  const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
   // Force temporal separation: roll back baseline by 60s so we have
   // unambiguous past/future zones to test against.
   setMtime(baseline, Date.now() - 60_000)
@@ -264,8 +264,8 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
 {
   const d = mkRepo('2-4'); cleanupDirs.push(d)
   runSessionStart(d) // baseline at T0
-  const baseline = path.join(d, '.claude', '.session-baseline')
-  const planP = path.join(d, '.claude', '.plan-approval-pending')
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
+  const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
   const baselineM = fs.statSync(baseline).mtimeMs
   fs.writeFileSync(planP, '')
   setMtime(planP, baselineM + 5_000) // newer than prior baseline
@@ -278,7 +278,7 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
 // 2.5 first-ever run with leftover plan-pending leaves it alone
 {
   const d = mkRepo('2-5'); cleanupDirs.push(d)
-  const planP = path.join(d, '.claude', '.plan-approval-pending')
+  const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
   fs.writeFileSync(planP, '')
   // No prior baseline exists.
   runSessionStart(d)
@@ -298,7 +298,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 {
   const d = mkRepo('3-1'); cleanupDirs.push(d)
   runSessionStart(d) // creates baseline
-  const baseline = path.join(d, '.claude', '.session-baseline')
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
   // Roll back baseline so we have a clear "older than" zone
   setMtime(baseline, Date.now() - 60_000)
   const baselineM = fs.statSync(baseline).mtimeMs
@@ -307,7 +307,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
     '.checkpoint-required',
     '.post-checkpoint-required',
     '.plan-approval-pending'
-  ].map(m => path.join(d, '.claude', m))
+  ].map(m => path.join(d, '.checkpoints', m))
   for (const m of markers) {
     fs.writeFileSync(m, '')
     setMtime(m, baselineM - 5_000)
@@ -328,13 +328,13 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 {
   const d = mkRepo('3-2'); cleanupDirs.push(d)
   runSessionStart(d)
-  const baseline = path.join(d, '.claude', '.session-baseline')
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
   const baselineM = fs.statSync(baseline).mtimeMs
   const markers = [
     '.checkpoint-required',
     '.post-checkpoint-required',
     '.plan-approval-pending'
-  ].map(m => path.join(d, '.claude', m))
+  ].map(m => path.join(d, '.checkpoints', m))
   for (const m of markers) {
     fs.writeFileSync(m, '')
     setMtime(m, baselineM + 5_000) // in-flight (mid-session)
@@ -351,13 +351,13 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 // accidental symlinks (e.g. workspace setups), not adversarial.
 {
   const d = mkRepo('3-3'); cleanupDirs.push(d)
-  fs.writeFileSync(path.join(d, '.claude', '.checkpoint-required'), '')
+  fs.writeFileSync(path.join(d, '.checkpoints', '.checkpoint-required'), '')
   // Create a real file elsewhere with very-old mtime, then symlink
   // .session-baseline to it.
-  const realFile = path.join(d, '.claude', 'real-old-file')
+  const realFile = path.join(d, '.checkpoints', 'real-old-file')
   fs.writeFileSync(realFile, '')
   setMtime(realFile, Date.now() - 365 * 24 * 60 * 60 * 1000) // 1 year ago
-  fs.symlinkSync(realFile, path.join(d, '.claude', '.session-baseline'))
+  fs.symlinkSync(realFile, path.join(d, '.checkpoints', '.session-baseline'))
   // Without symlink defense, lstat(real) would say baseline is older than
   // markers → carve-out fires. With defense: symlink rejected → carve-out
   // does not fire → block.
@@ -373,7 +373,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 // fails the carve-out closed, symmetric with baseline.
 {
   const d = mkRepo('3-3b-post'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
@@ -388,7 +388,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 }
 {
   const d = mkRepo('3-3b-checkpoint'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
   // Symlinked .checkpoint-required newer than baseline. The gate-stop
   // path requires preReq to exist (real or symlink) before evaluating
@@ -404,7 +404,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 }
 {
   const d = mkRepo('3-3b-plan'); cleanupDirs.push(d)
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
@@ -435,7 +435,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 // 3.5 stop-gate block reason still parses cleanly.
 {
   const d = mkRepo('3-5'); cleanupDirs.push(d)
-  fs.writeFileSync(path.join(d, '.claude', '.checkpoint-required'), '')
+  fs.writeFileSync(path.join(d, '.checkpoints', '.checkpoint-required'), '')
   const r = runGateStop(d)
   let reason = null
   try { reason = JSON.parse(r.stdout).reason } catch {}
@@ -468,9 +468,14 @@ function mkE2EHome() {
   const scripts = path.join(home, '.episodic-memory', 'scripts')
   fs.mkdirSync(path.join(scripts, 'lib'), { recursive: true })
   fs.copyFileSync(EM_RECALL, path.join(scripts, 'em-recall.mjs'))
-  // em-recall imports scripts/lib/local-dir.mjs at module load
-  const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', 'local-dir.mjs')
-  fs.copyFileSync(libSrc, path.join(scripts, 'lib', 'local-dir.mjs'))
+  // em-recall imports scripts/lib/{local-dir,marker-paths}.mjs at module load.
+  // .checkpoints/ migration: marker-paths.mjs ships alongside local-dir.mjs;
+  // omit it and em-recall fails to load (same fix as test-stop-gate.sh's
+  // mk_fake_home).
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs']) {
+    const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
+    fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
+  }
   // Empty episodes dir so shouldArmBp001Checkpoint returns false
   fs.mkdirSync(path.join(home, '.episodic-memory', 'episodes'), { recursive: true })
   return home
@@ -498,7 +503,7 @@ function runHook(hookPath, inputJson, cwd, home) {
 {
   const d = mkRepo('4-1'); cleanupDirs.push(d)
   const home = mkE2EHome()
-  const claudeDir = path.join(d, '.claude')
+  const claudeDir = path.join(d, '.checkpoints')
   const baseline = path.join(claudeDir, '.session-baseline')
   const preReq = path.join(claudeDir, '.checkpoint-required')
   const postReq = path.join(claudeDir, '.post-checkpoint-required')
@@ -573,8 +578,8 @@ function runHook(hookPath, inputJson, cwd, home) {
 {
   const d = mkRepo('4-2'); cleanupDirs.push(d)
   const home = mkE2EHome()
-  const preReq = path.join(d, '.claude', '.checkpoint-required')
-  const preDone = path.join(d, '.claude', '.pre-checkpoint-done')
+  const preReq = path.join(d, '.checkpoints', '.checkpoint-required')
+  const preDone = path.join(d, '.checkpoints', '.pre-checkpoint-done')
   fs.writeFileSync(preReq, '') // armed
   // pre-done absent (empty) → gate must block
   const editInput = JSON.stringify({
@@ -608,8 +613,8 @@ function runHook(hookPath, inputJson, cwd, home) {
 {
   const d = mkRepo('4-3'); cleanupDirs.push(d)
   const home = mkE2EHome()
-  const preReq = path.join(d, '.claude', '.checkpoint-required')
-  const preDone = path.join(d, '.claude', '.pre-checkpoint-done')
+  const preReq = path.join(d, '.checkpoints', '.checkpoint-required')
+  const preDone = path.join(d, '.checkpoints', '.pre-checkpoint-done')
   fs.writeFileSync(preReq, '')
   // preDone absent → gate's marker_write allowlist condition met
   const writeInput = JSON.stringify({
