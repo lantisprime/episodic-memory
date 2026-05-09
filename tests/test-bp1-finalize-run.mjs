@@ -539,7 +539,11 @@ tap('G4 State C variant 2 (disk-mismatch): valid sig + mutated covered episode â
   fs.writeFileSync(targetPath, text)
   const r = spawnOrchestrator('finalize-recover', ['--project', project, '--run-id', runId], { callerCwd: project, homeDir: home })
   assert.equal(r.status, 4)
-  assert.match(r.stderr, /do not match manifest|State C/)
+  // FU from codex code-review round 1 (reply 20260509-052741-...-ec79): require
+  // the disk-mismatch path explicitly so a future signature-failure short-
+  // circuit cannot vacuously satisfy this named test.
+  assert.match(r.stderr, /on-disk records do not match manifest/)
+  assert.doesNotMatch(r.stderr, /signature invalid/)
   assert.equal(readRunState(project, runId).state, 'active')
 })
 
