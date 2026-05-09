@@ -348,13 +348,23 @@ function initRun(args) {
 // §D test-hook triple-guard: prod cannot fire even if env var is set, because
 // (a) NODE_ENV != 'test' guard, (b) explicit allow-list env, (c) projectRoot
 // must live under os.tmpdir(). All three required.
+//
+// macOS realpath note (codex round-2 FU-2): validateFinalizeArgs realpaths
+// `--project`, which on macOS resolves `/var/folders/...` → `/private/var/...`.
+// Comparing against a non-realpathed os.tmpdir() would never match, so test
+// fixtures using mkdtempSync(os.tmpdir()) wouldn't trigger the abort hook.
+// Realpath the tmpdir once at module load so both sides match.
+const TMPDIR_REAL = (() => {
+  try { return fs.realpathSync(os.tmpdir()) } catch { return os.tmpdir() }
+})()
+
 function maybeAbortHook(stepNum, projectRoot) {
   const abortStep = process.env.BP1_TEST_ABORT_AFTER_FINALIZE_STEP
   if (
     abortStep
     && process.env.NODE_ENV === 'test'
     && process.env.BP1_TEST_ALLOW_FINALIZE_ABORT === '1'
-    && projectRoot.startsWith(os.tmpdir())
+    && projectRoot.startsWith(TMPDIR_REAL)
     && Number(abortStep) === stepNum
   ) {
     throw new Error(`BP1_TEST_ABORT_AFTER_FINALIZE_STEP=${abortStep} fired (test-only)`)
@@ -478,7 +488,13 @@ function decisionLogFence(runId, projectRoot, runKey32B) {
   const allEpisodes = new Map() // id → {fm, body, canonicalSha}
   for (const store of stores) {
     if (!fs.existsSync(store)) continue
-    for (const f of fs.readdirSync(store)) {
+    // Sort directory entries for deterministic iteration. Without this, the
+    // order in which two pre-decisions are evaluated depends on filesystem
+    // ordering — codex round-2 FU-1 showed `post-is-itself-pre` evidence
+    // could be shadowed by `pre-decision-no-matching-post` when the bad
+    // post was iterated before the original pre. Safety outcome is identical
+    // (refusal either way); this just makes evidence reason deterministic.
+    for (const f of fs.readdirSync(store).sort()) {
       if (!f.endsWith('.md')) continue
       const fp = path.join(store, f)
       let buf
