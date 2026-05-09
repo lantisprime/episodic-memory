@@ -335,6 +335,112 @@ if (tool === 'claude-code' || tool === 'all') {
 }
 
 // ---------------------------------------------------------------------------
+// 2d. Worktree session permission grant (issue #213).
+//
+// In a linked-worktree session, Claude Code's working-directory permission
+// scope is the worktree path. But Rule 18 hooks read/write markers at the
+// CANONICAL repo's `.checkpoints/` (lesson `20260509-044449-...-7836` —
+// markers MUST stay canonical so stop-gate / checkpoint-gate / em-recall
+// can find them). The mismatch surfaces as recurring "Path is outside
+// allowed working directories" prompts on every Rule 18 marker access.
+//
+// Fix: when projectDir is a linked worktree of a canonical repo, append
+// the canonical repo's `.checkpoints/` directory to
+// `<projectDir>/.claude/settings.local.json` `permissions.additionalDirectories`
+// (Claude Code's documented working-directory extension; see
+// https://code.claude.com/docs/en/permissions).
+//
+// Design notes (folded from Codex round-1 plan-review reply
+// `20260509-073135-...-4fb5`):
+//   - Target = settings.local.json (machine-specific; absolute paths
+//     belong here, not shared settings.json — Codex finding A).
+//   - Worktree detection = realpath(show-toplevel) !== realpath(canonical)
+//     using existing resolveRepoRoot primitive (Codex finding D).
+//   - Scope = `.checkpoints/` only; do NOT auto-grant `.episodic-memory/`
+//     or other hook-managed paths without a separate Claude-tool caller
+//     (Codex finding C).
+//   - Existing/future worktrees: rerun installer per worktree (Codex
+//     finding E; no auto-detect of new worktrees).
+//   - I-1' (no-prompt at runtime) is NOT locally verifiable — manual
+//     acceptance artifact only (Codex finding B).
+// ---------------------------------------------------------------------------
+if (tool === 'claude-code' || tool === 'all') {
+  const { execSync } = await import('child_process')
+  const { resolveRepoRoot } = await import(
+    new URL('./scripts/lib/local-dir.mjs', import.meta.url).href
+  )
+
+  // Realpath if the path exists, else path.resolve fallback. Used both for
+  // de-dup keying and for canonicalizing the grant we write.
+  const normalizePathForGrant = (p) => {
+    try { return fs.realpathSync(p) } catch { return path.resolve(p) }
+  }
+
+  // Detect linked worktree by comparing the git context's working tree
+  // (--show-toplevel) against the canonical repo root (main checkout).
+  // Returns { worktreeRoot, canonicalRoot } when distinct; null when
+  // projectDir is the main repo, not a git repo, or git is unavailable.
+  const detectLinkedWorktree = (cwd) => {
+    let top
+    try {
+      top = execSync('git rev-parse --show-toplevel', {
+        cwd,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).toString().trim()
+    } catch {
+      return null
+    }
+    if (!top) return null
+    const canonical = resolveRepoRoot(cwd)
+    if (!canonical) return null
+    const topReal = normalizePathForGrant(top)
+    const canonicalReal = normalizePathForGrant(canonical)
+    if (topReal === canonicalReal) return null
+    return { worktreeRoot: topReal, canonicalRoot: canonicalReal }
+  }
+
+  const wt = detectLinkedWorktree(projectDir)
+  if (wt) {
+    const checkpointsDir = path.join(wt.canonicalRoot, '.checkpoints')
+    const grantPath = normalizePathForGrant(checkpointsDir)
+    const settingsLocalPath = path.join(projectDir, '.claude', 'settings.local.json')
+
+    let localSettings = {}
+    let parseFailed = false
+    if (fs.existsSync(settingsLocalPath)) {
+      try {
+        localSettings = JSON.parse(fs.readFileSync(settingsLocalPath, 'utf8'))
+      } catch (e) {
+        // Refuse to silently overwrite malformed user JSON. Surface and skip.
+        console.log(`Error: ${settingsLocalPath} is not valid JSON (${e.message}); skipping additionalDirectories grant.`)
+        parseFailed = true
+      }
+    }
+
+    if (!parseFailed) {
+      if (!localSettings.permissions || typeof localSettings.permissions !== 'object') {
+        localSettings.permissions = {}
+      }
+      if (!Array.isArray(localSettings.permissions.additionalDirectories)) {
+        localSettings.permissions.additionalDirectories = []
+      }
+      // De-dup by realpath (handles symlink/literal aliasing). Preserve
+      // original entries verbatim — only skip if any existing entry
+      // realpath-matches the new grant.
+      const existingReal = new Set(
+        localSettings.permissions.additionalDirectories.map(normalizePathForGrant)
+      )
+      if (!existingReal.has(grantPath)) {
+        localSettings.permissions.additionalDirectories.push(grantPath)
+        writeJSONAtomic(settingsLocalPath, localSettings)
+        console.log(`Granted worktree permission for canonical .checkpoints/ in ${settingsLocalPath} (issue #213).`)
+      }
+      // Already granted — silent no-op for re-run idempotence.
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 3. Install tool-specific instructions
 // ---------------------------------------------------------------------------
 const tools = tool === 'all' ? ['claude-code', 'cursor', 'codex', 'windsurf'] : [tool]
