@@ -185,11 +185,15 @@ tap('drift: changing scripts/lib/bp1-probe.mjs content changes artifact_version_
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bp1-probe-drift-'))
   execFileSync('git', ['init', '-q'], { cwd: tmp })
   fs.mkdirSync(path.join(tmp, 'scripts', 'lib'), { recursive: true })
-  // Copy the real builder + manifest lib + probe to the tmp project
+  // Copy the real builder + manifest lib + probe to the tmp project.
+  // bp1-manifest.mjs transitively imports bp1-frontmatter.mjs + bp1-canonicalize.mjs
+  // (added in PR-1c-B Slice 2 commits 1/5 + 2/5); fixture must mirror that.
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'))
-  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'bp1-manifest.mjs'),
-    path.join(tmp, 'scripts', 'lib', 'bp1-manifest.mjs'))
+  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+    fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
+      path.join(tmp, 'scripts', 'lib', lib))
+  }
   // Initial probe content
   fs.writeFileSync(path.join(tmp, 'scripts', 'lib', 'bp1-probe.mjs'),
     'export function probeScheduledTasksCapability(){return{capability:"fallback"}}\n')
@@ -213,8 +217,10 @@ tap('drift: changing scripts/lib/bp1-sweep.mjs content changes artifact_version_
   fs.mkdirSync(path.join(tmp, 'scripts', 'lib'), { recursive: true })
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'))
-  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'bp1-manifest.mjs'),
-    path.join(tmp, 'scripts', 'lib', 'bp1-manifest.mjs'))
+  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+    fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
+      path.join(tmp, 'scripts', 'lib', lib))
+  }
   fs.writeFileSync(path.join(tmp, 'scripts', 'lib', 'bp1-sweep.mjs'),
     'export function scanForCandidates(){return{path_a_candidates:[],path_b_candidates:[],counts:{}}}\n')
   const a = JSON.parse(execFileSync('node',
@@ -234,8 +240,10 @@ tap('drift: a non-bp1 lib file (e.g. scripts/lib/foo.mjs) is NOT in the manifest
   fs.mkdirSync(path.join(tmp, 'scripts', 'lib'), { recursive: true })
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'))
-  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'bp1-manifest.mjs'),
-    path.join(tmp, 'scripts', 'lib', 'bp1-manifest.mjs'))
+  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+    fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
+      path.join(tmp, 'scripts', 'lib', lib))
+  }
   fs.writeFileSync(path.join(tmp, 'scripts', 'lib', 'foo.mjs'), '// not bp1\n')
   const r = JSON.parse(execFileSync('node',
     [path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'), '--project', tmp, '--json'],

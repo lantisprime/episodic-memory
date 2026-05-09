@@ -280,3 +280,371 @@ export function canonicalProjectRoot(cwd = process.cwd()) {
     return toplevel
   }
 }
+
+// ===========================================================================
+// Run-completion manifest (RFC-004 §738-789, M1)
+//
+// Distinct from the artifact-version manifest above. The run-completion
+// manifest is signed by the verify-key (NOT the per-run key) at finalize-run
+// and verified at replay. Carries `manifest_schema_version: "1.0"` as a
+// REQUIRED top-level signed field (round-2 N3 mod).
+//
+// All run-manifest functions are pure (caller-supplied records); disk I/O
+// for collecting records lives in the orchestrator's finalize-run step (or
+// future collectEpisodeRecords helper, Session B).
+// ===========================================================================
+
+export const MANIFEST_SCHEMA_VERSION = '1.0'
+
+const RUN_ID_RE = /^[a-z0-9-]+$/
+
+/**
+ * Validate a run_id is shape-safe before any path-join (D1 fix).
+ * @param {string} runId
+ * @throws {Error} if shape mismatch.
+ */
+export function assertRunIdShape(runId) {
+  if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) {
+    throw new Error(`invalid run_id shape: ${JSON.stringify(runId)}`)
+  }
+}
+
+/**
+ * Strict project-root resolver for finalize/replay paths (D3 fix).
+ * Unlike canonicalProjectRoot above, does NOT fall back to the raw toplevel
+ * when realpath fails — throws ProjectRootResolutionFailed instead.
+ *
+ * @param {string} [cwd]
+ * @returns {string} canonical realpath of the git toplevel
+ * @throws {Error} when not in a git repo OR realpath fails
+ */
+export function canonicalProjectRootStrict(cwd = process.cwd()) {
+  let toplevel
+  try {
+    toplevel = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch (e) {
+    const err = new Error(`ProjectRootResolutionFailed: not a git repo at ${cwd}: ${e.message}`)
+    err.code = 'ProjectRootResolutionFailed'
+    throw err
+  }
+  if (!toplevel) {
+    const err = new Error(`ProjectRootResolutionFailed: empty toplevel at ${cwd}`)
+    err.code = 'ProjectRootResolutionFailed'
+    throw err
+  }
+  try {
+    return fs.realpathSync(toplevel)
+  } catch (e) {
+    const err = new Error(`ProjectRootResolutionFailed: realpath failed for ${toplevel}: ${e.message}`)
+    err.code = 'ProjectRootResolutionFailed'
+    throw err
+  }
+}
+
+/**
+ * Compute the records-root: sha256 of sorted-by-episode_id concat of
+ * (episode_id || canonical_sha256 || body_sha256 || hmac_signature) for all
+ * records. Empty records → sha256(""). Order-stable (B2 / I5).
+ *
+ * @param {Array<{episode_id:string, canonical_sha256:string, body_sha256:string, hmac_signature:string}>} records
+ * @returns {string} hex sha256
+ */
+export function computeRecordsRoot(records) {
+  if (!Array.isArray(records)) {
+    throw new TypeError('records must be an array')
+  }
+  if (records.length === 0) {
+    return crypto.createHash('sha256').update('').digest('hex')
+  }
+  const sorted = records.slice().sort((a, b) => {
+    if (a.episode_id < b.episode_id) return -1
+    if (a.episode_id > b.episode_id) return 1
+    return 0
+  })
+  const h = crypto.createHash('sha256')
+  for (const r of sorted) {
+    if (!r || typeof r !== 'object') {
+      throw new TypeError('records must contain objects')
+    }
+    for (const f of ['episode_id', 'canonical_sha256', 'body_sha256', 'hmac_signature']) {
+      if (typeof r[f] !== 'string') {
+        throw new TypeError(`record missing string field: ${f}`)
+      }
+      h.update(r[f])
+    }
+  }
+  return h.digest('hex')
+}
+
+/**
+ * Build the run-completion manifest payload.
+ *
+ * `manifest_schema_version: "1.0"` is REQUIRED top-level signed field (N3).
+ * The payload is fully self-describing: includes runId, projectRoot,
+ * terminalState, finalizedAt (ISO-8601 UTC, RFC-004 line 758), episodeCount,
+ * episodes_records_root, and per_episode_records.
+ *
+ * @param {Array} records
+ * @param {string} runId
+ * @param {string} projectRoot — canonical realpath
+ * @param {'complete'|'aborted'|'abandoned'|'archived'} terminalState
+ * @param {string} finalizedAt — ISO-8601 UTC
+ * @param {number} episodeCount — must equal records.length
+ * @returns {object} payload
+ */
+export function buildManifestPayload(
+  records, runId, projectRoot, terminalState, finalizedAt, episodeCount,
+) {
+  assertRunIdShape(runId)
+  if (typeof projectRoot !== 'string' || !projectRoot.startsWith('/')) {
+    throw new TypeError('projectRoot must be absolute path string')
+  }
+  if (!['complete', 'aborted', 'abandoned', 'archived'].includes(terminalState)) {
+    throw new Error(`invalid terminalState: ${terminalState}`)
+  }
+  if (typeof finalizedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(finalizedAt)) {
+    throw new Error(`finalizedAt must be ISO-8601 UTC: ${finalizedAt}`)
+  }
+  if (!Number.isInteger(episodeCount) || episodeCount < 0) {
+    throw new Error(`episodeCount must be non-negative integer: ${episodeCount}`)
+  }
+  if (episodeCount !== records.length) {
+    throw new Error(`episodeCount (${episodeCount}) !== records.length (${records.length})`)
+  }
+  const root = computeRecordsRoot(records)
+  return {
+    manifest_schema_version: MANIFEST_SCHEMA_VERSION,
+    run_id: runId,
+    project_root: projectRoot,
+    terminal_state: terminalState,
+    finalized_at: finalizedAt,
+    episode_count: episodeCount,
+    episodes_records_root: root,
+    per_episode_records: records.slice(),
+  }
+}
+
+/**
+ * Sign a manifest payload with the verify-key (HMAC-SHA256). The payload is
+ * stableStringified BEFORE signing (recursive, every nesting level — C2 fix).
+ *
+ * @param {object} payload
+ * @param {Buffer} verifyKey32B
+ * @returns {string} hex signature
+ */
+export function signManifest(payload, verifyKey32B) {
+  if (!payload || typeof payload !== 'object') {
+    throw new TypeError('payload must be an object')
+  }
+  if (!Buffer.isBuffer(verifyKey32B) || verifyKey32B.length !== 32) {
+    throw new TypeError('verifyKey32B must be a 32-byte Buffer')
+  }
+  const canonical = stableStringify(payload)
+  return crypto.createHmac('sha256', verifyKey32B).update(canonical, 'utf8').digest('hex')
+}
+
+/**
+ * Verify a manifest signature. Returns true iff the recomputed HMAC matches
+ * (constant-time compare). Signature mismatch returns false; malformed inputs
+ * throw.
+ *
+ * @param {object} payload
+ * @param {string} signatureHex
+ * @param {Buffer} verifyKey32B
+ * @returns {boolean}
+ */
+export function verifyManifest(payload, signatureHex, verifyKey32B) {
+  if (typeof signatureHex !== 'string' || !/^[0-9a-f]+$/i.test(signatureHex)) {
+    return false
+  }
+  const expected = signManifest(payload, verifyKey32B)
+  // Constant-time compare to avoid timing leaks.
+  if (expected.length !== signatureHex.length) return false
+  const a = Buffer.from(expected, 'hex')
+  const b = Buffer.from(signatureHex, 'hex')
+  if (a.length !== b.length) return false
+  return crypto.timingSafeEqual(a, b)
+}
+
+// ===========================================================================
+// On-disk record collection + manifest equality (M1 finalize-run / replay)
+// ===========================================================================
+
+import { parseBp1Frontmatter } from './bp1-frontmatter.mjs'
+import { canonicalize } from './bp1-canonicalize.mjs'
+
+function readEpisodesIn(dir) {
+  if (!fs.existsSync(dir)) return []
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => path.join(dir, f))
+}
+
+// Detect whether raw episode bytes "look like" a BP-1-tagged run-related
+// episode. Used so the strict parser cannot silently swallow a corrupted
+// run-tagged file (round-1 codex code-review MAJOR finding 2): if the raw
+// file mentions our target run_id or carries any bp1- tag, parser failure
+// must propagate as a hard error, not a silent skip.
+function looksLikeBp1Run(buf, runId) {
+  // Buffer.includes accepts a string and tests UTF-8 byte-equality — the
+  // signal we want here is purely textual presence, not a parse.
+  if (buf.includes(`run_id: ${runId}`)) return true
+  // Tag-array search: bare-token `bp1-` prefix anywhere in a `tags: [...]`
+  // line. We bound the search to limit pathological inputs.
+  const head = buf.slice(0, Math.min(buf.length, 8192)).toString('utf8')
+  return /^tags:\s*\[[^\]]*\bbp1-/m.test(head)
+}
+
+/**
+ * Collect bp1-run records for a given run_id from BOTH stores (RFC-004
+ * §777-789 v3.12). Local store: <projectRoot>/.episodic-memory/episodes.
+ * Global store: <homedir>/.episodic-memory/episodes. Excludes the
+ * `bp1-run-manifest` itself (would be self-referential).
+ *
+ * Round-1 code-review fixes:
+ *   - Drop the date-time-prefix predicate. The orchestrator's actual ids
+ *     start with `bp1-run-...` (mintRunId + episodeId), not `YYYYMMDD-...`.
+ *     Any string sorts deterministically; a regex is unnecessary.
+ *   - Hard-fail when a strict-parse error hits a file that "looks BP-1-run-
+ *     tagged" by raw bytes, instead of silently skipping it.
+ *   - Hard-fail when local/global stores hold the same id with different
+ *     content (canonical_sha256 / body_sha256 / hmac_signature mismatch).
+ *     Exact duplicates are idempotent; conflicts surface as
+ *     `bp1-finalize-duplicate-id-conflict`-class errors.
+ *   - Read files as Buffer so the strict parser's fatal UTF-8 decode runs.
+ *
+ * @param {string} runId
+ * @param {string} projectRoot
+ * @returns {Array<{episode_id:string, canonical_sha256:string, body_sha256:string, hmac_signature:string}>}
+ *          Sorted by episode_id (deterministic order).
+ */
+export function collectEpisodeRecords(runId, projectRoot) {
+  assertRunIdShape(runId)
+  if (typeof projectRoot !== 'string' || !projectRoot.startsWith('/')) {
+    throw new TypeError('projectRoot must be absolute path string')
+  }
+  const stores = [
+    path.join(projectRoot, '.episodic-memory', 'episodes'),
+    path.join(os.homedir(), '.episodic-memory', 'episodes'),
+  ]
+  const seenRecords = new Map()
+  const records = []
+  for (const store of stores) {
+    for (const filePath of readEpisodesIn(store)) {
+      let buf
+      try {
+        buf = fs.readFileSync(filePath)
+      } catch {
+        // Unreadable file is a hard failure for finalize: a run's records must
+        // be enumerable. The orchestrator surfaces this as bp1-finalize-fence-fail.
+        throw new Error(`collectEpisodeRecords: unreadable episode file ${filePath}`)
+      }
+      let parsed
+      try {
+        parsed = parseBp1Frontmatter(buf)
+      } catch (e) {
+        // If the raw bytes look like a BP-1 run-tagged episode for THIS run,
+        // a parser failure is a corruption — surface it. Otherwise skip
+        // (workplan, lessons, etc. share the store).
+        if (looksLikeBp1Run(buf, runId)) {
+          throw new Error(`collectEpisodeRecords: BP-1-tagged episode at ${filePath} failed strict parse: ${e.message}`)
+        }
+        continue
+      }
+      const fm = parsed.frontmatter
+      if (fm.run_id !== runId) continue
+      // Self-exclusion: bp1-run-manifest tagged episodes (RFC §777 v3.12).
+      if (Array.isArray(fm.tags) && fm.tags.includes('bp1-run-manifest')) continue
+      // Required fields for a record:
+      for (const f of ['id', 'body_sha256', 'hmac_signature']) {
+        if (typeof fm[f] !== 'string' || fm[f] === '') {
+          throw new Error(`collectEpisodeRecords: episode ${filePath} missing required field ${f}`)
+        }
+      }
+      const { canonicalBytes } = canonicalize(fm, parsed.body)
+      const canonicalSha = crypto.createHash('sha256').update(canonicalBytes).digest('hex')
+      const record = {
+        episode_id: fm.id,
+        canonical_sha256: canonicalSha,
+        body_sha256: fm.body_sha256,
+        hmac_signature: fm.hmac_signature,
+      }
+      const prev = seenRecords.get(fm.id)
+      if (prev) {
+        if (
+          prev.canonical_sha256 !== record.canonical_sha256 ||
+          prev.body_sha256 !== record.body_sha256 ||
+          prev.hmac_signature !== record.hmac_signature
+        ) {
+          throw new Error(
+            `collectEpisodeRecords: duplicate episode_id ${fm.id} with conflicting content ` +
+            `between stores (file ${filePath})`,
+          )
+        }
+        // Exact duplicate — idempotent dedupe.
+        continue
+      }
+      seenRecords.set(fm.id, record)
+      records.push(record)
+    }
+  }
+  records.sort((a, b) => {
+    if (a.episode_id < b.episode_id) return -1
+    if (a.episode_id > b.episode_id) return 1
+    return 0
+  })
+  return records
+}
+
+/**
+ * Verify the on-disk records match the records embedded in a manifest payload.
+ * Re-collects from disk, sorts both sides by episode_id, compares each field
+ * exactly. Returns { ok: boolean, mismatches: Array<{episode_id, field, disk, manifest}> }.
+ *
+ * Used by the step-5 disk re-read fence: after the manifest is signed and
+ * persisted, re-read is more than just "parse + verify signature" — the
+ * records must still describe what's actually on disk now.
+ *
+ * @param {object} manifestPayload — output of buildManifestPayload
+ * @param {string} runId
+ * @param {string} projectRoot
+ * @returns {{ ok: boolean, mismatches: Array<{episode_id:string, field:string, disk:any, manifest:any}> }}
+ */
+export function verifyOnDiskEqualsManifest(manifestPayload, runId, projectRoot) {
+  if (!manifestPayload || typeof manifestPayload !== 'object') {
+    throw new TypeError('manifestPayload must be an object')
+  }
+  if (!Array.isArray(manifestPayload.per_episode_records)) {
+    throw new TypeError('manifestPayload.per_episode_records must be an array')
+  }
+  const onDisk = collectEpisodeRecords(runId, projectRoot)
+  const expected = manifestPayload.per_episode_records.slice().sort((a, b) => {
+    if (a.episode_id < b.episode_id) return -1
+    if (a.episode_id > b.episode_id) return 1
+    return 0
+  })
+  const mismatches = []
+  if (onDisk.length !== expected.length) {
+    mismatches.push({
+      episode_id: '<count>',
+      field: 'episode_count',
+      disk: onDisk.length,
+      manifest: expected.length,
+    })
+    return { ok: false, mismatches }
+  }
+  for (let i = 0; i < expected.length; i++) {
+    const e = expected[i]
+    const d = onDisk[i]
+    for (const f of ['episode_id', 'canonical_sha256', 'body_sha256', 'hmac_signature']) {
+      if (e[f] !== d[f]) {
+        mismatches.push({ episode_id: e.episode_id, field: f, disk: d[f], manifest: e[f] })
+      }
+    }
+  }
+  return { ok: mismatches.length === 0, mismatches }
+}

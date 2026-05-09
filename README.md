@@ -85,7 +85,7 @@ The installer:
 2. Copies `patterns/_index.json` to `~/.episodic-memory/patterns/` for global pattern validation
 3. Creates `.episodic-memory/` in the target project for local episodes
 4. Copies the appropriate instruction file for your tool
-5. With `--install-hooks`: copies `hooks/*.sh` into `~/.claude/hooks/` and `hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Use `--install-hooks-force` to overwrite locally edited hook files.
+5. With `--install-hooks`: copies `hooks/*.sh` into `~/.claude/hooks/` and `hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
 
 ## Supported Tools
 
@@ -175,13 +175,14 @@ Patterns are seeded into the global episode store via `em-seed-patterns.mjs` so 
 
 ### Enforcement
 
-Behavioral patterns are documentation — they tell AI assistants **what** to follow, but don't mechanically **prevent** violations. The system provides two layers of enforcement:
+Behavioral patterns are documentation by default — but the most-violated patterns get escalated to mechanical enforcement (see BP-1 Auto-Pilot below). The system provides two layers:
 
 **Built-in (episodic-memory):**
 - **Violation tracking** (`em-violation.mjs`) — structured storage with pattern linkage, searchable by `--category violation` and `--tag violated:<pattern_id>`
 - **Session-end prompt** (`em-session-end-prompt.mjs`) — SessionEnd hook that asks about violations
 - **Proactive recall** (`em-recall.mjs`) — surfaces past violations at session start as pre-flight warnings
 - **Checkpoint enforcement gate** (RFC-002 Phase 3b, shipped + activated 2026-05-02 via [#78](https://github.com/lantisprime/episodic-memory/pull/78) and [#84](https://github.com/lantisprime/episodic-memory/pull/84)) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done. Opt-in via `node install.mjs --tool claude-code --install-hooks --project <path>`; registers SessionStart + PreToolUse + SessionEnd hooks in `~/.claude/settings.json`.
+- **BP-1 Auto-Pilot** (RFC-004, M0 + M1 shipped 2026-05-06..09 via [#181](https://github.com/lantisprime/episodic-memory/pull/181), [#186](https://github.com/lantisprime/episodic-memory/pull/186), [#188](https://github.com/lantisprime/episodic-memory/pull/188), [#200](https://github.com/lantisprime/episodic-memory/pull/200), [#206](https://github.com/lantisprime/episodic-memory/pull/206)) — activation gate, deadline sweep, finalize-replay state machine, and HMAC-signed run manifests that mechanically enforce bp-001 (implementation workflow). Replaces documentation-only enforcement for the workflow lifecycle.
 
 **External ([user-preferences](https://github.com/lantisprime/user-preferences)):**
 - **Pre-tool hooks** (e.g., `plan-gate.sh`) that block writes during the planning phase
@@ -197,6 +198,9 @@ Episodic-memory and user-preferences are fully independent — install either or
 | [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted (Phases 1-3 shipped) |
 | [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-3 + 3b shipped + runtime-deployed) |
 | [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
+| [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 shipped) |
+| [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Draft |
+| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Draft |
 
 ## Scripts Reference
 
@@ -211,6 +215,11 @@ node ~/.episodic-memory/scripts/em-store.mjs \
   --summary "Chose JWT over session cookies" \
   --body "JWT simplifies our stateless API design..." \
   --scope global
+
+# For long bodies (e.g. plan documents), use --body-file instead of --body (#196)
+node ~/.episodic-memory/scripts/em-store.mjs \
+  --project my-project --category decision --summary "..." \
+  --body-file ./decision-body.md
 ```
 
 ### Revise
@@ -220,6 +229,8 @@ node ~/.episodic-memory/scripts/em-revise.mjs \
   --summary "Switched to session cookies" \
   --body "JWT token size became a problem..." \
   --tags "auth,security"
+
+# --body-file is also supported (#196)
 ```
 
 ### Search
@@ -320,6 +331,8 @@ node ~/.episodic-memory/scripts/em-violation.mjs \
   --body "Details..." \
   --sequence "plan,code,push" \
   --correct "plan,checkpoint,code,review,push"
+
+# --body-file is also supported (#196)
 ```
 
 ### Workflow Validation (Lifecycle Episode Chains)
@@ -386,6 +399,80 @@ node ~/.episodic-memory/scripts/em-session-end-prompt.mjs
 ### Rebuild Index
 ```bash
 node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
+```
+
+### BP-1 Auto-Pilot (RFC-004)
+
+The BP-1 Auto-Pilot suite mechanically enforces the bp-001 implementation workflow. These scripts are normally driven by `install.mjs --bp1` and the SessionStart hook — operators usually don't invoke them directly.
+
+```bash
+# Activation gate — every gated artifact reads via flag-check (RFC-004 §158-167)
+node ~/.episodic-memory/scripts/bp1-flag-check.mjs --project <root>
+
+# Build the runtime-artifact manifest (single source of truth, RFC-004 §107-152)
+node ~/.episodic-memory/scripts/bp1-build-artifact-manifest.mjs [--project <root>] [--yaml]
+
+# Canonicalize an episode for HMAC signing (debug/inspection)
+node ~/.episodic-memory/scripts/bp1-canonicalize.mjs --episode <path> [--pretty]
+
+# Path A + Path B fallback executor (auto-wired as SessionStart H2 hook)
+node ~/.episodic-memory/scripts/bp1-deadline-sweep.mjs --once [--project <root>]
+
+# Orchestrator subcommands: init-run, finalize-run, finalize-recover (M1)
+node ~/.episodic-memory/scripts/bp1-orchestrator.mjs init-run --project <root>
+node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-run --run-id <id>
+node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-recover --run-id <id>
+```
+
+### Compliance Audit & Transcript Mining
+
+```bash
+# Measure rule-skip rates from Claude Code session JSONL transcripts
+# (heuristic — false positives expected; useful for trend tracking)
+node ~/.episodic-memory/scripts/em-audit-compliance.mjs \
+  [--since <ISO>] [--slug <substr>] [--exclude-worktrees] [--format json|markdown]
+
+# Surface decisions/lessons/violations buried in transcripts that were never
+# captured as episodes; writes a staging file under .claude/scratch/, never
+# calls em-store directly (cold-storage discipline)
+node ~/.episodic-memory/scripts/em-mine-transcripts.mjs \
+  [--since <ISO>] [--slug <substr>] [--output <path>] [--dry-run]
+```
+
+### Review Request (Workflow Lifecycle Event)
+
+```bash
+# Build + store a workflow.lifecycle review-request event with full ref
+# validation (plan, approval, pre/post-checkpoint, tests, code review,
+# bug log, command inventory). RFC-002 Phase 3b-H1 PR-D (#118).
+node ~/.episodic-memory/scripts/em-review-request.mjs \
+  --task <id> \
+  --plan-ref <episode:id|file:path|url> \
+  --approval-ref <episode:id> \
+  --pre-checkpoint-ref <episode:id> \
+  --post-checkpoint-ref <episode:id> \
+  --tests-ref <episode:id|file:path> \
+  --code-review-ref <episode:id> \
+  [--bug-log-ref <issue-url>]+ | [--no-new-bugs] \
+  [--command-inventory-ref <ref>] [--dry-run]
+```
+
+### RFC Validation (Rule-14 CI Gates)
+
+These are CI-only validators that diff prose-tier RFC content against the machine-readable source of truth. Per Rule 14 (machine-readable blocks for drift-prone state).
+
+```bash
+# Cross-check _index.json + RFC frontmatter + Active RFCs table in README.md
+node ~/.episodic-memory/scripts/em-rfc-validate.mjs [--json]
+
+# RFC-004 §107-152: artifact-manifest YAML block ↔ builder output parity
+node ~/.episodic-memory/scripts/validate-rfc-artifact-manifest.mjs [--json]
+
+# RFC-004 §689-719: canonical-fields spec ↔ bp1-canonicalize.mjs lib parity
+node ~/.episodic-memory/scripts/validate-rfc-canonical-fields.mjs [--json]
+
+# RFC-004 §1072: §11.5 failure-table prose markdown ↔ YAML mirror parity
+node ~/.episodic-memory/scripts/validate-rfc-failure-table.mjs [--json]
 ```
 
 ## License

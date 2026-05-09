@@ -250,10 +250,14 @@ tap('Codex round-3: em-search subprocess malformed-output error propagates', () 
   // Loader referencing a non-existent id
   fs.writeFileSync(path.join(proj, '.claude', 'agents', 'bp1-fake.md'),
     'Canonical prompt episode 20260506-100000-fake-slug-abcd.\n')
-  // Copy the real lib + builder + a stubbed em-search into proj/scripts/
+  // Copy the real lib + builder + a stubbed em-search into proj/scripts/.
+  // bp1-manifest.mjs transitively imports bp1-frontmatter.mjs + bp1-canonicalize.mjs
+  // (added in PR-1c-B Slice 2 commits 1/5 + 2/5); fixture must mirror that.
   fs.mkdirSync(path.join(proj, 'scripts', 'lib'), { recursive: true })
-  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'bp1-manifest.mjs'),
-    path.join(proj, 'scripts', 'lib', 'bp1-manifest.mjs'))
+  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+    fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
+      path.join(proj, 'scripts', 'lib', lib))
+  }
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(proj, 'scripts', 'bp1-build-artifact-manifest.mjs'))
   // Stub em-search to return malformed JSON (no episodes array)
