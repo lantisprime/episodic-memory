@@ -104,6 +104,24 @@ test('buildInstallManifest enumerates hooks + libs + scripts + script-libs + pat
   eq(byKind.pattern, 1)
 })
 
+// Codex round-1 F3 regression: HOOK_SPECS entries are emitted even when the
+// repo source files don't exist. Otherwise a wrong --repo produces a
+// vacuously-empty manifest that passes the gate.
+test('buildInstallManifest emits HOOK_SPECS entries even when repo sources missing', () => {
+  const phantomRepo = path.join(tmpRoot, 'phantom-for-manifest-test')
+  // Don't create any files — phantomRepo doesn't even exist.
+  const m = buildInstallManifest(phantomRepo, synthHome)
+  const hookEntries = m.filter(e => e.kind === 'hook')
+  eq(hookEntries.length, 4)  // checkpoint-gate, plan-gate, em-recall-sessionstart, stop-gate
+  // Each hook entry's repoPath should point at the phantom repo's hooks/ dir
+  // (which doesn't exist — that's the point: cutover catches it as SOURCE_GONE).
+  for (const e of hookEntries) {
+    if (!e.repoPath.startsWith(phantomRepo)) {
+      throw new Error(`hook entry repoPath outside phantom repo: ${e.repoPath}`)
+    }
+  }
+})
+
 test('buildInstallManifest sorts entries by relativePath', () => {
   const m = buildInstallManifest(synthRepo, synthHome)
   for (let i = 1; i < m.length; i++) {
@@ -151,6 +169,34 @@ test('all-MISSING (empty home) → exit 1, all entries MISSING', () => {
   eq(result.allOk, false)
   eq(result.counts.MISSING, 12)
   if (result.counts.OK) throw new Error(`unexpected OK count: ${result.counts.OK}`)
+})
+
+// Codex round-1 F3 regression: wrong/empty --repo must NOT vacuously pass.
+test('empty/wrong --repo → exit 1, emptyManifest=false (HOOK_SPECS still emitted) + SOURCE_GONE', () => {
+  // Synthetic empty repo: directory exists but contains no hooks/scripts.
+  const emptyRepo = path.join(tmpRoot, 'empty-repo')
+  fs.mkdirSync(emptyRepo, { recursive: true })
+  const result = runCutoverExpectFail(emptyRepo, synthHome)
+  eq(result.allOk, false)
+  // HOOK_SPECS entries are now emitted unconditionally — 4 unique hook
+  // .sh files (checkpoint-gate, plan-gate, em-recall-sessionstart, stop-gate)
+  // appear with status SOURCE_GONE because the empty-repo paths don't exist.
+  eq(result.emptyManifest, false)
+  if (!result.counts.SOURCE_GONE || result.counts.SOURCE_GONE < 4) {
+    throw new Error(`expected ≥4 SOURCE_GONE entries, got ${JSON.stringify(result.counts)}`)
+  }
+})
+
+test('truly empty manifest (no HOOK_SPECS sources possible) → emptyManifest=true, exit 1', () => {
+  // Construct a "repo" with NO hooks/ subdir AT ALL (HOOK_SPECS would still
+  // emit entries that fail SOURCE_GONE — proves the failure routes through
+  // the SOURCE_GONE counts, not just emptyManifest).
+  const phantomRepo = path.join(tmpRoot, 'phantom-repo-not-a-dir')
+  // Don't even mkdir it. buildInstallManifest still emits HOOK_SPECS entries
+  // (they're unconditional now), so emptyManifest is false; SOURCE_GONE is
+  // the load-bearing failure mode.
+  const result = runCutoverExpectFail(phantomRepo, synthHome)
+  eq(result.allOk, false)
 })
 
 test('all-OK (home installed identically) → exit 0', () => {

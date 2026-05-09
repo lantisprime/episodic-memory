@@ -64,7 +64,10 @@ const counts = results.reduce((acc, r) => {
   return acc
 }, {})
 
-const allOk = (counts.OK || 0) === results.length
+// Codex round-1 F3: an empty manifest (wrong --repo, missing source tree)
+// must NOT report allOk. fail-closed when there's nothing to verify.
+const emptyManifest = results.length === 0
+const allOk = !emptyManifest && (counts.OK || 0) === results.length
 
 if (JSON_OUTPUT) {
   console.log(JSON.stringify({
@@ -72,6 +75,7 @@ if (JSON_OUTPUT) {
     homeDir: HOME_DIR,
     counts,
     allOk,
+    emptyManifest,
     results
   }, null, 2))
 } else {
@@ -95,6 +99,8 @@ if (JSON_OUTPUT) {
   console.log(`Summary: ${summary} (total=${results.length})`)
   if (allOk) {
     console.log('All entries match. Cutover safe to proceed.')
+  } else if (emptyManifest) {
+    console.log('Manifest is empty — no entries to verify. Check --repo points at the episodic-memory repo root.')
   } else {
     console.log('Mismatches found. Re-run install.mjs --tool claude-code --install-hooks --install-hooks-force.')
   }

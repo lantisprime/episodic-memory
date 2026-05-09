@@ -335,6 +335,21 @@ assert_blocked "49. Bash '>> .post-checkpoint-done' BLOCKED (POST_REQ not armed)
 assert_blocked "50. Bash 'tee .post-checkpoint-done' BLOCKED (POST_REQ not armed)" \
   "$(mock_json 'Bash' "echo content | tee $POST_DONE")" "Checkpoint required"
 
+# Codex round-1 F1 regression: nested marker-like paths under .checkpoints/
+# or .claude/ must NOT pass the marker_write allowlist. Pre-fix the
+# allowlist matched any descendant by basename; post-fix it requires an
+# EXACT match against the canonical primary or legacy marker path.
+mkdir -p "$MARKER_DIR/sub" "$LEGACY_MARKER_DIR/sub"
+assert_blocked "50a. nested .checkpoints/sub/.pre-checkpoint-done — NOT allowed (F1)" \
+  "$(mock_json 'Bash' "echo content > $MARKER_DIR/sub/.pre-checkpoint-done")" "Checkpoint required"
+assert_blocked "50b. nested .claude/sub/.pre-checkpoint-done — NOT allowed (F1)" \
+  "$(mock_json 'Bash' "echo content > $LEGACY_MARKER_DIR/sub/.pre-checkpoint-done")" "Checkpoint required"
+# Edit tool path-equivalent of 50a
+edit_nested_json=$(jq -nc --arg fp "$MARKER_DIR/sub/.pre-checkpoint-done" --arg cwd "$TEST_DIR" \
+  '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd}')
+assert_blocked "50c. Edit nested .checkpoints/sub/.pre-checkpoint-done — NOT allowed (F1)" \
+  "$edit_nested_json" "Checkpoint required"
+
 # ============================================================================
 echo ""
 echo "--- #66: heredoc-body bypass blocked (pre-<< check) ---"

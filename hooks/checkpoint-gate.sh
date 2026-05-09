@@ -86,14 +86,23 @@ marker_exists() {
 marker_nonempty() {
   [ -s "$PRIMARY_DIR/$1" ] || [ -s "$LEGACY_DIR/$1" ]
 }
-# marker_basename_for_target <abs-path> — echoes the basename if the path
-# is under either marker dir, else echoes nothing (caller branches on empty).
+# marker_basename_for_target <abs-path> — echoes the basename if the TARGET
+# matches an EXACT authoritative marker path at either root (primary or
+# legacy). Echoes nothing for descendants like
+# `<root>/.checkpoints/sub/.pre-checkpoint-done` so the marker_write
+# allowlist can't be bypassed via path-traversal-shaped names. Codex
+# round-1 F1 (path: hooks/checkpoint-gate.sh:91-95): the prior prefix
+# match accepted any descendant with a marker basename, mirroring the
+# pre-fix #146 deadlock class.
 marker_basename_for_target() {
-  local target="$1"
-  case "$target" in
-    "$PRIMARY_DIR"/*|"$LEGACY_DIR"/*) basename "$target" ;;
-    *) printf '' ;;
-  esac
+  local target="$1" m
+  for m in .pre-checkpoint-done .post-checkpoint-done .plan-approval-pending; do
+    if [ "$target" = "$PRIMARY_DIR/$m" ] || [ "$target" = "$LEGACY_DIR/$m" ]; then
+      printf '%s' "$m"
+      return 0
+    fi
+  done
+  printf ''
 }
 
 # Read-only tools — always allowed

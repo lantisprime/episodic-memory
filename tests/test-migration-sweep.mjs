@@ -130,6 +130,26 @@ test('config with comments and blank lines parsed correctly', () => {
   eq(result.allClean, true)
 })
 
+// Codex round-1 F2 regression: comment-only / empty config must fail closed.
+test('empty config (comments + blanks only) → exit 1, noRootsConfigured', () => {
+  const cfg = path.join(tmpRoot, 'roots-comments-only.txt')
+  fs.writeFileSync(cfg, `# only comments\n\n# nothing enrolled\n`)
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.noRootsConfigured, true)
+  eq(result.allClean, false)
+  eq(result.rootsScanned, 0)
+})
+
+test('completely empty config file → exit 1, noRootsConfigured', () => {
+  const cfg = path.join(tmpRoot, 'roots-empty.txt')
+  fs.writeFileSync(cfg, '')
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.noRootsConfigured, true)
+  eq(result.allClean, false)
+})
+
 test('all enrolled roots clean → exit 0', () => {
   const a = mkRoot('cfg-clean-a')
   const b = mkRoot('cfg-clean-b')

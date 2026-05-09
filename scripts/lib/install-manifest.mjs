@@ -88,16 +88,21 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
   // Hooks — driven by HOOK_SPECS (subset of hooks/*.sh that we wire).
   // Deduped on file basename so stop-gate.sh (registered twice for
   // Stop + SubagentStop) appears once in the file manifest.
+  //
+  // Codex round-1 F3 (path: scripts/lib/install-manifest.mjs:95-98):
+  // entries are emitted UNCONDITIONALLY for HOOK_SPECS so a wrong/empty
+  // --repo can't return an empty manifest that vacuously passes the
+  // cutover check. compareFiles in migration-cutover.mjs reports
+  // SOURCE_GONE when repoPath is missing, which the gate counts as
+  // failure.
   const hookFiles = new Set()
   for (const spec of HOOK_SPECS) {
     if (hookFiles.has(spec.file)) continue
     hookFiles.add(spec.file)
     const rel = `hooks/${spec.file}`
-    const repoPath = path.join(repoDir, rel)
-    if (!fs.existsSync(repoPath)) continue
     entries.push({
       relativePath: rel,
-      repoPath,
+      repoPath: path.join(repoDir, rel),
       installedPath: path.join(HOME_HOOKS(homeDir), spec.file),
       kind: 'hook'
     })

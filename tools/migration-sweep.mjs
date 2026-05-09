@@ -97,12 +97,17 @@ function scanRoot(root) {
 
 const scans = roots.map(scanRoot)
 const totalLegacy = scans.reduce((sum, s) => sum + s.count, 0)
-const allClean = totalLegacy === 0 && !configMissing
+// Codex round-1 F2: an existing-but-empty / comment-only config produces
+// roots=[] and would otherwise vacuously pass the gate. Treat zero
+// enrolled roots as a failed gate (noRootsConfigured).
+const noRootsConfigured = !singleRoot && roots.length === 0
+const allClean = totalLegacy === 0 && !configMissing && !noRootsConfigured
 
 if (JSON_OUTPUT) {
   console.log(JSON.stringify({
     configPath: singleRoot ? null : configPath,
     configMissing,
+    noRootsConfigured,
     rootsScanned: roots.length,
     totalLegacy,
     allClean,
@@ -133,6 +138,8 @@ if (JSON_OUTPUT) {
     console.log('All enrolled roots are clean. Fallback branch removal safe (combine with cutover + 7-day floor).')
   } else if (configMissing && !singleRoot) {
     console.log('Config missing — exit 1 (treat as failed gate until enrolled roots are explicit).')
+  } else if (noRootsConfigured) {
+    console.log(`Config exists but enrolls zero roots — exit 1 (add at least one absolute project root to ${configPath}).`)
   } else {
     console.log('Migrate or remove the listed legacy markers, then re-run sweep.')
   }
