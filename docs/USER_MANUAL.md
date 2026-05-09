@@ -57,6 +57,7 @@ That's the only manual step. After this, your AI assistant reads the instruction
 2. Creates `.episodic-memory/` in your project for local memories
 3. Adds the right instruction file for your tool
 4. Updates `.gitignore` to exclude memory data
+5. With `--install-hooks` (Claude Code only): registers PreToolUse (checkpoint-gate, plan-gate, stop-gate), SessionStart (recall + BP-1 fallback sweep), and SessionEnd hooks. Re-running the installer warns when any installed hook has drifted from the source-of-truth copy.
 
 ---
 
@@ -384,18 +385,16 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
       write the checkpoint marker before continuing.
 ```
 
-**Why this exists:** The checkpoint enforcement gate (RFC-002 Phase 3b) is a PreToolUse hook that prevents the AI from skipping the plan → review → approval steps of the implementation workflow (bp-001). It's the mechanical version of the rules described in Scenario 11 — instead of relying on the AI to remember, the hook physically blocks edits until a checkpoint is recorded.
+**Why this exists:** The checkpoint enforcement gates (RFC-002 Phase 3b + RFC-004 BP-1 Auto-Pilot) are PreToolUse hooks that prevent the AI from skipping the plan → review → approval → testing steps of the implementation workflow (bp-001). It's the mechanical version of the rules described in Scenario 11 — instead of relying on the AI to remember, the hooks physically block edits until each checkpoint is recorded.
 
-**Two gates:**
-- **Pre-checkpoint** — blocks `Edit`/`Write`/`Bash` until `.claude/.pre-checkpoint-done` exists with the plan summary.
-- **Push-gate** — blocks `git push` until E2E testing and bug-logging steps are complete.
+**Three gates:**
+- **Pre-checkpoint** — blocks `Edit`/`Write`/`Bash` until the AI has printed its plan and you've approved it.
+- **Stop-gate (post-checkpoint)** — blocks turn-end until E2E testing has run and any bugs found are logged ([#144](https://github.com/lantisprime/episodic-memory/pull/144)).
+- **Push-gate** — blocks `git push` until all wrap-up steps are complete.
 
-**To clear the gate (intentionally):**
+**To clear a gate:** Approve the AI's plan in chat. The AI writes the checkpoint marker on your behalf — you don't run any commands manually. (The marker location is an internal implementation detail and has migrated once already.)
 
-```bash
-# After the AI has shown its plan and you've approved it:
-echo "ok" > .claude/.pre-checkpoint-done
-```
+**Behind the scenes — BP-1 Auto-Pilot (RFC-004).** These three gates are part of a run-lifecycle system that signs each implementation run with HMAC, tracks state across crashes, and replays unfinished work via a finalize-recovery state machine. You don't interact with it directly — the gates above are its user-facing edges.
 
 **To opt out entirely:** Don't pass `--install-hooks` during install, or remove the hook entries from `~/.claude/settings.json`.
 
@@ -595,3 +594,37 @@ rm -rf ~/.episodic-memory/episodes/*
 rm -rf my-project/.episodic-memory/episodes/*
 node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
 ```
+
+### "I want to back up my memories or move them to a new machine"
+
+`em-backup.mjs` mirrors your memory directories to a private GitHub repo with PII / secret redaction applied to the staging copy (source files are never modified):
+
+```bash
+# Preview what would be redacted, no writes
+node ~/.episodic-memory/scripts/em-backup.mjs --audit
+
+# One-time setup: create the private repo + initial commit + push
+node ~/.episodic-memory/scripts/em-backup.mjs --init
+
+# Daily run: rsync sources, redact, commit, push
+node ~/.episodic-memory/scripts/em-backup.mjs --sync
+```
+
+Config lives at `~/.config/em-backup/config.json`; see `examples/em-backup.config.example.json`. Refuses `--init` / `--sync` without a config to prevent shipping raw personal memory.
+
+`em-restore.mjs` selectively restores from a cloned backup repo — filterable by tag, date, or category, with conflict modes for handling existing files:
+
+```bash
+# Dry-run (default): show what would happen, no disk writes
+node ~/.episodic-memory/scripts/em-restore.mjs \
+  --from /path/to/cloned-backup-repo \
+  --source-map home-em=$HOME/.episodic-memory \
+  --tag workplan --from-date 2026-04-01
+
+# Apply with full doc tree (MEMORY.md, knowledge_base/, etc.)
+node ~/.episodic-memory/scripts/em-restore.mjs \
+  --from /path/to/backup --source-map home-em=$HOME/.episodic-memory \
+  --include-docs --apply
+```
+
+**Restore is one-way:** it can't undo redaction. Frame it as "spin up a fresh machine from backup," not "recover the originals." Files redacted via `extra_redact_strings` retain their `[REDACTED]` tokens; binary / oversized / symlinked files are absent and only summarized in the report.
