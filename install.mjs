@@ -680,47 +680,14 @@ if (installHooks) {
       }
     }
 
-    // 5a. Hook specs (file → event + matcher + timeout + canonical command).
-    const hookSpecs = [
-      {
-        file: 'checkpoint-gate.sh',
-        event: 'PreToolUse',
-        matcher: 'Edit|Write|MultiEdit|Bash|NotebookEdit',
-        timeout: 5
-      },
-      // plan-gate.sh: no matcher — must run on every PreToolUse so the
-      // tool-name allowlist (read-only tools) is the sole filter for what
-      // bypasses the marker. Issue #86 (PR-A): canonicalized into the repo
-      // and registered by the installer; Bash command-level allowlisting
-      // is deferred to PR-B.
-      {
-        file: 'plan-gate.sh',
-        event: 'PreToolUse',
-        timeout: 5
-      },
-      {
-        file: 'em-recall-sessionstart.sh',
-        event: 'SessionStart',
-        timeout: 10
-      },
-      // stop-gate.sh: registered on both Stop AND SubagentStop. SubagentStop
-      // is the conversion of Stop for subagent contexts per
-      // claude-code-hooks-reference.md:409 — without explicit SubagentStop
-      // registration, subagent shape-4 (docs-only-summarize-as-done from
-      // inside a Skill / Plan / Explore agent) is uncovered. Issue #128.
-      // Phase 3b primitive; future RFC-003 Phase 2 subsumes into
-      // adapters/claude-code/capabilities/enforcement.mjs.
-      {
-        file: 'stop-gate.sh',
-        event: 'Stop',
-        timeout: 5
-      },
-      {
-        file: 'stop-gate.sh',
-        event: 'SubagentStop',
-        timeout: 5
-      }
-    ]
+    // 5a. Hook specs imported from scripts/lib/install-manifest.mjs (single
+    // source of truth shared with tools/migration-cutover.mjs). Closes
+    // Codex round-2 implementation attention point: avoid a second
+    // hardcoded copy list.
+    const { HOOK_SPECS } = await import(
+      new URL('./scripts/lib/install-manifest.mjs', import.meta.url).href
+    )
+    const hookSpecs = HOOK_SPECS
 
     // 5b. Copy hook files; track which got installed for registration eligibility.
     const fileResults = {} // spec.file → result
