@@ -6,11 +6,16 @@ node_modules/
 .episodic-memory/
 
 # Claude Code runtime markers (managed by hooks, never committed)
+# 2026-05-09 .checkpoints/ migration: marker writes now land at .checkpoints/
+# instead of .claude/. Both roots are kept in this ignore set during burn-in.
+.checkpoints/
+.checkpoints-migration-roots
 .claude/.pre-checkpoint-done
 .claude/.post-checkpoint-done
 .claude/.checkpoint-required
 .claude/.post-checkpoint-required
 .claude/.plan-approval-pending
+.claude/.session-baseline
 .claude/settings.local.json
 
 # Per-session scratch (mining staging, codex requests/replies, etc.)

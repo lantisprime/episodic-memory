@@ -18,8 +18,23 @@ Phase 3b (RFC-002) introduces user-level hooks that need to be installed into `~
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `checkpoint-gate.sh` | PreToolUse | RFC-002 Phase 3b two-gate write/push enforcement |
-| `plan-gate.sh` | PreToolUse | Blocks write tools while `.claude/.plan-approval-pending` exists; allows read-only tools (canonical list lives in the `case` at `hooks/plan-gate.sh` — do not duplicate here). Issue #86 PR-A canonicalized this from a previously user-maintained file. |
+| `plan-gate.sh` | PreToolUse | Blocks write tools while `.plan-approval-pending` exists at the repo root; allows read-only tools (canonical list lives in the `case` at `hooks/plan-gate.sh` — do not duplicate here). Issue #86 PR-A canonicalized this from a previously user-maintained file. |
 | `em-recall-sessionstart.sh` | SessionStart | Mechanically invokes em-recall so its activator can arm checkpoint-gate before any user interaction |
+| `stop-gate.sh` | Stop / SubagentStop | Blocks turn-end when post-checkpoint required but absent (#128). |
+| `lib/marker-paths.sh` | sourced | Shared marker-path constants and dual-root helpers (2026-05-09 .checkpoints/ migration) |
+| `lib/repo-root.sh` | sourced | `resolve_repo_root` git-common-dir walker (PR #105 / #85) |
+| `lib/command-classifier.sh` | sourced | Quote/heredoc-aware Bash classifier (#86 PR-B / #89 / #101) |
+
+## Marker storage (.checkpoints/ migration, 2026-05-09)
+
+Marker WRITES land at `<repo-root>/.checkpoints/.X` (PRIMARY); reads check
+PRIMARY first then fall back to `<repo-root>/.claude/.X` (LEGACY) until the
+fallback branch is removed. CLEANUP sweeps BOTH roots until then. Migration
+exists because Claude Code's built-in sensitive-file guard prompts on every
+Write to a `.X` basename inside any `.claude/` segment, regardless of
+allowlist. See `tools/migration-cutover.mjs` and `tools/migration-sweep.mjs`
+for the install-parity check and burn-in exit gate that protect the
+fallback-removal commit.
 
 ## Installation
 

@@ -165,6 +165,20 @@ Add a violation-aware recall pass:
 
 ### Phase 3b: Checkpoint Enforcement Gate
 
+> **2026-05-09 .checkpoints/ migration note:** Marker WRITES under
+> `<repo>/.claude/.X` triggered Claude Code's built-in sensitive-file
+> guard, which blocked unattended Rule 18 marker writes (especially under
+> scheduled remote agents). The marker set has migrated to
+> `<repo>/.checkpoints/.X` (PRIMARY); reads honor BOTH `.checkpoints/`
+> and `.claude/` during burn-in via the shared
+> `hooks/lib/marker-paths.sh` + `scripts/lib/marker-paths.mjs` helpers.
+> Cleanup sweeps both roots until the legacy fallback is removed in a
+> follow-up commit. Doc references below to `.claude/.X` paths describe
+> the spec at the time it was written; runtime paths are now under
+> `.checkpoints/`. See `tools/migration-cutover.mjs` and
+> `tools/migration-sweep.mjs` for the parity check + state-based exit
+> gate.
+
 **Motivation:** Across 3+ sessions, bp-001 was violated 6+ times despite documentation in CLAUDE.md, bp-001 v2.0.0, MEMORY.md, and session handoffs. The only mechanism that ever prevented a violation was `plan-gate.sh` (a PreToolUse hook). Documentation-based enforcement fails under momentum — only mechanical gates work (bp-010). Two distinct failure modes observed: (1) skipping the pre-implementation checkpoint before coding starts, and (2) skipping E2E testing + bug logging before pushing — steps 8 and 9 are skipped 100% of the time because they come after the work "feels done."
 
 **New hook: `checkpoint-gate.sh`** — PreToolUse hook, follows `plan-gate.sh` architecture.

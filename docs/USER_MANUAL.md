@@ -377,7 +377,7 @@ AI:   ⚠️ Pre-flight warning: bp-001 (implementation workflow) was
 AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 
       "Checkpoint required. Write the Rule 18 pre-implementation
-      checkpoint block to .claude/.pre-checkpoint-done before write
+      checkpoint block to .checkpoints/.pre-checkpoint-done before write
       tools are unblocked."
 
       I'll print my implementation plan, get your approval, then
@@ -387,14 +387,20 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 **Why this exists:** The checkpoint enforcement gate (RFC-002 Phase 3b) is a PreToolUse hook that prevents the AI from skipping the plan → review → approval steps of the implementation workflow (bp-001). It's the mechanical version of the rules described in Scenario 11 — instead of relying on the AI to remember, the hook physically blocks edits until a checkpoint is recorded.
 
 **Two gates:**
-- **Pre-checkpoint** — blocks `Edit`/`Write`/`Bash` until `.claude/.pre-checkpoint-done` exists with the plan summary.
+- **Pre-checkpoint** — blocks `Edit`/`Write`/`Bash` until `.checkpoints/.pre-checkpoint-done` exists with the plan summary.
 - **Push-gate** — blocks `git push` until E2E testing and bug-logging steps are complete.
+
+**Marker location (.checkpoints/ migration, 2026-05-09):** Marker writes
+land at `<repo-root>/.checkpoints/.X` (PRIMARY); reads also honor
+`<repo-root>/.claude/.X` (LEGACY) during burn-in. Markers under `.claude/`
+trigger Claude Code's built-in sensitive-file prompt; the `.checkpoints/`
+relocation escapes it.
 
 **To clear the gate (intentionally):**
 
 ```bash
 # After the AI has shown its plan and you've approved it:
-echo "ok" > .claude/.pre-checkpoint-done
+echo "ok" > .checkpoints/.pre-checkpoint-done
 ```
 
 **To opt out entirely:** Don't pass `--install-hooks` during install, or remove the hook entries from `~/.claude/settings.json`.
