@@ -346,9 +346,11 @@ if (tool === 'claude-code' || tool === 'all') {
 //
 // Fix: when projectDir is a linked worktree of a canonical repo, append
 // the canonical repo's `.checkpoints/` directory to
-// `<projectDir>/.claude/settings.local.json` `permissions.additionalDirectories`
+// `<canonical>/.claude/settings.local.json` `permissions.additionalDirectories`
 // (Claude Code's documented working-directory extension; see
-// https://code.claude.com/docs/en/permissions).
+// https://code.claude.com/docs/en/permissions). Issue #215: must target the
+// CANONICAL settings.local.json, not the worktree's — Claude Code loads
+// project settings from the main repo, same canonicalization as our hooks.
 //
 // Design notes (folded from Codex round-1 plan-review reply
 // `20260509-073135-...-4fb5`):
@@ -403,7 +405,14 @@ if (tool === 'claude-code' || tool === 'all') {
   if (wt) {
     const checkpointsDir = path.join(wt.canonicalRoot, '.checkpoints')
     const grantPath = normalizePathForGrant(checkpointsDir)
-    const settingsLocalPath = path.join(projectDir, '.claude', 'settings.local.json')
+    // Issue #215 fix: write the grant to the CANONICAL repo's settings.local.json,
+    // not the worktree's. Claude Code loads project settings from the canonical
+    // repo root (the main checkout) — same canonicalization as our hooks. The
+    // original PR #214 wrote to <worktree>/.claude/settings.local.json which
+    // Claude Code never reads in a worktree session, so I-1' failed at runtime.
+    // Verified post-merge: the mechanism works (claude --add-dir <path>), but
+    // the settings file must live at <canonical>/.claude/settings.local.json.
+    const settingsLocalPath = path.join(wt.canonicalRoot, '.claude', 'settings.local.json')
 
     let localSettings = {}
     let parseFailed = false
@@ -433,7 +442,7 @@ if (tool === 'claude-code' || tool === 'all') {
       if (!existingReal.has(grantPath)) {
         localSettings.permissions.additionalDirectories.push(grantPath)
         writeJSONAtomic(settingsLocalPath, localSettings)
-        console.log(`Granted worktree permission for canonical .checkpoints/ in ${settingsLocalPath} (issue #213).`)
+        console.log(`Granted worktree permission for canonical .checkpoints/ in ${settingsLocalPath} (issues #213, #215).`)
       }
       // Already granted — silent no-op for re-run idempotence.
     }
