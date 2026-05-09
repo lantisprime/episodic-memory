@@ -62,6 +62,7 @@ import {
   signManifest,
   verifyManifest,
   verifyOnDiskEqualsManifest,
+  assertRunIdShape,
 } from './lib/bp1-manifest.mjs'
 import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
 
@@ -493,14 +494,22 @@ function decisionLogFence(runId, projectRoot, runKey32B) {
         continue // tolerated here; collectEpisodeRecords will hard-fail at step 2
       }
       const fm = parsed.frontmatter
-      if (fm.run_id !== runId) continue
       if (typeof fm.id !== 'string') continue
+      // Index ALL episodes (any run_id) so that a post episode whose id
+      // matches a pre's expected_post_episode_id but whose run_id differs
+      // is still visible — predicate 1 (post.run_id == runId) can then
+      // report `post-wrong-run-id` with structured detail per plan §A.1
+      // (codex round-1 MAJOR 4: prior version filtered out wrong-run posts
+      // and misclassified them as `pre-decision-no-matching-post`; reply
+      // episode 20260509-030119-...-2d2f).
       // Last-writer-wins is fine for the fence; collectEpisodeRecords step 2
       // detects duplicate-id-with-different-content as a separate failure.
       allEpisodes.set(fm.id, { fm, body: parsed.body })
     }
   }
   for (const { fm } of allEpisodes.values()) {
+    // Pre-decisions for THIS run only.
+    if (fm.run_id !== runId) continue
     if (fm.expected_post_episode_id == null) continue
     const expectedPostId = fm.expected_post_episode_id
     const post = allEpisodes.get(expectedPostId)
@@ -609,6 +618,16 @@ function validateFinalizeArgs(args) {
     usage()
     return { error: 2 }
   }
+  // Shape-validate runId BEFORE any filesystem path use. Without this, raw
+  // runId is interpolated into runKeyPath / episode ids / unlink targets
+  // (codex round-1 BLOCKER 1: --run-id ../escape wrote artifacts outside
+  // .episodic-memory/episodes; reply episode 20260509-030119-...-2d2f).
+  try {
+    assertRunIdShape(args.runId)
+  } catch (e) {
+    process.stderr.write(`error: --run-id has invalid shape: ${e.message}\n`)
+    return { error: 2 }
+  }
   let projectRoot
   try {
     projectRoot = fs.realpathSync(args.project)
@@ -714,12 +733,16 @@ function finalizeRun(args) {
   maybeAbortHook(5, projectRoot)
 
   // Step 6: shred run.key. After this point the run cannot be re-finalized
-  // (no live signing key remains).
+  // (no live signing key remains). Failure with key-still-on-disk violates
+  // I4 ("terminal state after no usable live run.key remains under single-
+  // process semantics") — fail closed; do NOT mark terminal. Operator can
+  // call finalize-recover after addressing the shred failure root cause
+  // (codex round-1 BLOCKER 2; reply episode 20260509-030119-...-2d2f).
   const shred = shredRunKey(projectRoot, runId)
-  if (shred.error) {
-    // Already-missing is benign; anything else is anomalous but key shred is
-    // best-effort once the manifest is durable.
-    process.stderr.write(`bp1-finalize-run: shredRunKey returned ${shred.error} (manifest already emitted)\n`)
+  if (shred.error && shred.error !== 'missing') {
+    emitFenceFailEvidence(projectRoot, runId, key32B, `shred-failed-${shred.error}`, { run_id: runId, key_path: runKeyPath(projectRoot, runId) })
+    process.stderr.write(`bp1-finalize-run: shredRunKey returned ${shred.error} — refusing to mark terminal (live run.key remains)\n`)
+    return 4
   }
   maybeAbortHook(6, projectRoot)
 
@@ -797,15 +820,17 @@ function finalizeRecover(args) {
   } else if (keyResult.error) {
     // State D: manifest valid, key damaged (mode/size/unreadable). Unlink
     // damaged key then mark terminal. DEFER `4b35`: compound terminal/key
-    // transition atomic helper (M2 follow-up).
+    // transition atomic helper (M2 follow-up). I4 + I5 require failing
+    // closed when key removal fails (codex round-1 BLOCKER 3; reply
+    // episode 20260509-030119-...-2d2f).
     state = 'D'
     try {
       fs.unlinkSync(runKeyPath(projectRoot, runId))
     } catch (e) {
-      // ENOENT ok (race with prior finalize); other errors anomalous but
-      // not fatal once manifest is durable.
+      // ENOENT is benign (race with prior finalize cleanup).
       if (e.code !== 'ENOENT') {
-        process.stderr.write(`bp1-finalize-recover: failed to unlink damaged run.key: ${e.message}\n`)
+        process.stderr.write(`bp1-finalize-recover: failed to unlink damaged run.key: ${e.message} (State D) — refusing to mark terminal (key still present)\n`)
+        return 4
       }
     }
     const term = markTerminal(projectRoot, runId, 'complete')
@@ -815,10 +840,13 @@ function finalizeRecover(args) {
     }
   } else {
     // State A: manifest valid, key still present. Shred then terminal.
+    // I4 requires failing closed when shred fails with key still on disk
+    // (codex round-1 BLOCKER 3; reply episode 20260509-030119-...-2d2f).
     state = 'A'
     const shred = shredRunKey(projectRoot, runId)
     if (shred.error && shred.error !== 'missing') {
-      process.stderr.write(`bp1-finalize-recover: shredRunKey returned ${shred.error} (State A)\n`)
+      process.stderr.write(`bp1-finalize-recover: shredRunKey returned ${shred.error} (State A) — refusing to mark terminal (live run.key remains)\n`)
+      return 4
     }
     const term = markTerminal(projectRoot, runId, 'complete')
     if (term.error && term.error !== 'already-terminal') {
