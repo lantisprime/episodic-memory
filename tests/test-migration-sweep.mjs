@@ -150,6 +150,68 @@ test('completely empty config file → exit 1, noRootsConfigured', () => {
   eq(result.allClean, false)
 })
 
+console.log('\nCodex round-2 F4: malformed config content fails closed:')
+
+test('config with binary garbage line → exit 1, control_chars validation', () => {
+  // 0x00 NUL + 0x01 SOH bytes embedded in a "path" line — the kind of
+  // content a corrupted file might contain.
+  const cfg = path.join(tmpRoot, 'roots-binary.txt')
+  const garbage = '\x00\x01garbled-bytes\x1f'
+  fs.writeFileSync(cfg, `${garbage}\n`)
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.allClean, false)
+  if (!result.invalidConfigEntries || result.invalidConfigEntries.length !== 1) {
+    throw new Error(`expected 1 invalid entry, got ${JSON.stringify(result.invalidConfigEntries)}`)
+  }
+  eq(result.invalidConfigEntries[0].reason, 'control_chars')
+})
+
+test('config with non-absolute path → exit 1, not_absolute', () => {
+  const cfg = path.join(tmpRoot, 'roots-relative.txt')
+  fs.writeFileSync(cfg, 'relative/path\n')
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  // path.resolve makes the entry absolute — so the validation that fails
+  // is does_not_exist (because the resolved path doesn't exist), not
+  // not_absolute. This is acceptable: either failure mode is fail-closed.
+  if (!result.invalidConfigEntries || result.invalidConfigEntries.length !== 1) {
+    throw new Error(`expected 1 invalid entry, got ${JSON.stringify(result.invalidConfigEntries)}`)
+  }
+})
+
+test('config with path-to-file (not directory) → exit 1, not_a_directory', () => {
+  const cfg = path.join(tmpRoot, 'roots-file.txt')
+  const someFile = path.join(tmpRoot, 'a-real-file.txt')
+  fs.writeFileSync(someFile, 'I am a file')
+  fs.writeFileSync(cfg, `${someFile}\n`)
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.invalidConfigEntries[0].reason, 'not_a_directory')
+})
+
+test('mixed valid + invalid entries → exit 1 (one bad line taints whole config)', () => {
+  const goodRoot = mkRoot('cfg-mixed-good')
+  const cfg = path.join(tmpRoot, 'roots-mixed.txt')
+  fs.writeFileSync(cfg, `${goodRoot}\n/nonexistent/path/${Date.now()}\n`)
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.allClean, false)
+  // Good root is still scanned + clean, but allClean fails closed because
+  // the bad entry is unverified.
+  eq(result.rootsScanned, 1)
+  eq(result.invalidConfigEntries.length, 1)
+})
+
+test('config path is a directory → exit 1, configError=not_a_file', () => {
+  const cfgDir = path.join(tmpRoot, 'config-as-dir')
+  fs.mkdirSync(cfgDir)
+  const { result, exitCode } = runSweep(`--config ${cfgDir}`)
+  eq(exitCode, 1)
+  eq(result.configError, 'not_a_file')
+  eq(result.allClean, false)
+})
+
 test('all enrolled roots clean → exit 0', () => {
   const a = mkRoot('cfg-clean-a')
   const b = mkRoot('cfg-clean-b')
