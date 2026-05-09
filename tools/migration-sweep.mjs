@@ -116,8 +116,12 @@ if (singleRoot) {
     configError = fromConfig.error
     roots = []
   } else {
-    const candidates = fromConfig.map(r => path.resolve(r))
-    const validations = candidates.map(r => ({ root: r, ...validateRoot(r) }))
+    // Codex round-3 F5: validate the RAW config string before path.resolve.
+    // path.resolve('.') → cwd (absolute, exists), so a `.` entry would
+    // otherwise pass the isAbsolute + isDirectory checks and silently
+    // enroll the caller's cwd. Likewise `C:\demo` on POSIX would resolve
+    // to <cwd>/C:\demo. Raw-first validation closes both classes.
+    const validations = fromConfig.map(r => ({ root: r, ...validateRoot(r) }))
     invalidConfigEntries = validations.filter(v => !v.valid).map(v => ({
       root: v.root, reason: v.reason
     }))

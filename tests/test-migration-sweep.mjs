@@ -212,6 +212,41 @@ test('config path is a directory → exit 1, configError=not_a_file', () => {
   eq(result.allClean, false)
 })
 
+console.log('\nCodex round-3 F5: relative-entry pre-resolve validation:')
+
+test('config with `.` (relative cwd) → exit 1, not_absolute (NOT silently resolved)', () => {
+  const cfg = path.join(tmpRoot, 'roots-dot.txt')
+  fs.writeFileSync(cfg, '.\n')
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.allClean, false)
+  if (!result.invalidConfigEntries || result.invalidConfigEntries.length !== 1) {
+    throw new Error(`expected 1 invalid entry, got ${JSON.stringify(result.invalidConfigEntries)}`)
+  }
+  eq(result.invalidConfigEntries[0].reason, 'not_absolute')
+  eq(result.invalidConfigEntries[0].root, '.')  // raw, not resolved
+})
+
+test('config with relative path that exists in cwd → exit 1, not_absolute', () => {
+  const cfg = path.join(tmpRoot, 'roots-relative-exists.txt')
+  fs.writeFileSync(cfg, 'tmp\n')
+  // Run sweep with cwd=tmpRoot so 'tmp' would resolve to an existing dir
+  // if path.resolve happened first.
+  const realDir = path.join(tmpRoot, 'tmp')
+  fs.mkdirSync(realDir, { recursive: true })
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.invalidConfigEntries[0].reason, 'not_absolute')
+})
+
+test('config with Windows-style path on POSIX → exit 1, not_absolute', () => {
+  const cfg = path.join(tmpRoot, 'roots-windows.txt')
+  fs.writeFileSync(cfg, 'C:\\demo\n')
+  const { result, exitCode } = runSweep(`--config ${cfg}`)
+  eq(exitCode, 1)
+  eq(result.invalidConfigEntries[0].reason, 'not_absolute')
+})
+
 test('all enrolled roots clean → exit 0', () => {
   const a = mkRoot('cfg-clean-a')
   const b = mkRoot('cfg-clean-b')
