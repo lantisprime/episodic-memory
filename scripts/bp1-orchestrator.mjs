@@ -2,7 +2,16 @@
 /**
  * bp1-orchestrator.mjs — BP-1 orchestrator runtime (RFC-004 §668, §722, M1).
  *
- * PR-1c-A scope: `init-run` subcommand only.
+ * Subcommands:
+ *   - init-run     (PR-1c-A) — mint + activation gate + key gen + run-started episode.
+ *   - finalize-run (PR-1c-B Slice 2 commit 4 — plan v3.3 episode bef4) —
+ *     7-step terminal closure: key-load gate, decision-log fence, records
+ *     collection, manifest build/sign/emit, disk re-read fence, key shred,
+ *     terminal state mark.
+ *   - finalize-recover (PR-1c-B Slice 2 commit 4) — 4-state A/B/C/D recovery
+ *     for partially-completed finalize-run (post-crash idempotence).
+ *
+ * init-run details:
  *   - Mints run_id.
  *   - Spawns bp1-flag-check.mjs (cwd: projectRoot) for activation gate.
  *     flag-check ALSO validates verify_key_id fingerprint vs activation map
@@ -17,15 +26,15 @@
  *   - Writes the episode to `<projectRoot>/.episodic-memory/episodes/`.
  *   - Prints run_id + episode_id as JSON to stdout.
  *
- * Out of scope (PR-1c-B): finalize-run, replay, manifest emit, event-table,
- * snapshot, full state machine, CLI subcommands beyond init-run.
+ * Out of scope (later): replay, event-table, snapshot, full state machine,
+ * CLI subcommands beyond init-run / finalize-run / finalize-recover.
  *
  * Exit codes:
- *   0 — run started successfully; { run_id, episode_id } on stdout.
- *   1 — activation gate refused (project disabled / key drift / hash drift).
- *        flag-check stderr forwarded to operator.
+ *   0 — success.
+ *   1 — activation gate refused (init-run only).
  *   2 — bad CLI args / missing --project / not a git repo.
  *   3 — internal error (run_id collision / key gen failure / other).
+ *   4 — finalize fence-fail / manifest-invalid (finalize-run / finalize-recover).
  *
  * Zero deps; Node stdlib only.
  */
@@ -38,9 +47,23 @@ import { execFileSync, spawnSync } from 'node:child_process'
 
 import { signCanonical } from './lib/bp1-hmac.mjs'
 import { canonicalize, projectProbeResultToFrontmatter } from './lib/bp1-canonicalize.mjs'
-import { generateRunKey } from './lib/bp1-keys.mjs'
-import { appendRun } from './lib/bp1-run-state.mjs'
+import {
+  generateRunKey,
+  loadRunKey,
+  shredRunKey,
+  runKeyPath,
+  loadVerifyKey,
+} from './lib/bp1-keys.mjs'
+import { appendRun, markTerminal, getRunState } from './lib/bp1-run-state.mjs'
 import { probeScheduledTasksCapability } from './lib/bp1-probe.mjs'
+import {
+  collectEpisodeRecords,
+  buildManifestPayload,
+  signManifest,
+  verifyManifest,
+  verifyOnDiskEqualsManifest,
+} from './lib/bp1-manifest.mjs'
+import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
 
 const REPO_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const FLAG_CHECK = path.join(REPO_DIR, 'scripts', 'bp1-flag-check.mjs')
@@ -51,18 +74,22 @@ const FLAG_CHECK = path.join(REPO_DIR, 'scripts', 'bp1-flag-check.mjs')
 
 function usage() {
   process.stderr.write(
-    'Usage: bp1-orchestrator init-run --project <projectRoot> --rfc-id <rfcId>\n',
+    'Usage:\n' +
+    '  bp1-orchestrator init-run --project <projectRoot> --rfc-id <rfcId>\n' +
+    '  bp1-orchestrator finalize-run --project <projectRoot> --run-id <runId>\n' +
+    '  bp1-orchestrator finalize-recover --project <projectRoot> --run-id <runId>\n',
   )
 }
 
 function parseArgs(argv) {
-  const out = { subcommand: null, project: null, rfcId: null }
+  const out = { subcommand: null, project: null, rfcId: null, runId: null }
   if (argv.length === 0) return out
   out.subcommand = argv[0]
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--project') out.project = argv[++i]
     else if (arg === '--rfc-id') out.rfcId = argv[++i]
+    else if (arg === '--run-id') out.runId = argv[++i]
     else if (arg === '--help' || arg === '-h') {
       usage()
       process.exit(0)
@@ -314,6 +341,502 @@ function initRun(args) {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: finalize-run (PR-1c-B Slice 2 commit 4 — plan v3.3 §B)
+// ---------------------------------------------------------------------------
+
+// §D test-hook triple-guard: prod cannot fire even if env var is set, because
+// (a) NODE_ENV != 'test' guard, (b) explicit allow-list env, (c) projectRoot
+// must live under os.tmpdir(). All three required.
+function maybeAbortHook(stepNum, projectRoot) {
+  const abortStep = process.env.BP1_TEST_ABORT_AFTER_FINALIZE_STEP
+  if (
+    abortStep
+    && process.env.NODE_ENV === 'test'
+    && process.env.BP1_TEST_ALLOW_FINALIZE_ABORT === '1'
+    && projectRoot.startsWith(os.tmpdir())
+    && Number(abortStep) === stepNum
+  ) {
+    throw new Error(`BP1_TEST_ABORT_AFTER_FINALIZE_STEP=${abortStep} fired (test-only)`)
+  }
+}
+
+function nowIso() {
+  return new Date().toISOString()
+}
+
+function buildFenceFailFrontmatterLines(epId, runId, projectRoot, summary, bodySha, hmacHex) {
+  const iso = nowIso()
+  return [
+    '---',
+    `id: ${epId}`,
+    `run_id: ${runId}`,
+    `type: evidence`,
+    `state: fence-fail`,
+    `parent_episode: null`,
+    `expected_post_episode_id: null`,
+    `summary: ${JSON.stringify(summary)}`,
+    `body_sha256: ${bodySha}`,
+    `hmac_signature: ${hmacHex}`,
+    `tags: [bp1-finalize-fence-fail, bp1-evidence-snapshot]`,
+    `category: workflow.lifecycle`,
+    `date: ${iso.slice(0, 10)}`,
+    `time: "${iso.slice(11, 16)}"`,
+    `project: ${JSON.stringify(path.basename(projectRoot))}`,
+    '---',
+    '',
+  ]
+}
+
+// Signed fence-fail evidence (run.key available). RFC §A.3.
+function emitFenceFailEvidence(projectRoot, runId, runKey32B, reason, details) {
+  const epId = episodeId(runId, 'fence-fail')
+  const summary = `BP-1 finalize fence-fail (${reason}): ${runId}`
+  const body = [
+    `# bp1-finalize-fence-fail — ${runId}`,
+    '',
+    `Run \`${runId}\` finalize aborted at ${nowIso()}.`,
+    '',
+    `**Reason:** \`${reason}\``,
+    '',
+    '**Details:**',
+    '',
+    '```json',
+    JSON.stringify(details, null, 2),
+    '```',
+    '',
+    `Episode id: \`${epId}\`.`,
+    '',
+  ].join('\n')
+  const frontmatter = {
+    type: 'evidence',
+    run_id: runId,
+    parent_episode: null,
+    expected_post_episode_id: null,
+    summary,
+  }
+  const { canonicalBytes, payload } = canonicalize(frontmatter, body)
+  const hmacHex = signCanonical(canonicalBytes, runKey32B)
+  const fmLines = buildFenceFailFrontmatterLines(epId, runId, projectRoot, summary, payload.body_sha256, hmacHex)
+  const episodesDir = path.join(projectRoot, '.episodic-memory', 'episodes')
+  fs.mkdirSync(episodesDir, { recursive: true })
+  fs.writeFileSync(path.join(episodesDir, `${epId}.md`), fmLines.join('\n') + body)
+  return epId
+}
+
+// Unsigned diagnostic (run.key NOT loadable). RFC §A.2 missing/mode/size/unreadable.
+function emitDiagnostic(projectRoot, runId, reason, details) {
+  const iso = nowIso()
+  const epId = `${runId}-diagnostic-${crypto.randomBytes(2).toString('hex')}`
+  const summary = `BP-1 finalize diagnostic (${reason}): ${runId}`
+  const body = [
+    `# bp1-finalize-diagnostic — ${runId}`,
+    '',
+    `Run \`${runId}\` finalize aborted at ${iso} (no signed evidence: run.key not loadable).`,
+    '',
+    `**Reason:** \`${reason}\``,
+    '',
+    '**Details:**',
+    '',
+    '```json',
+    JSON.stringify(details, null, 2),
+    '```',
+    '',
+  ].join('\n')
+  const fmLines = [
+    '---',
+    `id: ${epId}`,
+    `run_id: ${runId}`,
+    `type: evidence`,
+    `state: diagnostic`,
+    `parent_episode: null`,
+    `expected_post_episode_id: null`,
+    `summary: ${JSON.stringify(summary)}`,
+    `tags: [bp1-finalize-diagnostic]`,
+    `category: workflow.lifecycle`,
+    `date: ${iso.slice(0, 10)}`,
+    `time: "${iso.slice(11, 16)}"`,
+    `project: ${JSON.stringify(path.basename(projectRoot))}`,
+    '---',
+    '',
+  ]
+  const episodesDir = path.join(projectRoot, '.episodic-memory', 'episodes')
+  fs.mkdirSync(episodesDir, { recursive: true })
+  fs.writeFileSync(path.join(episodesDir, `${epId}.md`), fmLines.join('\n') + body)
+  return epId
+}
+
+// Decision-log fence (§A.1). Returns {ok:true} | {ok:false, reason, details}.
+// Reads pre-decision episodes from BOTH local + global stores; for each pre,
+// requires exactly one matching post in either store satisfying all 7
+// predicates per RFC-004 §689-696 / §619-623.
+function decisionLogFence(runId, projectRoot, runKey32B) {
+  const stores = [
+    path.join(projectRoot, '.episodic-memory', 'episodes'),
+    path.join(os.homedir(), '.episodic-memory', 'episodes'),
+  ]
+  const allEpisodes = new Map() // id → {fm, body, canonicalSha}
+  for (const store of stores) {
+    if (!fs.existsSync(store)) continue
+    for (const f of fs.readdirSync(store)) {
+      if (!f.endsWith('.md')) continue
+      const fp = path.join(store, f)
+      let buf
+      try {
+        buf = fs.readFileSync(fp)
+      } catch {
+        continue
+      }
+      let parsed
+      try {
+        parsed = parseBp1Frontmatter(buf)
+      } catch {
+        continue // tolerated here; collectEpisodeRecords will hard-fail at step 2
+      }
+      const fm = parsed.frontmatter
+      if (fm.run_id !== runId) continue
+      if (typeof fm.id !== 'string') continue
+      // Last-writer-wins is fine for the fence; collectEpisodeRecords step 2
+      // detects duplicate-id-with-different-content as a separate failure.
+      allEpisodes.set(fm.id, { fm, body: parsed.body })
+    }
+  }
+  for (const { fm } of allEpisodes.values()) {
+    if (fm.expected_post_episode_id == null) continue
+    const expectedPostId = fm.expected_post_episode_id
+    const post = allEpisodes.get(expectedPostId)
+    if (!post) {
+      return {
+        ok: false,
+        reason: 'pre-decision-no-matching-post',
+        details: { pre_id: fm.id, expected_post_episode_id: expectedPostId, found_post_id: null },
+      }
+    }
+    const pfm = post.fm
+    // Predicate 1: run_id alignment.
+    if (pfm.run_id !== runId) {
+      return { ok: false, reason: 'post-wrong-run-id', details: { pre_id: fm.id, post_id: pfm.id, post_run_id: pfm.run_id, expected_run_id: runId } }
+    }
+    // Predicate 2: parent_episode == pre.id.
+    if (pfm.parent_episode !== fm.id) {
+      return { ok: false, reason: 'post-wrong-parent-episode', details: { pre_id: fm.id, post_id: pfm.id, post_parent_episode: pfm.parent_episode } }
+    }
+    // Predicate 3: post is itself terminal (not another pre).
+    if (pfm.expected_post_episode_id !== null) {
+      return { ok: false, reason: 'post-is-itself-pre', details: { pre_id: fm.id, post_id: pfm.id, post_expected_post_episode_id: pfm.expected_post_episode_id } }
+    }
+    // Predicate 4: type == 'decision' (RFC-004 §689-696 canonical vocab).
+    if (pfm.type !== 'decision') {
+      return { ok: false, reason: 'post-wrong-type', details: { pre_id: fm.id, post_id: pfm.id, post_type: pfm.type, expected_type: 'decision' } }
+    }
+    // Predicate 5: tags includes 'bp1-decision' (RFC-004 §619-623).
+    if (!Array.isArray(pfm.tags) || !pfm.tags.includes('bp1-decision')) {
+      return { ok: false, reason: 'post-missing-bp1-decision-tag', details: { pre_id: fm.id, post_id: pfm.id, post_tags: pfm.tags || null } }
+    }
+    // Predicate 6: body_sha256 matches recomputed canonical body hash.
+    const { canonicalBytes, payload } = canonicalize(pfm, post.body)
+    if (pfm.body_sha256 !== payload.body_sha256) {
+      return { ok: false, reason: 'post-body-sha256-mismatch', details: { pre_id: fm.id, post_id: pfm.id, frontmatter_body_sha256: pfm.body_sha256, recomputed_body_sha256: payload.body_sha256 } }
+    }
+    // Predicate 7: hmac_signature verifies against per-run key over canonical bytes.
+    const expectedSig = signCanonical(canonicalBytes, runKey32B)
+    if (typeof pfm.hmac_signature !== 'string' || pfm.hmac_signature.toLowerCase() !== expectedSig.toLowerCase()) {
+      return { ok: false, reason: 'post-hmac-signature-invalid', details: { pre_id: fm.id, post_id: pfm.id } }
+    }
+  }
+  return { ok: true }
+}
+
+function buildManifestEpisodeFile(epId, runId, projectRoot, payload, manifestSig) {
+  const iso = nowIso()
+  const summary = `BP-1 run manifest: ${runId}`
+  const body = JSON.stringify(payload, null, 2) + '\n'
+  const fmLines = [
+    '---',
+    `id: ${epId}`,
+    `run_id: ${runId}`,
+    `type: evidence`,
+    `state: run-manifest`,
+    `parent_episode: null`,
+    `expected_post_episode_id: null`,
+    `summary: ${JSON.stringify(summary)}`,
+    `manifest_signature: ${manifestSig}`,
+    `terminal_state: ${payload.terminal_state}`,
+    `finalized_at: ${JSON.stringify(payload.finalized_at)}`,
+    `episodes_records_root: ${payload.episodes_records_root}`,
+    `manifest_schema_version: ${JSON.stringify(payload.manifest_schema_version)}`,
+    `tags: [bp1-run-manifest, bp1-evidence-snapshot]`,
+    `category: workflow.lifecycle`,
+    `date: ${iso.slice(0, 10)}`,
+    `time: "${iso.slice(11, 16)}"`,
+    `project: ${JSON.stringify(path.basename(projectRoot))}`,
+    '---',
+    '',
+  ]
+  return fmLines.join('\n') + body
+}
+
+// Locate manifest episode for runId in local store. DEFER `1bfc`: concurrent
+// finalize could create multiple bp1-run-manifest tagged episodes for the same
+// run; current best-effort is "first by lex sort". Manifest uniqueness under
+// concurrent finalize is M2 follow-up.
+function findManifestEpisode(projectRoot, runId) {
+  const local = path.join(projectRoot, '.episodic-memory', 'episodes')
+  if (!fs.existsSync(local)) return null
+  const candidates = []
+  for (const f of fs.readdirSync(local)) {
+    if (!f.endsWith('.md')) continue
+    const fp = path.join(local, f)
+    let buf
+    try {
+      buf = fs.readFileSync(fp)
+    } catch { continue }
+    let parsed
+    try { parsed = parseBp1Frontmatter(buf) } catch { continue }
+    const fm = parsed.frontmatter
+    if (fm.run_id !== runId) continue
+    if (!Array.isArray(fm.tags) || !fm.tags.includes('bp1-run-manifest')) continue
+    candidates.push({ path: fp, frontmatter: fm, body: parsed.body })
+  }
+  if (candidates.length === 0) return null
+  candidates.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  return candidates[0]
+}
+
+function validateFinalizeArgs(args) {
+  if (!args.project) { usage(); return { error: 2 } }
+  if (!args.runId) {
+    process.stderr.write('error: --run-id is required\n')
+    usage()
+    return { error: 2 }
+  }
+  let projectRoot
+  try {
+    projectRoot = fs.realpathSync(args.project)
+  } catch (_e) {
+    process.stderr.write(`error: --project does not exist: ${args.project}\n`)
+    return { error: 2 }
+  }
+  if (!fs.existsSync(path.join(projectRoot, '.git'))) {
+    process.stderr.write(`error: --project is not a git repository: ${projectRoot}\n`)
+    return { error: 2 }
+  }
+  return { projectRoot, runId: args.runId }
+}
+
+function finalizeRun(args) {
+  const v = validateFinalizeArgs(args)
+  if (v.error) return v.error
+  const { projectRoot, runId } = v
+  const homeDir = os.homedir()
+
+  // Step 0: key-load gate (§A.2). Three branches.
+  const keyResult = loadRunKey(projectRoot, runId)
+  if (keyResult.error) {
+    emitDiagnostic(projectRoot, runId, `run-key-${keyResult.error}`, { run_id: runId, key_path: runKeyPath(projectRoot, runId) })
+    process.stderr.write(`bp1-finalize-run: run.key ${keyResult.error}\n`)
+    return 4
+  }
+  const { key32B } = keyResult
+  maybeAbortHook(0, projectRoot)
+
+  // Step 1: decision-log fence (§A.1).
+  const fence = decisionLogFence(runId, projectRoot, key32B)
+  if (!fence.ok) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, fence.reason, fence.details)
+    process.stderr.write(`bp1-finalize-run: decision-log fence-fail (${fence.reason})\n`)
+    return 4
+  }
+  maybeAbortHook(1, projectRoot)
+
+  // Step 2: collect on-disk records. THROW PROPAGATES → signed fence-fail + exit 4.
+  let records
+  try {
+    records = collectEpisodeRecords(runId, projectRoot)
+  } catch (e) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, 'collect-records-failed', { message: e.message })
+    process.stderr.write(`bp1-finalize-run: collectEpisodeRecords failed: ${e.message}\n`)
+    return 4
+  }
+  maybeAbortHook(2, projectRoot)
+
+  // Step 3: records root (computed inside buildManifestPayload; nothing to
+  // separately do here other than the abort hook for crash-after-collect).
+  maybeAbortHook(3, projectRoot)
+
+  // Step 4: build + sign + emit manifest episode. Verify-key load fail
+  // (cannot emit signed manifest) → signed fence-fail + exit 4.
+  const verifyKeyLoad = loadVerifyKey(homeDir)
+  if (verifyKeyLoad.error) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, `verify-key-${verifyKeyLoad.error}`, { home_dir: homeDir })
+    process.stderr.write(`bp1-finalize-run: verify-key ${verifyKeyLoad.error}\n`)
+    return 4
+  }
+  // FU-1 ordering wording (§F): per_episode_records is in deterministic
+  // episode_id order (lexicographic) — NOT chronological. Same-second IDs
+  // tie on suffix. See plan-review round-2 FU-1 (episode 20260508-112437-...-4b9f).
+  const payload = buildManifestPayload(records, runId, projectRoot, 'complete', nowIso(), records.length)
+  const manifestSig = signManifest(payload, verifyKeyLoad.key32B)
+  const manifestEpId = episodeId(runId, 'manifest')
+  const episodesDir = path.join(projectRoot, '.episodic-memory', 'episodes')
+  fs.mkdirSync(episodesDir, { recursive: true })
+  const manifestPath = path.join(episodesDir, `${manifestEpId}.md`)
+  fs.writeFileSync(manifestPath, buildManifestEpisodeFile(manifestEpId, runId, projectRoot, payload, manifestSig))
+  maybeAbortHook(4, projectRoot)
+
+  // Step 5: disk re-read fence — parse, verify signature, verify on-disk
+  // records still equal manifest. Either fails → signed fence-fail + exit 4.
+  let reread
+  try {
+    reread = parseBp1Frontmatter(fs.readFileSync(manifestPath))
+  } catch (e) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, 'manifest-reread-parse-failed', { manifest_path: manifestPath, message: e.message })
+    process.stderr.write(`bp1-finalize-run: manifest re-read parse failed: ${e.message}\n`)
+    return 4
+  }
+  let rereadPayload
+  try {
+    rereadPayload = JSON.parse(reread.body)
+  } catch (e) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, 'manifest-reread-json-invalid', { manifest_path: manifestPath, message: e.message })
+    return 4
+  }
+  if (!verifyManifest(rereadPayload, reread.frontmatter.manifest_signature, verifyKeyLoad.key32B)) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, 'manifest-signature-invalid', { manifest_path: manifestPath })
+    process.stderr.write('bp1-finalize-run: manifest signature invalid on re-read\n')
+    return 4
+  }
+  const eq = verifyOnDiskEqualsManifest(rereadPayload, runId, projectRoot)
+  if (!eq.ok) {
+    emitFenceFailEvidence(projectRoot, runId, key32B, 'manifest-disk-mismatch', { mismatches: eq.mismatches })
+    process.stderr.write(`bp1-finalize-run: on-disk records do not match manifest (${eq.mismatches.length} mismatch(es))\n`)
+    return 4
+  }
+  maybeAbortHook(5, projectRoot)
+
+  // Step 6: shred run.key. After this point the run cannot be re-finalized
+  // (no live signing key remains).
+  const shred = shredRunKey(projectRoot, runId)
+  if (shred.error) {
+    // Already-missing is benign; anything else is anomalous but key shred is
+    // best-effort once the manifest is durable.
+    process.stderr.write(`bp1-finalize-run: shredRunKey returned ${shred.error} (manifest already emitted)\n`)
+  }
+  maybeAbortHook(6, projectRoot)
+
+  // Step 7: mark terminal state. DEFER `4b35`: compound State-D terminal/key
+  // transition atomicity (M2 follow-up).
+  const term = markTerminal(projectRoot, runId, 'complete')
+  if (term.error && term.error !== 'already-terminal') {
+    process.stderr.write(`bp1-finalize-run: markTerminal returned ${term.error}\n`)
+    return 3
+  }
+  maybeAbortHook(7, projectRoot)
+
+  process.stdout.write(JSON.stringify({
+    run_id: runId,
+    manifest_episode_id: manifestEpId,
+    terminal_state: 'complete',
+    episode_count: payload.episode_count,
+    episodes_records_root: payload.episodes_records_root,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: finalize-recover (PR-1c-B Slice 2 commit 4 — plan v3.3 §C)
+// ---------------------------------------------------------------------------
+
+function finalizeRecover(args) {
+  const v = validateFinalizeArgs(args)
+  if (v.error) return v.error
+  const { projectRoot, runId } = v
+  const homeDir = os.homedir()
+
+  // Locate manifest. No manifest = State C (manifest invalid / missing).
+  const manifest = findManifestEpisode(projectRoot, runId)
+  if (!manifest) {
+    process.stderr.write(`bp1-finalize-recover: no bp1-run-manifest episode for ${runId} (State C)\n`)
+    return 4
+  }
+  let payload
+  try {
+    payload = JSON.parse(manifest.body)
+  } catch (e) {
+    process.stderr.write(`bp1-finalize-recover: manifest body JSON-invalid (State C): ${e.message}\n`)
+    return 4
+  }
+
+  // Manifest validity: signature + on-disk equality. Any failure → State C.
+  const verifyKeyLoad = loadVerifyKey(homeDir)
+  if (verifyKeyLoad.error) {
+    process.stderr.write(`bp1-finalize-recover: verify-key ${verifyKeyLoad.error} (cannot validate manifest; State C)\n`)
+    return 4
+  }
+  const sig = manifest.frontmatter.manifest_signature
+  if (!verifyManifest(payload, sig, verifyKeyLoad.key32B)) {
+    process.stderr.write('bp1-finalize-recover: manifest signature invalid (State C)\n')
+    return 4
+  }
+  const eq = verifyOnDiskEqualsManifest(payload, runId, projectRoot)
+  if (!eq.ok) {
+    process.stderr.write(`bp1-finalize-recover: on-disk records do not match manifest (State C; ${eq.mismatches.length} mismatch(es))\n`)
+    return 4
+  }
+
+  // Manifest is valid. Branch on key state.
+  const keyResult = loadRunKey(projectRoot, runId)
+  let state
+  if (keyResult.error === 'missing') {
+    // State B: manifest valid, key already shredded. Terminal mark idempotent.
+    state = 'B'
+    const term = markTerminal(projectRoot, runId, 'complete')
+    if (term.error && term.error !== 'already-terminal') {
+      process.stderr.write(`bp1-finalize-recover: markTerminal returned ${term.error} (State B)\n`)
+      return 3
+    }
+  } else if (keyResult.error) {
+    // State D: manifest valid, key damaged (mode/size/unreadable). Unlink
+    // damaged key then mark terminal. DEFER `4b35`: compound terminal/key
+    // transition atomic helper (M2 follow-up).
+    state = 'D'
+    try {
+      fs.unlinkSync(runKeyPath(projectRoot, runId))
+    } catch (e) {
+      // ENOENT ok (race with prior finalize); other errors anomalous but
+      // not fatal once manifest is durable.
+      if (e.code !== 'ENOENT') {
+        process.stderr.write(`bp1-finalize-recover: failed to unlink damaged run.key: ${e.message}\n`)
+      }
+    }
+    const term = markTerminal(projectRoot, runId, 'complete')
+    if (term.error && term.error !== 'already-terminal') {
+      process.stderr.write(`bp1-finalize-recover: markTerminal returned ${term.error} (State D)\n`)
+      return 3
+    }
+  } else {
+    // State A: manifest valid, key still present. Shred then terminal.
+    state = 'A'
+    const shred = shredRunKey(projectRoot, runId)
+    if (shred.error && shred.error !== 'missing') {
+      process.stderr.write(`bp1-finalize-recover: shredRunKey returned ${shred.error} (State A)\n`)
+    }
+    const term = markTerminal(projectRoot, runId, 'complete')
+    if (term.error && term.error !== 'already-terminal') {
+      process.stderr.write(`bp1-finalize-recover: markTerminal returned ${term.error} (State A)\n`)
+      return 3
+    }
+  }
+
+  process.stdout.write(JSON.stringify({
+    run_id: runId,
+    state,
+    manifest_episode_id: manifest.frontmatter.id,
+    terminal_state: getRunState(projectRoot, runId)?.state ?? null,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -322,6 +845,12 @@ let exitCode
 switch (args.subcommand) {
   case 'init-run':
     exitCode = initRun(args)
+    break
+  case 'finalize-run':
+    exitCode = finalizeRun(args)
+    break
+  case 'finalize-recover':
+    exitCode = finalizeRecover(args)
     break
   case null:
   case undefined:
