@@ -123,7 +123,11 @@ function setBranch(name) {
   execSync(`git checkout -q -B ${name}`, { cwd: tmpProject })
 }
 
-const markerPath = path.join(tmpProject, '.claude', '.checkpoint-required')
+// 2026-05-09 .checkpoints/ migration: armed markers now land at
+// PRIMARY (.checkpoints/). Test reads check primary first, then fall
+// back to legacy via the same dual-root semantics the hooks use.
+const markerPath = path.join(tmpProject, '.checkpoints', '.checkpoint-required')
+const markerPathLegacy = path.join(tmpProject, '.claude', '.checkpoint-required')
 
 const ALL_PHASE3B_MARKERS = [
   '.checkpoint-required',
@@ -134,13 +138,15 @@ const ALL_PHASE3B_MARKERS = [
 
 function clearMarker() {
   try { fs.unlinkSync(markerPath) } catch {}
+  try { fs.unlinkSync(markerPathLegacy) } catch {}
 }
 
-// Clear all 4 Phase 3b markers — used by tests that exercise the full
-// state machine, so subsequent tests start from a known-clean .claude/
-// regardless of what state the previous test left behind.
+// Clear all Phase 3b markers across BOTH roots — used by tests that
+// exercise the full state machine, so subsequent tests start from a
+// known-clean state regardless of what the previous test left behind.
 function clearAllMarkers() {
   for (const m of ALL_PHASE3B_MARKERS) {
+    try { fs.unlinkSync(path.join(tmpProject, '.checkpoints', m)) } catch {}
     try { fs.unlinkSync(path.join(tmpProject, '.claude', m)) } catch {}
   }
 }
@@ -512,8 +518,11 @@ test('T7j. End-to-end: real SessionStart hook arms marker without --task-type (P
   execSync(`node "${REBUILD}" --scope all`, { cwd: sessionProject, env: sessionEnv })
 
   const hookPath = path.join(REPO_ROOT, 'hooks', 'em-recall-sessionstart.sh')
-  const markerOut = path.join(sessionProject, '.claude', '.checkpoint-required')
-  assert.ok(!fs.existsSync(markerOut), 'precondition: marker should not exist')
+  // .checkpoints/ migration: hook arms at PRIMARY (.checkpoints/).
+  const markerOut = path.join(sessionProject, '.checkpoints', '.checkpoint-required')
+  const markerOutLegacy = path.join(sessionProject, '.claude', '.checkpoint-required')
+  assert.ok(!fs.existsSync(markerOut), 'precondition: primary marker should not exist')
+  assert.ok(!fs.existsSync(markerOutLegacy), 'precondition: legacy marker should not exist')
 
   const stdin = JSON.stringify({ cwd: sessionProject })
   // Run the hook EXACTLY the way Claude Code would: stdin JSON, HOME pointing
@@ -584,7 +593,11 @@ test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next Sessio
   execSync(`node "${REBUILD}" --scope all`, { cwd: sessionProject, env: sessionEnv })
 
   const hookPath = path.join(REPO_ROOT, 'hooks', 'em-recall-sessionstart.sh')
-  const claudeDir = path.join(sessionProject, '.claude')
+  // .checkpoints/ migration: hook arms markers at PRIMARY (.checkpoints/);
+  // SessionEnd sweeps both PRIMARY and LEGACY. Tests assert at primary
+  // for arming; sweep negative assertion at primary suffices because
+  // setup writes go to primary too.
+  const claudeDir = path.join(sessionProject, '.checkpoints')
   const preReq = path.join(claudeDir, '.checkpoint-required')
   const postReq = path.join(claudeDir, '.post-checkpoint-required')
   const preDone = path.join(claudeDir, '.pre-checkpoint-done')
@@ -604,6 +617,7 @@ test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next Sessio
   // allows stop. Simulate the post-arming task signal that a real
   // implementation turn would produce by touching .post-checkpoint-required
   // with a future mtime (mtime > baseline → carve-out denied).
+  // Baseline at PRIMARY (.checkpoints/.session-baseline) per migration.
   const baseline = path.join(claudeDir, '.session-baseline')
   if (fs.existsSync(baseline)) {
     fs.writeFileSync(postReq, '')

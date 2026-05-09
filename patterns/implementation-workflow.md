@@ -62,7 +62,7 @@ Required visible block before the first Edit/Write in any Full or Light task:
 ```
 
 - This is documentation of intent (medium enforcement per bp-010)
-- Claude Code: backed by `plan-gate.sh` which hard-blocks Edit/Write when `.plan-approval-pending` exists (strong enforcement)
+- Claude Code: backed by `plan-gate.sh` which hard-blocks Edit/Write when `.plan-approval-pending` exists at the repo root (strong enforcement). 2026-05-09 `.checkpoints/` migration: marker writes go to `<repo>/.checkpoints/.plan-approval-pending` (PRIMARY); reads also honor `<repo>/.claude/.plan-approval-pending` (LEGACY) during burn-in.
 - Other tools: checkpoint block is the best available gate
 
 ## Post-implementation Checkpoint

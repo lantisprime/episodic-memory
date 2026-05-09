@@ -73,6 +73,10 @@ mk_fake_home() {
   mkdir -p "$fake_home/.episodic-memory/scripts/lib"
   cp "$REPO_ROOT/scripts/em-recall.mjs" "$fake_home/.episodic-memory/scripts/em-recall.mjs"
   cp "$REPO_ROOT/scripts/lib/local-dir.mjs" "$fake_home/.episodic-memory/scripts/lib/local-dir.mjs"
+  # 2026-05-09 .checkpoints/ migration: em-recall now also imports
+  # marker-paths.mjs; without it the module fails to load and the hook
+  # falls back to the canned em-recall-non-zero error message.
+  cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$fake_home/.episodic-memory/scripts/lib/marker-paths.mjs"
 }
 
 TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"

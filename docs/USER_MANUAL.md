@@ -378,7 +378,7 @@ AI:   ⚠️ Pre-flight warning: bp-001 (implementation workflow) was
 AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 
       "Checkpoint required. Write the Rule 18 pre-implementation
-      checkpoint block to .claude/.pre-checkpoint-done before write
+      checkpoint block to .checkpoints/.pre-checkpoint-done before write
       tools are unblocked."
 
       I'll print my implementation plan, get your approval, then
@@ -392,7 +392,7 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 - **Stop-gate (post-checkpoint)** — blocks turn-end until E2E testing has run and any bugs found are logged ([#144](https://github.com/lantisprime/episodic-memory/pull/144)).
 - **Push-gate** — blocks `git push` until all wrap-up steps are complete.
 
-**To clear a gate:** Approve the AI's plan in chat. The AI writes the checkpoint marker on your behalf — you don't run any commands manually. (The marker location is an internal implementation detail and has migrated once already.)
+**To clear a gate:** Approve the AI's plan in chat. The AI writes the checkpoint marker on your behalf — you don't run any commands manually. (Marker location is an internal implementation detail; PR #207 relocated it from `<repo>/.claude/.X` to `<repo>/.checkpoints/.X` to escape Claude Code's built-in sensitive-file prompt — readers honor both during burn-in.)
 
 **Behind the scenes — BP-1 Auto-Pilot (RFC-004).** These three gates are part of a run-lifecycle system that signs each implementation run with HMAC, tracks state across crashes, and replays unfinished work via a finalize-recovery state machine. You don't interact with it directly — the gates above are its user-facing edges.
 
