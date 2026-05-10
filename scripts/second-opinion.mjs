@@ -120,7 +120,7 @@ function readBodyFromFlag() {
 // ---------------------------------------------------------------------------
 // Subcommand: request
 // ---------------------------------------------------------------------------
-function cmdRequest() {
+async function cmdRequest() {
   const provider = flag('--provider')
   if (!provider) emitErr('missing-flag', '--provider is required')
 
@@ -181,6 +181,79 @@ function cmdRequest() {
     emitErr(e.code || 'write-failed', e.message, { stderr: e.stderr })
   }
 
+  // Optional synchronous dispatch via provider plugin.
+  let dispatchResult = null
+  let replyWritten = null
+  if (hasFlag('--dispatch')) {
+    const providerModulePath = path.join(
+      HARNESS_ROOT, 'scripts', 'second-opinion', 'providers', `${provider}.mjs`
+    )
+    if (!fs.existsSync(providerModulePath)) {
+      emitErr('provider-module-missing',
+        `Provider module not found: ${providerModulePath}`, { provider })
+    }
+    let providerModule
+    try {
+      // Dynamic import — synchronous via top-level await isn't available in CLI;
+      // use require-equivalent via createRequire instead. ESM dynamic import
+      // returns a Promise, so we await via top-level wrapper.
+      providerModule = await import(`file://${providerModulePath}`)
+    } catch (e) {
+      emitErr('provider-module-load-failed',
+        `Cannot load provider module ${providerModulePath}: ${e.message}`, { provider })
+    }
+
+    if (typeof providerModule.available !== 'function' ||
+        typeof providerModule.dispatch !== 'function') {
+      emitErr('provider-contract-violation',
+        `Provider ${provider} module must export available() and dispatch()`,
+        { provider, providerModulePath })
+    }
+
+    const availability = providerModule.available()
+    if (!availability.ok) {
+      emitErr('provider-unavailable',
+        `Provider ${provider} unavailable: ${availability.reason}`,
+        { provider, availability })
+    }
+
+    try {
+      dispatchResult = providerModule.dispatch({ prompt: fullBody, projectRoot })
+    } catch (e) {
+      emitErr('provider-dispatch-failed',
+        `Provider ${provider} dispatch threw: ${e.message}`, { provider })
+    }
+    if (!dispatchResult.ok) {
+      emitErr('provider-dispatch-nonzero',
+        `Provider ${provider} exited non-zero (${dispatchResult.exitCode})`,
+        { provider, dispatchResult })
+    }
+
+    // Persist reply via storage adapter using requestId from the request write.
+    const requestId = written.id
+    const replyMeta = {
+      summary: `Reply (${provider}) to ${requestId}`,
+      tags: tagsRaw,
+      'work-area': workArea,
+      round,
+      provider,
+    }
+    try {
+      if (storageKind === 'files') {
+        replyWritten = filesStorage.writeReply({
+          projectRoot, requestId, body: dispatchResult.stdout, meta: replyMeta,
+        })
+      } else {
+        replyWritten = episodicStorage.writeReply({
+          projectRoot, harnessRoot: HARNESS_ROOT, requestId,
+          body: dispatchResult.stdout, meta: replyMeta,
+        })
+      }
+    } catch (e) {
+      emitErr(e.code || 'reply-write-failed', e.message, { stderr: e.stderr })
+    }
+  }
+
   emitOk({
     subcommand: 'request',
     project_root: projectRoot,
@@ -192,6 +265,9 @@ function cmdRequest() {
     override_path: composed.overridePath || null,
     composed_length: fullBody.length,
     written,
+    dispatched: dispatchResult !== null,
+    dispatch_exit_code: dispatchResult ? dispatchResult.exitCode : null,
+    reply: replyWritten,
   })
 }
 
@@ -220,18 +296,24 @@ function cmdRebuildIndex() {
   emitOk({ subcommand: 'rebuild-index', project_root: projectRoot, ...result })
 }
 
-switch (subcommand) {
-  case 'request':
-    cmdRequest()
-    break
-  case 'list-replies':
-    cmdListReplies()
-    break
-  case 'rebuild-index':
-    cmdRebuildIndex()
-    break
-  default:
-    emitErr('unknown-subcommand', `Unknown subcommand: ${subcommand}`, {
-      knownSubcommands: ['request', 'list-replies', 'rebuild-index'],
-    })
+async function main() {
+  switch (subcommand) {
+    case 'request':
+      await cmdRequest()
+      break
+    case 'list-replies':
+      cmdListReplies()
+      break
+    case 'rebuild-index':
+      cmdRebuildIndex()
+      break
+    default:
+      emitErr('unknown-subcommand', `Unknown subcommand: ${subcommand}`, {
+        knownSubcommands: ['request', 'list-replies', 'rebuild-index'],
+      })
+  }
 }
+
+main().catch((e) => {
+  emitErr('uncaught', e.message, { stack: e.stack })
+})
