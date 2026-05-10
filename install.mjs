@@ -1030,16 +1030,36 @@ if (installHooks) {
 
 // ---------------------------------------------------------------------------
 // 6. --install-second-opinion: write install snapshot at
-//    ~/.claude/hooks/second-opinion-providers.json with source_hash +
-//    per-fragment SHAs + flattened providers + each provider's available()
-//    result (skipping providers whose CLI is not on PATH).
+//    ~/.claude/hooks/second-opinion-providers.json + copy
+//    hooks/second-opinion-gate.mjs to ~/.claude/hooks/.
 //
 // v3.1/v3.2/v3.3 contract: harness reads source_hash to detect drift
 // (I-27a registry-stale-at-gate); composer reads per-fragment SHAs for
 // in-flight tamper detection (I-27b preamble-tamper-at-composer); hook
-// reads providers + cli_match patterns to gate Bash/Agent calls.
+// reads providers + cli_match patterns to gate Bash/Agent calls (I-8/I-9/I-10).
+//
+// Note: hook registration in ~/.claude/settings.json PreToolUse is performed
+// by --install-hooks (existing flow). --install-second-opinion ONLY writes
+// the snapshot + copies the gate script. To register the hook, run
+// --install-hooks alongside --install-second-opinion.
 // ---------------------------------------------------------------------------
 if (installSecondOpinion) {
+  try {
+    // Copy hooks/second-opinion-gate.mjs to ~/.claude/hooks/.
+    const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+    fs.mkdirSync(userHooksDir, { recursive: true })
+    const repoGateSrc = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
+    const userGateDst = path.join(userHooksDir, 'second-opinion-gate.mjs')
+    if (fs.existsSync(repoGateSrc)) {
+      fs.copyFileSync(repoGateSrc, userGateDst)
+      fs.chmodSync(userGateDst, 0o755)
+      console.log(`Installed second-opinion gate hook: ${userGateDst}`)
+    } else {
+      console.log(`Warning: ${repoGateSrc} not found; hook gate not installed.`)
+    }
+  } catch (e) {
+    console.log(`Note: could not copy second-opinion gate hook: ${e.message}`)
+  }
   try {
     const { computeSourceHash } = await import(
       new URL('./scripts/second-opinion/lib/source-hash.mjs', import.meta.url).href
