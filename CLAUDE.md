@@ -25,6 +25,40 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - You must not do mental tracing always use the actual files or data
 - You must do code review and use the actual files
 
+## Second-opinion review harness
+Pluggable cross-tool review at `scripts/second-opinion.mjs`. Replaces the
+manual 5-step `em-store + codex exec + episode-reply` recipe with a callable
+harness that handles preamble composition, provider dispatch, and
+consensus-loop iteration in one invocation.
+
+```bash
+# Single-shot: write request → dispatch → write reply (synchronous).
+node scripts/second-opinion.mjs request \
+  --provider codex --project . --storage files \
+  --body "review this diff..." --summary "diff review" --dispatch
+
+# Consensus loop: dispatch → parse verdict → rebuttal-cb → next round.
+node scripts/second-opinion.mjs request \
+  --provider codex --project . --storage files \
+  --body-file plan.md --summary "plan review" \
+  --consensus --max-rounds 5 --rebuttal-cb scripts/my-rebuttal.mjs
+```
+
+Providers: `codex`, `claude-subagent`, `gemini`, `stub` (testing).
+Storage backends: `files` (`.review-store/`) or `episodic` (uses em-store).
+Preambles: per-provider defaults at `scripts/second-opinion/preambles/`,
+overridable via `--preamble <id>` CLI flag or
+`<project>/.review-store/preambles/<provider>.md` file.
+
+Run `node install.mjs --tool claude-code --install-second-opinion` to
+write the install snapshot at `~/.claude/hooks/second-opinion-providers.json`
+(required for harness I-27a registry-stale-at-gate + composer I-27b
+preamble-tamper-at-composer + Claude Code PreToolUse hook gating).
+
+The Claude Code PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks
+direct provider invocations (Bash + Agent variants) so reviews route
+through the harness. Hook is fail-closed on missing/malformed snapshot.
+
 ## Discovering active priorities (read on session start)
 Before recommending or starting work, fetch the latest workplan:
 ```bash

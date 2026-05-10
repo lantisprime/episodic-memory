@@ -37,6 +37,7 @@ const tool = flag('--tool')
 const projectDir = flag('--project') || process.cwd()
 const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
+const installSecondOpinion = argv.includes('--install-second-opinion')
 const REPO_HOOKS = path.join(REPO_DIR, 'hooks')
 
 // P2 (code review): warn if --install-hooks-force passed without --install-hooks.
@@ -66,7 +67,16 @@ Hook flags (claude-code / Phase 3b):
                           for them (re-run with --install-hooks-force to
                           accept). Atomic settings.json write (temp+rename).
   --install-hooks-force   Overwrite divergent hook files with repo versions
-                          and proceed with registration.`)
+                          and proceed with registration.
+
+Second-opinion harness:
+  --install-second-opinion Write install snapshot at
+                          ~/.claude/hooks/second-opinion-providers.json
+                          with source_hash + per-fragment SHAs + flattened
+                          providers (each provider's available() probed; CLI
+                          not on PATH → skipped). Required for harness I-27a
+                          gate (registry-stale-at-gate) + composer I-27b
+                          (preamble-tamper-at-composer).`)
   process.exit(1)
 }
 
@@ -98,6 +108,31 @@ if (fs.existsSync(REPO_SCRIPTS_LIB)) {
     fs.copyFileSync(path.join(REPO_SCRIPTS_LIB, file), path.join(libDst, file))
   }
 }
+
+// scripts/second-opinion/ — pluggable second-opinion review harness subtree.
+// Recursively copy preambles/, providers/, storage/, lib/. Done unconditionally
+// alongside scripts/*.mjs so the harness module imports resolve at runtime; the
+// install snapshot at ~/.claude/hooks/second-opinion-providers.json is only
+// written when --install-second-opinion is passed (separate concern).
+const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
+if (fs.existsSync(REPO_SECOND_OPINION)) {
+  const soDst = path.join(SCRIPTS_DIR, 'second-opinion')
+  copyDirRecursive(REPO_SECOND_OPINION, soDst)
+}
+
+function copyDirRecursive(src, dst) {
+  fs.mkdirSync(dst, { recursive: true })
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name)
+    const dstPath = path.join(dst, entry.name)
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, dstPath)
+    } else if (entry.isFile()) {
+      fs.copyFileSync(srcPath, dstPath)
+    }
+  }
+}
+
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
 
 // 1b. Copy patterns/_index.json for global pattern validation
@@ -990,6 +1025,102 @@ if (installHooks) {
     }
   } catch (e) {
     console.log(`Note: could not install hooks: ${e.message}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. --install-second-opinion: write install snapshot at
+//    ~/.claude/hooks/second-opinion-providers.json + copy
+//    hooks/second-opinion-gate.mjs to ~/.claude/hooks/.
+//
+// v3.1/v3.2/v3.3 contract: harness reads source_hash to detect drift
+// (I-27a registry-stale-at-gate); composer reads per-fragment SHAs for
+// in-flight tamper detection (I-27b preamble-tamper-at-composer); hook
+// reads providers + cli_match patterns to gate Bash/Agent calls (I-8/I-9/I-10).
+//
+// Note: hook registration in ~/.claude/settings.json PreToolUse is performed
+// by --install-hooks (existing flow). --install-second-opinion ONLY writes
+// the snapshot + copies the gate script. To register the hook, run
+// --install-hooks alongside --install-second-opinion.
+// ---------------------------------------------------------------------------
+if (installSecondOpinion) {
+  try {
+    // Copy hooks/second-opinion-gate.mjs to ~/.claude/hooks/.
+    const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+    fs.mkdirSync(userHooksDir, { recursive: true })
+    const repoGateSrc = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
+    const userGateDst = path.join(userHooksDir, 'second-opinion-gate.mjs')
+    if (fs.existsSync(repoGateSrc)) {
+      fs.copyFileSync(repoGateSrc, userGateDst)
+      fs.chmodSync(userGateDst, 0o755)
+      console.log(`Installed second-opinion gate hook: ${userGateDst}`)
+    } else {
+      console.log(`Warning: ${repoGateSrc} not found; hook gate not installed.`)
+    }
+  } catch (e) {
+    console.log(`Note: could not copy second-opinion gate hook: ${e.message}`)
+  }
+  try {
+    const { computeSourceHash } = await import(
+      new URL('./scripts/second-opinion/lib/source-hash.mjs', import.meta.url).href
+    )
+    const { writeSnapshot, DEFAULT_SNAPSHOT_PATH } = await import(
+      new URL('./scripts/second-opinion/lib/install-snapshot.mjs', import.meta.url).href
+    )
+
+    // Hash against the GLOBAL installed copy (what runtime will see), NOT the
+    // source repo. This ensures harness gate compares apples-to-apples.
+    const globalSecondOpinion = path.join(SCRIPTS_DIR, 'second-opinion')
+    if (!fs.existsSync(globalSecondOpinion)) {
+      console.log(`Warning: ${globalSecondOpinion} not found; cannot write install snapshot.`)
+    } else {
+      const hashed = computeSourceHash(globalSecondOpinion)
+
+      // Load providers/index.json + run each provider's available() to filter.
+      const providersRegPath = path.join(globalSecondOpinion, 'providers', 'index.json')
+      const providersReg = JSON.parse(fs.readFileSync(providersRegPath, 'utf8'))
+      const installedProviders = []
+      for (const provider of providersReg.providers) {
+        const moduleFile = path.join(globalSecondOpinion, 'providers', `${provider.id}.mjs`)
+        if (!fs.existsSync(moduleFile)) {
+          console.log(`Skip provider ${provider.id}: module file not found at ${moduleFile}`)
+          continue
+        }
+        try {
+          const mod = await import(new URL(`file://${moduleFile}`).href)
+          if (typeof mod.available !== 'function') {
+            console.log(`Skip provider ${provider.id}: module missing available() export`)
+            continue
+          }
+          const probe = mod.available()
+          if (!probe.ok) {
+            console.log(`Skip provider ${provider.id}: available() returned ${probe.reason}`)
+            continue
+          }
+          installedProviders.push(provider)
+          console.log(`Registered provider: ${provider.id}`)
+        } catch (e) {
+          console.log(`Skip provider ${provider.id}: import failed: ${e.message}`)
+        }
+      }
+
+      const snapshot = {
+        schema_version: 1,
+        source_hash: hashed.source_hash,
+        source_repo: REPO_DIR,
+        install_timestamp: new Date().toISOString(),
+        providers: installedProviders,
+        fragments: hashed.fragments,
+        file_hashes: hashed.file_hashes,
+      }
+      const written = writeSnapshot(snapshot)
+      console.log(`Wrote second-opinion install snapshot: ${written}`)
+      console.log(`  source_hash: ${hashed.source_hash}`)
+      console.log(`  providers:   ${installedProviders.map((p) => p.id).join(', ') || '(none)'}`)
+      console.log(`  fragments:   ${hashed.fragments.length}`)
+    }
+  } catch (e) {
+    console.log(`Note: could not install second-opinion snapshot: ${e.message}`)
   }
 }
 
