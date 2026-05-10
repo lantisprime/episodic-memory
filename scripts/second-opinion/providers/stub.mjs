@@ -24,29 +24,65 @@ export function available() {
  *   - synthetic verdict (default ACCEPT)
  *   - canonical fenced JSON block per v3 §Consensus-loop v3 contract
  */
+/**
+ * dispatch — Configurable for tests via env vars:
+ *   SO_STUB_VERDICT — one of ACCEPT, HOLD, REJECT, ACCEPT-with-FU (default ACCEPT)
+ *   SO_STUB_DEFER_COUNT — number of HOLD rounds before flipping to ACCEPT.
+ *     Used in conjunction with SO_STUB_VERDICT=HOLD to test consensus loops.
+ *     Counter is incremented across calls within the same harness process via
+ *     a module-scope variable.
+ *   SO_STUB_FINDING_SEVERITY — for HOLD/ACCEPT-with-FU, the severity to attach
+ *     to the synthetic finding (P1/P2/P3, default P2).
+ *   SO_STUB_FINDING_STATUS — synthetic finding status (ACCEPT-OK, NEEDS-MORE-WORK,
+ *     NEW-CONCERN, DEFERRED-AS-FU). Default NEEDS-MORE-WORK.
+ *   SO_STUB_SPEC_CYCLE — '1' to emit spec_cycle_signal: 'trigger-met'.
+ */
+
+let _callCount = 0
+
 export function dispatch({ prompt, projectRoot }) {
   if (!prompt) throw new Error('stub.dispatch: prompt is required')
   if (!projectRoot) throw new Error('stub.dispatch: projectRoot is required')
 
-  // Pull request_id from prompt if present (matches em-store id format).
+  _callCount++
+
   const idMatch = prompt.match(/(\d{8}-\d{6}-[a-z0-9-]+-[0-9a-f]{4})/)
   const requestId = idMatch ? idMatch[1] : 'unknown-request'
+
+  // Resolve effective verdict: SO_STUB_DEFER_COUNT lets the stub emit HOLD
+  // for N calls then flip to ACCEPT. Used to test consensus loop convergence.
+  let verdict = process.env.SO_STUB_VERDICT || 'ACCEPT'
+  const deferCount = parseInt(process.env.SO_STUB_DEFER_COUNT || '0', 10)
+  if (deferCount > 0 && verdict === 'HOLD' && _callCount > deferCount) {
+    verdict = 'ACCEPT'
+  }
+
+  const severity = process.env.SO_STUB_FINDING_SEVERITY || 'P2'
+  const status = process.env.SO_STUB_FINDING_STATUS || 'NEEDS-MORE-WORK'
+  const specCycle = process.env.SO_STUB_SPEC_CYCLE === '1'
+
+  let findings = []
+  if (verdict === 'HOLD' || verdict === 'REJECT') {
+    findings = [{ id: 'F1', class: 'safety', severity, status }]
+  } else if (verdict === 'ACCEPT-with-FU') {
+    findings = [{ id: 'F1', class: 'doc', severity: 'P3', status: 'DEFERRED-AS-FU' }]
+  }
+
+  const summary = {
+    final_verdict: verdict,
+    findings,
+    spec_cycle_signal: specCycle ? 'trigger-met' : null,
+  }
 
   const replyBody = `# Stub provider reply (test fixture)
 
 Request: ${requestId}
 Prompt length: ${prompt.length} chars
-Verdict: ACCEPT (synthetic)
-
-This is a stub-provider reply emitted in-process for testing the harness
-end-to-end without requiring a real provider CLI binary.
+Call count: ${_callCount}
+Verdict: ${verdict} (synthetic)
 
 \`\`\`json:second-opinion-summary
-{
-  "final_verdict": "ACCEPT",
-  "findings": [],
-  "spec_cycle_signal": null
-}
+${JSON.stringify(summary, null, 2)}
 \`\`\`
 `
 
@@ -57,4 +93,9 @@ end-to-end without requiring a real provider CLI binary.
     stderr: '',
     timedOut: false,
   }
+}
+
+// For tests — reset call counter between runs.
+export function __resetCallCount() {
+  _callCount = 0
 }

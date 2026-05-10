@@ -33,6 +33,9 @@ import * as filesStorage from './second-opinion/storage/files.mjs'
 import * as episodicStorage from './second-opinion/storage/episodic.mjs'
 import { computeSourceHash } from './second-opinion/lib/source-hash.mjs'
 import { readSnapshot, snapshotPath } from './second-opinion/lib/install-snapshot.mjs'
+import { parseVerdict, applyStopCondition, summarizeFindings }
+  from './second-opinion/lib/consensus.mjs'
+import { spawnSync } from 'node:child_process'
 
 // harnessRoot frozen at module load.
 const __filename = fileURLToPath(import.meta.url)
@@ -234,10 +237,29 @@ async function cmdRequest() {
     emitErr(e.code || 'write-failed', e.message, { stderr: e.stderr })
   }
 
-  // Optional synchronous dispatch via provider plugin.
-  let dispatchResult = null
-  let replyWritten = null
-  if (hasFlag('--dispatch')) {
+  // -------------------------------------------------------------------------
+  // Optional synchronous dispatch (--dispatch) or consensus loop (--consensus).
+  // --consensus implies --dispatch.
+  // -------------------------------------------------------------------------
+  const consensusMode = hasFlag('--consensus')
+  const dispatchRequested = consensusMode || hasFlag('--dispatch')
+  const maxRounds = parseInt(flag('--max-rounds') || '5', 10)
+  const rebuttalCbPath = flag('--rebuttal-cb')
+  const forceSpecCycleAccept = hasFlag('--force-spec-cycle-accept')
+
+  if (consensusMode && (!Number.isInteger(maxRounds) || maxRounds < 1)) {
+    emitErr('invalid-max-rounds', `--max-rounds must be a positive integer, got: ${maxRounds}`)
+  }
+
+  let providerModule = null
+  let firstWritten = written
+  let lastWritten = written
+  let lastReply = null
+  let lastDispatch = null
+  let consensusRounds = []
+  let consensusFinal = null
+
+  if (dispatchRequested) {
     const providerModulePath = path.join(
       HARNESS_ROOT, 'scripts', 'second-opinion', 'providers', `${provider}.mjs`
     )
@@ -245,66 +267,168 @@ async function cmdRequest() {
       emitErr('provider-module-missing',
         `Provider module not found: ${providerModulePath}`, { provider })
     }
-    let providerModule
     try {
-      // Dynamic import — synchronous via top-level await isn't available in CLI;
-      // use require-equivalent via createRequire instead. ESM dynamic import
-      // returns a Promise, so we await via top-level wrapper.
       providerModule = await import(`file://${providerModulePath}`)
     } catch (e) {
       emitErr('provider-module-load-failed',
         `Cannot load provider module ${providerModulePath}: ${e.message}`, { provider })
     }
-
     if (typeof providerModule.available !== 'function' ||
         typeof providerModule.dispatch !== 'function') {
       emitErr('provider-contract-violation',
         `Provider ${provider} module must export available() and dispatch()`,
         { provider, providerModulePath })
     }
-
     const availability = providerModule.available()
     if (!availability.ok) {
       emitErr('provider-unavailable',
         `Provider ${provider} unavailable: ${availability.reason}`,
         { provider, availability })
     }
+  }
 
+  function writeRequestRound(body, roundN) {
+    const m = {
+      summary: roundN === 1 ? summary : `${summary} (round ${roundN})`,
+      tags: tagsRaw, 'work-area': workArea, round: String(roundN), provider,
+    }
+    if (storageKind === 'files') {
+      return filesStorage.writeRequest({ projectRoot, body, meta: m })
+    }
+    return episodicStorage.writeRequest({
+      projectRoot, harnessRoot: HARNESS_ROOT, body, meta: m,
+    })
+  }
+
+  function writeReplyRound(requestId, body, roundN) {
+    const replyMeta = {
+      summary: `Reply (${provider}) to ${requestId}`,
+      tags: tagsRaw, 'work-area': workArea, round: String(roundN), provider,
+    }
+    if (storageKind === 'files') {
+      return filesStorage.writeReply({
+        projectRoot, requestId, body, meta: replyMeta,
+      })
+    }
+    return episodicStorage.writeReply({
+      projectRoot, harnessRoot: HARNESS_ROOT, requestId, body, meta: replyMeta,
+    })
+  }
+
+  function runDispatch(promptText) {
+    let r
     try {
-      dispatchResult = providerModule.dispatch({ prompt: fullBody, projectRoot })
+      r = providerModule.dispatch({ prompt: promptText, projectRoot })
     } catch (e) {
       emitErr('provider-dispatch-failed',
         `Provider ${provider} dispatch threw: ${e.message}`, { provider })
     }
-    if (!dispatchResult.ok) {
+    if (!r.ok) {
       emitErr('provider-dispatch-nonzero',
-        `Provider ${provider} exited non-zero (${dispatchResult.exitCode})`,
-        { provider, dispatchResult })
+        `Provider ${provider} exited non-zero (${r.exitCode})`,
+        { provider, dispatchResult: r })
     }
+    return r
+  }
 
-    // Persist reply via storage adapter using requestId from the request write.
-    const requestId = written.id
-    const replyMeta = {
-      summary: `Reply (${provider}) to ${requestId}`,
-      tags: tagsRaw,
-      'work-area': workArea,
-      round,
-      provider,
-    }
-    try {
-      if (storageKind === 'files') {
-        replyWritten = filesStorage.writeReply({
-          projectRoot, requestId, body: dispatchResult.stdout, meta: replyMeta,
-        })
-      } else {
-        replyWritten = episodicStorage.writeReply({
-          projectRoot, harnessRoot: HARNESS_ROOT, requestId,
-          body: dispatchResult.stdout, meta: replyMeta,
+  if (consensusMode) {
+    // Consensus loop: round 1 already wrote the request. Dispatch + parse +
+    // stop-condition; if loop, invoke --rebuttal-cb to get next-round body.
+    let currentRequestRecord = written
+    let currentBody = fullBody
+    let roundN = 1
+    while (true) {
+      const dispatchR = runDispatch(currentBody)
+      lastDispatch = dispatchR
+      const replyR = writeReplyRound(currentRequestRecord.id, dispatchR.stdout, roundN)
+      lastReply = replyR
+      lastWritten = currentRequestRecord
+
+      let verdict
+      try {
+        verdict = parseVerdict(dispatchR.stdout)
+      } catch (e) {
+        emitErr(e.code || 'verdict-parse-failed', e.message, {
+          round: roundN, requestId: currentRequestRecord.id, replyId: replyR.id,
+          detail: e.detail,
         })
       }
-    } catch (e) {
-      emitErr(e.code || 'reply-write-failed', e.message, { stderr: e.stderr })
+
+      const decision = applyStopCondition({
+        verdict, round: roundN, maxRounds,
+        hasRebuttalCb: !!rebuttalCbPath, forceSpecCycleAccept,
+      })
+
+      consensusRounds.push({
+        round: roundN,
+        request_id: currentRequestRecord.id,
+        reply_id: replyR.id,
+        final_verdict: verdict.final_verdict,
+        findings_summary: summarizeFindings(verdict.findings),
+        spec_cycle_signal: verdict.spec_cycle_signal || null,
+        stop_reason: decision.stopReason,
+      })
+
+      if (decision.stop) {
+        consensusFinal = {
+          consensus: decision.success ? 'reached' : decision.stopReason,
+          final_verdict: verdict.final_verdict,
+          stop_reason: decision.stopReason,
+          fu_appendix: decision.fuAppendix || [],
+          success: decision.success,
+        }
+        if (!decision.success) {
+          // Emit failure envelope but with rounds detail.
+          console.log(JSON.stringify({
+            status: 'error',
+            code: decision.stopReason,
+            message: `Consensus loop stopped without success: ${decision.stopReason}`,
+            consensus: consensusFinal,
+            rounds: consensusRounds,
+            project_root: projectRoot,
+            harness_root: HARNESS_ROOT,
+            provider,
+          }))
+          process.exit(decision.exitCode)
+        }
+        break
+      }
+
+      // Loop: invoke rebuttal-cb to generate next-round body.
+      const cbResult = spawnSync('node', [
+        rebuttalCbPath, '--reply-id', replyR.id,
+        '--reply-file', replyR.bodyPath || replyR.file,
+      ], {
+        cwd: projectRoot, shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      if (cbResult.status !== 0) {
+        emitErr('rebuttal-cb-failed',
+          `Rebuttal callback exited non-zero (${cbResult.status}): ${cbResult.stderr.toString()}`,
+          { round: roundN, replyId: replyR.id })
+      }
+      const rebuttalBody = cbResult.stdout.toString()
+      if (!rebuttalBody.trim()) {
+        emitErr('rebuttal-cb-empty',
+          `Rebuttal callback returned empty body for round ${roundN}`,
+          { round: roundN, replyId: replyR.id })
+      }
+
+      // Compose next-round prompt: rebuttal becomes the body; preamble carries forward.
+      const nextRoundFullBody = `${composed.preambleBody}\n\n---\n\n${rebuttalBody}`
+      if (nextRoundFullBody.length > providerEntry.prompt_max_chars) {
+        emitErr('prompt-overflow',
+          `Round ${roundN + 1} composed prompt (${nextRoundFullBody.length} chars) exceeds prompt_max_chars (${providerEntry.prompt_max_chars})`,
+          { round: roundN + 1, composedLength: nextRoundFullBody.length })
+      }
+
+      roundN++
+      currentRequestRecord = writeRequestRound(nextRoundFullBody, roundN)
+      currentBody = nextRoundFullBody
     }
+  } else if (dispatchRequested) {
+    // Single dispatch (existing behavior).
+    lastDispatch = runDispatch(fullBody)
+    lastReply = writeReplyRound(written.id, lastDispatch.stdout, 1)
   }
 
   emitOk({
@@ -317,10 +441,12 @@ async function cmdRequest() {
     fragment_ids: composed.fragmentIds,
     override_path: composed.overridePath || null,
     composed_length: fullBody.length,
-    written,
-    dispatched: dispatchResult !== null,
-    dispatch_exit_code: dispatchResult ? dispatchResult.exitCode : null,
-    reply: replyWritten,
+    written: firstWritten,
+    dispatched: lastDispatch !== null,
+    dispatch_exit_code: lastDispatch ? lastDispatch.exitCode : null,
+    reply: lastReply,
+    consensus: consensusFinal,
+    rounds: consensusMode ? consensusRounds : null,
   })
 }
 
