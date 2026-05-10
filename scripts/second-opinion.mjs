@@ -31,6 +31,8 @@ import { compose } from './second-opinion/preambles/composer.mjs'
 import { validateProviderRegistry } from './second-opinion/lib/registry-validator.mjs'
 import * as filesStorage from './second-opinion/storage/files.mjs'
 import * as episodicStorage from './second-opinion/storage/episodic.mjs'
+import { computeSourceHash } from './second-opinion/lib/source-hash.mjs'
+import { readSnapshot, snapshotPath } from './second-opinion/lib/install-snapshot.mjs'
 
 // harnessRoot frozen at module load.
 const __filename = fileURLToPath(import.meta.url)
@@ -120,9 +122,53 @@ function readBodyFromFlag() {
 // ---------------------------------------------------------------------------
 // Subcommand: request
 // ---------------------------------------------------------------------------
+/**
+ * I-27a: Registry freshness gate — recompute source hash, compare with installed
+ * snapshot. Mismatch → exit registry-stale-at-gate; no dispatch.
+ *
+ * Behavior modes:
+ *   - Snapshot exists + hash matches → proceed.
+ *   - Snapshot exists + hash mismatch → fail-close (registry-stale-at-gate).
+ *   - Snapshot exists + missing source_hash → fail-close (snapshot-missing-source-hash).
+ *   - Snapshot missing AND --enforce-snapshot OR SO_ENFORCE_SNAPSHOT=1 → fail-close.
+ *   - Snapshot missing AND no enforce flag → dev mode (skip with no-op; one-line note).
+ */
+function checkRegistryFreshness() {
+  const enforce = hasFlag('--enforce-snapshot') || process.env.SO_ENFORCE_SNAPSHOT === '1'
+  const secondOpinionRoot = path.join(HARNESS_ROOT, 'scripts', 'second-opinion')
+
+  let snapshot
+  try {
+    snapshot = readSnapshot()
+  } catch (e) {
+    if (e.code === 'snapshot-not-installed' && !enforce) {
+      // Dev mode — no install yet. Proceed without gate (degraded).
+      return { skipped: true, reason: 'snapshot-not-installed-dev-mode' }
+    }
+    emitErr(e.code || 'snapshot-read-failed', e.message, {
+      snapshotPath: e.snapshotPath || snapshotPath(),
+    })
+  }
+
+  const computed = computeSourceHash(secondOpinionRoot)
+  if (computed.source_hash !== snapshot.source_hash) {
+    emitErr('registry-stale-at-gate',
+      `Source hash mismatch: installed snapshot is stale relative to current source. Run: node install.mjs --install-second-opinion`,
+      {
+        expected: computed.source_hash,
+        installed: snapshot.source_hash,
+        snapshotPath: snapshotPath(),
+      })
+  }
+  return { skipped: false, snapshot, computed }
+}
+
 async function cmdRequest() {
   const provider = flag('--provider')
   if (!provider) emitErr('missing-flag', '--provider is required')
+
+  // I-27a gate (first action — fail-close before any other work).
+  const freshness = checkRegistryFreshness()
 
   const projectRoot = resolveProjectRoot()
   const reg = loadAndValidateProviders()
@@ -144,10 +190,17 @@ async function cmdRequest() {
 
   let composed
   try {
-    composed = compose({ provider, projectRoot, cliFragments })
+    // Pass snapshot to composer so per-fragment SHA validation (I-27b) fires
+    // when snapshot is available. In dev mode (snapshot absent), composer
+    // skips per-fragment validation consistently with harness I-27a behavior.
+    composed = compose({
+      provider, projectRoot, cliFragments,
+      snapshot: freshness.snapshot || null,
+    })
   } catch (e) {
     emitErr(e.code || 'compose-failed', e.message, {
       provider, fragmentId: e.fragmentId, overridePath: e.overridePath,
+      expectedSha: e.expectedSha, observedSha: e.observedSha, fragmentPath: e.fragmentPath,
     })
   }
 

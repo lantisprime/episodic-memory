@@ -34,6 +34,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveRepoRoot } from '../../lib/local-dir.mjs'
+import { sha256 } from '../lib/source-hash.mjs'
 
 // harnessRoot frozen at module load — never recomputed.
 const __filename = fileURLToPath(import.meta.url)
@@ -148,13 +149,44 @@ export function readAndValidateOverride(overridePath) {
 /**
  * Read a fragment file from the registry.
  *
- * Note: per-fragment SHA validation (defense-in-depth against in-flight tamper)
- * is performed by the harness against the install snapshot, NOT here. This
- * function only reads.
+ * I-27b: per-fragment SHA validation (defense-in-depth against in-flight tamper).
+ * If `expectedSha` is provided (from install snapshot), the fragment file's
+ * SHA-256 is computed BEFORE reading content; mismatch throws with code
+ * 'preamble-tamper-at-composer'. Catches mutation between harness gate
+ * (I-27a) and composer fragment-read.
+ *
+ * If `expectedSha` is null/undefined (dev mode without snapshot), validation
+ * is skipped (consistent with harness I-27a dev-mode behavior).
  */
-export function readFragment(fragmentEntry) {
+export function readFragment(fragmentEntry, expectedSha = null) {
   const fragmentPath = path.join(PREAMBLES_DIR, fragmentEntry.path)
+  if (expectedSha) {
+    const observed = sha256(fragmentPath)
+    if (observed !== expectedSha) {
+      const err = new Error(
+        `Fragment ${fragmentEntry.id} SHA mismatch — in-flight tamper detected. ` +
+        `Expected ${expectedSha}, observed ${observed} at ${fragmentPath}`
+      )
+      err.code = 'preamble-tamper-at-composer'
+      err.fragmentId = fragmentEntry.id
+      err.fragmentPath = fragmentPath
+      err.expectedSha = expectedSha
+      err.observedSha = observed
+      throw err
+    }
+  }
   return fs.readFileSync(fragmentPath, 'utf8')
+}
+
+/**
+ * Build a fragment-id → expectedSha map from the install snapshot.
+ * Returns {} if snapshot is null (dev mode).
+ */
+function buildExpectedShaMap(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.fragments)) return {}
+  const map = {}
+  for (const f of snapshot.fragments) map[f.id] = f.sha256
+  return map
 }
 
 /**
@@ -165,6 +197,8 @@ export function readFragment(fragmentEntry) {
  *   projectRoot: string,               // canonical project root (caller resolved)
  *   cliFragments: string[]|null,       // --preamble <id>,... (null = not used)
  *   registry?: object,                 // pre-loaded registry; loadRegistry() if absent
+ *   snapshot?: object,                 // install snapshot — when present, enables
+ *                                      //   per-fragment SHA validation (I-27b).
  * }
  *
  * Returns: {
@@ -176,7 +210,7 @@ export function readFragment(fragmentEntry) {
  *
  * Throws: { code, message, ... } — caller maps to exit code.
  */
-export function compose({ provider, projectRoot, cliFragments = null, registry }) {
+export function compose({ provider, projectRoot, cliFragments = null, registry, snapshot = null }) {
   if (!provider) {
     const err = new Error('compose: provider is required')
     err.code = 'invalid-args'
@@ -189,6 +223,7 @@ export function compose({ provider, projectRoot, cliFragments = null, registry }
   }
 
   const reg = registry || loadRegistry()
+  const expectedShaMap = buildExpectedShaMap(snapshot)
 
   // Tier 1: CLI flag wins.
   if (cliFragments && cliFragments.length > 0) {
@@ -201,7 +236,7 @@ export function compose({ provider, projectRoot, cliFragments = null, registry }
         err.fragmentId = id
         throw err
       }
-      fragmentBodies.push(readFragment(entry))
+      fragmentBodies.push(readFragment(entry, expectedShaMap[id]))
     }
     return {
       preambleBody: fragmentBodies.join('\n\n'),
@@ -239,7 +274,7 @@ export function compose({ provider, projectRoot, cliFragments = null, registry }
       err.fragmentId = id
       throw err
     }
-    fragmentBodies.push(readFragment(entry))
+    fragmentBodies.push(readFragment(entry, expectedShaMap[id]))
   }
   return {
     preambleBody: fragmentBodies.join('\n\n'),
