@@ -155,6 +155,35 @@ test('harness invoked from worktree resolves projectRoot to canonical (no --proj
     'main repo should have requests dir')
 })
 
+test('explicit --project <linked-worktree> canonicalizes to main repo (F1 regression)', () => {
+  const main = makeTmpProject()
+  execFileSync('git', ['-C', main, 'commit', '--allow-empty', '-q', '-m', 'init'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+  })
+  const wt = path.join(path.dirname(main), `wt-explicit-${path.basename(main)}`)
+  tmpDirs.push(wt)
+  execFileSync('git', ['-C', main, 'worktree', 'add', '-q', '-b', 'wtbr-explicit', wt], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  const result = runHarness([
+    'request',
+    '--provider', 'stub',
+    '--project', wt,
+    '--storage', 'files',
+    '--body', 'explicit worktree',
+    '--summary', 'explicit wt test',
+  ])
+
+  assert.strictEqual(fs.realpathSync(result.project_root), fs.realpathSync(main),
+    `explicit --project <worktree> must canonicalize to main: got ${result.project_root}`)
+  assert.ok(!fs.existsSync(path.join(wt, '.review-store')),
+    'worktree path should not have .review-store (explicit --project canonicalized)')
+  assert.ok(fs.existsSync(path.join(main, '.review-store', 'requests')),
+    'main repo should have requests dir')
+})
+
 // ---------------------------------------------------------------------------
 // I-15: concurrent writes
 // ---------------------------------------------------------------------------

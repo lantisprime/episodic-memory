@@ -78,8 +78,8 @@ if (!subcommand) {
 function resolveProjectRoot() {
   const explicit = flag('--project')
   if (explicit) {
-    if (!path.isAbsolute(explicit)) return path.resolve(process.cwd(), explicit)
-    return explicit
+    const abs = path.isAbsolute(explicit) ? explicit : path.resolve(process.cwd(), explicit)
+    return resolveRepoRoot(abs)
   }
   return resolveRepoRoot(process.cwd())
 }
