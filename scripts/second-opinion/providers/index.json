@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "providers": [
+    {
+      "id": "stub",
+      "binary": "stub-provider",
+      "cli_match": "^stub-provider\\b",
+      "prompt_max_chars": 100000,
+      "agent_block_patterns": [],
+      "agent_allow_patterns": []
+    },
+    {
+      "id": "codex",
+      "binary": "codex",
+      "cli_match": "^codex\\s+exec\\b",
+      "prompt_max_chars": 200000,
+      "agent_block_patterns": ["codex:codex-rescue", "codex:codex-cli-runtime"],
+      "agent_allow_patterns": ["codex:setup", "codex:gpt-5-4-prompting", "codex:codex-result-handling"]
+    },
+    {
+      "id": "claude-subagent",
+      "binary": "claude",
+      "cli_match": "^claude\\b",
+      "prompt_max_chars": 150000,
+      "agent_block_patterns": [],
+      "agent_allow_patterns": []
+    },
+    {
+      "id": "gemini",
+      "binary": "gemini",
+      "cli_match": "^gemini\\b",
+      "prompt_max_chars": 100000,
+      "agent_block_patterns": [],
+      "agent_allow_patterns": []
+    }
+  ]
+}
