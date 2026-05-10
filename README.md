@@ -200,7 +200,7 @@ Episodic-memory and user-preferences are fully independent — install either or
 | [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
 | [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 shipped) |
 | [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Draft |
-| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Draft |
+| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Accepted (harness shipped PR #222) |
 
 ## Scripts Reference
 
@@ -371,7 +371,37 @@ node ~/.episodic-memory/scripts/em-pattern-health.mjs --has-enforcement bp-006-p
 
 Searches `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/`, and `<project>/.github/workflows/` for `pattern_id` references to detect mechanical enforcement. Patterns flagged `needs-enforcement` are violated repeatedly with no hook to stop them; `needs-attention` means an enforcement file exists but violations still occur (escalate to a human).
 
+### Second-Opinion Review Harness
+
+Pluggable cross-tool review at `scripts/second-opinion.mjs` (RFC-006 implementation, shipped PR #222). One callable entry point handles em-store request → provider dispatch → preamble composition → reply parsing → consensus iteration. Replaces the manual em-store + `codex exec` + watcher + reply-episode recipe.
+
+```bash
+# Single-shot: write request → dispatch → write reply (synchronous)
+node scripts/second-opinion.mjs request \
+  --provider codex --project . --storage episodic \
+  --body "review this diff..." --summary "diff review" --dispatch
+
+# Consensus loop: dispatch → parse verdict → rebuttal-cb → next round
+node scripts/second-opinion.mjs request \
+  --provider codex --project . --storage episodic \
+  --body-file plan.md --summary "plan review" \
+  --consensus --max-rounds 5 --rebuttal-cb scripts/my-rebuttal.mjs
+```
+
+Providers: `codex`, `claude-subagent`, `gemini`, `stub` (testing). Storage backends: `files` (`.review-store/`) or `episodic` (uses em-store; default for the cross-tool message bus). Preambles: per-provider defaults at `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
+
+Bootstrap (writes the install snapshot consumed by validators + the Claude Code PreToolUse gate hook):
+
+```bash
+node install.mjs --tool claude-code --install-second-opinion
+```
+
+The PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks direct provider invocations (Bash + Agent variants) so reviews route through the harness; fail-closed on missing/malformed snapshot.
+
 ### Codex Watcher
+
+Underlying cursor mechanism for the harness's `episodic` storage backend, also usable standalone for the manual review fallback.
+
 ```bash
 # Poll project-local memory for new Codex replies (default scope: local)
 node ~/.episodic-memory/scripts/em-watch-codex.mjs
@@ -440,6 +470,8 @@ node ~/.episodic-memory/scripts/em-mine-transcripts.mjs \
 ```
 
 ### Review Request (Workflow Lifecycle Event)
+
+Lifecycle event for the workflow audit trail — orthogonal to the second-opinion harness above. This script records that a review *happened* (with refs to plan/approval/checkpoints/tests/etc.); the harness *runs* the review.
 
 ```bash
 # Build + store a workflow.lifecycle review-request event with full ref
