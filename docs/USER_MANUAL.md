@@ -15,6 +15,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 6: Reaching a Milestone](#scenario-6-reaching-a-milestone)
 - [Scenario 7: Recording Project Context](#scenario-7-recording-project-context)
 - [Scenario 8: Switching Between Tools](#scenario-8-switching-between-tools)
+- [Scenario 8b: Running a Second-Opinion Review on a Plan or Diff](#scenario-8b-running-a-second-opinion-review-on-a-plan-or-diff)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
@@ -275,7 +276,47 @@ AI:   I see from a previous session that you chose Tailwind CSS
 
 **How it works:** Both tools read from and write to `~/.episodic-memory/`. The instruction files are different per tool, but the data is shared.
 
-**Cross-tool messaging via Codex watcher.** When Codex writes review feedback as episodes (tagged `codex`, `codex-review`, or `codex-reply`), Claude Code or Cursor can poll for new replies with `em-watch-codex.mjs` — episodes act as a lightweight message bus between tools, with per-scope cursors so nothing is read twice.
+**Cross-tool messaging via the second-opinion harness.** When you ask one tool to review another's plan or diff, `scripts/second-opinion.mjs` writes the request as a local episode, dispatches it to the chosen provider (Codex, Claude subagent, Gemini), and writes the reply back as another episode. Both halves live in `.episodic-memory/` so any tool can read them later. Under the hood, `em-watch-codex.mjs` provides the per-scope cursors that keep replies from being read twice.
+
+---
+
+## Scenario 8b: Running a Second-Opinion Review on a Plan or Diff
+
+**What happens:** You're about to implement a non-trivial change and want a second model to sanity-check the plan before you commit time. Or you've finished a PR and want a class-completeness review before merging. Instead of manually writing the request, invoking the other tool, and stitching the reply back into your store, you invoke one harness and it does the round-trip for you.
+
+```
+You:  Get a second opinion on this plan from Codex before I start.
+
+AI:   Running scripts/second-opinion.mjs --provider codex --dispatch
+      with the plan body...
+
+      Codex replied (episode 20260510-...-1076): ACCEPT-with-FU.
+      Two findings — F1 (P1, accepted), F2 (P2, deferred as
+      follow-up). Want me to fold F1 into the plan?
+```
+
+**Single-shot review of a plan file:**
+
+```bash
+node scripts/second-opinion.mjs request \
+  --provider codex --project . --storage episodic \
+  --body-file plan.md --summary "plan review" --dispatch
+```
+
+**Consensus loop until both sides agree (or you hit the round cap):**
+
+```bash
+node scripts/second-opinion.mjs request \
+  --provider codex --project . --storage episodic \
+  --body-file plan.md --summary "plan review" \
+  --consensus --max-rounds 5 --rebuttal-cb scripts/my-rebuttal.mjs
+```
+
+The `--rebuttal-cb` is a script that takes the reviewer's verdict and decides what to send back next round — accept the findings, push back with new evidence, or stop. Each round is one request episode + one reply episode, so the whole conversation is auditable later via `em-search --tag codex-review --scope local`.
+
+**Providers available:** `codex` (OpenAI Codex CLI), `claude-subagent` (a separate Claude Code session), `gemini` (Google's CLI), and `stub` for testing harness behavior without spending tokens.
+
+**When to use it:** Rule 18 step 2 (any non-trivial implementation needs a second-opinion review on the plan before approval), PR-level reviews before merge, or any time you want a sanity check from a different model family on a load-bearing decision.
 
 ---
 
