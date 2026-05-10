@@ -15,6 +15,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 6: Reaching a Milestone](#scenario-6-reaching-a-milestone)
 - [Scenario 7: Recording Project Context](#scenario-7-recording-project-context)
 - [Scenario 8: Switching Between Tools](#scenario-8-switching-between-tools)
+- [Scenario 8b: Running a Second-Opinion Review on a Plan or Diff](#scenario-8b-running-a-second-opinion-review-on-a-plan-or-diff)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
