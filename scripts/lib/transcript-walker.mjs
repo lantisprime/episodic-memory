@@ -175,29 +175,40 @@ export async function* walkTranscripts({ slugFilter, excludeWorktrees, since } =
   // events (rare, but accurate).
   const transcripts = listTranscripts({ slugFilter, excludeWorktrees })
   for (const t of transcripts) {
-    const stream = fs.createReadStream(t.file, { encoding: 'utf8' })
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-    for await (const line of rl) {
-      if (!line.trim()) continue
-      let rec
-      try { rec = JSON.parse(line) } catch { continue }
-      const { role, toolName } = classify(rec)
-      if (role === 'skip') continue
-      if (sinceMs && rec.timestamp) {
-        const recMs = new Date(rec.timestamp).getTime()
-        if (Number.isFinite(recMs) && recMs < sinceMs) continue
+    try {
+      const stream = fs.createReadStream(t.file, { encoding: 'utf8' })
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
+      for await (const line of rl) {
+        if (!line.trim()) continue
+        let rec
+        try { rec = JSON.parse(line) } catch { continue }
+        const { role, toolName } = classify(rec)
+        if (role === 'skip') continue
+        if (sinceMs && rec.timestamp) {
+          const recMs = new Date(rec.timestamp).getTime()
+          if (Number.isFinite(recMs) && recMs < sinceMs) continue
+        }
+        const text = extractText(rec)
+        yield {
+          sessionId: t.sessionId,
+          slug: t.slug,
+          file: t.file,
+          ts: rec.timestamp || null,
+          role,
+          toolName,
+          text,
+          raw: rec,
+        }
       }
-      const text = extractText(rec)
-      yield {
-        sessionId: t.sessionId,
-        slug: t.slug,
-        file: t.file,
-        ts: rec.timestamp || null,
-        role,
-        toolName,
-        text,
-        raw: rec,
-      }
+    } catch (err) {
+      // NOTE: records yielded before the error are NOT rolled back. For
+      // EACCES-on-open (the #226 case) no records are yielded; for mid-read
+      // errors (EIO, truncation) consumers see records up to the failure
+      // point. "stopped reading" — not "atomic skip."
+      process.stderr.write(
+        `transcript-walker: stopped reading ${t.file} (${err.code || err.name || 'error'}: ${err.message})\n`
+      )
+      continue
     }
   }
 }
