@@ -111,6 +111,71 @@ export const AUDIT_TABLE = {
         'install.mjs',
       ],
     },
+    {
+      // I-NEW-B (issue #221): snapshot provider entries validated by the same
+      // shape contract as the source registry, before any hook reads them.
+      reader: 'Hook + readSnapshot (provider registry shape)',
+      reads_from: 'snapshot.providers[] entries (cli_match / binary / agent_block_patterns / agent_allow_patterns / id / prompt_max_chars)',
+      canonicalized_via: 'shared validateProviderRegistry (single source of truth)',
+      writer: 'install.mjs --install-second-opinion (Gate 2 pre-write validation)',
+      risk_class: 'Fail-open on missing/malformed provider fields the hook depends on (empty providers[] vacuous-pass; invalid cli_match regex silent-skip)',
+      mitigation: 'Shared validateProviderRegistry called at install (Gate 1 source-registry + Gate 2 installedProviders), readSnapshot (read-time), hook (gate-time via ./lib/registry-validator.mjs). All three fail-closed on violation. In-tree hook resolves via hooks/lib/registry-validator.mjs symlink; installed hook reads dereferenced copy at ~/.claude/hooks/lib/registry-validator.mjs.',
+      verifying_paths: [
+        'scripts/second-opinion/lib/registry-validator.mjs',
+        'scripts/second-opinion/lib/install-snapshot.mjs',
+        'install.mjs',
+        'hooks/second-opinion-gate.mjs',
+        'hooks/lib/registry-validator.mjs',
+        'tests/test-second-opinion-preamble.mjs',
+        'tests/test-second-opinion-install-snapshot.mjs',
+        'tests/test-second-opinion-gate.mjs',
+        'tests/test-install-second-opinion-e2e.mjs',
+      ],
+    },
+    {
+      // I-NEW-C (issue #221): --install-second-opinion is atomic w.r.t. its
+      // own validation — Gate 1 hard-stops before any side effects; Gate 2
+      // quarantines pre-existing snapshot on failure so hook fail-closes.
+      reader: 'install.mjs --install-second-opinion atomicity guard',
+      reads_from: 'REPO_DIR/scripts/second-opinion/providers/index.json (Gate 1, pre-copy); in-memory installedProviders (Gate 2, post-available()-filter)',
+      canonicalized_via: 'Gate 1 via import.meta.url-relative repo path; Gate 2 in-memory after copy + filter',
+      writer: 'install.mjs (writeSnapshot or rename to .stale.<unix-ms> on failure)',
+      risk_class: 'Stale-snapshot fail-open class: failed install leaves snapshot pointing at superseded source',
+      mitigation: 'Gate 1 hard-stops via process.exit(1) BEFORE any fs.copy / mkdir / write. Gate 2 quarantines pre-existing snapshot via fs.renameSync(snap, snap + ".stale." + Date.now()) on validation failure, so hook reads snapshot-not-installed and fail-closes. installFailed flag suppresses Done! success banner and sets process.exitCode = 1.',
+      verifying_paths: [
+        'install.mjs',
+        'tests/test-install-second-opinion-e2e.mjs',
+      ],
+    },
+    {
+      // R7-F2: installed-hook validator import root.
+      reader: 'Installed hook validator import',
+      reads_from: '~/.claude/hooks/lib/registry-validator.mjs (dereferenced copy of repo symlink target)',
+      canonicalized_via: 'Relative ./lib/ resolution from ~/.claude/hooks/second-opinion-gate.mjs',
+      writer: 'install.mjs --install-second-opinion (fs.copyFileSync dereferences source-side symlink)',
+      risk_class: 'Drift between in-tree validator (via symlink) and installed copy',
+      mitigation: 'Single canonical source at scripts/second-opinion/lib/registry-validator.mjs. In-tree hook tests resolve through symlink; installed hook reads copy. Both paths verified by test-second-opinion-gate.mjs (in-tree) + test-install-second-opinion-e2e.mjs (installed copy).',
+      verifying_paths: [
+        'hooks/lib/registry-validator.mjs',
+        'install.mjs',
+        'tests/test-second-opinion-gate.mjs',
+        'tests/test-install-second-opinion-e2e.mjs',
+      ],
+    },
+    {
+      // R7-F2: SO_INSTALL_SNAPSHOT_PATH env override (test path).
+      reader: 'SO_INSTALL_SNAPSHOT_PATH env override',
+      reads_from: 'process.env.SO_INSTALL_SNAPSHOT_PATH (if set) overrides ~/.claude/hooks/second-opinion-providers.json',
+      canonicalized_via: 'env var; honored by snapshotPath() in install-snapshot.mjs and SNAPSHOT_PATH in hooks/second-opinion-gate.mjs',
+      writer: 'Tests + harness E2E set this to redirect snapshot writes/reads',
+      risk_class: 'Test/runtime divergence if only one half honors the override',
+      mitigation: 'Both readers (snapshotPath + hook SNAPSHOT_PATH) check the same env var name. Existing test-second-opinion-install-snapshot tests assert override is honored end-to-end.',
+      verifying_paths: [
+        'scripts/second-opinion/lib/install-snapshot.mjs',
+        'hooks/second-opinion-gate.mjs',
+        'tests/test-second-opinion-install-snapshot.mjs',
+      ],
+    },
   ],
 }
 
