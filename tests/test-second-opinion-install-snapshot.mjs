@@ -165,6 +165,51 @@ test('readSnapshot on missing source_hash → snapshot-missing-source-hash', () 
   )
 })
 
+// I-NEW-B: snapshot providers[] validated against same contract as source
+// registry. Reader rejects malformed entries so hook fail-closes on read.
+test('readSnapshot on empty providers[] → snapshot-invalid-providers', () => {
+  const tmpPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'snap-empty-')), 'snap.json')
+  fs.writeFileSync(tmpPath, JSON.stringify({
+    schema_version: 1,
+    source_hash: 'dummy',
+    providers: [],
+  }), 'utf8')
+  assert.throws(() => readSnapshot(tmpPath),
+    (e) => e.code === 'snapshot-invalid-providers' && e.field === 'providers'
+  )
+})
+
+test('readSnapshot on malformed cli_match (invalid regex) → snapshot-invalid-providers', () => {
+  const tmpPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'snap-bad-regex-')), 'snap.json')
+  fs.writeFileSync(tmpPath, JSON.stringify({
+    schema_version: 1,
+    source_hash: 'dummy',
+    providers: [{
+      id: 'codex', binary: 'codex', cli_match: '[', prompt_max_chars: 1000,
+      agent_block_patterns: [], agent_allow_patterns: [],
+    }],
+  }), 'utf8')
+  assert.throws(() => readSnapshot(tmpPath),
+    (e) => e.code === 'snapshot-invalid-providers' && e.field === 'cli_match' &&
+           e.provider === 'codex' && typeof e.regexError === 'string'
+  )
+})
+
+test('readSnapshot on non-string binary → snapshot-invalid-providers', () => {
+  const tmpPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'snap-bad-binary-')), 'snap.json')
+  fs.writeFileSync(tmpPath, JSON.stringify({
+    schema_version: 1,
+    source_hash: 'dummy',
+    providers: [{
+      id: 'codex', binary: 123, cli_match: '^codex', prompt_max_chars: 1000,
+      agent_block_patterns: [], agent_allow_patterns: [],
+    }],
+  }), 'utf8')
+  assert.throws(() => readSnapshot(tmpPath),
+    (e) => e.code === 'snapshot-invalid-providers' && e.field === 'binary' && e.observed === 123
+  )
+})
+
 // ---------------------------------------------------------------------------
 // I-27a harness gate: matching source + snapshot → OK
 // ---------------------------------------------------------------------------
