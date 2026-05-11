@@ -344,7 +344,7 @@ After install:
 
 Logs live at `~/Library/Logs/episodic-memory/`. If something looks off (digest didn't run, mining looks empty), `tail ~/Library/Logs/episodic-memory/em-daily-mining.log` is the first stop; `launchctl print gui/$(id -u)/com.charltonho.em-daily-mining` shows whether the job is loaded and when it last ran.
 
-**When you don't want this:** if you're on Linux/Windows or just prefer manual control, skip the install — every scheduled task has a manual equivalent (`node scripts/em-mine-transcripts.mjs`, `em-search --tag weekly-digest`, etc.).
+**When you don't want this:** if you're on Linux/Windows or just prefer manual control, skip the install — the mining job has a direct CLI equivalent (`node scripts/em-mine-transcripts.mjs`), and the digest / hygiene jobs run their SKILLs, so you can trigger those by asking your AI assistant to run the weekly-digest / instruction-hygiene routine when you want one.
 
 ---
 
