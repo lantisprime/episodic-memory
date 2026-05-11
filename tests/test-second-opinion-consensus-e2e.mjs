@@ -74,6 +74,11 @@ process.stdout.write(\`Rebuttal: addressing reply \${replyId} from \${replyFile}
 
 function runHarness(args, { cwd, expectError = false, extraEnv = {} } = {}) {
   const env = { ...process.env, ...extraEnv }
+  // Dev-mode skip of I-27a (stale dev-box snapshot otherwise breaks every
+  // harness test orthogonal to the freshness gate).
+  if (env.SO_INSTALL_SNAPSHOT_PATH === undefined) {
+    env.SO_INSTALL_SNAPSHOT_PATH = '/nonexistent/snapshot-for-consensus-e2e-dev-mode.json'
+  }
   const result = spawnSync('node', [HARNESS, ...args], {
     cwd: cwd || process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],

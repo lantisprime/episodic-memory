@@ -54,10 +54,22 @@ function makeTmpProject() {
   return tmp
 }
 
-function runHarness(args, { cwd, expectError = false } = {}) {
+function runHarness(args, { cwd, expectError = false, snapshotPath, extraEnv = {} } = {}) {
+  const env = { ...process.env, ...extraEnv }
+  // Default: redirect to a non-existent snapshot path so the harness skips
+  // I-27a (dev mode). Tests that need to exercise the freshness gate or the
+  // new snapshot-invalid-providers branch pass snapshotPath explicitly.
+  // Without this default, a stale ~/.claude/hooks/second-opinion-providers.json
+  // on a dev box would fail tests that have nothing to do with the gate.
+  if (snapshotPath !== undefined) {
+    env.SO_INSTALL_SNAPSHOT_PATH = snapshotPath
+  } else if (env.SO_INSTALL_SNAPSHOT_PATH === undefined) {
+    env.SO_INSTALL_SNAPSHOT_PATH = '/nonexistent/snapshot-for-dispatch-tests-dev-mode.json'
+  }
   const result = spawnSync('node', [HARNESS, ...args], {
     cwd: cwd || process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    env,
   })
   const stdout = result.stdout.toString()
   let parsed
@@ -212,6 +224,102 @@ test('--dispatch on provider in registry but missing .mjs file → provider-modu
   // runs first). This documents the order of defenses.
   assert.strictEqual(result.code, 'unknown-provider')
 })
+
+// ---------------------------------------------------------------------------
+// Issue #221 — harness pre-flight (checkRegistryFreshness) rejects
+// invalid-providers snapshot BEFORE any request artifact is written.
+// 5-axis matrix bound to caller-cwd != --project (toolkit #20 / R7-F1).
+// ---------------------------------------------------------------------------
+console.log('\n## Issue #221 — harness fails-closed on invalid snapshot, no side effects')
+
+function writeInvalidProvidersSnapshot(snapPath) {
+  fs.mkdirSync(path.dirname(snapPath), { recursive: true })
+  fs.writeFileSync(snapPath, JSON.stringify({
+    schema_version: 1,
+    source_hash: 'dummy-source-hash',
+    providers: [{
+      id: 'codex', binary: 'codex', cli_match: '[', prompt_max_chars: 1000,
+      agent_block_patterns: [], agent_allow_patterns: [],
+    }],
+  }), 'utf8')
+}
+
+// Axis (a): caller cwd != --project (non-git caller), files storage.
+// Asserts no .review-store under EITHER caller or target.
+test('axis (a) — caller cwd != --project (non-git caller): no side effects on invalid snapshot', () => {
+  const targetProj = makeTmpProject()
+  const callerCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'so-axis-a-caller-'))
+  tmpDirs.push(callerCwd)
+  const snapPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'so-axis-a-snap-')), 'snap.json')
+  tmpDirs.push(path.dirname(snapPath))
+  writeInvalidProvidersSnapshot(snapPath)
+
+  const result = runHarness([
+    'request',
+    '--provider', 'codex',
+    '--project', targetProj,
+    '--storage', 'files',
+    '--body', 'should-not-write',
+    '--summary', 'axis-a',
+    '--dispatch',
+  ], { cwd: callerCwd, snapshotPath: snapPath, expectError: true })
+
+  assert.strictEqual(result.code, 'snapshot-invalid-providers',
+    `expected snapshot-invalid-providers, got: ${JSON.stringify(result)}`)
+  // No .review-store at either location.
+  assert.ok(!fs.existsSync(path.join(targetProj, '.review-store')),
+    'no .review-store under target')
+  assert.ok(!fs.existsSync(path.join(callerCwd, '.review-store')),
+    'no .review-store under caller cwd (R7-F1 axis a)')
+})
+
+// Axis (b): linked worktree as --project target. Same fail-closed assertions.
+test('axis (b) — linked worktree as --project target: no side effects on invalid snapshot', () => {
+  const mainRepo = makeTmpProject()
+  // Bootstrap one commit so worktree add succeeds.
+  execFileSync('git', ['-C', mainRepo, 'commit', '--allow-empty', '-q', '-m', 'init'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+  })
+  const worktreePath = path.join(path.dirname(mainRepo), `wt-${path.basename(mainRepo)}-221b`)
+  tmpDirs.push(worktreePath)
+  execFileSync('git', ['-C', mainRepo, 'worktree', 'add', '-q', '-b', `wt-221b-${Date.now()}`, worktreePath], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const callerCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'so-axis-b-caller-'))
+  tmpDirs.push(callerCwd)
+  const snapPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'so-axis-b-snap-')), 'snap.json')
+  tmpDirs.push(path.dirname(snapPath))
+  writeInvalidProvidersSnapshot(snapPath)
+
+  const result = runHarness([
+    'request',
+    '--provider', 'codex',
+    '--project', worktreePath,
+    '--storage', 'files',
+    '--body', 'should-not-write',
+    '--summary', 'axis-b',
+    '--dispatch',
+  ], { cwd: callerCwd, snapshotPath: snapPath, expectError: true })
+
+  assert.strictEqual(result.code, 'snapshot-invalid-providers')
+  // No .review-store under worktree OR canonical OR caller.
+  assert.ok(!fs.existsSync(path.join(worktreePath, '.review-store')),
+    'no .review-store under linked worktree target')
+  assert.ok(!fs.existsSync(path.join(mainRepo, '.review-store')),
+    'no .review-store under canonical main repo')
+  assert.ok(!fs.existsSync(path.join(callerCwd, '.review-store')),
+    'no .review-store under caller cwd')
+})
+
+// Axes (c)/(d)/(e) are documented as equivalent under early-exit:
+// (c) non-git caller — already covered by axis (a) above (callerCwd is plain dir).
+// (d) wrong inherited subprocess cwd — under early-exit no subprocess spawns;
+//     the non-error path's cwd: projectRoot binding is verified by
+//     test-second-opinion-storage.mjs.
+// (e) HOME / CLAUDE_CONFIG_DIR redirect — tracked under issue #223; orthogonal
+//     to this branch since SO_INSTALL_SNAPSHOT_PATH plumbs through whichever
+//     HOME readSnapshot resolves to.
 
 // ---------------------------------------------------------------------------
 // Summary

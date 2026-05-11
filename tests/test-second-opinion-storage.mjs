@@ -59,9 +59,18 @@ function makeTmpProject() {
  * Throws if exit code is unexpected.
  */
 function runHarness(args, { cwd, expectError = false } = {}) {
+  // Redirect SO_INSTALL_SNAPSHOT_PATH to a non-existent path so harness
+  // skips I-27a gate (dev mode). Storage tests are orthogonal to the
+  // freshness gate; a stale dev-box snapshot otherwise causes spurious
+  // registry-stale-at-gate failures.
+  const env = { ...process.env }
+  if (env.SO_INSTALL_SNAPSHOT_PATH === undefined) {
+    env.SO_INSTALL_SNAPSHOT_PATH = '/nonexistent/snapshot-for-storage-tests-dev-mode.json'
+  }
   const result = spawnSync('node', [HARNESS, ...args], {
     cwd: cwd || process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    env,
   })
   const stdout = result.stdout.toString()
   let parsed
@@ -191,6 +200,10 @@ console.log('\n## I-15 concurrent file-storage writes')
 test('rebuild-index recovers all entries after parallel writes', () => {
   const tmp = makeTmpProject()
   // Spawn 5 concurrent writes.
+  const env = { ...process.env }
+  if (env.SO_INSTALL_SNAPSHOT_PATH === undefined) {
+    env.SO_INSTALL_SNAPSHOT_PATH = '/nonexistent/snapshot-for-storage-tests-dev-mode.json'
+  }
   const procs = []
   for (let i = 0; i < 5; i++) {
     procs.push(spawnSync('node', [HARNESS,
@@ -200,7 +213,7 @@ test('rebuild-index recovers all entries after parallel writes', () => {
       '--storage', 'files',
       '--body', `parallel body ${i}`,
       '--summary', `parallel ${i}`,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] }))
+    ], { stdio: ['ignore', 'pipe', 'pipe'], env }))
   }
   for (const p of procs) {
     assert.strictEqual(p.status, 0, `concurrent write failed: ${p.stderr.toString()}`)

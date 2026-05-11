@@ -42,6 +42,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
+import { validateProviderRegistry } from './lib/registry-validator.mjs'
+
 const SNAPSHOT_PATH = process.env.SO_INSTALL_SNAPSHOT_PATH ||
   path.join(os.homedir(), '.claude', 'hooks', 'second-opinion-providers.json')
 
@@ -93,6 +95,19 @@ function loadSnapshot() {
   }
   if (!parsed.source_hash) {
     return { error: 'snapshot-missing-source-hash' }
+  }
+  // I-NEW-B: validate providers[] shape so the hook fail-closes on bad
+  // registry rather than silently skipping providers with bad regex via
+  // compileCliMatch's null-return fallback.
+  try {
+    validateProviderRegistry({ schema_version: 1, providers: parsed.providers })
+  } catch (e) {
+    return {
+      error: 'snapshot-invalid-providers',
+      detail: e.message,
+      field: e.field,
+      provider: e.provider,
+    }
   }
   return { snapshot: parsed }
 }
@@ -201,10 +216,18 @@ if (!input) {
 
 const snap = loadSnapshot()
 if (snap.error) {
+  const extra = { code: snap.error }
+  if (snap.field) extra.field = snap.field
+  if (snap.provider) extra.provider = snap.provider
+  if (snap.detail) extra.detail = snap.detail
+  const detailSuffix = snap.field
+    ? ` (field: ${snap.field}${snap.provider ? `, provider: ${snap.provider}` : ''})`
+    : ''
   emitBlock(
-    `second-opinion-gate: ${snap.error}. Run: node install.mjs --install-second-opinion to install the registry. ` +
-    `(Direct provider calls cannot be safely gated without the install snapshot.)`,
-    { code: snap.error }
+    `second-opinion-gate: ${snap.error}${detailSuffix}. ` +
+    `Run: node install.mjs --install-second-opinion to install/refresh the registry. ` +
+    `(Direct provider calls cannot be safely gated without a valid install snapshot.)`,
+    extra
   )
 }
 
