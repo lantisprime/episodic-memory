@@ -119,37 +119,76 @@ if (installSecondOpinion) {
   }
 }
 
+// I-NEW-C completeness (PR-level review P1): the unconditional script + lib +
+// second-opinion subtree copies below mutate the active second-opinion runtime
+// surface. A throw there (e.g., a directory blocking a destination file)
+// would leave the pre-existing snapshot pointing at superseded source.
+// Hoisted helper invoked from the runtime-copy catch when installSecondOpinion
+// is true.
+async function quarantinePreExistingSnapshotForFailedInstall() {
+  try {
+    const { snapshotPath } = await import(
+      new URL('./scripts/second-opinion/lib/install-snapshot.mjs', import.meta.url).href
+    )
+    const target = snapshotPath()
+    if (fs.existsSync(target)) {
+      const quarantineName = `${target}.stale.${Date.now()}`
+      fs.renameSync(target, quarantineName)
+      console.error(`Quarantined pre-existing snapshot to: ${quarantineName}`)
+    }
+  } catch (qe) {
+    console.error(`Quarantine attempt failed: ${qe.message}`)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 1. Install scripts globally
+//
+// Second-opinion runtime surface: scripts/*.mjs (incl. scripts/second-opinion.mjs
+// harness entrypoint) + scripts/lib/ (shared deps) + scripts/second-opinion/
+// subtree. A copy failure here while installSecondOpinion is true must
+// quarantine the pre-existing snapshot so the hook fail-closes on next call.
 // ---------------------------------------------------------------------------
 fs.mkdirSync(SCRIPTS_DIR, { recursive: true })
 fs.mkdirSync(path.join(GLOBAL_DIR, 'episodes'), { recursive: true })
 
-const scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(f => f.endsWith('.mjs'))
-for (const file of scriptFiles) {
-  const src = path.join(REPO_SCRIPTS, file)
-  const dst = path.join(SCRIPTS_DIR, file)
-  fs.copyFileSync(src, dst)
-  fs.chmodSync(dst, 0o755)
-}
-// scripts/lib/ — shared helpers (e.g. local-dir.mjs for #85). Imported by em-* scripts.
-const REPO_SCRIPTS_LIB = path.join(REPO_SCRIPTS, 'lib')
-if (fs.existsSync(REPO_SCRIPTS_LIB)) {
-  const libDst = path.join(SCRIPTS_DIR, 'lib')
-  fs.mkdirSync(libDst, { recursive: true })
-  for (const file of fs.readdirSync(REPO_SCRIPTS_LIB).filter(f => f.endsWith('.mjs'))) {
-    fs.copyFileSync(path.join(REPO_SCRIPTS_LIB, file), path.join(libDst, file))
+let scriptFiles
+try {
+  scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(f => f.endsWith('.mjs'))
+  for (const file of scriptFiles) {
+    const src = path.join(REPO_SCRIPTS, file)
+    const dst = path.join(SCRIPTS_DIR, file)
+    fs.copyFileSync(src, dst)
+    fs.chmodSync(dst, 0o755)
   }
-}
+  // scripts/lib/ — shared helpers (e.g. local-dir.mjs for #85). Imported by em-* scripts.
+  const REPO_SCRIPTS_LIB = path.join(REPO_SCRIPTS, 'lib')
+  if (fs.existsSync(REPO_SCRIPTS_LIB)) {
+    const libDst = path.join(SCRIPTS_DIR, 'lib')
+    fs.mkdirSync(libDst, { recursive: true })
+    for (const file of fs.readdirSync(REPO_SCRIPTS_LIB).filter(f => f.endsWith('.mjs'))) {
+      fs.copyFileSync(path.join(REPO_SCRIPTS_LIB, file), path.join(libDst, file))
+    }
+  }
 
-// scripts/second-opinion/ — pluggable second-opinion review harness subtree.
-// Recursively copy preambles/, providers/, storage/, lib/. Done unconditionally
-// alongside scripts/*.mjs so the harness module imports resolve at runtime; the
-// install snapshot at ~/.claude/hooks/second-opinion-providers.json is only
-// written when --install-second-opinion is passed (separate concern).
-if (fs.existsSync(REPO_SECOND_OPINION)) {
-  const soDst = path.join(SCRIPTS_DIR, 'second-opinion')
-  copyDirRecursive(REPO_SECOND_OPINION, soDst)
+  // scripts/second-opinion/ — pluggable second-opinion review harness subtree.
+  // Recursively copy preambles/, providers/, storage/, lib/. Done unconditionally
+  // alongside scripts/*.mjs so the harness module imports resolve at runtime; the
+  // install snapshot at ~/.claude/hooks/second-opinion-providers.json is only
+  // written when --install-second-opinion is passed (separate concern).
+  if (fs.existsSync(REPO_SECOND_OPINION)) {
+    const soDst = path.join(SCRIPTS_DIR, 'second-opinion')
+    copyDirRecursive(REPO_SECOND_OPINION, soDst)
+  }
+} catch (copyErr) {
+  if (installSecondOpinion) {
+    console.error(`Runtime copy failed during second-opinion install: ${copyErr.message}`)
+    console.error(`Active runtime may be partially modified; quarantining snapshot.`)
+    await quarantinePreExistingSnapshotForFailedInstall()
+    process.exit(1)
+  }
+  // No second-opinion install requested → legacy behavior (rethrow).
+  throw copyErr
 }
 
 function copyDirRecursive(src, dst) {

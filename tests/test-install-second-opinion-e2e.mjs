@@ -404,6 +404,66 @@ test('writeSnapshot blocked: quarantine still fires via unified outer-catch', ()
 })
 
 // ---------------------------------------------------------------------------
+// Case 6: PR-level review P1 regression — runtime copy failure quarantines.
+// Reproduces codex's repro: replace the destination providers/index.json with
+// a DIRECTORY in tempHome's installed runtime so copyDirRecursive throws when
+// it tries to overwrite. Asserts quarantine fires from the runtime-copy
+// catch (not the snapshot-refresh catch), exit 1, no Done!, snapshot
+// renamed to .stale.<ts>.
+// ---------------------------------------------------------------------------
+console.log('\n## Case 6 — runtime copy failure quarantines (PR-level review P1)')
+test('runtime copy throws (blocked destination): quarantine fires from copy catch', () => {
+  const tempBase = mkTempBase('case6')
+  const tempRepoCopy = path.join(tempBase, 'repo')
+  const tempProject = path.join(tempBase, 'project')
+  const tempHome = path.join(tempBase, 'home')
+  const callerCwd = path.join(tempBase, 'caller')
+
+  copyRepo(REPO_ROOT, tempRepoCopy)
+  fs.mkdirSync(tempProject, { recursive: true })
+  fs.mkdirSync(callerCwd, { recursive: true })
+
+  // First install: happy path. Snapshot lands, source lands.
+  const happyResult = runInstall(tempRepoCopy, tempProject, tempHome, callerCwd)
+  assert.strictEqual(happyResult.status, 0, 'prior happy install must succeed')
+  const snapPath = path.join(tempHome, '.claude/hooks/second-opinion-providers.json')
+  assert.ok(fs.existsSync(snapPath), 'snapshot must exist after happy install')
+  const preSnapshotContent = fs.readFileSync(snapPath, 'utf8')
+
+  // Now block the second-opinion subtree copy by replacing the destination
+  // providers/index.json with a DIRECTORY. fs.copyFileSync into a dir
+  // throws EISDIR.
+  const destRegFile = path.join(tempHome, '.episodic-memory/scripts/second-opinion/providers/index.json')
+  fs.rmSync(destRegFile, { force: true })
+  fs.mkdirSync(destRegFile, { recursive: true })
+
+  // Re-run install. Gate 1 passes (registry shape is valid in repo copy).
+  // copyDirRecursive then throws when trying to overwrite providers/index.json.
+  const r = runInstall(tempRepoCopy, tempProject, tempHome, callerCwd)
+
+  assert.notStrictEqual(r.status, 0,
+    `runtime copy failure must exit nonzero; got ${r.status}, stderr=${r.stderr}`)
+  assert.ok(!r.stdout.includes('Done!'),
+    `no Done! on runtime-copy failure; stdout=${r.stdout}`)
+
+  // PR-level P1 invariant: pre-existing snapshot must be quarantined.
+  assert.ok(!fs.existsSync(snapPath),
+    `current snapshot must be quarantined when runtime copy throws; still exists at ${snapPath}`)
+
+  // Quarantine file exists matching .stale.<digits>.
+  const hooksDir = path.dirname(snapPath)
+  const quarantineFiles = fs.readdirSync(hooksDir).filter(
+    f => f.startsWith('second-opinion-providers.json.stale.')
+  )
+  assert.strictEqual(quarantineFiles.length, 1,
+    `expected 1 quarantine file from runtime-copy catch, found ${quarantineFiles.length}: ${quarantineFiles}`)
+  assert.strictEqual(
+    fs.readFileSync(path.join(hooksDir, quarantineFiles[0]), 'utf8'),
+    preSnapshotContent,
+    'quarantined snapshot must be byte-identical to pre-install original')
+})
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 console.log(`\n${passed} passed, ${failed} failed`)
