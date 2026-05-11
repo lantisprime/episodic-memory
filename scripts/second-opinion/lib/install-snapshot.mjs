@@ -29,6 +29,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
+import { validateProviderRegistry } from './registry-validator.mjs'
+
 export const DEFAULT_SNAPSHOT_PATH = path.join(
   os.homedir(),
   '.claude',
@@ -57,6 +59,11 @@ export function writeSnapshot(snapshot, customPath) {
  *   - 'snapshot-not-installed' if file missing
  *   - 'snapshot-parse-failed' if JSON malformed
  *   - 'snapshot-missing-source-hash' if source_hash field absent
+ *   - 'snapshot-invalid-providers' if providers[] entries violate the
+ *     shared validator contract (I-NEW-B: hook depends on cli_match /
+ *     binary / agent_block_patterns / agent_allow_patterns shape; we
+ *     reject malformed entries here so the hook fail-closes on read
+ *     rather than silently skipping providers with bad regex).
  */
 export function readSnapshot(customPath) {
   const targetPath = customPath || snapshotPath()
@@ -83,6 +90,23 @@ export function readSnapshot(customPath) {
     const err = new Error(`Snapshot at ${targetPath} missing source_hash field`)
     err.code = 'snapshot-missing-source-hash'
     err.snapshotPath = targetPath
+    throw err
+  }
+  // I-NEW-B: validate providers[] against the shared shape contract.
+  try {
+    validateProviderRegistry({ schema_version: 1, providers: parsed.providers })
+  } catch (e) {
+    const err = new Error(
+      `Snapshot at ${targetPath} has invalid providers[]: ${e.message}`
+    )
+    err.code = 'snapshot-invalid-providers'
+    err.snapshotPath = targetPath
+    err.field = e.field
+    err.provider = e.provider
+    err.observed = e.observed
+    if (e.regexError) err.regexError = e.regexError
+    if (e.index !== undefined) err.index = e.index
+    if (e.duplicate) err.duplicate = e.duplicate
     throw err
   }
   return parsed

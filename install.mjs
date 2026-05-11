@@ -39,6 +39,12 @@ const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
 const installSecondOpinion = argv.includes('--install-second-opinion')
 const REPO_HOOKS = path.join(REPO_DIR, 'hooks')
+const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
+
+// I-NEW-C: --install-second-opinion is atomic w.r.t. its own validation.
+// installFailed is tracked across all sub-steps so the final "Done!" banner
+// can be suppressed and process.exitCode set on any failure.
+let installFailed = false
 
 // P2 (code review): warn if --install-hooks-force passed without --install-hooks.
 // Without the base flag, the entire hook-install block is skipped; a force flag
@@ -87,6 +93,33 @@ if (!VALID_TOOLS.includes(tool)) {
 }
 
 // ---------------------------------------------------------------------------
+// GATE 1: --install-second-opinion pre-flight registry validation (I-NEW-C).
+//
+// Runs BEFORE any file copies so a malformed source registry produces a
+// hard-stop with the active runtime byte-identical to its pre-install state.
+// Closes the stale-snapshot class: failed install cannot leave new top-level
+// harness files or subtree copies in place while the snapshot stays old.
+// ---------------------------------------------------------------------------
+if (installSecondOpinion) {
+  try {
+    const repoRegPath = path.join(REPO_SECOND_OPINION, 'providers', 'index.json')
+    const repoReg = JSON.parse(fs.readFileSync(repoRegPath, 'utf8'))
+    const { validateProviderRegistry } = await import(
+      new URL('./scripts/second-opinion/lib/registry-validator.mjs', import.meta.url).href
+    )
+    validateProviderRegistry(repoReg)
+  } catch (e) {
+    console.error(`Pre-flight registry validation failed: ${e.message}`)
+    if (e.code) console.error(`  code: ${e.code}`)
+    if (e.field) console.error(`  field: ${e.field}`)
+    if (e.provider) console.error(`  provider: ${e.provider}`)
+    if (e.observed !== undefined) console.error(`  observed: ${JSON.stringify(e.observed)}`)
+    console.error(`Aborting install. No files touched.`)
+    process.exit(1)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 1. Install scripts globally
 // ---------------------------------------------------------------------------
 fs.mkdirSync(SCRIPTS_DIR, { recursive: true })
@@ -114,7 +147,6 @@ if (fs.existsSync(REPO_SCRIPTS_LIB)) {
 // alongside scripts/*.mjs so the harness module imports resolve at runtime; the
 // install snapshot at ~/.claude/hooks/second-opinion-providers.json is only
 // written when --install-second-opinion is passed (separate concern).
-const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
 if (fs.existsSync(REPO_SECOND_OPINION)) {
   const soDst = path.join(SCRIPTS_DIR, 'second-opinion')
   copyDirRecursive(REPO_SECOND_OPINION, soDst)
@@ -1044,9 +1076,10 @@ if (installHooks) {
 // --install-hooks alongside --install-second-opinion.
 // ---------------------------------------------------------------------------
 if (installSecondOpinion) {
+  const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+  const userHooksLibDir = path.join(userHooksDir, 'lib')
   try {
     // Copy hooks/second-opinion-gate.mjs to ~/.claude/hooks/.
-    const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
     fs.mkdirSync(userHooksDir, { recursive: true })
     const repoGateSrc = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
     const userGateDst = path.join(userHooksDir, 'second-opinion-gate.mjs')
@@ -1056,10 +1089,35 @@ if (installSecondOpinion) {
       console.log(`Installed second-opinion gate hook: ${userGateDst}`)
     } else {
       console.log(`Warning: ${repoGateSrc} not found; hook gate not installed.`)
+      installFailed = true
     }
   } catch (e) {
-    console.log(`Note: could not copy second-opinion gate hook: ${e.message}`)
+    console.error(`Failed to copy second-opinion gate hook: ${e.message}`)
+    installFailed = true
   }
+
+  try {
+    // Copy registry-validator.mjs alongside the hook so the installed hook can
+    // import './lib/registry-validator.mjs' (single source of truth — in-tree
+    // hook tests resolve through the hooks/lib/ symlink; installed hook reads
+    // this dereferenced copy).
+    fs.mkdirSync(userHooksLibDir, { recursive: true })
+    const repoValidatorSrc = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
+    const userValidatorDst = path.join(userHooksLibDir, 'registry-validator.mjs')
+    if (fs.existsSync(repoValidatorSrc)) {
+      // fs.copyFileSync dereferences symlinks by default — destination is a
+      // regular file with the validator source's content.
+      fs.copyFileSync(repoValidatorSrc, userValidatorDst)
+      console.log(`Installed second-opinion validator lib: ${userValidatorDst}`)
+    } else {
+      console.log(`Warning: ${repoValidatorSrc} not found; validator lib not installed.`)
+      installFailed = true
+    }
+  } catch (e) {
+    console.error(`Failed to copy second-opinion validator lib: ${e.message}`)
+    installFailed = true
+  }
+
   try {
     const { computeSourceHash } = await import(
       new URL('./scripts/second-opinion/lib/source-hash.mjs', import.meta.url).href
@@ -1067,12 +1125,16 @@ if (installSecondOpinion) {
     const { writeSnapshot, DEFAULT_SNAPSHOT_PATH } = await import(
       new URL('./scripts/second-opinion/lib/install-snapshot.mjs', import.meta.url).href
     )
+    const { validateProviderRegistry } = await import(
+      new URL('./scripts/second-opinion/lib/registry-validator.mjs', import.meta.url).href
+    )
 
     // Hash against the GLOBAL installed copy (what runtime will see), NOT the
     // source repo. This ensures harness gate compares apples-to-apples.
     const globalSecondOpinion = path.join(SCRIPTS_DIR, 'second-opinion')
     if (!fs.existsSync(globalSecondOpinion)) {
       console.log(`Warning: ${globalSecondOpinion} not found; cannot write install snapshot.`)
+      installFailed = true
     } else {
       const hashed = computeSourceHash(globalSecondOpinion)
 
@@ -1104,6 +1166,36 @@ if (installSecondOpinion) {
         }
       }
 
+      // GATE 2: validate filtered installedProviders before writing snapshot.
+      // Gate 1 already passed (source registry shape was valid), so a Gate 2
+      // failure means the available() filter reduced providers to a malformed
+      // set (typically empty when no provider CLI is on PATH — N1 fires).
+      try {
+        validateProviderRegistry({ schema_version: 1, providers: installedProviders })
+      } catch (gateErr) {
+        installFailed = true
+        console.error(`Snapshot validation failed: ${gateErr.message}`)
+        if (gateErr.field) console.error(`  field: ${gateErr.field}`)
+        if (gateErr.provider) console.error(`  provider: ${gateErr.provider}`)
+
+        // Quarantine any pre-existing snapshot so the hook fail-closes
+        // (snapshot-not-installed) rather than reading a stale-valid snapshot
+        // while the active source has been updated. Rename (not delete) to
+        // preserve forensic evidence.
+        try {
+          const existingSnap = DEFAULT_SNAPSHOT_PATH
+          if (fs.existsSync(existingSnap)) {
+            const quarantineName = `${existingSnap}.stale.${Date.now()}`
+            fs.renameSync(existingSnap, quarantineName)
+            console.error(`Quarantined pre-existing snapshot to: ${quarantineName}`)
+          }
+        } catch (qe) {
+          console.error(`Quarantine attempt failed: ${qe.message}`)
+        }
+        // Skip the writeSnapshot call below.
+        throw gateErr
+      }
+
       const snapshot = {
         schema_version: 1,
         source_hash: hashed.source_hash,
@@ -1120,11 +1212,16 @@ if (installSecondOpinion) {
       console.log(`  fragments:   ${hashed.fragments.length}`)
     }
   } catch (e) {
-    console.log(`Note: could not install second-opinion snapshot: ${e.message}`)
+    if (!installFailed) {
+      console.error(`Failed to install second-opinion snapshot: ${e.message}`)
+      installFailed = true
+    }
   }
+
+  if (installFailed) process.exitCode = 1
 }
 
-console.log('\nDone! Episodic memory is ready.')
+if (!installFailed) console.log('\nDone! Episodic memory is ready.')
 console.log(`Global data:  ${GLOBAL_DIR}/`)
 console.log(`Local data:   ${localDir}/`)
 console.log(`Scripts:      ${SCRIPTS_DIR}/`)

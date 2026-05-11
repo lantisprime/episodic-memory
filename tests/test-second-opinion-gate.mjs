@@ -181,6 +181,100 @@ test('snapshot missing source_hash → block', () => {
   assert.strictEqual(r.decision.code, 'snapshot-missing-source-hash')
 })
 
+// I-NEW-B: snapshot providers[] validated by same contract as source
+// registry. Hook fail-closes on invalid shape rather than silent-skip
+// in compileCliMatch.
+test('empty providers[] snapshot → block snapshot-invalid-providers', () => {
+  const tmp = makeTmpSnapshotPath()
+  fs.mkdirSync(path.dirname(tmp), { recursive: true })
+  fs.writeFileSync(tmp, JSON.stringify({
+    schema_version: 1, source_hash: 'dummy', providers: [],
+  }), 'utf8')
+  const r = runHook(
+    { tool_name: 'Bash', tool_input: { command: 'codex exec "hi"', run_in_background: true }, cwd: '/tmp' },
+    { snapshotPath: tmp },
+  )
+  assert.strictEqual(r.decision.decision, 'block')
+  assert.strictEqual(r.decision.code, 'snapshot-invalid-providers')
+  assert.strictEqual(r.decision.field, 'providers')
+})
+
+test('malformed cli_match (invalid regex) → block snapshot-invalid-providers', () => {
+  const tmp = makeTmpSnapshotPath()
+  fs.mkdirSync(path.dirname(tmp), { recursive: true })
+  fs.writeFileSync(tmp, JSON.stringify({
+    schema_version: 1, source_hash: 'dummy',
+    providers: [{
+      id: 'codex', binary: 'codex', cli_match: '[', prompt_max_chars: 1000,
+      agent_block_patterns: [], agent_allow_patterns: [],
+    }],
+  }), 'utf8')
+  const r = runHook(
+    { tool_name: 'Bash', tool_input: { command: 'codex exec "hi"', run_in_background: true }, cwd: '/tmp' },
+    { snapshotPath: tmp },
+  )
+  assert.strictEqual(r.decision.decision, 'block')
+  assert.strictEqual(r.decision.code, 'snapshot-invalid-providers')
+  assert.strictEqual(r.decision.field, 'cli_match')
+  assert.strictEqual(r.decision.provider, 'codex')
+})
+
+// R3-F1 / R7-F1: installed-hook test. Copy hook + dereferenced validator
+// lib to a temp ~/.claude/hooks-shaped dir; run the COPIED hook from cwd
+// outside the repo against a malformed snapshot. Verifies the install
+// copy mechanics work (hook can import its colocated lib at runtime).
+test('installed hook (outside-repo cwd) fail-closes on invalid snapshot', () => {
+  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'so-installed-hook-'))
+  tmpDirs.push(tempBase)
+  const installedHooksDir = path.join(tempBase, '.claude', 'hooks')
+  const installedLibDir = path.join(installedHooksDir, 'lib')
+  fs.mkdirSync(installedLibDir, { recursive: true })
+
+  // Copy hook + dereferenced validator (fs.copyFileSync dereferences the
+  // repo-side symlink, writing a regular file at the destination).
+  fs.copyFileSync(HOOK, path.join(installedHooksDir, 'second-opinion-gate.mjs'))
+  fs.copyFileSync(
+    path.join(REPO_ROOT, 'scripts/second-opinion/lib/registry-validator.mjs'),
+    path.join(installedLibDir, 'registry-validator.mjs'),
+  )
+
+  // Verify the copy is a regular file (not a symlink).
+  const stat = fs.lstatSync(path.join(installedLibDir, 'registry-validator.mjs'))
+  assert.ok(stat.isFile() && !stat.isSymbolicLink(),
+    `installed validator must be regular file, got isSymlink=${stat.isSymbolicLink()}`)
+
+  // Write malformed snapshot.
+  const snapPath = path.join(installedHooksDir, 'second-opinion-providers.json')
+  fs.writeFileSync(snapPath, JSON.stringify({
+    schema_version: 1, source_hash: 'dummy',
+    providers: [{
+      id: 'codex', binary: 'codex', cli_match: '[', prompt_max_chars: 1000,
+      agent_block_patterns: [], agent_allow_patterns: [],
+    }],
+  }), 'utf8')
+
+  // Run the INSTALLED hook from cwd outside the repo.
+  const outsideCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'so-outside-'))
+  tmpDirs.push(outsideCwd)
+  const r = spawnSync('node', [path.join(installedHooksDir, 'second-opinion-gate.mjs')], {
+    input: JSON.stringify({
+      tool_name: 'Bash',
+      tool_input: { command: 'codex exec "hi"', run_in_background: true },
+      cwd: outsideCwd,
+    }),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: outsideCwd,
+    env: { ...process.env, SO_INSTALL_SNAPSHOT_PATH: snapPath },
+    encoding: 'utf8',
+  })
+
+  assert.strictEqual(r.status, 0, `hook exit should be 0; stderr=${r.stderr}`)
+  const decision = JSON.parse(r.stdout)
+  assert.strictEqual(decision.decision, 'block')
+  assert.strictEqual(decision.code, 'snapshot-invalid-providers')
+  assert.strictEqual(decision.field, 'cli_match')
+})
+
 // ---------------------------------------------------------------------------
 // Bash branch
 // ---------------------------------------------------------------------------
