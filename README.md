@@ -396,7 +396,15 @@ Bootstrap (writes the install snapshot consumed by validators + the Claude Code 
 node install.mjs --tool claude-code --install-second-opinion
 ```
 
-The PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks direct provider invocations (Bash + Agent variants) so reviews route through the harness; fail-closed on missing/malformed snapshot.
+The PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks direct provider invocations (Bash + Agent variants) so reviews route through the harness. Fail-closed cases:
+
+- Missing or malformed snapshot (parse error, missing `source_hash`).
+- Invalid providers — empty `providers[]`, duplicate `id`, missing/non-compilable `cli_match` regex, missing `binary`, or non-array `agent_block_patterns` / `agent_allow_patterns`. Hook blocks with reason `snapshot-invalid-providers`.
+- Validator lib unloadable (orphan hook without `~/.claude/hooks/lib/registry-validator.mjs`). Hook blocks with reason `snapshot-validator-load-failed`.
+
+The shared `validateProviderRegistry` (`scripts/second-opinion/lib/registry-validator.mjs`) runs at install (Gate 1 + Gate 2), `readSnapshot`, and the hook — one contract, three enforcement points (PR #221 / #227).
+
+`--install-second-opinion` is atomic across five failure paths. Gate 1 hard-stops before any file copy if the source registry is invalid. Beyond Gate 1, any failure — runtime-copy throw, validator-lib throw, Gate 2 throw, or `writeSnapshot` throw — renames any pre-existing `~/.claude/hooks/second-opinion-providers.json` to `second-opinion-providers.json.stale.<unix-ms>` so the hook keeps fail-closing rather than reading a stale snapshot against newly-updated source. Re-run the install command to recover.
 
 ### Codex Watcher
 
@@ -468,6 +476,28 @@ node ~/.episodic-memory/scripts/em-audit-compliance.mjs \
 node ~/.episodic-memory/scripts/em-mine-transcripts.mjs \
   [--since <ISO>] [--slug <substr>] [--output <path>] [--dry-run]
 ```
+
+### Scheduled Routines (launchd, macOS)
+
+Bootstrap (`install-launchd-routines.sh`) installs four LaunchAgent plists so the recurring chores run without manual invocation:
+
+| Plist label | Schedule | What runs |
+|---|---|---|
+| `com.charltonho.em-daily-mining` | daily 19:30 | `episodic-memory-daily-mining` SKILL — mines today's transcripts into a staging file under `.claude/scratch/` |
+| `com.charltonho.em-weekly-digest` | Sunday 09:00 | `episodic-memory-weekly-digest` SKILL — writes the weekly digest episode |
+| `com.charltonho.instruction-hygiene` | Sunday 11:00 | `instruction-hygiene-maintenance` SKILL — lesson-set audit |
+| `com.charltonho.em-backup-sync` | daily 23:00 | `em-backup-sync-wrapper.sh` — pushes the em-backup repo to remote |
+
+The three SKILL-driven jobs invoke through a rendered wrapper (`~/.claude/scheduled-tasks/em-skill-wrapper.sh`) that reads the SKILL.md body and passes it to `claude -p --`. The `--` separator is required because SKILL.md begins with YAML frontmatter (`---`) — without it, the arg parser treats the body as a long-option flag (PR #228).
+
+```bash
+bash install-launchd-routines.sh --dry-run     # preview, no writes
+bash install-launchd-routines.sh               # install (no smoke test)
+bash install-launchd-routines.sh --smoke       # install + kickstart daily-mining
+bash install-launchd-routines.sh --uninstall   # bootout + delete plists (logs preserved)
+```
+
+Logs land at `~/Library/Logs/episodic-memory/<job>.log`. Each plist sets `CLAUDE_SCHEDULED_TASK=1` so the SessionStart handoff prompt self-suppresses; `WorkingDirectory` and the wrapper both pin the project root so cwd-sensitive resolvers don't drift under launchd.
 
 ### Review Request (Workflow Lifecycle Event)
 

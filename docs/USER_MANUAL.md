@@ -16,6 +16,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 7: Recording Project Context](#scenario-7-recording-project-context)
 - [Scenario 8: Switching Between Tools](#scenario-8-switching-between-tools)
 - [Scenario 8b: Running a Second-Opinion Review on a Plan or Diff](#scenario-8b-running-a-second-opinion-review-on-a-plan-or-diff)
+- [Scenario 8c: Running Routines on a Schedule (macOS)](#scenario-8c-running-routines-on-a-schedule-macos)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
@@ -317,6 +318,33 @@ The `--rebuttal-cb` is a script that takes the reviewer's verdict and decides wh
 **Providers available:** `codex` (OpenAI Codex CLI), `claude-subagent` (a separate Claude Code session), `gemini` (Google's CLI), and `stub` for testing harness behavior without spending tokens.
 
 **When to use it:** Rule 18 step 2 (any non-trivial implementation needs a second-opinion review on the plan before approval), PR-level reviews before merge, or any time you want a sanity check from a different model family on a load-bearing decision.
+
+---
+
+## Scenario 8c: Running Routines on a Schedule (macOS)
+
+**What happens:** Some episodic-memory chores benefit from running on a recurring schedule rather than waiting for your next session — nightly transcript mining (so today's lessons don't pile up), Sunday digest, weekly hygiene check, and daily backup sync. macOS `launchd` can drive these for you so you never have to remember.
+
+This is the one corner of the project where you run a script yourself: a one-shot install. After that, the routines fire on their own and write logs you can read later.
+
+```bash
+# From the project root
+bash install-launchd-routines.sh --dry-run     # preview, no writes
+bash install-launchd-routines.sh               # install
+bash install-launchd-routines.sh --smoke       # install + kickstart daily-mining for a smoke test
+bash install-launchd-routines.sh --uninstall   # remove everything (logs preserved)
+```
+
+After install:
+
+- **Daily 19:30** — mines the day's transcripts into a staging file you'll review next session.
+- **Sunday 09:00** — writes the weekly digest episode (so Monday you wake up to a summary).
+- **Sunday 11:00** — runs the instruction-hygiene audit against your behavioral rules.
+- **Daily 23:00** — pushes your em-backup repo to remote.
+
+Logs live at `~/Library/Logs/episodic-memory/`. If something looks off (digest didn't run, mining looks empty), `tail ~/Library/Logs/episodic-memory/em-daily-mining.log` is the first stop; `launchctl print gui/$(id -u)/com.charltonho.em-daily-mining` shows whether the job is loaded and when it last ran.
+
+**When you don't want this:** if you're on Linux/Windows or just prefer manual control, skip the install — every scheduled task has a manual equivalent (`node scripts/em-mine-transcripts.mjs`, `em-search --tag weekly-digest`, etc.).
 
 ---
 
