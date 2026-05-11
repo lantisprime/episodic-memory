@@ -156,6 +156,93 @@ await tap('sessionSnapshot summarizes a session', async () => {
   assert.equal(snap.cwd, '/Users/test/foo')
 })
 
+// --- #226 regression: per-file fault tolerance under EACCES ---------------
+// Issue #226: one unreadable .jsonl was aborting the entire walk. The fix
+// wraps the per-file stream consumption in try/catch and continues.
+// Determinism: monkey-patch fs.createReadStream to return a stream that
+// emits 'error' on first read (mirrors real EACCES async-error path).
+// Ordering: unreadable BEFORE readable to prove continue-after-error.
+
+const { Readable } = await import('node:stream')
+const slug3 = '-Users-test-projects-eacces-fixture'
+const sidUnread = '33333333-3333-3333-3333-333333333333'
+const sidRead = '44444444-4444-4444-4444-444444444444'
+fs.mkdirSync(path.join(projectsDir, slug3), { recursive: true })
+
+const unreadablePath = path.join(projectsDir, slug3, sidUnread + '.jsonl')
+const readablePath = path.join(projectsDir, slug3, sidRead + '.jsonl')
+
+const readableSession = [
+  { type: 'queue-operation', operation: 'enqueue', timestamp: '2026-05-03T10:00:00Z', sessionId: sidRead, content: 'readable record' },
+  { type: 'assistant', timestamp: '2026-05-03T10:00:01Z', sessionId: sidRead, cwd: '/Users/test/eacces', message: { content: [{ type: 'text', text: 'continued past the unreadable file' }] } },
+]
+// File contents don't matter for unreadablePath because createReadStream is
+// monkey-patched for it; but listTranscripts.statSync requires it to exist.
+fs.writeFileSync(unreadablePath, 'this content is never read because createReadStream is mocked\n')
+fs.writeFileSync(readablePath, readableSession.map((r) => JSON.stringify(r)).join('\n') + '\n')
+// Enforce walk order: unreadable mtime < readable mtime (listTranscripts sorts ascending)
+const earlier = new Date('2026-05-03T09:00:00Z')
+const later = new Date('2026-05-03T11:00:00Z')
+fs.utimesSync(unreadablePath, earlier, earlier)
+fs.utimesSync(readablePath, later, later)
+
+const brokenFiles = new Set()
+const origCreateReadStream = fs.createReadStream
+fs.createReadStream = function patchedCreateReadStream(file, opts) {
+  if (brokenFiles.has(file)) {
+    const err = Object.assign(new Error('mocked permission denied'), { code: 'EACCES' })
+    return new Readable({
+      read() { process.nextTick(() => this.destroy(err)) }
+    })
+  }
+  return origCreateReadStream.call(fs, file, opts)
+}
+
+const origStderrWrite = process.stderr.write.bind(process.stderr)
+let capturedStderr = ''
+process.stderr.write = (chunk, ...rest) => {
+  capturedStderr += typeof chunk === 'string' ? chunk : chunk.toString()
+  return true
+}
+
+await tap('#226: walker continues past unreadable file (unreadable-first ordering)', async () => {
+  brokenFiles.clear()
+  brokenFiles.add(unreadablePath)
+  capturedStderr = ''
+  const recs = []
+  for await (const r of walker.walkTranscripts({ slugFilter: 'eacces-fixture' })) recs.push(r)
+  assert.ok(
+    recs.some((r) => r.sessionId === sidRead),
+    'expected at least one record from readable file after unreadable file was skipped'
+  )
+  assert.ok(
+    !recs.some((r) => r.sessionId === sidUnread),
+    'no records should be attributed to the unreadable file'
+  )
+  assert.match(
+    capturedStderr,
+    new RegExp(`transcript-walker: skipping ${unreadablePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    'stderr should warn about the skipped unreadable file'
+  )
+  assert.match(capturedStderr, /EACCES/, 'stderr should include the error code')
+})
+
+await tap('#226: walker handles all-N-unreadable case (zero records, N warnings, no throw)', async () => {
+  brokenFiles.clear()
+  brokenFiles.add(unreadablePath)
+  brokenFiles.add(readablePath)
+  capturedStderr = ''
+  const recs = []
+  for await (const r of walker.walkTranscripts({ slugFilter: 'eacces-fixture' })) recs.push(r)
+  assert.equal(recs.length, 0, 'expected zero records when all files in slug are unreadable')
+  const warningLines = capturedStderr.split('\n').filter((l) => l.includes('transcript-walker: skipping'))
+  assert.equal(warningLines.length, 2, `expected 2 skip warnings, got ${warningLines.length}: ${capturedStderr}`)
+})
+
+// Restore patches before cleanup
+fs.createReadStream = origCreateReadStream
+process.stderr.write = origStderrWrite
+
 // --- cleanup ---------------------------------------------------------------
 fs.rmSync(TMP, { recursive: true, force: true })
 
