@@ -365,9 +365,25 @@ test('readAndValidateOverride calls fs.readFileSync exactly once for override pa
 })
 
 // ---------------------------------------------------------------------------
-// Registry validator — N1 + N10 + Number.isInteger predicate
+// Registry validator — N1 + N10 + per-field predicates (id, prompt_max_chars,
+// cli_match, binary, agent_block_patterns, agent_allow_patterns).
 // ---------------------------------------------------------------------------
 console.log('\n## Registry validator')
+
+// Test helper: a minimal valid entry. Each per-field test overrides ONLY
+// the field it exercises so failures isolate to the field under test.
+function validEntry(overrides = {}) {
+  return {
+    id: 'p',
+    prompt_max_chars: 100,
+    cli_match: '^p\\b',
+    binary: 'p',
+    agent_block_patterns: [],
+    agent_allow_patterns: [],
+    ...overrides,
+  }
+}
+
 test('valid registry passes', () => {
   const reg = JSON.parse(fs.readFileSync(PROVIDERS_REGISTRY, 'utf8'))
   const result = validateProviderRegistry(reg)
@@ -386,8 +402,8 @@ test('N10: duplicate provider id → registry-invalid', () => {
   const reg = {
     schema_version: 1,
     providers: [
-      { id: 'codex', prompt_max_chars: 100 },
-      { id: 'codex', prompt_max_chars: 200 },
+      validEntry({ id: 'codex' }),
+      validEntry({ id: 'codex', prompt_max_chars: 200 }),
     ],
   }
   assert.throws(() => validateProviderRegistry(reg),
@@ -396,57 +412,140 @@ test('N10: duplicate provider id → registry-invalid', () => {
 })
 
 test('prompt_max_chars: 0 passes (legitimate "no prompt allowed")', () => {
-  const reg = {
-    schema_version: 1,
-    providers: [{ id: 'p', prompt_max_chars: 0 }],
-  }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: 0 })] }
   assert.doesNotThrow(() => validateProviderRegistry(reg))
 })
 
 test('prompt_max_chars: null → registry-invalid', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p', prompt_max_chars: null }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: null })] }
   assert.throws(() => validateProviderRegistry(reg),
     (e) => e.code === 'registry-invalid' && e.field === 'prompt_max_chars' && e.observed === null
   )
 })
 
 test('prompt_max_chars: undefined (missing) → registry-invalid', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p' }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: undefined })] }
   assert.throws(() => validateProviderRegistry(reg),
     (e) => e.code === 'registry-invalid' && e.field === 'prompt_max_chars'
   )
 })
 
 test('prompt_max_chars: -1 → registry-invalid', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p', prompt_max_chars: -1 }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: -1 })] }
   assert.throws(() => validateProviderRegistry(reg),
     (e) => e.code === 'registry-invalid' && e.field === 'prompt_max_chars' && e.observed === -1
   )
 })
 
 test('prompt_max_chars: "100" (string) → registry-invalid', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p', prompt_max_chars: '100' }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: '100' })] }
   assert.throws(() => validateProviderRegistry(reg),
     (e) => e.code === 'registry-invalid' && e.field === 'prompt_max_chars'
   )
 })
 
 test('prompt_max_chars: 1.5 (float) → registry-invalid', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p', prompt_max_chars: 1.5 }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: 1.5 })] }
   assert.throws(() => validateProviderRegistry(reg),
     (e) => e.code === 'registry-invalid' && e.field === 'prompt_max_chars'
   )
 })
 
 test('prompt_max_chars: NaN → registry-invalid', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p', prompt_max_chars: NaN }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: NaN })] }
   assert.throws(() => validateProviderRegistry(reg),
     (e) => e.code === 'registry-invalid' && e.field === 'prompt_max_chars'
   )
 })
 
 test('prompt_max_chars: 2147483647 (INT_MAX) passes', () => {
-  const reg = { schema_version: 1, providers: [{ id: 'p', prompt_max_chars: 2147483647 }] }
+  const reg = { schema_version: 1, providers: [validEntry({ prompt_max_chars: 2147483647 })] }
+  assert.doesNotThrow(() => validateProviderRegistry(reg))
+})
+
+// ---------------------------------------------------------------------------
+// New field validation (Issue #221): cli_match, binary,
+// agent_block_patterns, agent_allow_patterns.
+// ---------------------------------------------------------------------------
+
+test('cli_match: missing → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ cli_match: undefined })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'cli_match' && e.provider === 'p'
+  )
+})
+
+test('cli_match: empty string → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ cli_match: '' })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'cli_match' && e.observed === ''
+  )
+})
+
+test('cli_match: invalid regex ("[") → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ cli_match: '[' })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'cli_match' && typeof e.regexError === 'string'
+  )
+})
+
+test('binary: missing → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ binary: undefined })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'binary' && e.provider === 'p'
+  )
+})
+
+test('binary: empty string → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ binary: '' })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'binary'
+  )
+})
+
+test('binary: non-string (123) → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ binary: 123 })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'binary' && e.observed === 123
+  )
+})
+
+test('agent_block_patterns: non-array (string) → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ agent_block_patterns: 'foo' })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'agent_block_patterns'
+  )
+})
+
+test('agent_block_patterns: array with non-string entry → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ agent_block_patterns: ['ok', 42] })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'agent_block_patterns' && e.index === 1
+  )
+})
+
+test('agent_allow_patterns: non-array (null) → registry-invalid', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ agent_allow_patterns: null })] }
+  assert.throws(() => validateProviderRegistry(reg),
+    (e) => e.code === 'registry-invalid' && e.field === 'agent_allow_patterns'
+  )
+})
+
+test('agent_allow_patterns: empty array passes (no allowlist exceptions)', () => {
+  const reg = { schema_version: 1, providers: [validEntry({ agent_allow_patterns: [] })] }
+  assert.doesNotThrow(() => validateProviderRegistry(reg))
+})
+
+test('all-new-fields-valid entry passes', () => {
+  const reg = {
+    schema_version: 1,
+    providers: [validEntry({
+      cli_match: '^codex\\s+exec\\b',
+      binary: 'codex',
+      agent_block_patterns: ['codex:codex-rescue'],
+      agent_allow_patterns: ['codex:setup'],
+    })],
+  }
   assert.doesNotThrow(() => validateProviderRegistry(reg))
 })
 
