@@ -201,8 +201,12 @@ export async function* walkTranscripts({ slugFilter, excludeWorktrees, since } =
         }
       }
     } catch (err) {
+      // NOTE: records yielded before the error are NOT rolled back. For
+      // EACCES-on-open (the #226 case) no records are yielded; for mid-read
+      // errors (EIO, truncation) consumers see records up to the failure
+      // point. "stopped reading" — not "atomic skip."
       process.stderr.write(
-        `transcript-walker: skipping ${t.file} (${err.code || err.name || 'error'}: ${err.message})\n`
+        `transcript-walker: stopped reading ${t.file} (${err.code || err.name || 'error'}: ${err.message})\n`
       )
       continue
     }

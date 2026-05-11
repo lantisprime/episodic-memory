@@ -188,60 +188,65 @@ fs.utimesSync(readablePath, later, later)
 
 const brokenFiles = new Set()
 const origCreateReadStream = fs.createReadStream
-fs.createReadStream = function patchedCreateReadStream(file, opts) {
-  if (brokenFiles.has(file)) {
-    const err = Object.assign(new Error('mocked permission denied'), { code: 'EACCES' })
-    return new Readable({
-      read() { process.nextTick(() => this.destroy(err)) }
-    })
-  }
-  return origCreateReadStream.call(fs, file, opts)
-}
-
 const origStderrWrite = process.stderr.write.bind(process.stderr)
 let capturedStderr = ''
-process.stderr.write = (chunk, ...rest) => {
-  capturedStderr += typeof chunk === 'string' ? chunk : chunk.toString()
-  return true
+
+// try/finally guards against future top-level failures between patch and
+// restore leaking the monkey-patches into the cleanup section or subsequent
+// test runs (codex code-review FU-1 on cdec66f).
+try {
+  fs.createReadStream = function patchedCreateReadStream(file, opts) {
+    if (brokenFiles.has(file)) {
+      const err = Object.assign(new Error('mocked permission denied'), { code: 'EACCES' })
+      return new Readable({
+        read() { process.nextTick(() => this.destroy(err)) }
+      })
+    }
+    return origCreateReadStream.call(fs, file, opts)
+  }
+
+  process.stderr.write = (chunk, ...rest) => {
+    capturedStderr += typeof chunk === 'string' ? chunk : chunk.toString()
+    return true
+  }
+
+  await tap('#226: walker continues past unreadable file (unreadable-first ordering)', async () => {
+    brokenFiles.clear()
+    brokenFiles.add(unreadablePath)
+    capturedStderr = ''
+    const recs = []
+    for await (const r of walker.walkTranscripts({ slugFilter: 'eacces-fixture' })) recs.push(r)
+    assert.ok(
+      recs.some((r) => r.sessionId === sidRead),
+      'expected at least one record from readable file after unreadable file was skipped'
+    )
+    assert.ok(
+      !recs.some((r) => r.sessionId === sidUnread),
+      'no records should be attributed to the unreadable file'
+    )
+    assert.match(
+      capturedStderr,
+      new RegExp(`transcript-walker: stopped reading ${unreadablePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+      'stderr should warn about the stopped-reading unreadable file'
+    )
+    assert.match(capturedStderr, /EACCES/, 'stderr should include the error code')
+  })
+
+  await tap('#226: walker handles all-N-unreadable case (zero records, N warnings, no throw)', async () => {
+    brokenFiles.clear()
+    brokenFiles.add(unreadablePath)
+    brokenFiles.add(readablePath)
+    capturedStderr = ''
+    const recs = []
+    for await (const r of walker.walkTranscripts({ slugFilter: 'eacces-fixture' })) recs.push(r)
+    assert.equal(recs.length, 0, 'expected zero records when all files in slug are unreadable')
+    const warningLines = capturedStderr.split('\n').filter((l) => l.includes('transcript-walker: stopped reading'))
+    assert.equal(warningLines.length, 2, `expected 2 stopped-reading warnings, got ${warningLines.length}: ${capturedStderr}`)
+  })
+} finally {
+  fs.createReadStream = origCreateReadStream
+  process.stderr.write = origStderrWrite
 }
-
-await tap('#226: walker continues past unreadable file (unreadable-first ordering)', async () => {
-  brokenFiles.clear()
-  brokenFiles.add(unreadablePath)
-  capturedStderr = ''
-  const recs = []
-  for await (const r of walker.walkTranscripts({ slugFilter: 'eacces-fixture' })) recs.push(r)
-  assert.ok(
-    recs.some((r) => r.sessionId === sidRead),
-    'expected at least one record from readable file after unreadable file was skipped'
-  )
-  assert.ok(
-    !recs.some((r) => r.sessionId === sidUnread),
-    'no records should be attributed to the unreadable file'
-  )
-  assert.match(
-    capturedStderr,
-    new RegExp(`transcript-walker: skipping ${unreadablePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
-    'stderr should warn about the skipped unreadable file'
-  )
-  assert.match(capturedStderr, /EACCES/, 'stderr should include the error code')
-})
-
-await tap('#226: walker handles all-N-unreadable case (zero records, N warnings, no throw)', async () => {
-  brokenFiles.clear()
-  brokenFiles.add(unreadablePath)
-  brokenFiles.add(readablePath)
-  capturedStderr = ''
-  const recs = []
-  for await (const r of walker.walkTranscripts({ slugFilter: 'eacces-fixture' })) recs.push(r)
-  assert.equal(recs.length, 0, 'expected zero records when all files in slug are unreadable')
-  const warningLines = capturedStderr.split('\n').filter((l) => l.includes('transcript-walker: skipping'))
-  assert.equal(warningLines.length, 2, `expected 2 skip warnings, got ${warningLines.length}: ${capturedStderr}`)
-})
-
-// Restore patches before cleanup
-fs.createReadStream = origCreateReadStream
-process.stderr.write = origStderrWrite
 
 // --- cleanup ---------------------------------------------------------------
 fs.rmSync(TMP, { recursive: true, force: true })
