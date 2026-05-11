@@ -14,6 +14,7 @@
 # Reversible: --uninstall undoes everything this script created.
 
 set -e
+set -o pipefail
 
 DRY_RUN=0
 SMOKE=0
@@ -32,16 +33,13 @@ LA_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/episodic-memory"
 PROJECT_DIR="$HOME/Developer/projects/episodic-memory"
 SCHEDULED_TASKS_DIR="$HOME/.claude/scheduled-tasks"
+WRAPPER_TMPL="$PROJECT_DIR/scripts/em-skill-wrapper.sh.tmpl"
+WRAPPER_OUT="$SCHEDULED_TASKS_DIR/em-skill-wrapper.sh"
+VALIDATION_LIB="$PROJECT_DIR/scripts/lib/render-input-validation.sh"
 
-# Pin absolute binaries at install time (round-3 fix: don't rely on PATH lookup at runtime)
-NODE_BIN=$(command -v node)
-GH_BIN=$(command -v gh)
-CLAUDE_BIN=$(command -v claude)
-
-if [ -z "$NODE_BIN" ] || [ -z "$CLAUDE_BIN" ]; then
-  echo "ERROR: node and claude must be on PATH at install time. Found: node=$NODE_BIN claude=$CLAUDE_BIN" >&2
-  exit 3
-fi
+# Binary + template resolution deferred until install branch so --uninstall
+# remains fail-open: it must remove known runtime artifacts without requiring
+# node/claude/template/skill files to be present.
 
 # Plist labels
 LABELS=(
@@ -53,6 +51,12 @@ LABELS=(
 
 if [ "$UNINSTALL" -eq 1 ]; then
   echo "=== Uninstalling ==="
+  # Fail-open: only remove what exists, don't require any binaries or repo files.
+  if [ -f "$WRAPPER_OUT" ]; then
+    [ "$DRY_RUN" -eq 1 ] && echo "[dry-run] rm $WRAPPER_OUT" \
+                        || rm -f "$WRAPPER_OUT"
+    echo "  - em-skill-wrapper.sh removed"
+  fi
   for label in "${LABELS[@]}"; do
     plist="$LA_DIR/$label.plist"
     if launchctl print "gui/$UID_GUI/$label" >/dev/null 2>&1; then
@@ -69,6 +73,31 @@ if [ "$UNINSTALL" -eq 1 ]; then
   exit 0
 fi
 
+# --- Install-only preflight (skipped on --uninstall above) ---
+NODE_BIN=$(command -v node)
+# gh is optional (only weekly-digest uses it); `|| true` prevents `set -e`
+# from killing the script when gh is absent so the ${GH_BIN:-not found}
+# fallback in the pre-flight printout can render.
+GH_BIN=$(command -v gh || true)
+CLAUDE_BIN=$(command -v claude)
+if [ -z "$NODE_BIN" ] || [ -z "$CLAUDE_BIN" ]; then
+  echo "ERROR: node and claude must be on PATH at install time. Found: node=$NODE_BIN claude=$CLAUDE_BIN" >&2
+  exit 3
+fi
+if [ ! -f "$WRAPPER_TMPL" ]; then
+  echo "ERROR: missing $WRAPPER_TMPL (commit the template before installing)" >&2
+  exit 4
+fi
+if [ ! -f "$VALIDATION_LIB" ]; then
+  echo "ERROR: missing $VALIDATION_LIB" >&2
+  exit 4
+fi
+# shellcheck disable=SC1090
+source "$VALIDATION_LIB"
+if ! validate_render_inputs; then
+  exit 9
+fi
+
 echo "=== Pre-flight ==="
 echo "  UID:           $UID_GUI"
 echo "  LaunchAgents:  $LA_DIR"
@@ -77,6 +106,7 @@ echo "  Project:       $PROJECT_DIR"
 echo "  node:          $NODE_BIN"
 echo "  gh:            ${GH_BIN:-not found (weekly-digest depends on this)}"
 echo "  claude:        $CLAUDE_BIN"
+echo "  wrapper tmpl:  $WRAPPER_TMPL"
 
 # Verify scheduled-task SKILL.md files exist
 for skill in episodic-memory-daily-mining episodic-memory-weekly-digest instruction-hygiene-maintenance; do
@@ -103,17 +133,14 @@ mkdir -p "$LOG_DIR"
 # Per-plist invocation builders --------------------------------------------------
 
 claude_skill_invocation() {
-  # $1 = skill name (e.g. episodic-memory-daily-mining)
+  # $1 = skill name; invocation goes via the rendered wrapper so the SKILL.md
+  # body is inlined as the prompt and the project root is cd'd before claude
+  # starts. Replaces the prior `claude -p /<skill-name>` form which failed
+  # with "Unknown command" — scheduled-task SKILLs are not slash commands.
   cat <<EOF
-        <string>$CLAUDE_BIN</string>
-        <string>-p</string>
-        <string>--permission-mode</string>
-        <string>bypassPermissions</string>
-        <string>--setting-sources</string>
-        <string>project,local</string>
-        <string>--settings</string>
-        <string>{"hooks":{}}</string>
-        <string>/$1</string>
+        <string>/bin/bash</string>
+        <string>$WRAPPER_OUT</string>
+        <string>$1</string>
 EOF
 }
 
@@ -151,6 +178,8 @@ $invocation
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>$HOME</string>
+        <key>CLAUDE_SCHEDULED_TASK</key>
+        <string>1</string>
     </dict>
 $schedule
     <key>StandardOutPath</key>
@@ -229,6 +258,34 @@ write_plist com.charltonho.em-daily-mining "$(claude_skill_invocation episodic-m
 write_plist com.charltonho.em-weekly-digest "$(claude_skill_invocation episodic-memory-weekly-digest)" "$SUNDAY_09_00" em-weekly-digest
 write_plist com.charltonho.instruction-hygiene "$(claude_skill_invocation instruction-hygiene-maintenance)" "$SUNDAY_11_00" instruction-hygiene
 write_plist com.charltonho.em-backup-sync "$(backup_invocation)" "$DAILY_23_00" em-backup-sync
+
+# Render wrapper -------------------------------------------------------------
+#
+# CLAUDE_BIN / PROJECT_DIR were validated by validate_render_inputs upstream,
+# so sed-unsafe characters cannot reach this substitution. The sentinel grep
+# after render still catches malformed templates (placeholder typos etc.).
+
+echo ""
+echo "=== Rendering wrapper ==="
+render_wrapper() {
+  sed -e "s|@CLAUDE_BIN@|$CLAUDE_BIN|g" \
+      -e "s|@PROJECT_DIR@|$PROJECT_DIR|g" \
+      "$WRAPPER_TMPL"
+}
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[dry-run] would render $WRAPPER_OUT:"
+  render_wrapper | sed 's/^/    /'
+else
+  render_wrapper > "$WRAPPER_OUT.tmp"
+  if grep -q '@CLAUDE_BIN@\|@PROJECT_DIR@' "$WRAPPER_OUT.tmp"; then
+    echo "ERROR: wrapper render incomplete (unsubstituted placeholders in $WRAPPER_OUT.tmp)" >&2
+    rm -f "$WRAPPER_OUT.tmp"
+    exit 8
+  fi
+  chmod 755 "$WRAPPER_OUT.tmp"
+  mv "$WRAPPER_OUT.tmp" "$WRAPPER_OUT"
+  echo "  ✓ wrote $WRAPPER_OUT (chmod 755)"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo ""
