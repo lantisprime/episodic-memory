@@ -42,10 +42,31 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
-import { validateProviderRegistry } from './lib/registry-validator.mjs'
-
 const SNAPSHOT_PATH = process.env.SO_INSTALL_SNAPSHOT_PATH ||
   path.join(os.homedir(), '.claude', 'hooks', 'second-opinion-providers.json')
+
+// Dynamic import of validator so the hook can emit a structured block
+// decision if the colocated ./lib/registry-validator.mjs is missing or
+// malformed (partial install / orphan hook). A static import would crash
+// the hook at module-load with empty stdout — ambiguous fail-open class.
+// F4 from post-implementation code review.
+let validateProviderRegistry
+try {
+  const mod = await import(new URL('./lib/registry-validator.mjs', import.meta.url).href)
+  validateProviderRegistry = mod.validateProviderRegistry
+} catch (e) {
+  // Emit a fail-closed block decision and exit. Same envelope shape as
+  // every other block path so Claude Code can parse the JSON.
+  console.log(JSON.stringify({
+    decision: 'block',
+    code: 'snapshot-validator-load-failed',
+    reason: `second-opinion-gate: cannot load validator at ./lib/registry-validator.mjs ` +
+      `(detail: ${e.message}). Run: node install.mjs --install-second-opinion to ` +
+      `reinstall the colocated validator lib.`,
+    detail: e.message,
+  }))
+  process.exit(0)
+}
 
 function emitBlock(reason, extra = {}) {
   console.log(JSON.stringify({ decision: 'block', reason, ...extra }))

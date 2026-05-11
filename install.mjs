@@ -1118,16 +1118,40 @@ if (installSecondOpinion) {
     installFailed = true
   }
 
+  // Unified quarantine: if ANY snapshot-refresh step fails after the global
+  // source-copy completed (validator-lib copy, Gate 2 validation, or
+  // writeSnapshot), the pre-existing snapshot must be quarantined so the
+  // hook fail-closes (snapshot-not-installed) rather than reading a
+  // stale-valid snapshot against newly-updated source. Uses snapshotPath()
+  // — the same resolution writeSnapshot() uses — so env override
+  // (SO_INSTALL_SNAPSHOT_PATH) routes both to the same target. F1+F2 from
+  // post-implementation code review.
+  let snapshotPathFn = null
+  function quarantineExistingSnapshot() {
+    if (!snapshotPathFn) return
+    try {
+      const target = snapshotPathFn()
+      if (fs.existsSync(target)) {
+        const quarantineName = `${target}.stale.${Date.now()}`
+        fs.renameSync(target, quarantineName)
+        console.error(`Quarantined pre-existing snapshot to: ${quarantineName}`)
+      }
+    } catch (qe) {
+      console.error(`Quarantine attempt failed: ${qe.message}`)
+    }
+  }
+
   try {
     const { computeSourceHash } = await import(
       new URL('./scripts/second-opinion/lib/source-hash.mjs', import.meta.url).href
     )
-    const { writeSnapshot, DEFAULT_SNAPSHOT_PATH } = await import(
+    const { writeSnapshot, snapshotPath } = await import(
       new URL('./scripts/second-opinion/lib/install-snapshot.mjs', import.meta.url).href
     )
     const { validateProviderRegistry } = await import(
       new URL('./scripts/second-opinion/lib/registry-validator.mjs', import.meta.url).href
     )
+    snapshotPathFn = snapshotPath  // expose to outer-catch quarantine helper
 
     // Hash against the GLOBAL installed copy (what runtime will see), NOT the
     // source repo. This ensures harness gate compares apples-to-apples.
@@ -1173,27 +1197,10 @@ if (installSecondOpinion) {
       try {
         validateProviderRegistry({ schema_version: 1, providers: installedProviders })
       } catch (gateErr) {
-        installFailed = true
         console.error(`Snapshot validation failed: ${gateErr.message}`)
         if (gateErr.field) console.error(`  field: ${gateErr.field}`)
         if (gateErr.provider) console.error(`  provider: ${gateErr.provider}`)
-
-        // Quarantine any pre-existing snapshot so the hook fail-closes
-        // (snapshot-not-installed) rather than reading a stale-valid snapshot
-        // while the active source has been updated. Rename (not delete) to
-        // preserve forensic evidence.
-        try {
-          const existingSnap = DEFAULT_SNAPSHOT_PATH
-          if (fs.existsSync(existingSnap)) {
-            const quarantineName = `${existingSnap}.stale.${Date.now()}`
-            fs.renameSync(existingSnap, quarantineName)
-            console.error(`Quarantined pre-existing snapshot to: ${quarantineName}`)
-          }
-        } catch (qe) {
-          console.error(`Quarantine attempt failed: ${qe.message}`)
-        }
-        // Skip the writeSnapshot call below.
-        throw gateErr
+        throw gateErr  // unified outer-catch quarantines + sets installFailed
       }
 
       const snapshot = {
@@ -1216,6 +1223,9 @@ if (installSecondOpinion) {
       console.error(`Failed to install second-opinion snapshot: ${e.message}`)
       installFailed = true
     }
+    // Unified quarantine: any snapshot-refresh failure path (Gate 2 throw,
+    // writeSnapshot throw, dynamic-import failure mid-flight) ends here.
+    quarantineExistingSnapshot()
   }
 
   if (installFailed) process.exitCode = 1

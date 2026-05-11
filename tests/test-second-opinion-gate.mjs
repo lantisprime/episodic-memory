@@ -219,6 +219,41 @@ test('malformed cli_match (invalid regex) → block snapshot-invalid-providers',
   assert.strictEqual(r.decision.provider, 'codex')
 })
 
+// F4 regression: installed hook with MISSING lib (partial install / orphan
+// hook) must emit snapshot-validator-load-failed block decision rather than
+// crashing at module-load with empty stdout (ambiguous fail-open class).
+test('installed hook with missing validator lib → block snapshot-validator-load-failed', () => {
+  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'so-orphan-hook-'))
+  tmpDirs.push(tempBase)
+  const installedHooksDir = path.join(tempBase, '.claude', 'hooks')
+  fs.mkdirSync(installedHooksDir, { recursive: true })
+
+  // Copy ONLY the hook — deliberately omit the validator lib to simulate
+  // partial filesystem failure.
+  fs.copyFileSync(HOOK, path.join(installedHooksDir, 'second-opinion-gate.mjs'))
+
+  // Snapshot path doesn't matter (hook fails before reading snapshot).
+  const snapPath = path.join(installedHooksDir, 'second-opinion-providers.json')
+  const outsideCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'so-orphan-cwd-'))
+  tmpDirs.push(outsideCwd)
+  const r = spawnSync('node', [path.join(installedHooksDir, 'second-opinion-gate.mjs')], {
+    input: JSON.stringify({
+      tool_name: 'Bash',
+      tool_input: { command: 'codex exec "hi"', run_in_background: true },
+      cwd: outsideCwd,
+    }),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: outsideCwd,
+    env: { ...process.env, SO_INSTALL_SNAPSHOT_PATH: snapPath },
+    encoding: 'utf8',
+  })
+
+  assert.strictEqual(r.status, 0, `hook should exit 0 with block JSON; got status=${r.status}, stderr=${r.stderr}`)
+  const decision = JSON.parse(r.stdout)
+  assert.strictEqual(decision.decision, 'block')
+  assert.strictEqual(decision.code, 'snapshot-validator-load-failed')
+})
+
 // R3-F1 / R7-F1: installed-hook test. Copy hook + dereferenced validator
 // lib to a temp ~/.claude/hooks-shaped dir; run the COPIED hook from cwd
 // outside the repo against a malformed snapshot. Verifies the install

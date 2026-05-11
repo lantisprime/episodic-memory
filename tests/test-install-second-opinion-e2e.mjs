@@ -169,6 +169,12 @@ function preInstallValidSnapshot(tempHome) {
 // caller cwd != --project axis) and HOME overridden to tempHome. Returns
 // spawn result.
 function runInstall(tempRepoCopy, tempProject, tempHome, callerCwd, extraEnv = {}) {
+  // Hermeticity: scrub SO_INSTALL_SNAPSHOT_PATH so the install resolves the
+  // snapshot path via HOME (the production default). Otherwise an inherited
+  // env override from the test shell breaks the temp-HOME isolation. F3
+  // from post-implementation code review.
+  const env = { ...process.env, HOME: tempHome, ...extraEnv }
+  delete env.SO_INSTALL_SNAPSHOT_PATH
   return spawnSync('node', [
     path.join(tempRepoCopy, 'install.mjs'),
     '--tool', 'claude-code',
@@ -176,7 +182,7 @@ function runInstall(tempRepoCopy, tempProject, tempHome, callerCwd, extraEnv = {
     '--install-second-opinion',
   ], {
     cwd: callerCwd,
-    env: { ...process.env, HOME: tempHome, ...extraEnv },
+    env,
     encoding: 'utf8',
     timeout: 60000,
   })
@@ -343,6 +349,57 @@ test('Gate 2 with populated HOME + all-unavailable: snapshot quarantined to .sta
   // Quarantine file content byte-identical to original valid snapshot.
   const quarantineContent = fs.readFileSync(path.join(hooksDir, quarantineFiles[0]), 'utf8')
   assert.strictEqual(quarantineContent, preSnapshotContent,
+    'quarantined snapshot must be byte-identical to original')
+})
+
+// ---------------------------------------------------------------------------
+// Case 5: writeSnapshot failure path (F1 unified-quarantine regression).
+// Block writeSnapshot's atomic rename by pre-creating a directory at the
+// .tmp target. Validates that quarantine ALSO fires when writeSnapshot
+// throws (not just when Gate 2 validation throws).
+// ---------------------------------------------------------------------------
+console.log('\n## Case 5 — writeSnapshot failure (F1 unified-quarantine regression)')
+test('writeSnapshot blocked: quarantine still fires via unified outer-catch', () => {
+  const tempBase = mkTempBase('case5')
+  const tempRepoCopy = path.join(tempBase, 'repo')
+  const tempProject = path.join(tempBase, 'project')
+  const tempHome = path.join(tempBase, 'home')
+  const callerCwd = path.join(tempBase, 'caller')
+
+  copyRepo(REPO_ROOT, tempRepoCopy)
+  fs.mkdirSync(tempProject, { recursive: true })
+  fs.mkdirSync(callerCwd, { recursive: true })
+
+  // Pre-populate tempHome with valid snapshot.
+  const snapPath = preInstallValidSnapshot(tempHome)
+  const preSnapshotContent = fs.readFileSync(snapPath, 'utf8')
+
+  // Block writeSnapshot's atomic temp-then-rename by pre-creating a
+  // DIRECTORY at the .tmp path. fs.writeFileSync into a directory throws.
+  // writeSnapshot uses `${targetPath}.tmp` per install-snapshot.mjs.
+  fs.mkdirSync(`${snapPath}.tmp`, { recursive: true })
+
+  const r = runInstall(tempRepoCopy, tempProject, tempHome, callerCwd)
+
+  assert.notStrictEqual(r.status, 0,
+    `writeSnapshot block must exit nonzero; got ${r.status}, stderr=${r.stderr}`)
+  assert.ok(!r.stdout.includes('Done!'),
+    `no Done! on writeSnapshot failure; stdout=${r.stdout}`)
+
+  // F1 invariant: current snapshot must be quarantined (renamed).
+  assert.ok(!fs.existsSync(snapPath),
+    `current snapshot must be quarantined; still exists at ${snapPath}`)
+
+  // Quarantine file must exist.
+  const hooksDir = path.dirname(snapPath)
+  const quarantineFiles = fs.readdirSync(hooksDir).filter(
+    f => f.startsWith('second-opinion-providers.json.stale.')
+  )
+  assert.strictEqual(quarantineFiles.length, 1,
+    `expected 1 quarantine file, found ${quarantineFiles.length}: ${quarantineFiles}`)
+  assert.strictEqual(
+    fs.readFileSync(path.join(hooksDir, quarantineFiles[0]), 'utf8'),
+    preSnapshotContent,
     'quarantined snapshot must be byte-identical to original')
 })
 
