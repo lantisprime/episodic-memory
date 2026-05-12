@@ -168,6 +168,22 @@ _strip_shell_quotes() {
   printf '%s' "$s"
 }
 
+# PR-review round-2 P1 (codex episode ...5b9e): `${var//pattern/}` in
+# bash is pattern substitution, NOT literal substitution. Glob meta chars
+# (`*`, `?`, `[`) in the pattern are active. When the extracted absolute
+# path `$p` contains a literal `*` (e.g. `/tmp/emglob*/.checkpoints/X`),
+# `${cmd//\.${p}/}` over-matches and the occurrence-scoped check is
+# defeated. Escape glob meta chars in `$p` before using it as a pattern.
+# Backslash escape is not required because _strip_shell_quotes already
+# removed backslashes from the input.
+_escape_bash_glob() {
+  local s="$1"
+  s="${s//\*/\\*}"
+  s="${s//\?/\\?}"
+  s="${s//\[/\\[}"
+  printf '%s' "$s"
+}
+
 # Codex round-4 F12 + round-5 F15 + code-review A1: relative-marker-reference
 # detection. Matches `.checkpoints/<marker>` or `.claude/<marker>` as a
 # RELATIVE path (no leading `/`). (^|[^/])(\./)* handles bare, ./, ././, ../.
@@ -204,7 +220,13 @@ _command_first_absolute_noncanonical_marker() {
     # false-negative where `echo ./tmp/.checkpoints/X >/dev/null; touch
     # /tmp/.checkpoints/X` would have skipped the check because
     # `./tmp/.checkpoints/X` exists somewhere in the command.
-    local cmd_filtered="${cmd//\.${p}/}"
+    #
+    # PR-review round-2 P1: `${var//pattern/}` interprets glob meta chars
+    # in the pattern. Escape `*`/`?`/`[` in `$p` so the substitution is
+    # truly literal-equivalent (codex episode ...5b9e).
+    local p_escaped
+    p_escaped="$(_escape_bash_glob "$p")"
+    local cmd_filtered="${cmd//\.${p_escaped}/}"
     if [[ "$cmd_filtered" != *"$p"* ]]; then
       continue
     fi

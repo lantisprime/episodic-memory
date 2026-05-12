@@ -1021,6 +1021,19 @@ assert_blocked "B-34 (codex PR P1). benign mention + real wrong-root write → s
 assert_no_wrong_root_block "B-35 (codex PR P1 no-FP). pure relative mention without absolute write → no block" \
   "$(mock_json_cwd 'Bash' "echo x > ./.checkpoints/.pre-checkpoint-done" "$TEST_DIR")"
 
+# B-36 (codex PR round-2 P1): bash pattern substitution glob bypass.
+# Pre-fix: `${cmd//\.${p}/}` interpreted `*` in $p as glob, over-matching
+# both the relative mention AND the absolute write occurrences, defeating
+# the occurrence-scoped check. With glob-escape, `$p` is treated literally.
+assert_blocked "B-36 (codex PR round-2 P1). glob-metachar bypass → still blocks" \
+  "$(mock_json_cwd 'Bash' "echo ./tmp/emglob*/.checkpoints/.pre-checkpoint-done >/dev/null; touch /tmp/emglob*/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+# B-37 (codex PR round-2 P1 no-FP): pure relative glob-metachar mention
+# from main cwd should still NOT block (pattern literal in residual check).
+assert_no_wrong_root_block "B-37 (codex PR round-2 P1 no-FP). pure relative glob mention → no block" \
+  "$(mock_json_cwd 'Bash' "echo x > ./.checkpoints/.pre-checkpoint-done; echo also ./tmp/glob?/.checkpoints/.checkpoint-required" "$TEST_DIR")"
+
 # Cleanup B-test worktree
 git -C "$TEST_DIR" worktree remove --force "$WORKTREE_DIR" 2>/dev/null
 git -C "$TEST_DIR" branch -D test-wt-branch 2>/dev/null
