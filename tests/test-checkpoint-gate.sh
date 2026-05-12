@@ -339,16 +339,22 @@ assert_blocked "50. Bash 'tee .post-checkpoint-done' BLOCKED (POST_REQ not armed
 # or .claude/ must NOT pass the marker_write allowlist. Pre-fix the
 # allowlist matched any descendant by basename; post-fix it requires an
 # EXACT match against the canonical primary or legacy marker path.
+#
+# Rank-1 plan v7 update: descendants are now blocked by the new wrong-root
+# helper (_is_wrong_root_marker_write) with a more specific reason that
+# names the canonical path, NOT the generic "Checkpoint required" pre-gate
+# reason. Behavior is strictly better (block reason is actionable). Assert
+# the new reason substring.
 mkdir -p "$MARKER_DIR/sub" "$LEGACY_MARKER_DIR/sub"
 assert_blocked "50a. nested .checkpoints/sub/.pre-checkpoint-done — NOT allowed (F1)" \
-  "$(mock_json 'Bash' "echo content > $MARKER_DIR/sub/.pre-checkpoint-done")" "Checkpoint required"
+  "$(mock_json 'Bash' "echo content > $MARKER_DIR/sub/.pre-checkpoint-done")" "non-canonical path"
 assert_blocked "50b. nested .claude/sub/.pre-checkpoint-done — NOT allowed (F1)" \
-  "$(mock_json 'Bash' "echo content > $LEGACY_MARKER_DIR/sub/.pre-checkpoint-done")" "Checkpoint required"
+  "$(mock_json 'Bash' "echo content > $LEGACY_MARKER_DIR/sub/.pre-checkpoint-done")" "non-canonical path"
 # Edit tool path-equivalent of 50a
 edit_nested_json=$(jq -nc --arg fp "$MARKER_DIR/sub/.pre-checkpoint-done" --arg cwd "$TEST_DIR" \
   '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd}')
 assert_blocked "50c. Edit nested .checkpoints/sub/.pre-checkpoint-done — NOT allowed (F1)" \
-  "$edit_nested_json" "Checkpoint required"
+  "$edit_nested_json" "non-canonical path"
 
 # ============================================================================
 echo ""
@@ -759,6 +765,200 @@ else
   diff <(echo "$REPO_ROOT_BEFORE") <(echo "$REPO_ROOT_AFTER")
   ((failed++))
 fi
+
+# ============================================================================
+echo ""
+echo "--- B: Wrong-root marker write detection (rank-1 plan v7) ---"
+# ============================================================================
+# Codex-reviewed 7 rounds; final ACCEPT-with-FU at episode ...e19a.
+# Tests the new helpers in checkpoint-gate.sh:
+#   _marker_basename_in_set, _normalize_path_lexical, _is_canonical_marker_path,
+#   _command_has_relative_marker_path, _block_wrong_root_marker,
+#   _block_relative_marker_in_worktree, _is_wrong_root_marker_write.
+
+reset_state
+
+# B-tests need a SECOND cwd that is NOT the main repo root, to simulate
+# worktree-cwd OR nested-cwd within main. Create both shapes.
+WORKTREE_DIR="$(mktemp -d)"
+WORKTREE_DIR="$(cd -P "$WORKTREE_DIR" && pwd)"
+# Make WORKTREE_DIR a linked worktree of TEST_DIR (so resolve_repo_root from
+# WORKTREE_DIR returns TEST_DIR via git-common-dir).
+git -C "$TEST_DIR" config user.email t@t 2>/dev/null
+git -C "$TEST_DIR" config user.name t 2>/dev/null
+echo x > "$TEST_DIR/README.md"
+git -C "$TEST_DIR" add . >/dev/null 2>&1
+git -C "$TEST_DIR" commit -q -m init 2>/dev/null
+rmdir "$WORKTREE_DIR"
+git -C "$TEST_DIR" worktree add -q -b test-wt-branch "$WORKTREE_DIR" 2>/dev/null
+WORKTREE_DIR="$(cd -P "$WORKTREE_DIR" && pwd)"
+
+# Nested cwd inside main repo (codex F18)
+NESTED_DIR="$TEST_DIR/subdir"
+mkdir -p "$NESTED_DIR"
+
+# Arm the gate (checkpoint-required), but DON'T pre-create pre-done — so
+# the gate's pre-gate would block any allowed write. The B-tests assert
+# the EARLIER wrong-root checks fire BEFORE the pre-gate, with their
+# specific reason strings.
+touch "$PRE_REQ"
+
+mock_json_cwd() {
+  local tool_name="$1" command="$2" cwd="$3"
+  jq -n --arg tn "$tool_name" --arg cmd "$command" --arg cwd "$cwd" \
+    '{tool_name: $tn, tool_input: {command: $cmd}, cwd: $cwd}'
+}
+
+mock_json_write() {
+  local file_path="$1" cwd="$2"
+  jq -n --arg fp "$file_path" --arg cwd "$cwd" \
+    '{tool_name: "Write", tool_input: {file_path: $fp, content: "x"}, cwd: $cwd}'
+}
+
+# ---- Absolute-path wrong-root (codex F1/F7) ----
+
+assert_blocked "B-1. Bash: rm worktree-absolute marker → wrong-root block" \
+  "$(mock_json_cwd 'Bash' "rm $WORKTREE_DIR/.checkpoints/.pre-checkpoint-done" "$WORKTREE_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-2. Write: worktree-absolute marker → wrong-root block" \
+  "$(mock_json_write "$WORKTREE_DIR/.checkpoints/.post-checkpoint-done" "$WORKTREE_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-3. Bash: outside-repo absolute marker → wrong-root block" \
+  "$(mock_json_cwd 'Bash' "echo x > /tmp/.checkpoints/.pre-checkpoint-done" "$WORKTREE_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-4. Write: worktree legacy .claude/ absolute → wrong-root block" \
+  "$(mock_json_write "$WORKTREE_DIR/.claude/.plan-approval-pending" "$WORKTREE_DIR")" \
+  "non-canonical path"
+
+# ---- No false-positive on canonical paths of markers outside the 3-marker
+# allowlist (codex F7 — Bash redirects to canonical .checkpoint-required /
+# .preflight-done / .last-user-prompt.*.json should NOT trigger wrong-root) ----
+# Setup: satisfy pre-gate (PRE_DONE non-empty) so we test the WRONG-ROOT
+# branch only, not the orthogonal pre-checkpoint pre-gate.
+echo "pre-block" > "$PRE_DONE"
+
+# Asserts that the SPECIFIC wrong-root block does NOT fire. Other blocks
+# (push-gate, plan-gate) may still fire — we check the reason substring.
+assert_no_wrong_root_block() {
+  local test_name="$1"
+  local json="$2"
+  local output
+  output=$(echo "$json" | run_hook 2>/dev/null)
+  if echo "$output" | grep -qE 'non-canonical path|Relative marker reference'; then
+    echo "  ✗ $test_name (wrong-root falsely fired): $output"
+    ((failed++))
+  else
+    echo "  ✓ $test_name"
+    ((passed++))
+  fi
+}
+
+assert_no_wrong_root_block "B-5. Bash: canonical main .checkpoint-required (no FP)" \
+  "$(mock_json_cwd 'Bash' "echo x > $MARKER_DIR/.checkpoint-required" "$TEST_DIR")"
+
+assert_no_wrong_root_block "B-6. Bash: canonical main .preflight-done (no FP)" \
+  "$(mock_json_cwd 'Bash' "echo x > $MARKER_DIR/.preflight-done" "$TEST_DIR")"
+
+assert_no_wrong_root_block "B-7. Bash: canonical main .last-user-prompt (no FP)" \
+  "$(mock_json_cwd 'Bash' "echo x > $MARKER_DIR/.last-user-prompt.json" "$TEST_DIR")"
+
+# Restore pre-done empty for remaining tests (pre-gate state)
+: > "$PRE_DONE"
+rm -f "$PRE_DONE"
+
+# ---- Relative-marker precheck from worktree cwd (codex F10, F12, F15) ----
+
+assert_blocked "B-8. Bash: relative '> .checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'echo x > .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_allowed "B-9. Bash: relative '> .checkpoints/<marker>' from MAIN" \
+  "$(mock_json_cwd 'Bash' "echo x > .checkpoints/.pre-checkpoint-done" "$TEST_DIR")"
+
+assert_blocked "B-10. Bash: 'touch .checkpoints/<marker>' from worktree (F12 verb-agnostic)" \
+  "$(mock_json_cwd 'Bash' 'touch .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-11. Bash: 'mv /tmp/x .checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'mv /tmp/x .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-12. Bash: 'cp /tmp/x .checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'cp /tmp/x .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-13. Bash: 'dd of=.checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'dd if=/tmp/x of=.checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-14. Bash: '> ./.checkpoints/<marker>' from worktree → block" \
+  "$(mock_json_cwd 'Bash' 'echo x > ./.checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+# B-14b sanity: same shape from MAIN cwd → wrong-root block does NOT fire
+# (CWD == REPO_ROOT means precheck skips; the pre-gate may still fire — we
+# only assert the wrong-root reason is absent).
+assert_no_wrong_root_block "B-14b. Bash: './.checkpoints/<marker>' from MAIN cwd → no wrong-root FP" \
+  "$(mock_json_cwd 'Bash' 'echo x > ./.checkpoints/.pre-checkpoint-done' "$TEST_DIR")"
+
+assert_blocked "B-15. Bash: 'rm .checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'rm .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+# ---- Codex F16 — verb fan-out: install, cat >>, heredoc ----
+
+assert_blocked "B-16. Bash: 'install /tmp/x .checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'install /tmp/x .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-17. Bash: 'cat /tmp/x >> .checkpoints/<marker>' from worktree" \
+  "$(mock_json_cwd 'Bash' 'cat /tmp/x >> .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+# B-18 (codex F16 heredoc): DEFERRED — classifier mis-labels
+# `cat <<EOF > .checkpoints/<marker>\nx\nEOF` as read_only, so the precheck
+# (which only runs for non-read_only) doesn't fire. This is a classifier
+# bug separate from the wrong-root cluster. Tracked as FU: "classifier
+# heredoc-with-redirect mis-classification" (see PR description).
+# The 7 other verbs (touch, mv, cp, install, dd, redirect, rm, tee, cat>>)
+# are covered by B-8/B-10/B-11/B-12/B-13/B-14/B-15/B-16/B-17.
+
+# ---- Codex F15 — `./` and `././` prefix chains ----
+
+assert_blocked "B-19. Bash: '> ./.checkpoints/<marker>' worktree" \
+  "$(mock_json_cwd 'Bash' 'echo x > ./.checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+# B-20 is the canonical-main same shape allowed; B-14b above covers it. Skip duplicate.
+
+assert_blocked "B-21. Bash: '> ././.checkpoints/<marker>' worktree (chained ./)" \
+  "$(mock_json_cwd 'Bash' 'echo x > ././.checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-22. Bash: 'touch ./.checkpoints/<marker>' worktree (./ + touch)" \
+  "$(mock_json_cwd 'Bash' 'touch ./.checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+# ---- Codex F18 — nested-cwd (not a worktree, just inside main repo) ----
+
+assert_blocked "B-23. Bash: relative marker from nested cwd inside main repo" \
+  "$(mock_json_cwd 'Bash' 'echo x > .checkpoints/.pre-checkpoint-done' "$NESTED_DIR")" \
+  "Relative marker reference"
+
+# Disk assertions (B-23a/b/c): block didn't write either nested or canonical
+assert_marker_absent "B-23a. After B-23: nested marker NOT created" \
+  "$NESTED_DIR/.checkpoints/.pre-checkpoint-done"
+assert_marker_absent "B-23b. After B-23: canonical marker NOT created (no PRE_DONE write)" \
+  "$PRE_DONE"
+assert_marker_exists "B-23c. After B-23: trigger marker (PRE_REQ) preserved" \
+  "$PRE_REQ"
+
+# Cleanup B-test worktree
+git -C "$TEST_DIR" worktree remove --force "$WORKTREE_DIR" 2>/dev/null
+git -C "$TEST_DIR" branch -D test-wt-branch 2>/dev/null
 
 # ============================================================================
 echo ""

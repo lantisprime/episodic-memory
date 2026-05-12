@@ -30,6 +30,7 @@ import {
   ensurePrimaryDir,
   bothMarkerPaths
 } from './lib/marker-paths.mjs'
+import { _maxMtimeAcrossRootsStrict } from './lib/stop-gate-helpers.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -184,6 +185,32 @@ if (gateFlag === 'stop') {
   // hooks/checkpoint-gate.sh + hooks/plan-gate.sh that use repo-root.sh.
   // Closes #106's worktree-orphan class for this gate.
   //
+  // #178 F1: defer stop-gate when plan is ACTIVELY pending at EITHER root.
+  // The plan-gate blocks Write/Bash while .plan-approval-pending exists at
+  // either root, creating an unrecoverable triangle when stop-gate ALSO
+  // blocks. The exemption narrows to ACTIVE plan-pending only (mtime >
+  // baseline) — orphan plan-pending falls through to the existing carve-out.
+  //
+  // Strict-lstat semantics via _maxMtimeAcrossRootsStrict (codex round-3 F11
+  // + round-6 F17): ENOENT skips (marker absent at this root, fine); any
+  // other lstat error (EACCES, ENOTDIR, EIO, ELOOP) → hadOtherError → fail
+  // closed. Symlink at EITHER root → fail closed (same-class with carve-out
+  // symmetric defense).
+  //
+  // Dual-root semantics (codex round-2 F8): plan-pending and baseline are
+  // BOTH evaluated across primary and legacy. resolveMarkerRead's primary-
+  // first ordering would have recreated the deadlock when primary is stale
+  // and legacy is active during burn-in.
+  const planPending = _maxMtimeAcrossRootsStrict(REPO_ROOT, '.plan-approval-pending')
+  const baseStrict = _maxMtimeAcrossRootsStrict(REPO_ROOT, BASELINE_NAME)
+  if (
+    planPending.anyExisted && !planPending.hadSymlink && !planPending.hadOtherError &&
+    baseStrict.anyExisted && !baseStrict.hadSymlink && !baseStrict.hadOtherError &&
+    planPending.mtime > baseStrict.mtime
+  ) {
+    process.exit(0)
+  }
+
   // Dual-root .checkpoints/ migration: PRE_REQ existence is checked at
   // EITHER root (resolveMarkerRead returns the path of whichever exists,
   // primary preferred). POST_DONE non-empty check uses the resolved path.

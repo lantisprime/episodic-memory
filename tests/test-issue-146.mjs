@@ -145,20 +145,26 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
   else bad('1.2: carve-out should fire', `got: ${JSON.stringify(r)}`)
 }
 
-// 1.3 baseline + plan-pending newer than baseline → block
+// 1.3 baseline + plan-pending newer than baseline → DEFER (rank-1 plan v7
+// #178 F1 inverts the pre-existing expectation: active plan-pending in
+// flight triggers the new stop-gate exemption — see L5 5.1 for the
+// canonical positive test of this behavior). Active plan-pending was
+// previously a TASK_SIGNAL that BLOCKED stop-gate; now it DEFERs (because
+// otherwise checkpoint-gate + plan-gate + stop-gate form an unrecoverable
+// triangle — see scratch/rank1-plan-v7.md §A rationale).
 {
   const d = mkRepo('1-3'); cleanupDirs.push(d)
   const claudeDir = path.join(d, '.checkpoints')
   fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
   setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
-  // sleep effect: plan-pending will be NEWER than baseline
+  // plan-pending NEWER than baseline → active (rank-1 plan v7 exemption fires)
   const planP = path.join(claudeDir, '.plan-approval-pending')
   fs.writeFileSync(planP, '')
-  setMtime(planP, Date.now() + 5_000) // explicitly future to defeat fs resolution
+  setMtime(planP, Date.now() + 5_000)
   const r = runGateStop(d)
-  if (isBlock(r) && r.status === 0) ok('1.3: plan-pending newer than baseline → block')
-  else bad('1.3: plan-pending → block', `got: ${JSON.stringify(r)}`)
+  if (isCarveOutAllow(r)) ok('1.3 (rank-1 v7): plan-pending active → defer (was: block)')
+  else bad('1.3: active plan-pending should defer', `got: ${JSON.stringify(r)}`)
   if (fs.existsSync(planP)) ok('1.3 (defensive): plan-pending preserved')
   else bad('1.3 defensive', 'plan-pending disappeared')
 }
@@ -472,7 +478,7 @@ function mkE2EHome() {
   // .checkpoints/ migration: marker-paths.mjs ships alongside local-dir.mjs;
   // omit it and em-recall fails to load (same fix as test-stop-gate.sh's
   // mk_fake_home).
-  for (const lib of ['local-dir.mjs', 'marker-paths.mjs']) {
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'stop-gate-helpers.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }
@@ -631,6 +637,252 @@ function runHook(hookPath, inputJson, cwd, home) {
   } else {
     bad('4.3: marker_write should be allowed',
       `status=${r.status} stdout=${r.stdout}`)
+  }
+}
+
+// ============================================================================
+console.log('\n=== L5 — Active-plan exemption (#178 F1, rank-1 plan v7) ===')
+// ============================================================================
+// Codex-reviewed 7 rounds; final ACCEPT-with-FU at episode ...e19a.
+// Exemption fires iff plan-pending active (mtime > baseline) at either
+// root, with strict-lstat fail-closed (codex F11). Symlink + ENOTDIR
+// fail closed (codex F17). 5.11/5.12 use ENOTDIR via .checkpoints
+// being a regular file — deterministic and platform-portable.
+
+function isCarveOutAllow_v5(r) {
+  // Same shape as isCarveOutAllow (above); aliased for L5 readability.
+  return r.status === 0 && !r.stdout
+}
+
+// 5.1 plan-pending active at primary (mtime > baseline) → defer
+{
+  const d = mkRepo('5-1'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  setMtime(path.join(claudeDir, '.session-baseline'), Date.now() - 30_000)
+  const planP = path.join(claudeDir, '.plan-approval-pending')
+  fs.writeFileSync(planP, '')
+  setMtime(planP, Date.now() + 5_000) // active mid-session
+  const r = runGateStop(d)
+  if (isCarveOutAllow_v5(r)) ok('5.1: plan-pending active at primary → defer')
+  else bad('5.1', `got: ${JSON.stringify(r)}`)
+}
+
+// 5.2 plan-pending symlink at primary → fail closed
+{
+  const d = mkRepo('5-2'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  setMtime(path.join(claudeDir, '.session-baseline'), Date.now() - 30_000)
+  const real = path.join(claudeDir, 'real-plan-marker')
+  fs.writeFileSync(real, '')
+  setMtime(real, Date.now() + 5_000)
+  fs.symlinkSync(real, path.join(claudeDir, '.plan-approval-pending'))
+  const r = runGateStop(d)
+  // Symlink → exemption ineligible; carve-out ALSO fails closed on symlink
+  // markers (existing #146 P2 symmetry). Net: block.
+  if (isBlock(r) && r.status === 0) ok('5.2: symlinked plan-pending → exemption ineligible → block')
+  else bad('5.2', `got: ${JSON.stringify(r)}`)
+}
+
+// 5.3 plan-pending orphan (mtime ≤ baseline) → exemption skipped; existing
+// carve-out fires when ALL markers stale → defer.
+{
+  const d = mkRepo('5-3'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 120_000)
+  const planP = path.join(claudeDir, '.plan-approval-pending')
+  fs.writeFileSync(planP, '')
+  setMtime(planP, Date.now() - 90_000) // older than baseline
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  // baseline mtime now (newest) → carve-out fires for stale plan-pending
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.3: orphan plan-pending → exemption skipped, carve-out fires → defer')
+  else bad('5.3', 'expected carve-out defer for fully orphan markers')
+}
+
+// 5.4 plan-pending orphan + .checkpoint-required ACTIVE → block. Exemption
+// doesn't rescue when other carve-out signals fail.
+{
+  const d = mkRepo('5-4'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  setMtime(path.join(claudeDir, '.session-baseline'), Date.now() - 30_000)
+  const planP = path.join(claudeDir, '.plan-approval-pending')
+  fs.writeFileSync(planP, '')
+  setMtime(planP, Date.now() - 90_000) // orphan
+  const preReq = path.join(claudeDir, '.checkpoint-required')
+  fs.writeFileSync(preReq, '')
+  setMtime(preReq, Date.now() + 5_000) // re-armed mid-session
+  if (isBlock(runGateStop(d))) ok('5.4: orphan plan-pending + active checkpoint-required → block (exemption skipped)')
+  else bad('5.4', 'expected block when checkpoint-required is mid-session active')
+}
+
+// 5.5 plan-pending active at LEGACY root only → defer (dual-root happy path)
+{
+  const d = mkRepo('5-5'); cleanupDirs.push(d)
+  const primary = path.join(d, '.checkpoints')
+  const legacy = path.join(d, '.claude')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(primary, '.checkpoint-required'), '')
+  setMtime(path.join(primary, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(primary, '.session-baseline'), '')
+  setMtime(path.join(primary, '.session-baseline'), Date.now() - 30_000)
+  // plan-pending lives at LEGACY only
+  const planP = path.join(legacy, '.plan-approval-pending')
+  fs.writeFileSync(planP, '')
+  setMtime(planP, Date.now() + 5_000)
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.5: active plan-pending at LEGACY only → defer (dual-root)')
+  else bad('5.5', 'expected dual-root exemption to fire for legacy-only active plan-pending')
+}
+
+// 5.6 baseline absent at both roots → exemption skipped → block (preReq + empty postDone path).
+{
+  const d = mkRepo('5-6'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  const planP = path.join(claudeDir, '.plan-approval-pending')
+  fs.writeFileSync(planP, '')
+  // NO baseline at either root
+  if (isBlock(runGateStop(d))) ok('5.6: baseline absent → exemption ineligible → block')
+  else bad('5.6', 'expected block when no baseline anywhere')
+}
+
+// 5.7 plan-pending lstat ENOENT-equivalent (we test the "absent" branch
+// covered by ENOENT being silently skipped — same as U2). At gate level:
+// no plan-pending anywhere → exemption ineligible → existing carve-out path.
+{
+  const d = mkRepo('5-7'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.checkpoint-required'), '')
+  setMtime(path.join(claudeDir, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  // No plan-pending — exemption ineligible. Carve-out evaluates;
+  // checkpoint-required is stale, baseline is current → carve-out fires → defer
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.7: no plan-pending → exemption ineligible, carve-out defers')
+  else bad('5.7', 'expected carve-out defer when no plan-pending')
+}
+
+// 5.8 primary stale + legacy active → defer (codex F8 dual-root active)
+{
+  const d = mkRepo('5-8'); cleanupDirs.push(d)
+  const primary = path.join(d, '.checkpoints')
+  const legacy = path.join(d, '.claude')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(primary, '.checkpoint-required'), '')
+  setMtime(path.join(primary, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(primary, '.session-baseline'), '')
+  setMtime(path.join(primary, '.session-baseline'), Date.now() - 30_000)
+  // PRIMARY plan-pending: stale
+  const primaryPlan = path.join(primary, '.plan-approval-pending')
+  fs.writeFileSync(primaryPlan, '')
+  setMtime(primaryPlan, Date.now() - 90_000)
+  // LEGACY plan-pending: active
+  const legacyPlan = path.join(legacy, '.plan-approval-pending')
+  fs.writeFileSync(legacyPlan, '')
+  setMtime(legacyPlan, Date.now() + 5_000)
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.8 (F8): primary stale + legacy active → defer (max-across-roots)')
+  else bad('5.8', 'expected dual-root exemption to take MAX mtime; should fire')
+}
+
+// 5.9 primary symlink + legacy active → BLOCK (codex F8 symlink-at-either fails closed)
+{
+  const d = mkRepo('5-9'); cleanupDirs.push(d)
+  const primary = path.join(d, '.checkpoints')
+  const legacy = path.join(d, '.claude')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(primary, '.checkpoint-required'), '')
+  setMtime(path.join(primary, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(primary, '.session-baseline'), '')
+  setMtime(path.join(primary, '.session-baseline'), Date.now() - 30_000)
+  // PRIMARY plan-pending: symlink
+  const real = path.join(primary, 'real-plan-marker')
+  fs.writeFileSync(real, '')
+  fs.symlinkSync(real, path.join(primary, '.plan-approval-pending'))
+  // LEGACY plan-pending: active
+  const legacyPlan = path.join(legacy, '.plan-approval-pending')
+  fs.writeFileSync(legacyPlan, '')
+  setMtime(legacyPlan, Date.now() + 5_000)
+  if (isBlock(runGateStop(d))) ok('5.9 (F8): primary symlink + legacy active → block (fail-closed)')
+  else bad('5.9', 'expected block when ANY root has symlink')
+}
+
+// 5.10 both roots have active plan-pending → defer (sanity)
+{
+  const d = mkRepo('5-10'); cleanupDirs.push(d)
+  const primary = path.join(d, '.checkpoints')
+  const legacy = path.join(d, '.claude')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(primary, '.checkpoint-required'), '')
+  setMtime(path.join(primary, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(primary, '.session-baseline'), '')
+  setMtime(path.join(primary, '.session-baseline'), Date.now() - 30_000)
+  fs.writeFileSync(path.join(primary, '.plan-approval-pending'), '')
+  setMtime(path.join(primary, '.plan-approval-pending'), Date.now() + 5_000)
+  fs.writeFileSync(path.join(legacy, '.plan-approval-pending'), '')
+  setMtime(path.join(legacy, '.plan-approval-pending'), Date.now() + 5_000)
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.10: both roots active → defer')
+  else bad('5.10', 'expected defer when both roots have active plan-pending')
+}
+
+// 5.11 ENOTDIR on primary marker dir → exemption ineligible → BLOCK (codex F17)
+// Setup: primary .checkpoints is a REGULAR FILE (not dir), legacy is real
+// directory with active plan-pending + baseline + checkpoint-required. The
+// strict helper detects hadOtherError on primary side → exemption ineligible.
+{
+  const d = mkRepo('5-11'); cleanupDirs.push(d)
+  // PRIMARY: regular file at .checkpoints (NOT a dir) → ENOTDIR on child lstat
+  // mkRepo() creates .checkpoints as a directory — rm it first before
+  // writing the regular file in its place.
+  fs.rmSync(path.join(d, '.checkpoints'), { recursive: true, force: true })
+  fs.writeFileSync(path.join(d, '.checkpoints'), 'not-a-dir')
+  // LEGACY: full setup
+  const legacy = path.join(d, '.claude')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(legacy, '.checkpoint-required'), '')
+  setMtime(path.join(legacy, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(legacy, '.session-baseline'), '')
+  setMtime(path.join(legacy, '.session-baseline'), Date.now() - 30_000)
+  fs.writeFileSync(path.join(legacy, '.plan-approval-pending'), '')
+  setMtime(path.join(legacy, '.plan-approval-pending'), Date.now() + 5_000)
+  // Defensive: confirm primary .checkpoints is a regular file at check time
+  const st = fs.lstatSync(path.join(d, '.checkpoints'))
+  if (!st.isFile()) {
+    bad('5.11 setup', `expected .checkpoints to be regular file; got mode ${st.mode.toString(8)}`)
+  } else if (isBlock(runGateStop(d))) {
+    ok('5.11 (F17): ENOTDIR primary + active legacy → exemption ineligible → block')
+  } else {
+    bad('5.11', 'expected block when primary marker dir is unreadable (ENOTDIR)')
+  }
+}
+
+// 5.12 ENOTDIR on primary baseline (.checkpoints is a regular file) +
+// legacy baseline ok + plan-pending active → BLOCK on baseline side
+// (same fail-closed semantic for baseline computation).
+{
+  const d = mkRepo('5-12'); cleanupDirs.push(d)
+  // Same shape as 5.11: primary `.checkpoints` is regular file. This also
+  // affects baseline lookup at primary. Combined with the marker side
+  // failing, both branches of the strict helper see hadOtherError=true.
+  // This test documents that the strict semantic applies symmetrically.
+  fs.rmSync(path.join(d, '.checkpoints'), { recursive: true, force: true })
+  fs.writeFileSync(path.join(d, '.checkpoints'), 'not-a-dir')
+  const legacy = path.join(d, '.claude')
+  fs.mkdirSync(legacy, { recursive: true })
+  fs.writeFileSync(path.join(legacy, '.checkpoint-required'), '')
+  setMtime(path.join(legacy, '.checkpoint-required'), Date.now() - 60_000)
+  fs.writeFileSync(path.join(legacy, '.session-baseline'), '')
+  setMtime(path.join(legacy, '.session-baseline'), Date.now() - 30_000)
+  fs.writeFileSync(path.join(legacy, '.plan-approval-pending'), '')
+  setMtime(path.join(legacy, '.plan-approval-pending'), Date.now() + 5_000)
+  if (isBlock(runGateStop(d))) {
+    ok('5.12 (F17): ENOTDIR primary baseline + legacy active → block (fail-closed on baseline)')
+  } else {
+    bad('5.12', 'expected block when primary baseline path is unreadable')
   }
 }
 

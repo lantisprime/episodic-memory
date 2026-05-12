@@ -77,6 +77,9 @@ mk_fake_home() {
   # marker-paths.mjs; without it the module fails to load and the hook
   # falls back to the canned em-recall-non-zero error message.
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$fake_home/.episodic-memory/scripts/lib/marker-paths.mjs"
+  # rank-1 plan v7 (2026-05-12): em-recall also imports stop-gate-helpers.mjs
+  # for the active-plan exemption (_maxMtimeAcrossRootsStrict).
+  cp "$REPO_ROOT/scripts/lib/stop-gate-helpers.mjs" "$fake_home/.episodic-memory/scripts/lib/stop-gate-helpers.mjs"
 }
 
 TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"

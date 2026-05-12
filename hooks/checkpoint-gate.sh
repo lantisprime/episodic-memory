@@ -105,6 +105,117 @@ marker_basename_for_target() {
   printf ''
 }
 
+# ---------------------------------------------------------------------------
+# Wrong-root marker write detection (#191 B2 / #202 / #178 cluster).
+# Hook-deadlock cluster plan v7 — codex 7-round review, ACCEPT-with-FU.
+# ---------------------------------------------------------------------------
+#
+# Closed marker set (8 basenames) — mirrors classifier emit-site cases at
+# command-classifier.sh lines 516, 522, 630, 636, 666, 672. Used for
+# wrong-root detection only; NOT for marker_basename_for_target's narrower
+# 3-marker allowlist (intentionally narrower — only 3 markers are valid
+# gate-action targets here; the other 5 are handled by other gates/hooks).
+_marker_basename_in_set() {
+  case "${1##*/}" in
+    .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending| \
+    .checkpoint-required|.post-checkpoint-required|.preflight-done| \
+    .last-user-prompt.json) return 0 ;;
+    .last-user-prompt.*.json) return 0 ;;
+  esac
+  return 1
+}
+
+# Codex round-4 F13: lexical `./` segment normalization (pure string manip;
+# no symlink resolution — kept lexical for defense in depth + simplicity).
+# Strips leading `./`, mid-path `/./`. `../` lexical normalization is FU
+# (see scratch/rank1-plan-v7.md FU list F13b); if a TARGET contains `../`,
+# this helper passes it through and the equality check fails closed (block).
+_normalize_path_lexical() {
+  local p="$1"
+  while [ "${p#*/./}" != "$p" ]; do
+    p="${p%%/./*}/${p#*/./}"
+  done
+  case "$p" in
+    ./*) p="${p#./}" ;;
+  esac
+  printf '%s' "$p"
+}
+
+# Returns 0 iff (lexically-normalized) target equals canonical PRIMARY or
+# LEGACY path for its own basename. Decoupled from marker_basename_for_target's
+# narrower 3-marker scope (codex round-2 F7).
+_is_canonical_marker_path() {
+  local target basename norm
+  norm="$(_normalize_path_lexical "$1")"
+  basename="${norm##*/}"
+  [ "$norm" = "$PRIMARY_DIR/$basename" ] && return 0
+  [ "$norm" = "$LEGACY_DIR/$basename" ] && return 0
+  return 1
+}
+
+# Codex round-4 F12 + round-5 F15: relative-marker-reference detection.
+# Matches `.checkpoints/<marker>` or `.claude/<marker>` as a RELATIVE
+# path (no leading `/`). (^|[^/])(\./)* handles bare, ./, ././, ../ forms.
+# Returns 0 iff a relative marker path is referenced.
+_command_has_relative_marker_path() {
+  local cmd="$1"
+  printf '%s' "$cmd" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)'
+}
+
+# E2E-discovered absolute-non-canonical detection: for Bash commands where
+# the classifier returns shared_write (touch/mv/cp/install/dd of=) on an
+# ABSOLUTE marker path NOT under canonical PRIMARY/LEGACY. The
+# marker_write-branch check covers absolute paths classified AS marker_write
+# (redirect/rm/tee); this catches the shared_write-classified-but-targets-
+# marker case. Echoes the first offending path on match (exit 0); empty on
+# no match (exit 1).
+_command_first_absolute_noncanonical_marker() {
+  local cmd="$1"
+  local matches p basename
+  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)' 2>/dev/null || true)
+  [ -z "$matches" ] && return 1
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    basename="${p##*/}"
+    if [ "$p" != "$PRIMARY_DIR/$basename" ] && [ "$p" != "$LEGACY_DIR/$basename" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done <<< "$matches"
+  return 1
+}
+
+# Emit wrong-root BLOCK decision for absolute-path attempts (Write/Edit or
+# Bash with absolute paths). Reason names BOTH the attempted path AND the
+# canonical path the agent should use.
+_block_wrong_root_marker() {
+  local attempted="$1" basename="${1##*/}"
+  local canonical="$PRIMARY_DIR/$basename"
+  jq -nc --arg attempted "$attempted" --arg canonical "$canonical" --arg basename "$basename" \
+    '{decision: "block", reason: ("Marker write to non-canonical path. You wrote " + $attempted + " but " + $basename + " must live under the main repo at " + $canonical + ". In a git worktree, hooks resolve markers against the main repo root via git-common-dir — write the marker at the canonical absolute path instead. Hook: checkpoint-gate.sh.")}'
+  exit 0
+}
+
+# Emit wrong-root BLOCK decision for Bash relative-marker attempts from
+# non-canonical cwd. Reason includes the verbatim command excerpt and the
+# canonical primary marker dir.
+_block_relative_marker_in_worktree() {
+  local cmd_excerpt="$1"
+  jq -nc --arg cmd "$cmd_excerpt" --arg primary "$PRIMARY_DIR" \
+    '{decision: "block", reason: ("Relative marker reference from worktree cwd. The classifier resolves relative paths against the main repo root, but the shell executes them under the worktree cwd. Command was: " + $cmd + ". Re-issue with an absolute path under " + $primary + " (or cd to the main repo first). Hook: checkpoint-gate.sh.")}'
+  exit 0
+}
+
+# Composite predicate: wrong-root iff (basename in closed set) AND (NOT
+# canonical primary/legacy path). Decoupled from marker_basename_for_target's
+# narrower allowlist (codex round-2 F7).
+_is_wrong_root_marker_write() {
+  local target="$1"
+  _marker_basename_in_set "$target" || return 1
+  _is_canonical_marker_path "$target" && return 1
+  return 0
+}
+
 # Read-only tools — always allowed
 case "$TOOL_NAME" in
   Read|Glob|Grep|Agent|WebFetch|WebSearch|AskUserQuestion|EnterPlanMode|ExitPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|Skill|NotebookRead|ToolSearch|mcp__*)
@@ -148,6 +259,30 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     exit 0
   fi
 
+  # Codex round-4 F12 + round-5 F15 + round-6 F18: verb-agnostic relative-
+  # marker precheck. Runs for ALL non-read_only Bash when CWD != REPO_ROOT
+  # (linked worktree OR nested cwd inside main repo). Catches touch/mv/cp/
+  # install/dd-of/cat>>/heredoc-> + redirect/rm/tee. Classifier resolves
+  # relative redirect targets against REPO_ROOT, but shell executes under
+  # tool cwd — without this precheck, the gate "allows" a write whose
+  # artifact lands at the wrong root.
+  if [ "$CWD" != "$REPO_ROOT" ] && _command_has_relative_marker_path "$COMMAND"; then
+    _block_relative_marker_in_worktree "$COMMAND"
+  fi
+
+  # E2E-discovered: when CWD != REPO_ROOT and the command has an ABSOLUTE
+  # non-canonical marker path (typically worktree-absolute like
+  # `touch $WT_DIR/.checkpoints/X`), classifier returns shared_write so the
+  # marker_write branch never fires. Check explicitly here so the
+  # wrong-root block reason is emitted instead of falling through to the
+  # generic pre-gate reason.
+  if [ "$CWD" != "$REPO_ROOT" ]; then
+    NONCANON_ABS="$(_command_first_absolute_noncanonical_marker "$COMMAND")"
+    if [ -n "$NONCANON_ABS" ]; then
+      _block_wrong_root_marker "$NONCANON_ABS"
+    fi
+  fi
+
   # marker_write deadlock-prevention allowlist. Only allow when the gate's
   # state expects that specific marker write. All other marker_write Bash
   # falls through to the pre-gate as a normal write.
@@ -156,6 +291,14 @@ if [ "$TOOL_NAME" = "Bash" ]; then
   # either .checkpoints/.X (new canonical) or .claude/.X (legacy fallback,
   # tolerated during burn-in for backward compat).
   if [ "$LABEL" = "marker_write" ]; then
+    # Codex round-1 F1 + round-2 F7: absolute-path wrong-root BLOCK before
+    # marker_basename_for_target's narrower allowlist evaluation. Catches
+    # `Bash echo x > <wt>/.checkpoints/.pre-checkpoint-done` shape where
+    # classifier-reported TARGET ≠ shell-resolved artifact location.
+    if _is_wrong_root_marker_write "$TARGET"; then
+      _block_wrong_root_marker "$TARGET"
+    fi
+
     TARGET_BN="$(marker_basename_for_target "$TARGET")"
 
     # Cross-gate invariant: checkpoint marker writes are blocked while
@@ -200,6 +343,24 @@ case "$TOOL_NAME" in
       REST="${RESULT#*	}"
       TARGET="${REST%%	*}"
       if [ "$LABEL" = "marker_write" ]; then
+        # Codex round-1 F1 + round-2 F7: absolute-path wrong-root BLOCK
+        # before marker_basename_for_target. Same predicate as Bash branch.
+        # Note: classify_path at command-classifier.sh:1232 only emits
+        # marker_write for 3 checkpoint markers — so this branch's effective
+        # wrong-root surface is narrower than Bash's 8 markers. The other 5
+        # markers (.checkpoint-required, .post-checkpoint-required,
+        # .preflight-done, .last-user-prompt.*) reach Write/Edit via
+        # preflight-gate.sh's helper-only enforcement at
+        # preflight-gate.sh:170-209, not via this branch. classify_path
+        # 3→8 marker expansion tracked as FU per scratch/rank1-plan-v7.md F9.
+        #
+        # Relative-marker precheck (Bash side) is NOT mirrored here:
+        # Claude Code's Write/Edit tool requires absolute file_path, so the
+        # worktree-relative attack surface doesn't apply.
+        if _is_wrong_root_marker_write "$TARGET"; then
+          _block_wrong_root_marker "$TARGET"
+        fi
+
         TARGET_BN="$(marker_basename_for_target "$TARGET")"
         # Cross-gate invariant
         if marker_exists .plan-approval-pending && [ "$TARGET_BN" != ".plan-approval-pending" ]; then
