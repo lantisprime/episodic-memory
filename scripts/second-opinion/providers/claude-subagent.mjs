@@ -56,11 +56,17 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
   // version; safest portable pattern is `claude -p <prompt>` for
   // single-shot non-interactive runs. For subagent dispatch specifically,
   // use the `--agent` or task-tool surface; v1 keeps it simple as `-p`.
+  //
+  // CLAUDE_SCHEDULED_TASK=1 (issue #232): the child `claude` invocation
+  // must skip the operator's SessionStart hook. Without this override the
+  // hook's blocking directive prepends to the child's first turn and
+  // hijacks the review prompt. Same env-propagation class as #224.
   const result = spawnSync(binary, ['-p', prompt], {
     cwd: projectRoot,
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout,
+    env: { ...process.env, CLAUDE_SCHEDULED_TASK: '1' },
   })
 
   return {
