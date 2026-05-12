@@ -795,12 +795,16 @@ The records hold everything replay needs to detect tampering **without `run.key`
 
 Verification failure → `bp1-hmac-fail` (live, row 16) or `bp1-manifest-fail` (post-terminal, row 30).
 
-**Negative test (NEW v3.10 — addresses CLI v3.9 F1):**
+**Direct file scan, not em-search (v3.13 — closes Issue #190 patch 6):** the cross-store equality check at step 5 reads source-of-truth episode files **directly** via `fs.readdirSync` over `<project>/.episodic-memory/episodes/` AND `~/.episodic-memory/episodes/` — it does NOT consult the em-search index, because the index may lag the on-disk truth at finalize time (e.g. an episode written within the same run that hasn't yet been indexed, or an index rebuild lag). Reading the directory directly is the only way to detect the "extra file added" attack (H27 family) without relying on an index that an attacker might also be able to delay. See `scripts/bp1-orchestrator.mjs:484-486` (`decisionLogFence`) and `scripts/lib/bp1-manifest.mjs` (`collectEpisodeRecords`) for the implementation.
+
+**Negative tests (NEW v3.10; PARAMETERIZED v3.13 per Issue #190 patch 6 — local + global stores):**
 
 | # | Scenario | Expected outcome |
 |---|---|---|
-| H27 (NEW v3.10) | Post-terminal: attacker adds an extra episode file to `<project>/.episodic-memory/episodes/` with the same `run_id` as a finalized run, but the manifest is unchanged | Replay step 5 (on-disk-set equality check) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
-| H28 (NEW v3.10) | Post-terminal: attacker deletes an on-disk episode file that IS listed in the manifest's records | Replay step 5 detects missing episode; `bp1-manifest-fail` with reason `missing-episode` |
+| H27a (PARAM v3.13; was H27 v3.10) | Post-terminal: attacker adds an extra episode file to **`<project>/.episodic-memory/episodes/` (local store)** with the same `run_id` as a finalized run, but the manifest is unchanged | Replay step 5 (direct file scan) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
+| H27b (NEW v3.13) | Post-terminal: attacker adds an extra episode file to **`~/.episodic-memory/episodes/` (global store)** with the same `run_id` as a finalized run (e.g. forged `bp1-lesson`), but the manifest is unchanged | Replay step 5 (direct file scan across BOTH stores) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
+| H28a (PARAM v3.13; was H28 v3.10) | Post-terminal: attacker deletes an on-disk episode file from **the local store** that IS listed in the manifest's records | Replay step 5 detects missing episode; `bp1-manifest-fail` with reason `missing-episode` |
+| H28b (NEW v3.13) | Post-terminal: attacker deletes an on-disk episode file from **the global store** that IS listed in the manifest's records (e.g. a `bp1-lesson` that landed in global per the storage policy) | Replay step 5 detects missing episode in either store; `bp1-manifest-fail` with reason `missing-episode` |
 
 #### Finalize-run sequence
 
