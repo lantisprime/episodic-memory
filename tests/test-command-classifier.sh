@@ -453,6 +453,39 @@ assert_preflight_cmd "Q41 stacked wrappers" \
   'sudo -u root timeout -k 5s 30s nice -n 10 codex exec foo' "codex-review-handoff"
 assert_preflight_cmd "Q42 sudo --user=root long-opt-equals" \
   'sudo --user=root codex exec foo' "codex-review-handoff"
+# Q43-Q50: long-opt --key value form (codex round 3 finding `...bd73`)
+assert_preflight_cmd "Q43 sudo --user root space" \
+  'sudo --user root codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q44 timeout --kill-after 5s 30s" \
+  'timeout --kill-after 5s 30s codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q45 stdbuf --output L" \
+  'stdbuf --output L codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q46 env --unset BAD" \
+  'env --unset BAD codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q47 nice --adjustment 10" \
+  'nice --adjustment 10 codex exec foo' "codex-review-handoff"
+# Q48-Q55: modern command runners (codex round 3 finding `...bd73`)
+assert_preflight_cmd "Q48 systemd-run --user --scope" \
+  'systemd-run --user --scope codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q49 systemd-run -u name" \
+  'systemd-run -u myunit codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q50 flatpak-spawn --host" \
+  'flatpak-spawn --host codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q51 uv run" \
+  'uv run codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q52 poetry run" \
+  'poetry run codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q53 pixi run" \
+  'pixi run codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q54 nix develop -c" \
+  'nix develop -c codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q55 nix shell -c" \
+  'nix shell -c codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q56 direnv exec ." \
+  'direnv exec . codex exec foo' "codex-review-handoff"
+# Q57: stacked runner + classic wrapper
+assert_preflight_cmd "Q57 sudo + uv run codex" \
+  'sudo -u root uv run codex exec foo' "codex-review-handoff"
 
 echo ""
 echo "--- classify_preflight_path ---"

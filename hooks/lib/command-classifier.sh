@@ -1228,7 +1228,13 @@ classify_path() {
 
 # Wrapper-utility prefixes that may precede the real command verb. Same set
 # the existing classifier handles for bash -c / env / sudo / nohup / timeout.
-_PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec)$'
+_PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec|systemd-run|flatpak-spawn)$'
+
+# Two-word command runners: verb + fixed subcommand consume index; rest of
+# loop unwraps wrapper flags. Codex r3 finding `...bd73`. Patterns:
+#   uv run CMD | poetry run CMD | pixi run CMD | direnv exec DIR CMD
+#   nix develop -c CMD | nix shell -c CMD
+_PREFLIGHT_RUNNERS_RE='^(uv|poetry|pixi|direnv|nix)$'
 
 # Tag-name fragments that, when found in --tag/--tags/--summary args, mark
 # an em-* invocation as a codex-review handoff.
@@ -1249,35 +1255,128 @@ _preflight_unwrap_index() {
   local n=${#T[@]}
   while [ $i -lt $n ]; do
     local t="${T[$i]}"
+    local wrapper=""
+
+    # Two-word runner detection (uv run, poetry run, pixi run, direnv exec,
+    # nix develop -c, nix shell -c). Codex r3 finding `...bd73`.
+    if [[ "$t" =~ $_PREFLIGHT_RUNNERS_RE ]] && [ $((i+1)) -lt $n ]; then
+      local sub="${T[$((i+1))]}"
+      case "$t" in
+        uv|poetry|pixi)
+          if [ "$sub" = "run" ]; then
+            wrapper="$t-run"
+            i=$((i+2))
+          fi
+          ;;
+        direnv)
+          if [ "$sub" = "exec" ]; then
+            wrapper="direnv-exec"
+            i=$((i+2))
+            # direnv exec DIR CMD — consume DIR positional.
+            if [ $i -lt $n ]; then i=$((i+1)); fi
+          fi
+          ;;
+        nix)
+          if [ "$sub" = "develop" ] || [ "$sub" = "shell" ]; then
+            wrapper="nix-$sub"
+            i=$((i+2))
+            # nix develop|shell -c CMD — find -c, then advance past it
+            # so CMD becomes the verb. If no -c found, this isn't the
+            # bypass shape; let the outer loop break naturally.
+            while [ $i -lt $n ]; do
+              local nt="${T[$i]}"
+              if [ "$nt" = "-c" ]; then
+                i=$((i+1))
+                break
+              fi
+              case "$nt" in
+                -*) i=$((i+1)) ;;
+                *)  break ;;
+              esac
+            done
+          fi
+          ;;
+      esac
+      if [ -n "$wrapper" ]; then
+        # Skip remaining wrapper flags (rare but possible after the
+        # subcommand).
+        while [ $i -lt $n ]; do
+          local w="${T[$i]}"
+          case "$w" in
+            *=*) i=$((i+1)) ;;
+            -*)  i=$((i+1)) ;;
+            *)   break ;;
+          esac
+        done
+        continue
+      fi
+    fi
+
     if [[ "$t" =~ $_PREFLIGHT_WRAPPERS_RE ]]; then
-      local wrapper="$t"
+      wrapper="$t"
       i=$((i+1))
       # Per-wrapper short-opt set that takes an ARGUMENT in the next token.
-      # P1 fix from codex PR-level review round 2 (`...cbc2`): without per-
-      # wrapper arg-arity, `sudo -u root codex exec foo` consumed `root` as
-      # the positional verb and matched none.
+      # P1 fix from codex PR-level review round 2 (`...cbc2`).
       local arg_re=''
+      # Per-wrapper LONG-opt set that takes an ARGUMENT in the next token
+      # (when in `--key value` form, not `--key=value`). Codex r3 finding
+      # `...bd73` rejected the deferral.
+      local long_arg_re=''
       case "$wrapper" in
-        sudo|doas)  arg_re='^-[ugCDHRTpAB]$' ;;
-        timeout)    arg_re='^-[ks]$' ;;
-        nice)       arg_re='^-n$' ;;
-        ionice)     arg_re='^-[cnpt]$' ;;
-        env)        arg_re='^-[uS]$' ;;
-        stdbuf)     arg_re='^-[ioe]$' ;;
-        exec)       arg_re='^-a$' ;;
-        chrt)       arg_re='^-[pP]$' ;;
-        nohup|command|setsid|stdbuf) arg_re='' ;;
+        sudo|doas)
+          arg_re='^-[ugCDHRTpAB]$'
+          long_arg_re='^--(user|group|close-from|host|prompt|runas-uid|runas-gid|chdir|chroot)$'
+          ;;
+        timeout)
+          arg_re='^-[ks]$'
+          long_arg_re='^--(kill-after|signal)$'
+          ;;
+        nice)
+          arg_re='^-n$'
+          long_arg_re='^--adjustment$'
+          ;;
+        ionice)
+          arg_re='^-[cnpt]$'
+          long_arg_re='^--(class|classdata|pid|pgrp|uid)$'
+          ;;
+        env)
+          arg_re='^-[uS]$'
+          long_arg_re='^--(unset|split-string|chdir)$'
+          ;;
+        stdbuf)
+          arg_re='^-[ioe]$'
+          long_arg_re='^--(input|output|error)$'
+          ;;
+        exec)
+          arg_re='^-a$'
+          long_arg_re='^--argv0$'
+          ;;
+        chrt)
+          arg_re='^-[pP]$'
+          long_arg_re='^--(pid|sched-runtime|sched-deadline|sched-period)$'
+          ;;
+        systemd-run)
+          arg_re='^-[uGtMpES]$'
+          long_arg_re='^--(unit|user|machine|property|setenv|description|slice|on-active|on-boot|on-startup|on-unit-active|on-unit-inactive|on-calendar|service-type|exec-directory|state-directory|cache-directory|logs-directory|configuration-directory|working-directory|gid|uid|nice)$'
+          ;;
+        flatpak-spawn)
+          arg_re=''
+          long_arg_re='^--(env|directory|forward-fd)$'
+          ;;
       esac
-      # Skip env-style assignments, short options, and per-wrapper option
-      # arguments. Long-opt `--key value` form residual gap (filed if seen);
-      # `--key=value` form is already handled (contains `=`).
       while [ $i -lt $n ]; do
         local w="${T[$i]}"
         case "$w" in
           *=*) i=$((i+1)) ;;
+          --*)
+            if [ -n "$long_arg_re" ] && [[ "$w" =~ $long_arg_re ]]; then
+              i=$((i+2))
+            else
+              i=$((i+1))
+            fi
+            ;;
           -*)
             if [ -n "$arg_re" ] && [[ "$w" =~ $arg_re ]]; then
-              # Consume flag + its argument.
               i=$((i+2))
             else
               i=$((i+1))
@@ -1286,14 +1385,12 @@ _preflight_unwrap_index() {
           *)   break ;;
         esac
       done
-      # Wrappers that take a single positional argument BEFORE the command
-      # to wrap. `timeout DURATION CMD` — DURATION is positional, distinct
-      # from `-k DURATION` and `-s SIGNAL` (already consumed via arg_re).
+      # Wrappers with a positional BEFORE the command to wrap.
       case "$wrapper" in
         timeout)
-          if [ $i -lt $n ]; then
-            i=$((i+1))
-          fi
+          # `timeout DURATION CMD` — DURATION is positional, distinct from
+          # `-k DURATION` and `-s SIGNAL` (consumed via arg_re/long_arg_re).
+          if [ $i -lt $n ]; then i=$((i+1)); fi
           ;;
       esac
     else
