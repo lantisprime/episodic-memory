@@ -38,6 +38,7 @@ const projectDir = flag('--project') || process.cwd()
 const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
 const installSecondOpinion = argv.includes('--install-second-opinion')
+const bootstrapLastPrompt = argv.includes('--bootstrap-last-prompt')
 const REPO_HOOKS = path.join(REPO_DIR, 'hooks')
 const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
 
@@ -51,6 +52,49 @@ let installFailed = false
 // alone silently no-ops and a user might think their settings were updated.
 if (installHooksForce && !installHooks) {
   console.log('Warning: --install-hooks-force has no effect without --install-hooks; ignoring.')
+}
+
+// ---------------------------------------------------------------------------
+// --bootstrap-last-prompt: standalone operation, doesn't require --tool.
+// Writes a 60-second bootstrap sentinel at
+// <projectDir>/.checkpoints/.last-user-prompt.<sid>.json so the pre-flight
+// gate's I8 cross-check has ground truth for the FIRST prompt of a fresh
+// install — before any UserPromptSubmit hook has fired. After the first
+// real prompt, the hook writes a non-bootstrap file and this sentinel is
+// replaced. Plan-v2 C6 (#238).
+// ---------------------------------------------------------------------------
+if (bootstrapLastPrompt) {
+  const sidFromFlag = flag('--session-id')
+  const sid = sidFromFlag || process.env.CLAUDE_SESSION_ID
+  if (!sid) {
+    console.error('--bootstrap-last-prompt: no session_id provided. Pass --session-id <sid> or set CLAUDE_SESSION_ID in env.')
+    process.exit(1)
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(sid)) {
+    console.error(`--bootstrap-last-prompt: session_id "${sid}" does not match [A-Za-z0-9_-]{1,128}.`)
+    process.exit(1)
+  }
+  const projectAbs = path.resolve(projectDir)
+  if (!fs.existsSync(projectAbs)) {
+    console.error(`--bootstrap-last-prompt: --project ${projectAbs} does not exist.`)
+    process.exit(1)
+  }
+  const checkpointsDir = path.join(projectAbs, '.checkpoints')
+  fs.mkdirSync(checkpointsDir, { recursive: true })
+  const sentinel = {
+    bootstrap: true,
+    session_id: sid,
+    wrote_at_ms: Date.now(),
+    note: 'install.mjs --bootstrap-last-prompt; valid for 60s; UserPromptSubmit hook will replace on first real prompt'
+  }
+  const target = path.join(checkpointsDir, `.last-user-prompt.${sid}.json`)
+  const temp = path.join(checkpointsDir, `.last-user-prompt.${sid}.json.${process.pid}.tmp`)
+  fs.writeFileSync(temp, JSON.stringify(sentinel, null, 2))
+  fs.renameSync(temp, target)
+  console.log(`Wrote bootstrap sentinel: ${target} (valid 60s)`)
+  // If --bootstrap-last-prompt is the ONLY action requested (no --tool),
+  // exit successfully here. Otherwise fall through to the normal install.
+  if (!tool) process.exit(0)
 }
 
 if (!tool) {
@@ -82,7 +126,17 @@ Second-opinion harness:
                           providers (each provider's available() probed; CLI
                           not on PATH → skipped). Required for harness I-27a
                           gate (registry-stale-at-gate) + composer I-27b
-                          (preamble-tamper-at-composer).`)
+                          (preamble-tamper-at-composer).
+
+Pre-flight prompt-binding bootstrap:
+  --bootstrap-last-prompt  Write a bootstrap sentinel at
+                          <project>/.checkpoints/.last-user-prompt.<sid>.json
+                          so the pre-flight gate's I8 cross-check has
+                          ground truth for the FIRST prompt of a fresh
+                          install (before the UserPromptSubmit hook has
+                          fired). The sentinel is valid for 60 seconds.
+                          Reads CLAUDE_SESSION_ID from env (or refuses
+                          with a clear error). Idempotent.`)
   process.exit(1)
 }
 
@@ -1062,7 +1116,12 @@ if (installHooks) {
       'checkpoint-gate.sh': path.join(userHooksDir, 'checkpoint-gate.sh'),
       'plan-gate.sh': path.join(userHooksDir, 'plan-gate.sh'),
       'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh'),
-      'stop-gate.sh': path.join(userHooksDir, 'stop-gate.sh')
+      'stop-gate.sh': path.join(userHooksDir, 'stop-gate.sh'),
+      // #238 plan-v2 audit F5: include preflight-gate.sh (PR #240 omission)
+      // AND the new preflight-prompt-helper.sh so stale registrations are
+      // flagged for the operator to prune.
+      'preflight-gate.sh': path.join(userHooksDir, 'preflight-gate.sh'),
+      'preflight-prompt-helper.sh': path.join(userHooksDir, 'preflight-prompt-helper.sh')
     }
     const staleEntries = detectStaleCanonicalEntries(settings.hooks, canonicalByBasename)
     for (const { event, basename, command } of staleEntries) {

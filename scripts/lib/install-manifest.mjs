@@ -70,6 +70,18 @@ export const HOOK_SPECS = [
     event: 'PreToolUse',
     matcher: 'Bash|Agent|Task|Write|Edit|MultiEdit|NotebookEdit',
     timeout: 10
+  },
+  // preflight-prompt-helper.sh: UserPromptSubmit hook for true prompt-
+  // binding (#238 PR1 FU-C2). Writes .checkpoints/.last-user-prompt.<sid>.json
+  // with the canonical sha of the real user prompt; preflight-gate.sh
+  // cross-checks marker.prompt_sha256 against the file. UserPromptSubmit
+  // accepts no matcher per claude-code-hooks-reference.md:85 (always fires).
+  // Timeout 5s — hook is small and atomic; if it can't complete in 5s
+  // something is wrong and fail-safe (exit 0) is the right outcome.
+  {
+    file: 'preflight-prompt-helper.sh',
+    event: 'UserPromptSubmit',
+    timeout: 5
   }
 ]
 
