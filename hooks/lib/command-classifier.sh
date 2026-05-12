@@ -608,8 +608,20 @@ _classify_segment() {
         -*) j=$((j+1)); continue ;;
       esac
       local tbase="$(basename "$t")"
+      # Preflight markers added per plan-v2 I10 (audit F1 same-class):
+      # the rm-marker class was missing `.preflight-done` (PR #240 oversight)
+      # and the new session-namespaced `.last-user-prompt.<sid>.json` files.
+      # Without these, `rm .checkpoints/.preflight-done` (or the per-session
+      # last-prompt file) from Bash bypasses the gate's direct-Write deny
+      # and re-opens the trust-based hole the gate exists to close.
       case "$tbase" in
-        .plan-approval-pending|.pre-checkpoint-done|.post-checkpoint-done|.checkpoint-required|.post-checkpoint-required)
+        .plan-approval-pending|.pre-checkpoint-done|.post-checkpoint-done|.checkpoint-required|.post-checkpoint-required|.preflight-done)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
+          return 0
+          ;;
+        .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
@@ -632,8 +644,15 @@ _classify_segment() {
         -*) j=$((j+1)); continue ;;
       esac
       local tbase="$(basename "$t")"
+      # Same-class extension per plan-v2 I10 — see rm-of-marker comment above.
       case "$tbase" in
-        .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending)
+        .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.preflight-done)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
+          return 0
+          ;;
+        .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
@@ -1713,7 +1732,17 @@ classify_preflight_tool() {
     Agent|Task)
       local subagent
       subagent="$(printf '%s' "$tool_input_json" | jq -r '.subagent_type // ""' 2>/dev/null)"
+      # Plan-v2 I11 (audit F7): `negative-scenario-planner` is the documented
+      # bootstrap workaround for plan-time review when the harness channel is
+      # blocked (workplan v49 §workaround). It runs BEFORE plans exist, so it
+      # cannot itself be gated by a post-plan marker. Reviewer-class subagents
+      # (`negative-scenario-reviewer`, future `negative-scenario-coder`, etc.)
+      # remain gated — those run AFTER a plan exists and a marker is feasible.
       case "$subagent" in
+        negative-scenario-planner)
+          printf '%s\t%s\t%s\n' "none" "" "agent_planner_bootstrap_exempt"
+          return 0
+          ;;
         codex:*|codex-*|negative-scenario-*)
           printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "agent_${subagent//[^a-zA-Z0-9]/_}"
           return 0

@@ -111,6 +111,23 @@ assert_label "T53 rm plan-approval-pending" \
   "rm .claude/.plan-approval-pending" "marker_write" "$TEST_ROOT/.claude/.plan-approval-pending"
 assert_label "T54 rm -f marker" \
   "rm -f .pre-checkpoint-done" "marker_write" "$TEST_ROOT/.pre-checkpoint-done"
+# Plan-v2 I10 (audit F1 same-class). PR #240 omitted .preflight-done from the
+# rm-marker class; plan-v2 adds it + the new session-namespaced last-prompt
+# files. Without these, `rm .checkpoints/.preflight-done` bypasses the gate.
+assert_label "T54a rm preflight-done (PR240 same-class gap)" \
+  "rm .checkpoints/.preflight-done" "marker_write" "$TEST_ROOT/.checkpoints/.preflight-done"
+assert_label "T54b rm last-user-prompt session-namespaced" \
+  "rm .checkpoints/.last-user-prompt.abc-123.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.abc-123.json"
+assert_label "T54c rm -rf last-user-prompt UUID-form" \
+  "rm -rf .checkpoints/.last-user-prompt.1d6761c2-eaa2-43f7-a287-9dc2f301c9db.json" \
+  "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.1d6761c2-eaa2-43f7-a287-9dc2f301c9db.json"
+assert_label "T54d tee writing to preflight-done" \
+  "tee .checkpoints/.preflight-done" "marker_write" "$TEST_ROOT/.checkpoints/.preflight-done"
+assert_label "T54e tee writing to last-user-prompt" \
+  "tee .checkpoints/.last-user-prompt.sess.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.sess.json"
+# Negative: rm of a similarly-named file that's NOT in the class should NOT trip.
+assert_label "T54f rm last-user-prompt without .json suffix → not marker" \
+  "rm .checkpoints/.last-user-prompt.notjson" "shared_write"
 assert_label "T55 quoted body containing marker name" \
   "echo 'this is .pre-checkpoint-done text'" "read_only"
 
@@ -561,7 +578,14 @@ assert_preflight_tool "QT01 Bash codex" "Bash" '{"command":"codex exec foo"}' "c
 assert_preflight_tool "QT02 Bash ls" "Bash" '{"command":"ls -la"}' "none"
 assert_preflight_tool "QT03 Bash empty" "Bash" '{"command":""}' "none"
 assert_preflight_tool "QT04 Agent codex-rescue" "Agent" '{"subagent_type":"codex:codex-rescue"}' "codex-review-handoff"
-assert_preflight_tool "QT05 Agent neg-scenario" "Agent" '{"subagent_type":"negative-scenario-reviewer"}' "codex-review-handoff"
+assert_preflight_tool "QT05 Agent neg-scenario-reviewer (gated)" "Agent" '{"subagent_type":"negative-scenario-reviewer"}' "codex-review-handoff"
+# Plan-v2 I11 (audit F7): the planner subagent is the bootstrap workaround
+# for plan-time review when the harness channel is blocked (workplan v49).
+# It must NOT be gated — it runs BEFORE plans exist, so requiring a
+# post-plan marker creates an interlock (#243). Reviewer-class subagents
+# remain gated.
+assert_preflight_tool "QT05a Agent neg-scenario-planner (bootstrap exempt)" "Agent" '{"subagent_type":"negative-scenario-planner"}' "none"
+assert_preflight_tool "QT05b Task neg-scenario-planner (bootstrap exempt)" "Task" '{"subagent_type":"negative-scenario-planner"}' "none"
 assert_preflight_tool "QT06 Agent generic" "Agent" '{"subagent_type":"general-purpose"}' "none"
 assert_preflight_tool "QT07 Task variant" "Task" '{"subagent_type":"codex:something"}' "codex-review-handoff"
 assert_preflight_tool "QT08 Write feedback" "Write" '{"file_path":"/abs/repo/feedback_x.md"}' "rule-bearing-file-edit"
