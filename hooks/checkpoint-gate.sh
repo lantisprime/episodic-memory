@@ -197,13 +197,15 @@ _command_first_absolute_noncanonical_marker() {
   [ -z "$matches" ] && return 0
   while IFS= read -r p; do
     [ -z "$p" ] && continue
-    # If the extracted path appears as `.<p>` in the command, that's a
-    # relative-form reference (./<p> or part of ../<p>) — already handled
-    # by _command_has_relative_marker_path. Skip to avoid false-positive
-    # blocking of canonical writes from MAIN cwd (e.g.
-    # `echo x > ./.checkpoints/<marker>` with cwd == REPO_ROOT). Uses
-    # `grep -F` for literal substring match.
-    if printf '%s' "$cmd" | grep -qF ".${p}"; then
+    # PR-review P1: occurrence-scoped relative-vs-absolute disambiguation.
+    # Strip all literal `.${p}` occurrences from cmd, then check if $p
+    # still appears. If it does, there's at least one NON-relative
+    # occurrence (a genuine absolute reference). Avoids the global-filter
+    # false-negative where `echo ./tmp/.checkpoints/X >/dev/null; touch
+    # /tmp/.checkpoints/X` would have skipped the check because
+    # `./tmp/.checkpoints/X` exists somewhere in the command.
+    local cmd_filtered="${cmd//\.${p}/}"
+    if [[ "$cmd_filtered" != *"$p"* ]]; then
       continue
     fi
     basename="${p##*/}"

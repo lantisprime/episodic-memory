@@ -1007,6 +1007,20 @@ assert_blocked "B-32 (A2). Bash: dd of=/tmp/.checkpoints/<marker> from MAIN cwd"
 assert_no_wrong_root_block "B-33 (A2 no-FP). Bash: touch on canonical $MARKER_DIR/<marker> from MAIN cwd" \
   "$(mock_json_cwd 'Bash' "touch $MARKER_DIR/.checkpoint-required" "$TEST_DIR")"
 
+# ---- PR-level review P1 regression — occurrence-scoped relative-vs-absolute ----
+# Codex caught: a benign mention of `./<absolute-path>` in part of the command
+# was making the global filter skip the absolute-write check for the WHOLE
+# command, allowing a separate real wrong-root write elsewhere.
+
+assert_blocked "B-34 (codex PR P1). benign mention + real wrong-root write → still blocks" \
+  "$(mock_json_cwd 'Bash' "echo ./tmp/.checkpoints/.pre-checkpoint-done >/dev/null; touch /tmp/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+# Defensive: pure benign mention (no real write) should still NOT block
+# (avoid over-correction — we want occurrence-scoped, not blunt always-block)
+assert_no_wrong_root_block "B-35 (codex PR P1 no-FP). pure relative mention without absolute write → no block" \
+  "$(mock_json_cwd 'Bash' "echo x > ./.checkpoints/.pre-checkpoint-done" "$TEST_DIR")"
+
 # Cleanup B-test worktree
 git -C "$TEST_DIR" worktree remove --force "$WORKTREE_DIR" 2>/dev/null
 git -C "$TEST_DIR" branch -D test-wt-branch 2>/dev/null
