@@ -565,10 +565,10 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 **Probe sequence (M0 deliverable, run by orchestrator on every cold start):**
 
 1. Call `mcp__scheduled-tasks__list_scheduled_tasks` (any mode — even an empty list confirms the capability is wired).
-2. On success: orchestrator records `scheduled_tasks_capability: native` in the **`bp1-run-started` episode** (M1 cold-start, HMAC-signed by the per-run `run.key`; canonical fields per §689-719 subsection for `state-transition:run-started`).
+2. On success: orchestrator records `scheduled_tasks_capability: native` in the **`bp1-run-started` episode** (M1 cold-start, HMAC-signed by the per-run `run.key`; canonical fields per the `#### Canonical bytes (what each HMAC signs)` 5-fields appendix for `state-transition:run-started`).
 3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. **T1 (deadline-tick / Path A) and T1b (naked-entry-sweep / Path B)** must run via the unified fallback `bp1-deadline-sweep.mjs --once` until the next probe succeeds. **T2 (weekly meta-audit) does NOT have a fallback path** — when scheduled-tasks are unavailable, T2 degrades to a manual `node scripts/bp1-security-audit.mjs --once` invocation surfaced in the operator runbook (see below); operators are explicitly informed of the degraded mode in the `bp1-run-started` episode body (in the `degraded_mode_statement` canonical field).
 
-> **Episode-name distinction (v3.13 — closes Issue #190 patch 1):** the cold-start probe result lives in the per-run `bp1-run-started` episode (M1 deliverable, HMAC-signed by `run.key`). This is **distinct from** `bp1-activation`, which records the M5 flag-flip event (per-project, HMAC-signed by the global `verify-key`; see §197-203). Prior RFC drafts conflated the two by saying "the activation episode" in the probe step; v3.13 disambiguates because the canonical fields, signing key, and emission moment differ.
+> **Episode-name distinction (v3.13 — closes Issue #190 patch 1):** the cold-start probe result lives in the per-run `bp1-run-started` episode (M1 deliverable, HMAC-signed by `run.key`). This is **distinct from** `bp1-activation`, which records the M5 flag-flip event (per-project, HMAC-signed by the global `verify-key`; see the `### Flip mechanism (per-project)` subsection under `## Activation flag (M2-safety envelope)` above). Prior RFC drafts conflated the two by saying "the activation episode" in the probe step; v3.13 disambiguates because the canonical fields, signing key, and emission moment differ.
 
 **Fallback: `scripts/bp1-deadline-sweep.mjs --once`** (M0 deliverable, EXTENDED v3.8 to also cover Path B naked-entry sweep):
 
@@ -853,7 +853,7 @@ JSON schema (source-of-truth in code at `scripts/lib/bp1-run-state.mjs`):
 | `active` | `appendRun()` on `init-run` step 4 | Run is live; `run.key` exists on disk; HMAC-signed episodes can land. |
 | `complete` | `markTerminal(..., 'complete')` on `finalize-run` step 7 (or `finalize-recover`) | Happy-path terminal closure; manifest sealed; `run.key` shredded. |
 | `aborted` | `markTerminal(..., 'aborted')` | Operator-driven abort (M2+); manifest may or may not exist. |
-| `abandoned` | `bp1-archive-ghosts.mjs` after `needs_human` exceeds 7-day SLA (per state machine §846) | Auto-archived; no further state transitions. |
+| `abandoned` | `bp1-archive-ghosts.mjs` after `needs_human` exceeds 7-day SLA (per the `## State machine — transitions` table below) | Auto-archived; no further state transitions. |
 | `archived` | M5 post-run cleanup (long-tail; future) | Final tombstone; no further reads expected. |
 
 `active` is the only non-terminal value. The terminal subset is `{complete, aborted, abandoned, archived}`; `markTerminal()` enforces this set via `VALID_TERMINAL_STATES.includes(terminalState)` (rejects `'invalid-state'`).
@@ -867,7 +867,7 @@ JSON schema (source-of-truth in code at `scripts/lib/bp1-run-state.mjs`):
 
 Filesystem scoping: this contract assumes local POSIX-like semantics (atomic `mkdir` + per-inode monotonic mtime). NFS/CIFS are best-effort; distributed-FS support is a future RFC.
 
-**Cross-store note (v3.13 close-out):** the run-state index is local-only (per-project). Cross-store invariants discussed at §777 / H27 / H28 apply to **episode** files, not the run-state index — the latter is per-project metadata, not part of the manifest replay set.
+**Cross-store note (v3.13 close-out):** the run-state index is local-only (per-project). Cross-store invariants discussed in the `#### Verification flow` H27/H28 negative tests apply to **episode** files, not the run-state index — the latter is per-project metadata, not part of the manifest replay set.
 
 #### Negative tests (M1, alongside the implementation)
 
@@ -1869,11 +1869,11 @@ Post-acceptance maintenance pass. The RFC was flipped to `accepted` at v3.12 (20
 
 #### Scope (doc-only)
 
-1. §567-569 — distinguish `bp1-run-started` (M1 cold-start, HMAC by per-run `run.key`) from `bp1-activation` (M5 flag-flip, HMAC by `verify-key`).
-2. §689-719 — canonical-payload subsection for `state-transition:run-started` pinning the 5 fields signed in M1 (`scheduled_tasks_capability`, `probe_reason`, `degraded_mode_statement`, `native_probe_performed`, `t2_fallback`). Tamper × 5 tests at `tests/test-bp1-canonicalize.mjs:134-167` (already shipped).
+1. `#### Scheduled-task probe + fallback (M0)` — distinguish `bp1-run-started` (M1 cold-start, HMAC by per-run `run.key`) from `bp1-activation` (M5 flag-flip, HMAC by `verify-key`).
+2. `#### Canonical bytes (what each HMAC signs)` — 5-fields appendix for `state-transition:run-started` pinning the fields signed in M1 (`scheduled_tasks_capability`, `probe_reason`, `degraded_mode_statement`, `native_probe_performed`, `t2_fallback`). Tamper × 5 tests at `tests/test-bp1-canonicalize.mjs:134-167` (already shipped).
 3. §"Run-state index schema" (new under HMAC/canonicalize/replay) — pin path `<project>/.episodic-memory/runs/_index.json`, schema, **state enum** `active|complete|aborted|abandoned|archived` (terminal subset = `{complete, aborted, abandoned, archived}` per `VALID_TERMINAL_STATES` at `scripts/lib/bp1-run-state.mjs:58`), atomicity contract (lockdir mutex + 30s stale + tier-2 mtime fallback, per-process unique temp + renameSync).
 4. `#### Finalize-run sequence` "Step 6 → step 7 ordering invariant" note + `#### Negative tests (M1, alongside the implementation)` H17 row — invariant-preservation note: shred-before-terminal ordering (steps 6→7) MUST be preserved per PR #206 BLOCKER-2 closure; the reverse order re-opens I-4 ("terminal state after no usable live `run.key` remains"). Issue #190 patch 4's proposed reorder is REJECTED. H17 wording expanded to name `finalize-recover` State A/B/D recovery paths. §11.5 failure-table row 32 prose + YAML mirror updated to match the new H17 wording.
-5. §777 + H27/H28 — parameterized across local + global stores (H27a/b + H28a/b); explicit "direct file scan, not em-search" wording to clarify the implementation contract at `scripts/bp1-orchestrator.mjs:484-486` (`decisionLogFence`).
+5. `#### Verification flow` — H27/H28 parameterized across local + global stores (H27a/b + H28a/b); explicit "direct file scan, not em-search" wording to clarify the implementation contract at `scripts/bp1-orchestrator.mjs:484-486` (`decisionLogFence`).
 6. Frontmatter: `version: 3.12` → `3.13`; `last_modified: 2026-05-06` → `2026-05-13`.
 
 #### Review trail (Rule 18 step 2)
@@ -1892,7 +1892,7 @@ The matrix also surfaced that the reorder would break the G5_TABLE crash-recover
 
 **Path A** (chosen): drop the code reorder; add an invariant-preservation explanation citing BLOCKER-2; expand H17 wording to name the recovery states. No code changes, no test changes.
 
-**Path B** (rejected): the reorder. Would require superseding the BLOCKER-2 decision episode with new evidence, rewriting §846 state machine, flipping G5_TABLE, updating `finalize-recover` State A, and adding multi-actor race tests.
+**Path B** (rejected): the reorder. Would require superseding the BLOCKER-2 decision episode with new evidence, rewriting the `## State machine — transitions` table, flipping G5_TABLE, updating `finalize-recover` State A, and adding multi-actor race tests.
 
 #### Round-1 findings (resolved in this v3.13 entry)
 
@@ -1912,7 +1912,7 @@ No code paths edited → no test regression risk.
 
 #### Issues closed by v3.13
 
-- **#185** — M1 acceptance: activation episode must canonically sign the 5 probe fields. Acceptance 1-3 verified shipped at `scripts/lib/bp1-canonicalize.mjs:70-77` (registration), `scripts/bp1-orchestrator.mjs:308-340` (signing path), `tests/test-bp1-canonicalize.mjs:134-167` (per-field tamper × 5). Note Issue body said "the activation episode"; the shipped name is `bp1-run-started` per Resolution 4 / §567-569 distinction.
-- **#190** — RFC v3.13 patch list: items 1 (§203 `#### Flip mechanism` + `#### Scheduled-task probe + fallback` distinction), 2 (new `#### Run-state index schema` subsection), 3 (`#### Canonical bytes` 5-fields appendix verified already-correct), 4 (REJECTED reorder; replaced with `#### Finalize-run sequence` ordering-invariant note per planner matrix + Codex consensus), 5 (H17 wording in `#### Negative tests (M1, alongside the implementation)` expanded + §11.5 row 32 mirror updated), 6 (`#### Verification flow` H27/H28 parameterized). CI gate update from patch 3 is N/A — `validate-rfc-canonical-fields.mjs` already bidirectionally validates via `TYPE_SPECIFIC_CANONICAL_FIELDS`; no edit needed.
+- **#185** — M1 acceptance: activation episode must canonically sign the 5 probe fields. Acceptance 1-3 verified shipped at `scripts/lib/bp1-canonicalize.mjs:70-77` (registration), `scripts/bp1-orchestrator.mjs:308-340` (signing path), `tests/test-bp1-canonicalize.mjs:134-167` (per-field tamper × 5). Note Issue body said "the activation episode"; the shipped name is `bp1-run-started` per Resolution 4 / the `#### Scheduled-task probe + fallback (M0)` distinction.
+- **#190** — RFC v3.13 patch list: items 1 (`#### Flip mechanism (per-project)` + `#### Scheduled-task probe + fallback (M0)` distinction), 2 (new `#### Run-state index schema` subsection), 3 (`#### Canonical bytes (what each HMAC signs)` 5-fields appendix verified already-correct), 4 (REJECTED reorder; replaced with `#### Finalize-run sequence` ordering-invariant note per planner matrix + Codex consensus), 5 (H17 wording in `#### Negative tests (M1, alongside the implementation)` expanded + §11.5 row 32 mirror updated), 6 (`#### Verification flow` H27/H28 parameterized). CI gate update from patch 3 is N/A — `validate-rfc-canonical-fields.mjs` already bidirectionally validates via `TYPE_SPECIFIC_CANONICAL_FIELDS`; no edit needed.
 
 ---
