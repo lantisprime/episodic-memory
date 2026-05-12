@@ -145,6 +145,13 @@ assert_label "T54h > redirect to .checkpoint-required → marker_write" \
   "printf x > .checkpoints/.checkpoint-required" "marker_write" "$TEST_ROOT/.checkpoints/.checkpoint-required"
 assert_label "T54i > redirect to .post-checkpoint-required → marker_write" \
   "printf x > .checkpoints/.post-checkpoint-required" "marker_write" "$TEST_ROOT/.checkpoints/.post-checkpoint-required"
+# Codex round-2 FU on PR #246: tee was missing checkpoint-required +
+# post-checkpoint-required (latent pre-existing gap parallel to the
+# C4 rm-class fix); regression test the closure.
+assert_label "T54j tee .checkpoint-required → marker_write" \
+  "tee .checkpoints/.checkpoint-required" "marker_write" "$TEST_ROOT/.checkpoints/.checkpoint-required"
+assert_label "T54k tee .post-checkpoint-required → marker_write" \
+  "tee .checkpoints/.post-checkpoint-required" "marker_write" "$TEST_ROOT/.checkpoints/.post-checkpoint-required"
 assert_label "T54d tee writing to preflight-done" \
   "tee .checkpoints/.preflight-done" "marker_write" "$TEST_ROOT/.checkpoints/.preflight-done"
 assert_label "T54e tee writing to last-user-prompt" \

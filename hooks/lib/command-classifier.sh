@@ -657,8 +657,13 @@ _classify_segment() {
       esac
       local tbase="$(basename "$t")"
       # Same-class extension per plan-v2 I10 — see rm-of-marker comment above.
+      # Codex round-2 FU on PR #246: tee was still missing
+      # `.checkpoint-required` and `.post-checkpoint-required` (latent
+      # pre-existing gap, parallel shape to the rm-class C4 fix); closing
+      # for class-completeness so the same-class lens is tight across all
+      # write surfaces.
       case "$tbase" in
-        .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.preflight-done|.last-user-prompt.json)
+        .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.checkpoint-required|.post-checkpoint-required|.preflight-done|.last-user-prompt.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
