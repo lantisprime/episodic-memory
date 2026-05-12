@@ -497,6 +497,17 @@ assert_preflight_cmd "Q61 systemd-run with arg-taking" \
   'systemd-run --unit myapp --user codex exec foo' "codex-review-handoff"
 assert_preflight_cmd "Q62 systemd-run -G boolean" \
   'systemd-run -G codex exec foo' "codex-review-handoff"
+# Q63-Q65: env -S/--split-string command-vector recursion (codex r5 finding `...729a`)
+assert_preflight_cmd "Q63 env -S codex" \
+  'env -S "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "Q64 env --split-string codex" \
+  'env --split-string "codex review --plan"' "codex-review-handoff"
+assert_preflight_cmd "Q65 env -vS codex" \
+  'env -vS "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "Q66 env -S non-codex" \
+  'env -S "ls -la"' "none"
+assert_preflight_cmd "Q67 env --split-string=codex equals" \
+  'env --split-string=codex\ exec\ foo true' "codex-review-handoff"
 
 echo ""
 echo "--- classify_preflight_path ---"

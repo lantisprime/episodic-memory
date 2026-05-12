@@ -1512,6 +1512,50 @@ _classify_preflight_segment() {
     return 0
   fi
 
+  # Special-case: env -S "<command-string>" or env --split-string "<cmd>"
+  # treats the argument as a command vector to execute (GNU coreutils env
+  # `-S/--split-string` semantics). Codex r5 finding `...729a`. Detect
+  # before generic unwrap consumes -S as a regular arg-taking flag.
+  if [ $n -ge 3 ] && [ "${T[0]}" = "env" ]; then
+    local _envk=1
+    while [ $_envk -lt $n ]; do
+      local _envt="${T[$_envk]}"
+      case "$_envt" in
+        -S|--split-string)
+          local _envinner="${T[$((_envk+1))]:-}"
+          if [ -n "$_envinner" ]; then
+            classify_preflight_command "$_envinner" "$_repo_root"
+            return 0
+          fi
+          break
+          ;;
+        --split-string=*)
+          local _envinner="${_envt#*=}"
+          if [ -n "$_envinner" ]; then
+            classify_preflight_command "$_envinner" "$_repo_root"
+            return 0
+          fi
+          break
+          ;;
+        # `-S` may appear inside a short-opt cluster: -vS, -iS, etc.
+        -*S*)
+          case "$_envt" in
+            --*) _envk=$((_envk+1)); continue ;;
+          esac
+          local _envinner="${T[$((_envk+1))]:-}"
+          if [ -n "$_envinner" ]; then
+            classify_preflight_command "$_envinner" "$_repo_root"
+            return 0
+          fi
+          break
+          ;;
+        -*) _envk=$((_envk+1)) ;;
+        *=*) _envk=$((_envk+1)) ;;
+        *) break ;;
+      esac
+    done
+  fi
+
   local i
   i="$(_preflight_unwrap_index 0 "${T[@]}")"
   if [ $i -ge $n ]; then
