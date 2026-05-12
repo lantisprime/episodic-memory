@@ -1252,21 +1252,45 @@ _preflight_unwrap_index() {
     if [[ "$t" =~ $_PREFLIGHT_WRAPPERS_RE ]]; then
       local wrapper="$t"
       i=$((i+1))
-      # Skip env-style assignments and short options.
+      # Per-wrapper short-opt set that takes an ARGUMENT in the next token.
+      # P1 fix from codex PR-level review round 2 (`...cbc2`): without per-
+      # wrapper arg-arity, `sudo -u root codex exec foo` consumed `root` as
+      # the positional verb and matched none.
+      local arg_re=''
+      case "$wrapper" in
+        sudo|doas)  arg_re='^-[ugCDHRTpAB]$' ;;
+        timeout)    arg_re='^-[ks]$' ;;
+        nice)       arg_re='^-n$' ;;
+        ionice)     arg_re='^-[cnpt]$' ;;
+        env)        arg_re='^-[uS]$' ;;
+        stdbuf)     arg_re='^-[ioe]$' ;;
+        exec)       arg_re='^-a$' ;;
+        chrt)       arg_re='^-[pP]$' ;;
+        nohup|command|setsid|stdbuf) arg_re='' ;;
+      esac
+      # Skip env-style assignments, short options, and per-wrapper option
+      # arguments. Long-opt `--key value` form residual gap (filed if seen);
+      # `--key=value` form is already handled (contains `=`).
       while [ $i -lt $n ]; do
         local w="${T[$i]}"
         case "$w" in
           *=*) i=$((i+1)) ;;
-          -*)  i=$((i+1)) ;;
+          -*)
+            if [ -n "$arg_re" ] && [[ "$w" =~ $arg_re ]]; then
+              # Consume flag + its argument.
+              i=$((i+2))
+            else
+              i=$((i+1))
+            fi
+            ;;
           *)   break ;;
         esac
       done
       # Wrappers that take a single positional argument BEFORE the command
-      # to wrap (timeout DURATION, nice may use -n, but bare `nice CMD` is
-      # also valid → no extra positional). Conservative list:
+      # to wrap. `timeout DURATION CMD` — DURATION is positional, distinct
+      # from `-k DURATION` and `-s SIGNAL` (already consumed via arg_re).
       case "$wrapper" in
         timeout)
-          # `timeout DURATION CMD` — skip one non-flag positional (DURATION).
           if [ $i -lt $n ]; then
             i=$((i+1))
           fi

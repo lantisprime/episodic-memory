@@ -432,6 +432,27 @@ assert_preflight_cmd "Q31 multi-segment with chain at end" \
   'ls; echo ok && codex exec foo' "codex-review-handoff"
 assert_preflight_cmd "Q32 benign chain — no codex" \
   'echo ok; ls; pwd' "none"
+# Q33-Q40: wrapper option-argument bypass class (codex round 2 finding `...cbc2`)
+assert_preflight_cmd "Q33 sudo -u root" \
+  'sudo -u root codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q34 sudo -g group" \
+  'sudo -g admin codex review' "codex-review-handoff"
+assert_preflight_cmd "Q35 timeout -k 5s 30s" \
+  'timeout -k 5s 30s codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q36 timeout -s SIGTERM 30s" \
+  'timeout -s SIGTERM 30s codex review' "codex-review-handoff"
+assert_preflight_cmd "Q37 nice -n 10" \
+  'nice -n 10 codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q38 ionice -c 3" \
+  'ionice -c 3 codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q39 env -u VAR" \
+  'env -u BAD codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q40 stdbuf -o L" \
+  'stdbuf -o L codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q41 stacked wrappers" \
+  'sudo -u root timeout -k 5s 30s nice -n 10 codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q42 sudo --user=root long-opt-equals" \
+  'sudo --user=root codex exec foo' "codex-review-handoff"
 
 echo ""
 echo "--- classify_preflight_path ---"
