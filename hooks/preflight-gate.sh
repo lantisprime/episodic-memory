@@ -88,6 +88,22 @@ _emit_deny() {
   exit 0
 }
 
+# P2-1 (code-review FU): validate SESSION_ID shape immediately after
+# _emit_deny is defined and BEFORE any downstream path-construction or
+# marker comparison. Every other layer (hook, helper, install bootstrap)
+# enforces ^[A-Za-z0-9_-]{1,128}$; the gate must match so a malicious
+# stdin payload can't cause path-traversal via LAST_PROMPT_SID_PATH
+# interpolation. Empty SESSION_ID is allowed (Claude Code may omit it;
+# downstream branches already test `-n "$SESSION_ID"`).
+if [ -n "$SESSION_ID" ]; then
+  case "$SESSION_ID" in
+    *[!A-Za-z0-9_-]*) _emit_deny "preflight-gate.sh: session_id from stdin contains invalid chars; cannot evaluate prompt-binding." ;;
+  esac
+  if [ ${#SESSION_ID} -gt 128 ]; then
+    _emit_deny "preflight-gate.sh: session_id from stdin exceeds 128 chars; cannot evaluate prompt-binding."
+  fi
+fi
+
 # _canonicalize_one <input-path> <hook-cwd>
 # Echoes canonical path on stdout; returns 0 on success, non-zero on
 # canonicalization failure (SYMLOOP_MAX, EACCES, lib-missing). CALLER must
@@ -189,7 +205,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
       # last-prompt` is an agent attempt to spoof the prompt-binding.
       # Deny regardless of --root presence (the agent could supply
       # --root correctly while still forging the sha).
-      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt(\b|$)'; then
+      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
         _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
       fi
     fi
@@ -301,7 +317,7 @@ if [ -n "$SESSION_ID" ]; then
     fi
     if [ "$M_PROMPT_SHA" != "$FILE_PROMPT_SHA" ]; then
       # Truncate the shas for readability (full hashes are 64 chars).
-      _emit_deny "Pre-flight marker prompt_sha256 does not match the current real user prompt. Marker sha: ${M_PROMPT_SHA:0:12}…; ground-truth sha: ${FILE_PROMPT_SHA:0:12}… (from $CANON_LAST_PROMPT_SID). The marker is bound to a prior prompt. Re-run the pre-flight steps for the current prompt before retrying."
+      _emit_deny "Pre-flight marker prompt_sha256 does not match the current real user prompt. Marker sha: ${M_PROMPT_SHA:0:16}…; ground-truth sha: ${FILE_PROMPT_SHA:0:16}… (from $CANON_LAST_PROMPT_SID). The marker is bound to a prior prompt. Re-run the pre-flight steps for the current prompt before retrying."
     fi
   fi
 fi

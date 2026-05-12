@@ -121,6 +121,14 @@ assert_label "T54b rm last-user-prompt session-namespaced" \
 assert_label "T54c rm -rf last-user-prompt UUID-form" \
   "rm -rf .checkpoints/.last-user-prompt.1d6761c2-eaa2-43f7-a287-9dc2f301c9db.json" \
   "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.1d6761c2-eaa2-43f7-a287-9dc2f301c9db.json"
+# P2-2 (code-review FU): legacy non-namespaced .last-user-prompt.json also
+# in rm-marker class. Previously omitted from the C4 fix — Bash rm of the
+# legacy basename would have classified as shared_write, leaving the gate's
+# direct-Write deny (which DOES cover legacy) inconsistent with Bash rm.
+assert_label "T54c2 rm legacy non-namespaced last-user-prompt.json" \
+  "rm .checkpoints/.last-user-prompt.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.json"
+assert_label "T54c3 tee legacy non-namespaced last-user-prompt.json" \
+  "tee .checkpoints/.last-user-prompt.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.json"
 assert_label "T54d tee writing to preflight-done" \
   "tee .checkpoints/.preflight-done" "marker_write" "$TEST_ROOT/.checkpoints/.preflight-done"
 assert_label "T54e tee writing to last-user-prompt" \

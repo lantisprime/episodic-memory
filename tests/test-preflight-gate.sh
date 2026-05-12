@@ -691,7 +691,11 @@ fi
 # blocking `node --test tests/test-marker-write-helper.mjs`-style usage.)
 TF="$(mktmp)"; stage_fixture "$TF"
 out="$(printf '{"tool_name":"Bash","tool_input":{"command":"node --test tests/test-preflight-marker-write.mjs"},"cwd":"%s","session_id":"%s"}' "$TF" "$SESSION_ID" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
-if [ -z "$out" ] || ! printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("preflight-marker-write.mjs invoked without")' >/dev/null 2>&1; then
+# M-4 tightening: pass iff out is empty OR permissionDecision is NOT "deny".
+# (Previous form passed when the reason didn't match a specific string —
+# any OTHER deny reason also satisfied it.)
+decision="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // ""' 2>/dev/null || echo "")"
+if [ -z "$out" ] || [ "$decision" != "deny" ]; then
   echo "  ✓ regex no longer false-positives on test-preflight-marker-write.mjs"
   passed=$((passed+1))
 else
@@ -708,6 +712,21 @@ run_gate "$TF" "Bash" "{\"command\":\"node preflight-marker-write.mjs --target p
 TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Write" "{\"file_path\":\"$TF/.checkpoints/.last-user-prompt.fake-sid.json\",\"content\":\"x\"}" \
   "deny" "forbidden|helper" "direct Write to namespaced last-prompt → DENY"
+
+# P2-1 (code-review FU): malicious session_id from stdin → conservative deny
+# Without the gate-side regex check, a session_id containing path-traversal
+# could escape .checkpoints/ via the constructed LAST_PROMPT_SID_PATH.
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+out="$(printf '{"tool_name":"Bash","tool_input":{"command":"codex exec foo"},"cwd":"%s","session_id":"../etc/passwd"}' "$TF" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
+if printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 && \
+   printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -qE "invalid chars"; then
+  echo "  ✓ P2-1 invalid session_id from stdin → deny + 'invalid chars' reason"
+  passed=$((passed+1))
+else
+  echo "  ✗ P2-1 invalid session_id path-traversal not caught: $out"
+  failed=$((failed+1))
+fi
 
 # I9: gate's read path is canonicalized — symlink target outside expected
 # location should be denied conservatively.

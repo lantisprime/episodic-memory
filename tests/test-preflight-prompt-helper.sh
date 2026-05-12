@@ -169,24 +169,41 @@ rm -rf "$TF"
 
 # ---------- I5: idempotent on identical input ----------
 
-echo "--- I5: idempotent for same prompt + session ---"
+echo "--- I5: load-bearing fields stable across calls ---"
 
+# Note: wrote_at_ms WILL differ across calls (timestamp), so the file is NOT
+# byte-identical across calls. The load-bearing fields are prompt_sha256 +
+# session_id + cwd + repo_root — those MUST be identical. M-5 tightening:
+# explicitly compare each load-bearing field's before/after value, not just
+# the final value against a canon recompute.
 TF="$(mktmp)"; stage_repo "$TF"
 SID="i5-test"
 run_hook "$TF" "stable prompt text" "$SID" 2>/dev/null
-SHA1="$(shasum -a 256 "$TF/.checkpoints/.last-user-prompt.${SID}.json" | awk '{print $1}')"
-sleep 0.05  # ensure mtime would tick if write happened
-# Note: wrote_at_ms WILL differ across calls (timestamp), so the file is NOT
-# byte-identical across calls. But the prompt_sha256 + session_id + cwd
-# fields MUST be identical. This tests the load-bearing portion.
+SHA_BEFORE="$(jq -r '.prompt_sha256' "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+SID_BEFORE="$(jq -r '.session_id'    "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+CWD_BEFORE="$(jq -r '.cwd'           "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+sleep 0.05  # mtime would tick if anything fluctuated
 run_hook "$TF" "stable prompt text" "$SID" 2>/dev/null
-SHA1_AFTER="$(jq -r '.prompt_sha256' "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
-EXP="$(jq -nc --arg s "$SID" '{}' >/dev/null; node -e "import('$REPO_ROOT/scripts/lib/preflight-prompt-canon.mjs').then(m => process.stdout.write(m.canonicalPromptSha256FromString('stable prompt text')))")"
-if [ "$SHA1_AFTER" = "$EXP" ]; then
-  echo "  ✓ I5 prompt_sha256 stable across idempotent calls"
+SHA_AFTER="$(jq -r '.prompt_sha256'  "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+SID_AFTER="$(jq -r '.session_id'     "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+CWD_AFTER="$(jq -r '.cwd'            "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+
+if [ "$SHA_BEFORE" = "$SHA_AFTER" ] && [ "$SID_BEFORE" = "$SID_AFTER" ] && [ "$CWD_BEFORE" = "$CWD_AFTER" ]; then
+  echo "  ✓ I5 load-bearing fields (sha/session_id/cwd) stable across two calls"
   passed=$((passed+1))
 else
-  echo "  ✗ I5 sha drift: got $SHA1_AFTER, expected $EXP"
+  echo "  ✗ I5 field drift: sha=$SHA_BEFORE→$SHA_AFTER sid=$SID_BEFORE→$SID_AFTER cwd=$CWD_BEFORE→$CWD_AFTER"
+  failed=$((failed+1))
+fi
+
+# Cross-check: the second-call sha matches what the canon lib computes
+# directly. (Was the I5 test pre-tightening; keep it as a separate cross-check.)
+EXP="$(node -e "import('$REPO_ROOT/scripts/lib/preflight-prompt-canon.mjs').then(m => process.stdout.write(m.canonicalPromptSha256FromString('stable prompt text')))")"
+if [ "$SHA_AFTER" = "$EXP" ]; then
+  echo "  ✓ I5 prompt_sha256 matches canon-lib direct computation"
+  passed=$((passed+1))
+else
+  echo "  ✗ I5 sha drift vs canon: got $SHA_AFTER, expected $EXP"
   failed=$((failed+1))
 fi
 
