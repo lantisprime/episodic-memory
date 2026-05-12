@@ -54,8 +54,34 @@ fallback-removal commit.
 
 **Edit here as the canonical source**, but local edits to `~/.claude/hooks/*.sh` are also fine in the meantime — PR-B's installer will diff them against the repo source rather than silently overwriting. If you choose to edit the installed copy directly, expect to either re-apply that edit here on next sync or use `--install-hooks-force` to overwrite when you're done.
 
+## macOS `com.apple.provenance` xattr — recovery from undeletable marker
+
+On macOS Sequoia (Darwin 25+) with App Management or an EDR agent, files written by Claude Code's Write tool inherit `com.apple.provenance` and can become **undeletable** — `sudo rm` returns `EPERM` ("Operation not permitted") even with full disk access. If a marker file (`.plan-approval-pending`, `.checkpoint-required`, `.pre-checkpoint-done`, etc.) gets stuck in this state, the gate hooks fire on every turn-end with no escape from inside the agent.
+
+**Escape hatch** (run from a terminal, NOT from the agent):
+
+```sh
+# Temporarily disable the hooks so the gate doesn't fire while you triage:
+sudo mv ~/.claude/hooks/checkpoint-gate.sh /tmp/
+sudo mv ~/.claude/hooks/plan-gate.sh       /tmp/
+sudo mv ~/.claude/hooks/stop-gate.sh       /tmp/
+
+# Resolve the marker situation (move the offending marker to /tmp/, or
+# wait for the xattr to age out, or contact your IT for an EDR override).
+
+# Restore the hooks:
+sudo mv /tmp/checkpoint-gate.sh ~/.claude/hooks/
+sudo mv /tmp/plan-gate.sh       ~/.claude/hooks/
+sudo mv /tmp/stop-gate.sh       ~/.claude/hooks/
+```
+
+`sudo mv` of the hook scripts themselves works because the parent `~/.claude/hooks/` directory typically doesn't carry the provenance protection — only files written by Claude Code's Write tool do. The marker file itself remains stuck; once the hooks are absent, the gates don't fire, and Claude Code can resume work. The stuck marker can be cleaned up when the xattr ages out (usually 24-48 hours) or via IT-level provenance override.
+
+**Long-term fix** tracked at #178 F3 — Claude Code harness change to strip `com.apple.provenance` post-write on marker files in `.checkpoints/`. Out of scope for this repo. Cross-link to writer-side worktree audit: `feedback_project_root_binding_audit.md`.
+
 ## Related
 
 - RFC-002 Phase 3b spec: `docs/rfcs/RFC-002-learning-loop.md`
 - Tracking issue: #59
 - plan-gate canonicalization: #86 (PR-A: tool-name allowlist + canonicalize; PR-B: strict Bash command allowlist)
+- Hook-deadlock cluster: #178, #191, #202 (rank-1 plan v7 — wrong-root marker write detection + stop-gate active-plan exemption)

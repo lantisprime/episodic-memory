@@ -420,6 +420,12 @@ function buildTempHome(homeRoot) {
     path.join(SCRIPTS, 'lib', 'marker-paths.mjs'),
     path.join(installedLib, 'marker-paths.mjs'),
   )
+  // rank-1 plan v7: em-recall now imports stop-gate-helpers.mjs for the
+  // active-plan exemption. Test fixture must mirror transitive imports.
+  fs.copyFileSync(
+    path.join(SCRIPTS, 'lib', 'stop-gate-helpers.mjs'),
+    path.join(installedLib, 'stop-gate-helpers.mjs'),
+  )
   // No hook-install.json; warn_hook_freshness soft-fails on missing manifest.
   return installedScripts
 }
