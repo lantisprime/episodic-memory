@@ -417,6 +417,21 @@ assert_preflight_cmd "Q24 unsafe no codex literal" \
   'eval $(cat /etc/x); ls -la' "none"
 assert_preflight_cmd "Q25 --tags=codex equals form" \
   'em-store --tags=codex-reply,round-3 --body z' "codex-review-handoff"
+# Q26-Q30: bash chain bypass class (codex PR-level review 2026-05-12 finding)
+assert_preflight_cmd "Q26 ; chain after benign verb" \
+  'echo ok; codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q27 && chain" \
+  'true && codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q28 || chain" \
+  'false || codex review --plan' "codex-review-handoff"
+assert_preflight_cmd "Q29 subshell parens" \
+  '( codex exec foo )' "codex-review-handoff"
+assert_preflight_cmd "Q30 chain with em-store" \
+  'cd /tmp && node scripts/em-store.mjs --tag codex-review --body x' "codex-review-handoff"
+assert_preflight_cmd "Q31 multi-segment with chain at end" \
+  'ls; echo ok && codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q32 benign chain — no codex" \
+  'echo ok; ls; pwd' "none"
 
 echo ""
 echo "--- classify_preflight_path ---"

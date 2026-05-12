@@ -1331,24 +1331,86 @@ classify_preflight_command() {
     return 0
   fi
 
-  # Collect token texts in order
-  local -a T=()
+  # Walk segments separated by control operators (; && || | & NL). Per
+  # segment, run the classifier inner; if ANY segment matches a preflight
+  # claim class, the whole command does. P1 fix for bash-chain bypass
+  # (`echo ok; codex exec foo`, `true && codex exec`, etc.) caught by codex
+  # PR-level review 2026-05-12.
+  local -a SEG=()
   local line
+  local matched_class="" matched_trigger="" matched_detail=""
+  _classify_seg_and_check() {
+    if [ ${#SEG[@]} -eq 0 ]; then return 0; fi
+    local seg_result
+    seg_result="$(_classify_preflight_segment "$_repo_root" "${SEG[@]}")"
+    local seg_class="${seg_result%%	*}"
+    if [ "$seg_class" != "none" ] && [ -z "$matched_class" ]; then
+      matched_class="$seg_class"
+      local rest="${seg_result#*	}"
+      matched_trigger="${rest%%	*}"
+      matched_detail="${rest#*	}"
+    fi
+  }
   while IFS= read -r line; do
     case "$line" in
-      "T "*) T+=("${line:2}") ;;
+      "T "*) SEG+=("${line:2}") ;;
+      "O &&"|"O ||"|"O ;"|"O ;;"|"O |"|"O |&"|"O &"|"O NL")
+        _classify_seg_and_check
+        SEG=()
+        ;;
     esac
   done <<< "$stream"
+  _classify_seg_and_check
+
+  if [ -n "$matched_class" ]; then
+    printf '%s\t%s\t%s\n' "$matched_class" "$matched_trigger" "$matched_detail"
+    return 0
+  fi
+  printf '%s\t%s\t%s\n' "none" "" "no_match"
+  return 0
+}
+
+# _classify_preflight_segment <repo-root> <token1> <token2> ...
+# Per-segment classifier. Returns claim-class<TAB>trigger<TAB>detail.
+# Extracted from classify_preflight_command's body so segments separated by
+# control operators each get classified.
+_classify_preflight_segment() {
+  local _repo_root="$1"
+  shift
+  local -a T=("$@")
+  local n=${#T[@]}
+  if [ $n -eq 0 ]; then
+    printf '%s\t%s\t%s\n' "none" "" "empty_segment"
+    return 0
+  fi
 
   local i
   i="$(_preflight_unwrap_index 0 "${T[@]}")"
-  local n=${#T[@]}
   if [ $i -ge $n ]; then
     printf '%s\t%s\t%s\n' "none" "" "empty_after_unwrap"
     return 0
   fi
 
   local verb="${T[$i]}"
+
+  # Strip leading subshell-open / brace-group / parenthesis tokens. The
+  # tokenizer emits `(` / `{` as standalone T tokens; we treat them as
+  # transparent for verb detection. P1 fix for `( codex exec foo )` bypass.
+  while [ $i -lt $n ]; do
+    case "${T[$i]}" in
+      '('|'{')
+        i=$((i+1))
+        # Re-run unwrap after stripping the open paren/brace.
+        i="$(_preflight_unwrap_index $i "${T[@]}")"
+        verb="${T[$i]:-}"
+        ;;
+      *) break ;;
+    esac
+  done
+  if [ -z "$verb" ]; then
+    printf '%s\t%s\t%s\n' "none" "" "empty_after_subshell_strip"
+    return 0
+  fi
 
   # Direct codex CLI
   if [ "$verb" = "codex" ]; then
@@ -1362,11 +1424,6 @@ classify_preflight_command() {
   fi
 
   # Shell wrapper with -c <cmd>: recurse into the inner command string.
-  # bash/sh/zsh/dash/ash/ksh + -c <CMD> executes CMD; verb of CMD is what
-  # matters. Distinct from env/sudo (which already had wrapper-unwrap).
-  # F4 fix: also recognize short-opt clusters containing `c` like `-lc`,
-  # `-il`, `-ci` — bash treats them as `-l` + `-c` etc. with the command
-  # arg following the cluster.
   case "$verb" in
     bash|sh|zsh|dash|ash|ksh)
       local k=$((i+1))
@@ -1374,11 +1431,8 @@ classify_preflight_command() {
         local kt="${T[$k]}"
         case "$kt" in
           -c|-*c*)
-            # -c exactly OR short-opt cluster containing 'c' (excluding
-            # long opts like --color). Long opts handled by the catch-all
-            # below.
             case "$kt" in
-              --*) k=$((k+1)); continue ;;  # long opts: skip
+              --*) k=$((k+1)); continue ;;
             esac
             local inner="${T[$((k+1))]:-}"
             if [ -n "$inner" ]; then
@@ -1397,7 +1451,6 @@ classify_preflight_command() {
   # node|npx invocation of em-* or second-opinion script
   case "$verb" in
     node|npx)
-      # Find the script arg (next non-flag token)
       local j=$((i+1))
       while [ $j -lt $n ]; do
         local t="${T[$j]}"
