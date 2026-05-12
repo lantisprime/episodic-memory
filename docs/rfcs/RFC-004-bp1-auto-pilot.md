@@ -818,6 +818,53 @@ If steps 1-5 fail, the run remains in non-terminal state and the per-run key is 
 
 **Step 6 → step 7 ordering invariant (v3.13 — codex code-review BLOCKER-2 closure):** the shred MUST precede the terminal-state mark. The reverse order (mark-terminal-then-shred) re-opens **I-4** ("terminal state after no usable live `run.key` remains, single-process semantics") — a post-step-6 crash would leave the run with `state == 'complete'` AND a live `run.key` on disk, which permits forged-signed evidence after the run is declared terminal. Under the shipped order, a step-6 shred failure with key-still-on-disk fails closed without marking terminal (the orchestrator returns exit 4 and emits signed `bp1-finalize-fence-fail` evidence); an operator can then re-run `finalize-recover` after addressing the shred root cause. See `scripts/bp1-orchestrator.mjs:751-756` fail-closed comment and PR #206 BLOCKER-2 reply episode `20260509-030119-pr-1c-b-slice-2-codex-code-review-r-2d2f`. Issue #190 patch 4 originally proposed the reverse order to "close" a post-step-7 markTerminal-fail gap; the planner-agent 8-axis matrix (session 2026-05-13) found this would trade one gap for a worse I-4 violation, so Path A keeps the shipped order and treats the markTerminal-fail residual as an exit-3 (non-fence) condition handled by `finalize-recover` State B/D idempotent re-mark.
 
+#### Run-state index schema (v3.13 — closes Issue #190 patch 2)
+
+The per-project run-state index lives at:
+
+```
+<project>/.episodic-memory/runs/_index.json
+```
+
+JSON schema (source-of-truth in code at `scripts/lib/bp1-run-state.mjs`):
+
+```json
+{
+  "schema_version": 1,
+  "runs": {
+    "<run_id>": {
+      "project_root": "<canonical realpath of project root>",
+      "state": "active|complete|aborted|abandoned|archived",
+      "created_at": "<ISO-8601 UTC>",
+      "terminal_at": "<ISO-8601 UTC | null>"
+    }
+  }
+}
+```
+
+**State enum (v3.13 — codex r1 P2 closure, mirrors `VALID_TERMINAL_STATES` in code):**
+
+| State | Set by | Meaning |
+|---|---|---|
+| `active` | `appendRun()` on `init-run` step 4 | Run is live; `run.key` exists on disk; HMAC-signed episodes can land. |
+| `complete` | `markTerminal(..., 'complete')` on `finalize-run` step 7 (or `finalize-recover`) | Happy-path terminal closure; manifest sealed; `run.key` shredded. |
+| `aborted` | `markTerminal(..., 'aborted')` | Operator-driven abort (M2+); manifest may or may not exist. |
+| `abandoned` | `bp1-archive-ghosts.mjs` after `needs_human` exceeds 7-day SLA (per state machine §846) | Auto-archived; no further state transitions. |
+| `archived` | M5 post-run cleanup (long-tail; future) | Final tombstone; no further reads expected. |
+
+`active` is the only non-terminal value. The terminal subset is `{complete, aborted, abandoned, archived}`; `markTerminal()` enforces this set via `VALID_TERMINAL_STATES.includes(terminalState)` (rejects `'invalid-state'`).
+
+**Atomicity contract:**
+
+- Writes go through `withRunStateLock(projectRoot, fn)` — atomic `fs.mkdirSync` at `<runs-dir>/_index.lock` provides POSIX-atomic mutex.
+- Stale-lock detection is two-tier: (1) PID + timestamp file inside the lockdir; (2) lockdir `mtimeMs` fallback for crashes between `mkdirSync` and PID-file write. Both use the same `STALE_LOCK_MS = 30_000` threshold.
+- Index writes use per-process unique temp filenames (`<target>.tmp.<pid>.<ts>.<rand>`) + `fs.renameSync` for crash-atomic visibility.
+- Read-only callers may use `getRunState(projectRoot, runId)` without acquiring the lock; `fs.readFileSync` is atomic on POSIX, so readers see either the previous valid state or the new state — never partial.
+
+Filesystem scoping: this contract assumes local POSIX-like semantics (atomic `mkdir` + per-inode monotonic mtime). NFS/CIFS are best-effort; distributed-FS support is a future RFC.
+
+**Cross-store note (v3.13 close-out):** the run-state index is local-only (per-project). Cross-store invariants discussed at §777 / H27 / H28 apply to **episode** files, not the run-state index — the latter is per-project metadata, not part of the manifest replay set.
+
 #### Negative tests (M1, alongside the implementation)
 
 | # | Scenario | Expected outcome | Phase |
