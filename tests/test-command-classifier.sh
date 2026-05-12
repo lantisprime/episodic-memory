@@ -355,6 +355,131 @@ assert_path "P02 plan-approval-pending" ".claude/.plan-approval-pending" "marker
 assert_path "P03 ordinary file" "src/foo.mjs" "shared_write"
 assert_path "P04 absolute marker" "$TEST_ROOT/.claude/.post-checkpoint-done" "marker_write"
 
+# ---------------------------------------------------------------------------
+# Layer D pre-flight classifier siblings — Q-series tests.
+# Codex consensus chain: r1 ACCEPT-with-FU `...ed24` → r5 ACCEPT `...dbf6`.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- classify_preflight_command ---"
+assert_preflight_cmd() {
+  local desc="$1"
+  local cmd="$2"
+  local expected_class="$3"
+  local result class
+  result="$(classify_preflight_command "$cmd" "$TEST_ROOT")"
+  class="${result%%	*}"
+  if [ "$class" = "$expected_class" ]; then
+    echo "  ✓ $desc"
+    passed=$((passed+1))
+  else
+    echo "  ✗ $desc — got $class, expected $expected_class"
+    failed=$((failed+1))
+  fi
+}
+assert_preflight_cmd "Q01 codex exec" 'codex exec "review"' "codex-review-handoff"
+assert_preflight_cmd "Q02 codex review" 'codex review --plan' "codex-review-handoff"
+assert_preflight_cmd "Q03 sudo wrap codex" 'sudo codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q04 env wrap codex" 'env A=1 codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q05 timeout wrap codex" 'timeout 60s codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q06 nohup wrap codex" 'nohup codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q07 multi-wrap" 'env X=y timeout 30s sudo codex review' "codex-review-handoff"
+assert_preflight_cmd "Q08 quoted-string echo no-fp" 'echo "codex exec foo"' "none"
+assert_preflight_cmd "Q09 bash -c codex" 'bash -c "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "Q10 sh -c codex" 'sh -c "codex review --bar"' "codex-review-handoff"
+assert_preflight_cmd "Q11 zsh -c em-store" 'zsh -c "em-store --tag codex-review --body x"' "codex-review-handoff"
+assert_preflight_cmd "Q11a bash -lc codex" 'bash -lc "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "Q11b bash -il then -c" 'bash -il -c "codex review"' "codex-review-handoff"
+assert_preflight_cmd "Q11c bash -ci codex" 'bash -ci "codex exec"' "codex-review-handoff"
+assert_preflight_cmd "Q11d bash --color" 'bash --color=auto -c "ls"' "none"
+assert_preflight_cmd "Q12 node em-store w/codex tag" \
+  'node scripts/em-store.mjs --tag codex-review --summary x' "codex-review-handoff"
+assert_preflight_cmd "Q13 node em-store no review tag" \
+  'node scripts/em-store.mjs --tag random --summary x' "none"
+assert_preflight_cmd "Q14 node em-revise w/code-review tag" \
+  'node scripts/em-revise.mjs --tag code-review-round-2 --body y' "codex-review-handoff"
+assert_preflight_cmd "Q15 node em-violation w/review-bp tag" \
+  'node scripts/em-violation.mjs --tags codex,review-pattern' "codex-review-handoff"
+assert_preflight_cmd "Q16 second-opinion harness" \
+  'node scripts/second-opinion.mjs request --provider codex --dispatch' "codex-review-handoff"
+assert_preflight_cmd "Q17 bare em-store w/review tag" \
+  'em-store --tag plan-review --body z' "codex-review-handoff"
+assert_preflight_cmd "Q18 bare em-store no review tag" \
+  'em-store --tag random --body z' "none"
+assert_preflight_cmd "Q19 ls" 'ls -la' "none"
+assert_preflight_cmd "Q20 git status" 'git status' "none"
+assert_preflight_cmd "Q21 npx em-store w/codex tag" \
+  'npx em-store --tag codex-review --body x' "codex-review-handoff"
+assert_preflight_cmd "Q22 absolute path em-store" \
+  'node /abs/repo/scripts/em-store.mjs --summary "codex review request"' "codex-review-handoff"
+assert_preflight_cmd "Q23 unsafe + codex literal" \
+  'eval $(cat /etc/x); codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q24 unsafe no codex literal" \
+  'eval $(cat /etc/x); ls -la' "none"
+assert_preflight_cmd "Q25 --tags=codex equals form" \
+  'em-store --tags=codex-reply,round-3 --body z' "codex-review-handoff"
+
+echo ""
+echo "--- classify_preflight_path ---"
+assert_preflight_path() {
+  local desc="$1"
+  local p="$2"
+  local expected_class="$3"
+  local result class
+  result="$(classify_preflight_path "$p" "$TEST_ROOT")"
+  class="${result%%	*}"
+  if [ "$class" = "$expected_class" ]; then
+    echo "  ✓ $desc"
+    passed=$((passed+1))
+  else
+    echo "  ✗ $desc — got $class, expected $expected_class"
+    failed=$((failed+1))
+  fi
+}
+assert_preflight_path "QP01 MEMORY.md" "/abs/repo/MEMORY.md" "rule-bearing-file-edit"
+assert_preflight_path "QP02 feedback_*.md" "/abs/repo/feedback_x.md" "rule-bearing-file-edit"
+assert_preflight_path "QP03 reference_*.md" "/abs/repo/reference_y.md" "rule-bearing-file-edit"
+assert_preflight_path "QP04 bundles" "/abs/repo/bundles/codex-channel.md" "rule-bearing-file-edit"
+assert_preflight_path "QP05 hooks" "/abs/repo/.claude/hooks/foo.sh" "rule-bearing-file-edit"
+assert_preflight_path "QP06 settings.json" "/abs/repo/.claude/settings.json" "rule-bearing-file-edit"
+assert_preflight_path "QP07 settings.local.json" "/abs/repo/.claude/settings.local.json" "rule-bearing-file-edit"
+assert_preflight_path "QP08 RFC dir" "/abs/repo/docs/rfcs/RFC-007-foo.md" "rule-bearing-file-edit"
+assert_preflight_path "QP09 episode file" "/abs/repo/.episodic-memory/episodes/x.md" "rule-bearing-file-edit"
+assert_preflight_path "QP10 random script" "/abs/repo/scripts/em-search.mjs" "none"
+assert_preflight_path "QP11 random source" "/abs/repo/src/foo.mjs" "none"
+assert_preflight_path "QP12 README" "/abs/repo/README.md" "none"
+
+echo ""
+echo "--- classify_preflight_tool ---"
+assert_preflight_tool() {
+  local desc="$1"
+  local tool_name="$2"
+  local tool_input_json="$3"
+  local expected_class="$4"
+  local result class
+  result="$(classify_preflight_tool "$tool_name" "$tool_input_json" "$TEST_ROOT")"
+  class="${result%%	*}"
+  if [ "$class" = "$expected_class" ]; then
+    echo "  ✓ $desc"
+    passed=$((passed+1))
+  else
+    echo "  ✗ $desc — got $class, expected $expected_class"
+    failed=$((failed+1))
+  fi
+}
+assert_preflight_tool "QT01 Bash codex" "Bash" '{"command":"codex exec foo"}' "codex-review-handoff"
+assert_preflight_tool "QT02 Bash ls" "Bash" '{"command":"ls -la"}' "none"
+assert_preflight_tool "QT03 Bash empty" "Bash" '{"command":""}' "none"
+assert_preflight_tool "QT04 Agent codex-rescue" "Agent" '{"subagent_type":"codex:codex-rescue"}' "codex-review-handoff"
+assert_preflight_tool "QT05 Agent neg-scenario" "Agent" '{"subagent_type":"negative-scenario-reviewer"}' "codex-review-handoff"
+assert_preflight_tool "QT06 Agent generic" "Agent" '{"subagent_type":"general-purpose"}' "none"
+assert_preflight_tool "QT07 Task variant" "Task" '{"subagent_type":"codex:something"}' "codex-review-handoff"
+assert_preflight_tool "QT08 Write feedback" "Write" '{"file_path":"/abs/repo/feedback_x.md"}' "rule-bearing-file-edit"
+assert_preflight_tool "QT09 Edit MEMORY.md" "Edit" '{"file_path":"/abs/repo/MEMORY.md"}' "rule-bearing-file-edit"
+assert_preflight_tool "QT10 MultiEdit hook" "MultiEdit" '{"file_path":"/abs/repo/.claude/hooks/foo.sh"}' "rule-bearing-file-edit"
+assert_preflight_tool "QT11 Write src file" "Write" '{"file_path":"/abs/repo/src/foo.mjs"}' "none"
+assert_preflight_tool "QT12 Read ungated" "Read" '{"file_path":"/anything"}' "none"
+assert_preflight_tool "QT13 Grep ungated" "Grep" '{"pattern":"foo"}' "none"
+
 echo ""
 echo "=================================================="
 echo "Results: $passed passed, $failed failed"

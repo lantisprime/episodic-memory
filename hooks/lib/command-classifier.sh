@@ -1209,3 +1209,304 @@ classify_path() {
   printf '%s\t\t%s\n' "shared_write" "path_default"
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# Layer D pre-flight classifier siblings (PR1 enforces codex-review-handoff
+# only; other claim classes registered for shape but not enforced).
+#
+# Output format: claim-class<TAB>trigger<TAB>match-detail
+#   claim-class:   codex-review-handoff | rule-bearing-file-edit |
+#                  adversarial-code-review | plan-time-matrix |
+#                  scratch-files | wrap-up-discipline | none
+#   trigger:       tool_target | prompt_phrase | (empty for none)
+#   match-detail:  short identifier of the rule that fired
+#
+# Sibling to classify_command / classify_path; reuses _tokenize internally.
+#
+# Codex consensus chain: r1 ACCEPT-with-FU `...ed24` → r5 ACCEPT `...dbf6`.
+# ---------------------------------------------------------------------------
+
+# Wrapper-utility prefixes that may precede the real command verb. Same set
+# the existing classifier handles for bash -c / env / sudo / nohup / timeout.
+_PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec)$'
+
+# Tag-name fragments that, when found in --tag/--tags/--summary args, mark
+# an em-* invocation as a codex-review handoff.
+_PREFLIGHT_REVIEW_TAG_RE='codex|review|second-opinion|plan-review|code-review|cross-tool-review|meta-review'
+
+# em-* CLI verbs that route review traffic. Bare names AND `node */<name>.mjs`
+# AND `npx <name>` AND plugin-script forms all classified.
+_PREFLIGHT_EM_VERBS_RE='^(em-store|em-revise|em-violation)(\.mjs)?$'
+
+# _preflight_unwrap_index — emit (to stdout) the index past wrapper-utility
+# prefix tokens. Args: $1 = start_index; $2..$N = all tokens.
+# Bash 3.2-compatible (no namerefs); same calling convention as existing
+# _classify_git in this file.
+_preflight_unwrap_index() {
+  local i=$1
+  shift
+  local -a T=("$@")
+  local n=${#T[@]}
+  while [ $i -lt $n ]; do
+    local t="${T[$i]}"
+    if [[ "$t" =~ $_PREFLIGHT_WRAPPERS_RE ]]; then
+      local wrapper="$t"
+      i=$((i+1))
+      # Skip env-style assignments and short options.
+      while [ $i -lt $n ]; do
+        local w="${T[$i]}"
+        case "$w" in
+          *=*) i=$((i+1)) ;;
+          -*)  i=$((i+1)) ;;
+          *)   break ;;
+        esac
+      done
+      # Wrappers that take a single positional argument BEFORE the command
+      # to wrap (timeout DURATION, nice may use -n, but bare `nice CMD` is
+      # also valid → no extra positional). Conservative list:
+      case "$wrapper" in
+        timeout)
+          # `timeout DURATION CMD` — skip one non-flag positional (DURATION).
+          if [ $i -lt $n ]; then
+            i=$((i+1))
+          fi
+          ;;
+      esac
+    else
+      break
+    fi
+  done
+  printf '%d' "$i"
+}
+
+# _preflight_scan_em_args — return 0 if em-* invocation has review-handoff
+# signals in --tag/--tags/--summary args; 1 otherwise.
+# Args: $1 = start_index; $2..$N = tokens.
+_preflight_scan_em_args() {
+  local i=$1
+  shift
+  local -a T=("$@")
+  local n=${#T[@]}
+  while [ $i -lt $n ]; do
+    local t="${T[$i]}"
+    case "$t" in
+      --tag|--tags|--summary)
+        local v="${T[$((i+1))]:-}"
+        if [[ "$v" =~ $_PREFLIGHT_REVIEW_TAG_RE ]]; then
+          return 0
+        fi
+        i=$((i+2))
+        ;;
+      --tag=*|--tags=*|--summary=*)
+        local v="${t#*=}"
+        if [[ "$v" =~ $_PREFLIGHT_REVIEW_TAG_RE ]]; then
+          return 0
+        fi
+        i=$((i+1))
+        ;;
+      *) i=$((i+1)) ;;
+    esac
+  done
+  return 1
+}
+
+# classify_preflight_command "$cmd" "$repo_root"
+classify_preflight_command() {
+  local cmd="$1"
+  # repo_root currently unused but kept for API parity + future trigger expansion.
+  local _repo_root="${2:-$(pwd)}"
+  local stream
+  stream="$(_tokenize "$cmd")"
+
+  # Unsafe (command substitution / unbalanced quotes) → conservatively
+  # treat as codex-review-handoff if literal `codex exec` or em-store appears
+  # anywhere in the raw command, otherwise none. The gate's policy is
+  # "fail closed on ambiguity."
+  if printf '%s\n' "$stream" | grep -q '^E '; then
+    if printf '%s\n' "$cmd" | grep -qE '\b(codex[[:space:]]+(exec|review)|em-(store|revise|violation))\b'; then
+      printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "unsafe_complex_with_review_literal"
+      return 0
+    fi
+    printf '%s\t%s\t%s\n' "none" "" "unsafe_complex_no_review_literal"
+    return 0
+  fi
+
+  # Collect token texts in order
+  local -a T=()
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "T "*) T+=("${line:2}") ;;
+    esac
+  done <<< "$stream"
+
+  local i
+  i="$(_preflight_unwrap_index 0 "${T[@]}")"
+  local n=${#T[@]}
+  if [ $i -ge $n ]; then
+    printf '%s\t%s\t%s\n' "none" "" "empty_after_unwrap"
+    return 0
+  fi
+
+  local verb="${T[$i]}"
+
+  # Direct codex CLI
+  if [ "$verb" = "codex" ]; then
+    local sub="${T[$((i+1))]:-}"
+    case "$sub" in
+      exec|review)
+        printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "codex_${sub}"
+        return 0
+        ;;
+    esac
+  fi
+
+  # Shell wrapper with -c <cmd>: recurse into the inner command string.
+  # bash/sh/zsh/dash/ash/ksh + -c <CMD> executes CMD; verb of CMD is what
+  # matters. Distinct from env/sudo (which already had wrapper-unwrap).
+  # F4 fix: also recognize short-opt clusters containing `c` like `-lc`,
+  # `-il`, `-ci` — bash treats them as `-l` + `-c` etc. with the command
+  # arg following the cluster.
+  case "$verb" in
+    bash|sh|zsh|dash|ash|ksh)
+      local k=$((i+1))
+      while [ $k -lt $n ]; do
+        local kt="${T[$k]}"
+        case "$kt" in
+          -c|-*c*)
+            # -c exactly OR short-opt cluster containing 'c' (excluding
+            # long opts like --color). Long opts handled by the catch-all
+            # below.
+            case "$kt" in
+              --*) k=$((k+1)); continue ;;  # long opts: skip
+            esac
+            local inner="${T[$((k+1))]:-}"
+            if [ -n "$inner" ]; then
+              classify_preflight_command "$inner" "$_repo_root"
+              return 0
+            fi
+            break
+            ;;
+          -*) k=$((k+1)) ;;
+          *)  break ;;
+        esac
+      done
+      ;;
+  esac
+
+  # node|npx invocation of em-* or second-opinion script
+  case "$verb" in
+    node|npx)
+      # Find the script arg (next non-flag token)
+      local j=$((i+1))
+      while [ $j -lt $n ]; do
+        local t="${T[$j]}"
+        case "$t" in
+          -*) j=$((j+1)) ;;
+          *)  break ;;
+        esac
+      done
+      if [ $j -lt $n ]; then
+        local script_basename
+        script_basename="$(basename "${T[$j]}")"
+        if [[ "$script_basename" =~ $_PREFLIGHT_EM_VERBS_RE ]]; then
+          if _preflight_scan_em_args $((j+1)) "${T[@]}"; then
+            printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "em_via_node_${script_basename%.mjs}"
+            return 0
+          fi
+        fi
+        if [[ "$script_basename" == "second-opinion.mjs" ]]; then
+          printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "second_opinion_harness"
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  # Bare em-* verb (PATH-resolved)
+  local verb_basename
+  verb_basename="$(basename "$verb")"
+  if [[ "$verb_basename" =~ $_PREFLIGHT_EM_VERBS_RE ]]; then
+    if _preflight_scan_em_args $((i+1)) "${T[@]}"; then
+      printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "em_bare_${verb_basename%.mjs}"
+      return 0
+    fi
+  fi
+
+  printf '%s\t%s\t%s\n' "none" "" "no_match"
+  return 0
+}
+
+# Rule-bearing path patterns. Edits to these files trigger
+# rule-bearing-file-edit claim class. PR1 registers shape only; enforcement
+# requires pairing with codex-review-handoff (see plan §"Three material
+# revisions"). Patterns are basename or path-suffix matches against the
+# realpath of the target file.
+_PREFLIGHT_RULE_BEARING_PATTERNS=(
+  '/MEMORY.md$'
+  '/feedback_[^/]*\.md$'
+  '/reference_[^/]*\.md$'
+  '/bundles/[^/]*\.md$'
+  '/.claude/hooks/'
+  '/.claude/settings(\.local)?\.json$'
+  '/docs/rfcs/'
+  '/.episodic-memory/episodes/'
+)
+
+# classify_preflight_path "$path" "$repo_root"
+classify_preflight_path() {
+  local p="$1"
+  local _repo_root="${2:-$(pwd)}"
+  local pat
+  for pat in "${_PREFLIGHT_RULE_BEARING_PATTERNS[@]}"; do
+    if [[ "$p" =~ $pat ]]; then
+      printf '%s\t%s\t%s\n' "rule-bearing-file-edit" "tool_target" "path_${pat//[^a-zA-Z0-9]/_}"
+      return 0
+    fi
+  done
+  printf '%s\t%s\t%s\n' "none" "" "path_no_match"
+  return 0
+}
+
+# classify_preflight_tool "$tool_name" "$tool_input_json" "$repo_root"
+# Top-level dispatch. tool_input_json passed as a single JSON string.
+classify_preflight_tool() {
+  local tool_name="$1"
+  local tool_input_json="$2"
+  local repo_root="${3:-$(pwd)}"
+
+  case "$tool_name" in
+    Bash)
+      local cmd
+      cmd="$(printf '%s' "$tool_input_json" | jq -r '.command // ""' 2>/dev/null)"
+      if [ -z "$cmd" ]; then
+        printf '%s\t%s\t%s\n' "none" "" "bash_empty_command"
+        return 0
+      fi
+      classify_preflight_command "$cmd" "$repo_root"
+      ;;
+    Agent|Task)
+      local subagent
+      subagent="$(printf '%s' "$tool_input_json" | jq -r '.subagent_type // ""' 2>/dev/null)"
+      case "$subagent" in
+        codex:*|codex-*|negative-scenario-*)
+          printf '%s\t%s\t%s\n' "codex-review-handoff" "tool_target" "agent_${subagent//[^a-zA-Z0-9]/_}"
+          return 0
+          ;;
+      esac
+      printf '%s\t%s\t%s\n' "none" "" "agent_no_match"
+      ;;
+    Write|Edit|MultiEdit|NotebookEdit)
+      local p
+      p="$(printf '%s' "$tool_input_json" | jq -r '.file_path // .path // .notebook_path // ""' 2>/dev/null)"
+      if [ -z "$p" ]; then
+        printf '%s\t%s\t%s\n' "none" "" "write_empty_path"
+        return 0
+      fi
+      classify_preflight_path "$p" "$repo_root"
+      ;;
+    *)
+      printf '%s\t%s\t%s\n' "none" "" "tool_not_gated"
+      ;;
+  esac
+}
