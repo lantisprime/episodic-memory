@@ -5,9 +5,9 @@ title: "BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow"
 status: accepted
 champion: Charlton Ho
 created: 2026-05-06
-last_modified: 2026-05-06
+last_modified: 2026-05-13
 accepted: 2026-05-06
-version: 3.12
+version: 3.13
 supersedes: ~
 superseded_by: ~
 ---
