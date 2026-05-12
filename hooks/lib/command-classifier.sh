@@ -506,8 +506,20 @@ _classify_segment() {
         continue
         ;;
     esac
+    # Same-class scope mirrors the rm/tee handlers below. Codex round-1 F1
+    # on PR #246 (HOLD): the redirect handler covered only 3 of 6 checkpoint
+    # markers and was missing both `.preflight-done` AND the new last-user-
+    # prompt family — so `printf x > .checkpoints/.last-user-prompt.<sid>.json`
+    # classified as `shared_write` and bypassed the entire prompt-binding
+    # layered enforcement.
     case "$rbase" in
-      .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending)
+      .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.checkpoint-required|.post-checkpoint-required|.preflight-done|.last-user-prompt.json)
+        local abs_target
+        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
+        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
+        return 0
+        ;;
+      .last-user-prompt.*.json)
         local abs_target
         abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
         printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"

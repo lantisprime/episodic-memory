@@ -304,6 +304,15 @@ if [ -n "$SESSION_ID" ]; then
     # I8 60s bootstrap window. After 60s, the bootstrap sentinel is stale
     # — fail-closed. Use node for portable ms-precision arithmetic.
     NOW_MS="$(node -e 'process.stdout.write(String(Date.now()))' 2>/dev/null || echo 0)"
+    # Codex round-1 F2 on PR #246 (HOLD): validate FILE_WROTE_AT_MS is
+    # numeric BEFORE arithmetic. Without this, a sentinel containing
+    # `"wrote_at_ms": "123abc"` triggers a bash arithmetic error; the
+    # gate exits non-zero with no `permissionDecision:"deny"` JSON,
+    # making behavior depend on Claude Code's hook-error fallback rather
+    # than the gate's local fail-closed contract.
+    case "$FILE_WROTE_AT_MS" in
+      ''|*[!0-9]*) _emit_deny "Bootstrap sentinel at $CANON_LAST_PROMPT_SID has non-numeric wrote_at_ms ($FILE_WROTE_AT_MS); cannot evaluate age. Re-run install.mjs --install-hooks --bootstrap-last-prompt." ;;
+    esac
     AGE_MS=$((NOW_MS - FILE_WROTE_AT_MS))
     if [ "$AGE_MS" -gt 60000 ] || [ "$AGE_MS" -lt 0 ]; then
       _emit_deny "Bootstrap sentinel at $CANON_LAST_PROMPT_SID is stale (age ${AGE_MS}ms > 60000ms). The UserPromptSubmit hook should have replaced it by now. Re-run install.mjs --install-hooks to wire the hook."

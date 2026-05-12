@@ -668,6 +668,24 @@ cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
 EOF
 run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "Bootstrap sentinel.*stale" "I8c bootstrap sentinel stale → deny"
 
+# I8d: codex round-1 F2 on PR #246 — non-numeric wrote_at_ms must emit a
+# proper deny JSON, NOT a bash arithmetic error. Without the numeric guard,
+# behavior depended on Claude Code's hook-error fallback.
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{"bootstrap": true, "wrote_at_ms": "123abc", "session_id": "$SESSION_ID"}
+EOF
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "non-numeric wrote_at_ms" "I8d non-numeric wrote_at_ms → proper deny JSON"
+
+# I8e: empty wrote_at_ms also fail-closed
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{"bootstrap": true, "wrote_at_ms": "", "session_id": "$SESSION_ID"}
+EOF
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "non-numeric wrote_at_ms" "I8e empty wrote_at_ms → deny"
+
 # I7a: Bash invocation with --target last-prompt → DENY (agent spoof attempt)
 TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target last-prompt --session-id agent-spoof\"}" \

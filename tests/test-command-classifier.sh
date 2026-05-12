@@ -129,6 +129,22 @@ assert_label "T54c2 rm legacy non-namespaced last-user-prompt.json" \
   "rm .checkpoints/.last-user-prompt.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.json"
 assert_label "T54c3 tee legacy non-namespaced last-user-prompt.json" \
   "tee .checkpoints/.last-user-prompt.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.json"
+# Codex round-1 F1 on PR #246: the `> redirect` handler was missing 4 of 6
+# checkpoint markers AND the entire last-user-prompt family. Without these,
+# `printf x > .checkpoints/.last-user-prompt.<sid>.json` bypasses the
+# marker_write class entirely.
+assert_label "T54d > redirect to .preflight-done → marker_write" \
+  "printf x > .checkpoints/.preflight-done" "marker_write" "$TEST_ROOT/.checkpoints/.preflight-done"
+assert_label "T54e > redirect to .last-user-prompt session-namespaced → marker_write" \
+  "printf x > .checkpoints/.last-user-prompt.spoof.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.spoof.json"
+assert_label "T54f >> append redirect to .last-user-prompt namespaced → marker_write" \
+  "echo x >> .checkpoints/.last-user-prompt.uuid-1234.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.uuid-1234.json"
+assert_label "T54g > redirect to legacy .last-user-prompt.json → marker_write" \
+  "printf x > .checkpoints/.last-user-prompt.json" "marker_write" "$TEST_ROOT/.checkpoints/.last-user-prompt.json"
+assert_label "T54h > redirect to .checkpoint-required → marker_write" \
+  "printf x > .checkpoints/.checkpoint-required" "marker_write" "$TEST_ROOT/.checkpoints/.checkpoint-required"
+assert_label "T54i > redirect to .post-checkpoint-required → marker_write" \
+  "printf x > .checkpoints/.post-checkpoint-required" "marker_write" "$TEST_ROOT/.checkpoints/.post-checkpoint-required"
 assert_label "T54d tee writing to preflight-done" \
   "tee .checkpoints/.preflight-done" "marker_write" "$TEST_ROOT/.checkpoints/.preflight-done"
 assert_label "T54e tee writing to last-user-prompt" \
