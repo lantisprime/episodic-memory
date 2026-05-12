@@ -61,6 +61,15 @@ export const HOOK_SPECS = [
     file: 'stop-gate.sh',
     event: 'SubagentStop',
     timeout: 5
+  },
+  // preflight-gate.sh: Layer D narrow PR1 (codex consensus chain
+  // ...ed24 → ...dbf6, 2026-05-12). PreToolUse on Bash/Agent/Write/Edit/
+  // MultiEdit/NotebookEdit. Read-only tools exempt at gate level.
+  {
+    file: 'preflight-gate.sh',
+    event: 'PreToolUse',
+    matcher: 'Bash|Agent|Task|Write|Edit|MultiEdit|NotebookEdit',
+    timeout: 10
   }
 ]
 

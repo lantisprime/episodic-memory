@@ -17,6 +17,12 @@ node_modules/
 .claude/.plan-approval-pending
 .claude/.session-baseline
 .claude/settings.local.json
+.claude/settings.local.json.bak.*
+# .claude/settings.json is per-user (contains hardcoded SessionStart hook
+# paths and per-developer permissions allowlists). The helper allowlist for
+# the preflight gate is documented in bundles/codex-review-channel-current.md.
+.claude/settings.json
+.claude/settings.json.bak.*
 
 # Per-session scratch (mining staging, codex requests/replies, etc.)
 .claude/scratch/
