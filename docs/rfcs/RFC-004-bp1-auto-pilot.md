@@ -565,8 +565,10 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 **Probe sequence (M0 deliverable, run by orchestrator on every cold start):**
 
 1. Call `mcp__scheduled-tasks__list_scheduled_tasks` (any mode — even an empty list confirms the capability is wired).
-2. On success: orchestrator records `scheduled_tasks_capability: native` in the activation episode.
-3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. **T1 (deadline-tick / Path A) and T1b (naked-entry-sweep / Path B)** must run via the unified fallback `bp1-deadline-sweep.mjs --once` until the next probe succeeds. **T2 (weekly meta-audit) does NOT have a fallback path** — when scheduled-tasks are unavailable, T2 degrades to a manual `node scripts/bp1-security-audit.mjs --once` invocation surfaced in the operator runbook (see below); operators are explicitly informed of the degraded mode in the activation episode body.
+2. On success: orchestrator records `scheduled_tasks_capability: native` in the **`bp1-run-started` episode** (M1 cold-start, HMAC-signed by the per-run `run.key`; canonical fields per §689-719 subsection for `state-transition:run-started`).
+3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. **T1 (deadline-tick / Path A) and T1b (naked-entry-sweep / Path B)** must run via the unified fallback `bp1-deadline-sweep.mjs --once` until the next probe succeeds. **T2 (weekly meta-audit) does NOT have a fallback path** — when scheduled-tasks are unavailable, T2 degrades to a manual `node scripts/bp1-security-audit.mjs --once` invocation surfaced in the operator runbook (see below); operators are explicitly informed of the degraded mode in the `bp1-run-started` episode body (in the `degraded_mode_statement` canonical field).
+
+> **Episode-name distinction (v3.13 — closes Issue #190 patch 1):** the cold-start probe result lives in the per-run `bp1-run-started` episode (M1 deliverable, HMAC-signed by `run.key`). This is **distinct from** `bp1-activation`, which records the M5 flag-flip event (per-project, HMAC-signed by the global `verify-key`; see §197-203). Prior RFC drafts conflated the two by saying "the activation episode" in the probe step; v3.13 disambiguates because the canonical fields, signing key, and emission moment differ.
 
 **Fallback: `scripts/bp1-deadline-sweep.mjs --once`** (M0 deliverable, EXTENDED v3.8 to also cover Path B naked-entry sweep):
 
