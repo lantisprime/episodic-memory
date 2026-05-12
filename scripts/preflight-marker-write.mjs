@@ -21,8 +21,17 @@
  *
  * Usage:
  *   echo '<JSON>'  | node /abs/path/preflight-marker-write.mjs --root /abs/repo --target preflight
- *   echo '<JSON>'  | node /abs/path/preflight-marker-write.mjs --root /abs/repo --target last-prompt
+ *   echo '<JSON>'  | node /abs/path/preflight-marker-write.mjs --root /abs/repo --target last-prompt --session-id <sid>
  *   cat input.json | node /abs/path/preflight-marker-write.mjs --root /abs/repo --target preflight
+ *
+ * Per-session namespacing (`--target last-prompt`):
+ *   The last-prompt file is keyed by session_id to avoid cross-session
+ *   liveness collisions (plan-time audit F4, scratch/238-plan-v2.md).
+ *   Basename: `.last-user-prompt.<session_id>.json`. session_id is required
+ *   for that target and must match `[A-Za-z0-9_-]{1,128}` (no dots, no
+ *   slashes — prevents basename injection past the `.json` suffix).
+ *   The preflight target is unchanged: single `.preflight-done` per repo,
+ *   session-bound via marker JSON content.
  *
  * Exit codes:
  *   0 — success; stdout is `{"status":"ok","path":"<final>","bytes":N}`
@@ -32,11 +41,13 @@
  *   5 — `--root` invalid (non-existent OR not a repo root signal)
  *   6 — `--target` missing or invalid value
  *   7 — stdin read error
+ *   8 — `--session-id` missing/invalid when target=last-prompt
  *
  * Discovered: codex r2 reply `20260512-071449-...-6e90` (atomicity invariant
  *   not locally verifiable for agent-side Write).
  * Refined:    codex r3-r5 (helper-only contract + --root required +
  *   canonicalize-path-tolerant lib for `--root` validation).
+ * Extended:   plan v2 C2 — `--session-id` for last-prompt namespacing (F4).
  *
  * Composes with:
  *   - scripts/lib/local-dir.mjs — resolveRepoRoot for --root validation.
@@ -51,10 +62,18 @@ import process from 'process'
 import { ensurePrimaryDir, primaryMarkerPath } from './lib/marker-paths.mjs'
 import { canonicalizePathTolerant } from './lib/canonicalize-path-tolerant.mjs'
 
+// preflight target → fixed basename; last-prompt target → suffix template
+// where {sid} is substituted with the validated --session-id value.
 const VALID_TARGETS = {
-  preflight: '.preflight-done',
-  'last-prompt': '.last-user-prompt.json'
+  preflight: { kind: 'fixed', basename: '.preflight-done' },
+  'last-prompt': { kind: 'session', template: '.last-user-prompt.{sid}.json' }
 }
+
+// session_id format: alphanumeric, underscore, dash. No dots (could collide
+// with the `.json` suffix), no slashes (path traversal), length-capped.
+// Claude Code session IDs are UUIDs (hyphenated hex); this regex covers
+// them while rejecting anything that could escape the basename.
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
 
 function fail(code, message) {
   process.stderr.write(`preflight-marker-write: ${message}\n`)
@@ -62,16 +81,19 @@ function fail(code, message) {
 }
 
 function parseArgs(argv) {
-  const args = { root: null, target: null }
+  const args = { root: null, target: null, sessionId: null }
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--root') {
       args.root = argv[++i]
     } else if (a === '--target') {
       args.target = argv[++i]
+    } else if (a === '--session-id') {
+      args.sessionId = argv[++i]
     } else if (a === '--help' || a === '-h') {
       process.stdout.write(
-        'Usage: echo "<JSON>" | preflight-marker-write.mjs --root <abs> --target <preflight|last-prompt>\n'
+        'Usage: echo "<JSON>" | preflight-marker-write.mjs --root <abs> --target <preflight|last-prompt> [--session-id <sid>]\n' +
+        '  --session-id required when --target=last-prompt (alphanumeric/underscore/dash, max 128 chars)\n'
       )
       process.exit(0)
     } else {
@@ -79,6 +101,21 @@ function parseArgs(argv) {
     }
   }
   return args
+}
+
+// Resolve the marker basename for a target, validating any required
+// per-target args (e.g. --session-id for last-prompt).
+function resolveBasename(target, sessionId) {
+  const spec = VALID_TARGETS[target]
+  if (spec.kind === 'fixed') return spec.basename
+  // kind === 'session'
+  if (!sessionId) {
+    fail(8, `SESSION_ID_REQUIRED: --session-id <sid> is mandatory when --target=${target}`)
+  }
+  if (!SESSION_ID_RE.test(sessionId)) {
+    fail(8, `SESSION_ID_INVALID: must match ${SESSION_ID_RE.source}, got: ${sessionId}`)
+  }
+  return spec.template.replace('{sid}', sessionId)
 }
 
 function validateRoot(rootArg) {
@@ -122,14 +159,14 @@ function readStdinSync() {
 }
 
 function main() {
-  const { root, target } = parseArgs(process.argv)
+  const { root, target, sessionId } = parseArgs(process.argv)
   if (!target) fail(6, 'TARGET_REQUIRED: --target <preflight|last-prompt>')
   if (!Object.prototype.hasOwnProperty.call(VALID_TARGETS, target)) {
     fail(6, `TARGET_INVALID: ${target}; valid: ${Object.keys(VALID_TARGETS).join(', ')}`)
   }
 
   const canonicalRoot = validateRoot(root)
-  const basename = VALID_TARGETS[target]
+  const basename = resolveBasename(target, sessionId)
   const finalPath = primaryMarkerPath(canonicalRoot, basename)
 
   const raw = readStdinSync()

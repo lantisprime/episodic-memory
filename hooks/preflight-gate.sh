@@ -88,6 +88,22 @@ _emit_deny() {
   exit 0
 }
 
+# P2-1 (code-review FU): validate SESSION_ID shape immediately after
+# _emit_deny is defined and BEFORE any downstream path-construction or
+# marker comparison. Every other layer (hook, helper, install bootstrap)
+# enforces ^[A-Za-z0-9_-]{1,128}$; the gate must match so a malicious
+# stdin payload can't cause path-traversal via LAST_PROMPT_SID_PATH
+# interpolation. Empty SESSION_ID is allowed (Claude Code may omit it;
+# downstream branches already test `-n "$SESSION_ID"`).
+if [ -n "$SESSION_ID" ]; then
+  case "$SESSION_ID" in
+    *[!A-Za-z0-9_-]*) _emit_deny "preflight-gate.sh: session_id from stdin contains invalid chars; cannot evaluate prompt-binding." ;;
+  esac
+  if [ ${#SESSION_ID} -gt 128 ]; then
+    _emit_deny "preflight-gate.sh: session_id from stdin exceeds 128 chars; cannot evaluate prompt-binding."
+  fi
+fi
+
 # _canonicalize_one <input-path> <hook-cwd>
 # Echoes canonical path on stdout; returns 0 on success, non-zero on
 # canonicalization failure (SYMLOOP_MAX, EACCES, lib-missing). CALLER must
@@ -124,6 +140,8 @@ case "$TOOL_NAME" in
       ec_pf=$?
       CANON_LAST_PROMPT="$(_canonicalize_one "$LAST_PROMPT_MARKER" "$REPO_ROOT")"
       ec_lp=$?
+      CANON_PRIMARY_DIR="$(_canonicalize_one "$PRIMARY_DIR" "$REPO_ROOT")"
+      ec_pd=$?
       set -e
       if [ $ec_tool -eq 99 ]; then
         _emit_deny "preflight-gate.sh: canonicalize-path-tolerant lib missing at $CANON_LIB. Re-run install.mjs --install-hooks."
@@ -133,10 +151,23 @@ case "$TOOL_NAME" in
       fi
       # Marker-path canonicalization should never fail (paths are simple,
       # no symlinks expected). If it does → conservative deny.
-      if [ $ec_pf -ne 0 ] || [ $ec_lp -ne 0 ]; then
+      if [ $ec_pf -ne 0 ] || [ $ec_lp -ne 0 ] || [ $ec_pd -ne 0 ]; then
         _emit_deny "preflight-gate.sh: failed to canonicalize marker paths; gate cannot evaluate. Re-run install.mjs --install-hooks."
       fi
-      if [ "$CANON_TOOL" = "$CANON_PREFLIGHT" ] || [ "$CANON_TOOL" = "$CANON_LAST_PROMPT" ]; then
+      # Direct equality covers .preflight-done and the legacy non-namespaced
+      # .last-user-prompt.json. Plan-v2 C5: also deny any
+      # .last-user-prompt.<sid>.json under .checkpoints/ (the session-
+      # namespaced files written by the helper via the UserPromptSubmit
+      # hook — agents must never write these directly).
+      _tool_basename="$(basename "$CANON_TOOL")"
+      _tool_parent="$(dirname "$CANON_TOOL")"
+      _last_prompt_namespaced=0
+      if [ "$_tool_parent" = "$CANON_PRIMARY_DIR" ]; then
+        case "$_tool_basename" in
+          .last-user-prompt.*.json) _last_prompt_namespaced=1 ;;
+        esac
+      fi
+      if [ "$CANON_TOOL" = "$CANON_PREFLIGHT" ] || [ "$CANON_TOOL" = "$CANON_LAST_PROMPT" ] || [ $_last_prompt_namespaced -eq 1 ]; then
         _emit_deny "Direct $TOOL_NAME to preflight marker is forbidden. Use the atomic helper: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight (or --target last-prompt). Resolved tool path: $CANON_TOOL."
       fi
     fi
@@ -155,13 +186,27 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # variants like `node\t/abs/.../preflight-marker-write.mjs` or
     # `node \\` + newline + path slip through to the same matcher (A3).
     NORMALIZED_CMD="$(printf '%s' "$CMD" | tr '\t\n' '  ' | sed 's/\\ / /g; s/  */ /g')"
-    # Match any helper invocation: node|npx|bash, bare basename `preflight-
-    # marker-write.mjs`, or any path ending in that basename. Closes A1
-    # asymmetry with the codex/em-* classifier in command-classifier.sh
-    # which already handles bare/npx/script-shebang invocations.
-    if printf '%s' "$NORMALIZED_CMD" | grep -qE '(\bnode |\bnpx |\bbash )?[^[:space:]]*\bpreflight-marker-write\.mjs\b'; then
+    # Match the helper basename when it's a real invocation: must be
+    # preceded by start-of-string, space, or slash (i.e. it IS the basename
+    # of a path or a bare invocation), AND followed by space or end. The
+    # previous regex used `\b...\b` which matched ANY word-boundary,
+    # producing false-positives on `test-preflight-marker-write.mjs`
+    # (the `-` in `test-` is a non-word char, so `\b` triggered against
+    # the following `p`). Plan-v2 C5: tighten the boundary.
+    HELPER_BASENAME_RE='(^|[ /])preflight-marker-write\.mjs( |$)'
+    if printf '%s' "$NORMALIZED_CMD" | grep -qE "$HELPER_BASENAME_RE"; then
       if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
         _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt>. No cwd fallback (ROOT_REQUIRED)."
+      fi
+      # I7 (plan-v2 audit F2): the UserPromptSubmit hook is the ONLY
+      # sanctioned writer of `.last-user-prompt.<sid>.json`. The hook
+      # runs OUTSIDE the PreToolUse path (UserPromptSubmit event), so
+      # any PreToolUse-time invocation of the helper with `--target
+      # last-prompt` is an agent attempt to spoof the prompt-binding.
+      # Deny regardless of --root presence (the agent could supply
+      # --root correctly while still forging the sha).
+      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
+        _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
       fi
     fi
   fi
@@ -216,6 +261,76 @@ fi
 if [ -z "$M_PROMPT_SHA" ]; then
   _emit_deny "Pre-flight marker missing prompt_sha256. Re-write with the current user prompt's sha256."
 fi
+
+# ---------------------------------------------------------------------------
+# I2 cross-check (plan-v2 audit F3 closure): compare marker prompt_sha256
+# against the ground-truth file written by the UserPromptSubmit hook
+# (.checkpoints/.last-user-prompt.<SESSION_ID>.json).
+#
+# I8 fail-closed with bootstrap window: if the ground-truth file is absent
+# for the current session, deny by default. Exception: install.mjs may
+# write a sentinel file with `bootstrap=true` and a recent wrote_at_ms;
+# accept that for 60 seconds so the first prompt of a fresh install can
+# land before the real UserPromptSubmit fires on prompt #2.
+#
+# Locally verifiable: the file path is constructed from REPO_ROOT (gate-
+# resolved) and SESSION_ID (passed by Claude Code in stdin), canonicalized
+# via the same tolerant lib used for write-side paths (I9).
+# ---------------------------------------------------------------------------
+if [ -n "$SESSION_ID" ]; then
+  LAST_PROMPT_SID_PATH="$PRIMARY_DIR/.last-user-prompt.${SESSION_ID}.json"
+  set +e
+  CANON_LAST_PROMPT_SID="$(_canonicalize_one "$LAST_PROMPT_SID_PATH" "$REPO_ROOT")"
+  ec_lps=$?
+  set -e
+  if [ $ec_lps -eq 99 ]; then
+    _emit_deny "preflight-gate.sh: canonicalize lib missing; cannot evaluate prompt-binding. Re-run install.mjs --install-hooks."
+  fi
+  if [ $ec_lps -ne 0 ]; then
+    # Canonicalization failed (e.g. symlink loop). Conservative deny.
+    _emit_deny "preflight-gate.sh: failed to canonicalize $LAST_PROMPT_SID_PATH ($CANON_LAST_PROMPT_SID); cannot verify prompt-binding."
+  fi
+  if [ ! -f "$CANON_LAST_PROMPT_SID" ]; then
+    _emit_deny "Pre-flight marker cannot be cross-checked against ground truth: $CANON_LAST_PROMPT_SID does not exist for session $SESSION_ID. The UserPromptSubmit hook should write this file on every real prompt. If this is the first prompt after a fresh install, run: node install.mjs --tool claude-code --install-hooks --bootstrap-last-prompt. Otherwise re-run install to wire the UserPromptSubmit hook."
+  fi
+  FILE_JSON="$(cat "$CANON_LAST_PROMPT_SID" 2>/dev/null || true)"
+  if [ -z "$FILE_JSON" ] || ! printf '%s' "$FILE_JSON" | jq empty 2>/dev/null; then
+    _emit_deny "Ground-truth file $CANON_LAST_PROMPT_SID is empty or not valid JSON. Re-run install.mjs --install-hooks to restore the UserPromptSubmit hook."
+  fi
+  FILE_BOOTSTRAP="$(printf '%s' "$FILE_JSON" | jq -r '.bootstrap // false')"
+  FILE_WROTE_AT_MS="$(printf '%s' "$FILE_JSON" | jq -r '.wrote_at_ms // 0')"
+  FILE_PROMPT_SHA="$(printf '%s' "$FILE_JSON" | jq -r '.prompt_sha256 // ""')"
+  if [ "$FILE_BOOTSTRAP" = "true" ]; then
+    # I8 60s bootstrap window. After 60s, the bootstrap sentinel is stale
+    # — fail-closed. Use node for portable ms-precision arithmetic.
+    NOW_MS="$(node -e 'process.stdout.write(String(Date.now()))' 2>/dev/null || echo 0)"
+    # Codex round-1 F2 on PR #246 (HOLD): validate FILE_WROTE_AT_MS is
+    # numeric BEFORE arithmetic. Without this, a sentinel containing
+    # `"wrote_at_ms": "123abc"` triggers a bash arithmetic error; the
+    # gate exits non-zero with no `permissionDecision:"deny"` JSON,
+    # making behavior depend on Claude Code's hook-error fallback rather
+    # than the gate's local fail-closed contract.
+    case "$FILE_WROTE_AT_MS" in
+      ''|*[!0-9]*) _emit_deny "Bootstrap sentinel at $CANON_LAST_PROMPT_SID has non-numeric wrote_at_ms ($FILE_WROTE_AT_MS); cannot evaluate age. Re-run install.mjs --install-hooks --bootstrap-last-prompt." ;;
+    esac
+    AGE_MS=$((NOW_MS - FILE_WROTE_AT_MS))
+    if [ "$AGE_MS" -gt 60000 ] || [ "$AGE_MS" -lt 0 ]; then
+      _emit_deny "Bootstrap sentinel at $CANON_LAST_PROMPT_SID is stale (age ${AGE_MS}ms > 60000ms). The UserPromptSubmit hook should have replaced it by now. Re-run install.mjs --install-hooks to wire the hook."
+    fi
+    # Within bootstrap window: allow without sha cross-check. The marker
+    # still has to satisfy all other gate checks below.
+  else
+    # Normal case: real UserPromptSubmit-written file. Compare shas.
+    if [ -z "$FILE_PROMPT_SHA" ]; then
+      _emit_deny "Ground-truth file $CANON_LAST_PROMPT_SID missing prompt_sha256 field. Re-run install.mjs --install-hooks."
+    fi
+    if [ "$M_PROMPT_SHA" != "$FILE_PROMPT_SHA" ]; then
+      # Truncate the shas for readability (full hashes are 64 chars).
+      _emit_deny "Pre-flight marker prompt_sha256 does not match the current real user prompt. Marker sha: ${M_PROMPT_SHA:0:16}…; ground-truth sha: ${FILE_PROMPT_SHA:0:16}… (from $CANON_LAST_PROMPT_SID). The marker is bound to a prior prompt. Re-run the pre-flight steps for the current prompt before retrying."
+    fi
+  fi
+fi
+
 if [ -z "$M_REQUIRED" ]; then
   _emit_deny "Pre-flight marker required_files is empty. Must include the bundle path: $BUNDLE_PATH."
 fi

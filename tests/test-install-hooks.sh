@@ -96,7 +96,7 @@ managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$")
 # 4 hook .sh files (checkpoint-gate, plan-gate, em-recall-sessionstart,
 # stop-gate) + 3 hooks/lib/.sh files (command-classifier, repo-root, +
 # marker-paths added 2026-05-09 with the .checkpoints/ migration) = 7.
-assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "7" "$managed_count"
+assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "9" "$managed_count"
 
 pg_manifest=$(jq -r '.files[] | select(.relative_path == "hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"
@@ -208,7 +208,7 @@ pre_total=$(jq '.hooks.PreToolUse | length' "$TEST_HOME/.claude/settings.json")
 # Post #86 PR-A: existing /some/user/plan-gate.sh + canonical checkpoint-gate
 # + canonical plan-gate = 3 entries. The stale /some/user/plan-gate.sh is
 # preserved verbatim (T4b) and the canonical is registered separately (T4b3).
-assert_eq "T4a PreToolUse now has 3 entries (existing plan-gate + canonical checkpoint-gate + canonical plan-gate)" "3" "$pre_total"
+assert_eq "T4a PreToolUse now has 4 entries (existing plan-gate + canonical checkpoint-gate + canonical plan-gate + canonical preflight-gate)" "4" "$pre_total"
 
 plan_gate_existing=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command == "/some/user/plan-gate.sh")] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T4b existing /some/user/plan-gate.sh entry preserved verbatim" "1" "$plan_gate_existing"
@@ -568,6 +568,104 @@ assert_eq "T16a --install-hooks-force overwrites divergent plan-gate with repo v
 
 pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T16b --install-hooks-force registers plan-gate after overwrite" "1" "$pg_count"
+
+# ---------------------------------------------------------------------------
+# T17: #238 plan-v2 C6 — preflight-prompt-helper.sh wired on UserPromptSubmit
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T17: UserPromptSubmit hook wiring (#238 C6) ---"
+reset_state
+run_installer --install-hooks
+
+# Hook file copied
+if [ -f "$TEST_HOME/.claude/hooks/preflight-prompt-helper.sh" ]; then
+  echo "  ✓ T17a preflight-prompt-helper.sh copied to ~/.claude/hooks/"
+  ((passed++))
+else
+  echo "  ✗ T17a preflight-prompt-helper.sh missing"
+  ((failed++))
+fi
+
+# Registered under UserPromptSubmit (event-agnostic addHookEntry path)
+ups_count=$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper"))] | length' "$TEST_HOME/.claude/settings.json" 2>/dev/null || echo 0)
+assert_eq "T17b preflight-prompt-helper registered on UserPromptSubmit" "1" "$ups_count"
+
+# No matcher on the entry (UserPromptSubmit always fires per hooks ref:85)
+ups_matcher=$(jq -r '.hooks.UserPromptSubmit[]? | select(.hooks[].command | test("preflight-prompt-helper")) | .matcher // "absent"' "$TEST_HOME/.claude/settings.json" 2>/dev/null)
+assert_eq "T17c UserPromptSubmit entry has no matcher" "absent" "$ups_matcher"
+
+# Timeout from HOOK_SPECS (5s)
+ups_timeout=$(jq -r '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper")) | .timeout' "$TEST_HOME/.claude/settings.json" 2>/dev/null)
+assert_eq "T17d UserPromptSubmit entry timeout=5s" "5" "$ups_timeout"
+
+# ---------------------------------------------------------------------------
+# T18: #238 plan-v2 C6 — --bootstrap-last-prompt sentinel write
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T18: --bootstrap-last-prompt (#238 C6) ---"
+reset_state
+
+# Bootstrap with --session-id flag (no env)
+HOME="$TEST_HOME" node "$INSTALLER" --bootstrap-last-prompt --project "$TEST_PROJECT" --session-id "boot-test-1" >/dev/null 2>&1
+EC=$?
+if [ $EC -eq 0 ] && [ -f "$TEST_PROJECT/.checkpoints/.last-user-prompt.boot-test-1.json" ]; then
+  echo "  ✓ T18a --session-id flag writes sentinel"
+  ((passed++))
+else
+  echo "  ✗ T18a sentinel not written (ec=$EC)"
+  ((failed++))
+fi
+
+# Sentinel has bootstrap=true + recent wrote_at_ms
+boot_flag=$(jq -r '.bootstrap' "$TEST_PROJECT/.checkpoints/.last-user-prompt.boot-test-1.json" 2>/dev/null)
+assert_eq "T18b sentinel bootstrap=true" "true" "$boot_flag"
+
+# Bootstrap with env CLAUDE_SESSION_ID
+reset_state
+HOME="$TEST_HOME" CLAUDE_SESSION_ID="env-sid-2" node "$INSTALLER" --bootstrap-last-prompt --project "$TEST_PROJECT" >/dev/null 2>&1
+if [ -f "$TEST_PROJECT/.checkpoints/.last-user-prompt.env-sid-2.json" ]; then
+  echo "  ✓ T18c CLAUDE_SESSION_ID env var works"
+  ((passed++))
+else
+  echo "  ✗ T18c env-var path failed"
+  ((failed++))
+fi
+
+# Missing session_id → error
+reset_state
+out=$(HOME="$TEST_HOME" node "$INSTALLER" --bootstrap-last-prompt --project "$TEST_PROJECT" 2>&1)
+EC=$?
+if [ $EC -ne 0 ] && echo "$out" | grep -q "no session_id"; then
+  echo "  ✓ T18d missing session_id → exit 1 + clear error"
+  ((passed++))
+else
+  echo "  ✗ T18d no-session_id behavior wrong (ec=$EC): $out"
+  ((failed++))
+fi
+
+# Invalid session_id format → error
+reset_state
+out=$(HOME="$TEST_HOME" node "$INSTALLER" --bootstrap-last-prompt --project "$TEST_PROJECT" --session-id "bad/sid" 2>&1)
+EC=$?
+if [ $EC -ne 0 ] && echo "$out" | grep -qE "does not match"; then
+  echo "  ✓ T18e bad session_id format → exit 1"
+  ((passed++))
+else
+  echo "  ✗ T18e bad-sid behavior wrong (ec=$EC): $out"
+  ((failed++))
+fi
+
+# Standalone (no --tool) succeeds
+reset_state
+out=$(HOME="$TEST_HOME" node "$INSTALLER" --bootstrap-last-prompt --project "$TEST_PROJECT" --session-id "standalone" 2>&1)
+EC=$?
+if [ $EC -eq 0 ] && [ -f "$TEST_PROJECT/.checkpoints/.last-user-prompt.standalone.json" ]; then
+  echo "  ✓ T18f standalone (no --tool) succeeds"
+  ((passed++))
+else
+  echo "  ✗ T18f standalone path failed (ec=$EC): $out"
+  ((failed++))
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

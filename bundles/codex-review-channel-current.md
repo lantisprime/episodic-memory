@@ -80,6 +80,15 @@ the harness, which is now the canonical channel.
 
 ## Marker schema
 
+The `prompt_sha256` field is now load-bearing: the pre-flight gate
+cross-checks it against `<repo>/.checkpoints/.last-user-prompt.<session_id>.json`,
+which is written by the `preflight-prompt-helper.sh` UserPromptSubmit hook
+on every real user prompt (#238 PR1 FU-C2). Both sides compute
+`sha256(utf8_bytes(JSON.parse(stdin).prompt))` via
+`scripts/lib/preflight-prompt-canon.mjs` — no trailing newline, post
+JSON-unescape. Markers with a fabricated sha that doesn't match the
+current real prompt are rejected.
+
 ```json
 {
   "session_id": "...",

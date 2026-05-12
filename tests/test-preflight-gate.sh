@@ -175,10 +175,33 @@ write_valid_marker() {
 EOF
 }
 
+# Helper: write the ground-truth `.last-user-prompt.<SESSION_ID>.json` file
+# that the C5 I2 cross-check requires. The marker's prompt_sha256 above is
+# the test-fixture string "abc123"; the cross-check requires this file's
+# prompt_sha256 to match. Use the same string so the cross-check passes
+# in tests that expect marker validation to fall through to later checks.
+write_ground_truth_last_prompt() {
+  local tmp="$1"
+  local sha="${2:-abc123}"
+  local now_ms
+  now_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+  cat > "$tmp/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{
+  "prompt_sha256": "$sha",
+  "session_id": "$SESSION_ID",
+  "transcript_path": "/tmp/x",
+  "cwd": "$tmp",
+  "repo_root": "$tmp",
+  "wrote_at_ms": $now_ms
+}
+EOF
+}
+
 # DIRECT-WRITE PATH: marker-write enforcement fires BEFORE marker validation.
 # So a Write to the marker path is denied even when a valid marker exists.
 # To test marker-validation paths, use a Bash claim-class trigger instead.
 write_valid_marker "$TMP"
+write_ground_truth_last_prompt "$TMP"
 run_gate "$TMP" "Bash" '{"command":"codex exec foo"}' "allow" "" "M10 valid marker → allow codex"
 
 # Wrong claim_class
@@ -205,6 +228,7 @@ run_gate "$TMP4" "Bash" '{"command":"codex exec foo"}' "deny" "repo_root" "M13 w
 # Bundle hash drift (modify bundle after marker written)
 TMP5="$(mktmp)"; stage_fixture "$TMP5"
 write_valid_marker "$TMP5"
+write_ground_truth_last_prompt "$TMP5"
 echo "DRIFT" >> "$TMP5/bundles/codex-review-channel-current.md"
 run_gate "$TMP5" "Bash" '{"command":"codex exec foo"}' "deny" "hash drift|sha-drift" "M14 bundle hash drift"
 
@@ -221,11 +245,13 @@ run_gate "$TMP7" "Bash" '{"command":"codex exec foo"}' "deny" "valid JSON" "M16 
 # Missing required_files
 TMP8="$(mktmp)"; stage_fixture "$TMP8"
 echo '{"session_id":"'"$SESSION_ID"'","transcript_path":"/tmp/x","prompt_sha256":"abc","prompt_index":1,"cwd":"'"$TMP8"'","repo_root":"'"$TMP8"'","memory_root":"x","claim_class":"codex-review-handoff","matched_triggers":{},"required_files":[],"loaded_files":[{"path":"x","mtime_ms":1,"sha256":"y"}],"artifact_steps_done":["x"],"created_at_ms":1}' > "$TMP8/.checkpoints/.preflight-done"
+write_ground_truth_last_prompt "$TMP8" "abc"
 run_gate "$TMP8" "Bash" '{"command":"codex exec foo"}' "deny" "required_files is empty|does not list bundle" "M17 empty required_files"
 
 # Required_files lacks bundle
 TMP9="$(mktmp)"; stage_fixture "$TMP9"
 echo '{"session_id":"'"$SESSION_ID"'","transcript_path":"/tmp/x","prompt_sha256":"abc","prompt_index":1,"cwd":"'"$TMP9"'","repo_root":"'"$TMP9"'","memory_root":"x","claim_class":"codex-review-handoff","matched_triggers":{},"required_files":["/some/other/file.md"],"loaded_files":[{"path":"/some/other/file.md","mtime_ms":1,"sha256":"y"}],"artifact_steps_done":["x"],"created_at_ms":1}' > "$TMP9/.checkpoints/.preflight-done"
+write_ground_truth_last_prompt "$TMP9" "abc"
 run_gate "$TMP9" "Bash" '{"command":"codex exec foo"}' "deny" "does not list bundle" "M18 required_files missing bundle"
 
 # ---------------------------------------------------------------------------
@@ -531,14 +557,16 @@ echo ""
 echo "--- F5-series: project-root binding ---"
 
 # F5a: gate spawned from caller cwd != target → marker artifacts under target
+# Updated for C2 plan-v2: last-prompt is now session-namespaced. Pass --session-id.
 TF="$(mktmp)"; stage_fixture "$TF"
 CALLER="$(mktmp)"
-echo '{"x":1}' | (cd "$CALLER" && node "$TF/scripts/preflight-marker-write.mjs" --root "$TF" --target last-prompt) >/dev/null
-if [ -f "$TF/.checkpoints/.last-user-prompt.json" ] && [ ! -f "$CALLER/.checkpoints/.last-user-prompt.json" ]; then
+F5A_SID="f5a-fixture"
+echo '{"x":1}' | (cd "$CALLER" && node "$TF/scripts/preflight-marker-write.mjs" --root "$TF" --target last-prompt --session-id "$F5A_SID") >/dev/null
+if [ -f "$TF/.checkpoints/.last-user-prompt.${F5A_SID}.json" ] && [ ! -f "$CALLER/.checkpoints/.last-user-prompt.${F5A_SID}.json" ]; then
   echo "  ✓ F5a artifacts land under --root, not caller cwd"
   passed=$((passed+1))
 else
-  echo "  ✗ F5a — TF: $([ -f "$TF/.checkpoints/.last-user-prompt.json" ] && echo yes || echo no), CALLER: $([ -f "$CALLER/.checkpoints/.last-user-prompt.json" ] && echo yes || echo no)"
+  echo "  ✗ F5a — TF: $([ -f "$TF/.checkpoints/.last-user-prompt.${F5A_SID}.json" ] && echo yes || echo no), CALLER: $([ -f "$CALLER/.checkpoints/.last-user-prompt.${F5A_SID}.json" ] && echo yes || echo no)"
   failed=$((failed+1))
 fi
 
@@ -591,6 +619,141 @@ else
   echo "  ✗ F1-neg — exit $ec output: $out"
   failed=$((failed+1))
 fi
+
+# ---------------------------------------------------------------------------
+# C5-series: plan-v2 audit findings F1-F7 closures
+#   I2  marker sha vs ground-truth file cross-check
+#   I7  agent-context --target last-prompt deny
+#   I8  fail-closed when ground-truth file absent (+ 60s bootstrap window)
+#   I9  reader canonicalization parity for the session-namespaced file
+#   regex tightening for the helper-invocation false-positive
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- C5-series: prompt-binding cross-check + helper-target deny ---"
+
+# I2a: marker sha matches ground-truth → allow (M10 already covers this; add
+# explicit I2 framing).
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+write_ground_truth_last_prompt "$TF" "abc123"
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "allow" "" "I2a marker sha matches ground-truth → allow"
+
+# I2b: marker sha differs from ground-truth → deny with both shas in reason
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"  # marker has prompt_sha256: "abc123"
+write_ground_truth_last_prompt "$TF" "different_sha_xyz"
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "does not match the current real user prompt" "I2b marker sha mismatch → deny"
+
+# I8a: ground-truth file absent → fail-closed deny
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+# Deliberately no write_ground_truth_last_prompt
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "does not exist for session" "I8a ground-truth file absent → deny"
+
+# I8b: bootstrap sentinel within 60s → allow
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+NOW_MS="$(node -e 'process.stdout.write(String(Date.now()))')"
+cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{"bootstrap": true, "wrote_at_ms": $NOW_MS, "session_id": "$SESSION_ID"}
+EOF
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "allow" "" "I8b bootstrap sentinel within 60s → allow"
+
+# I8c: bootstrap sentinel >60s old → deny (stale)
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+STALE_MS="$(node -e 'process.stdout.write(String(Date.now() - 90000))')"  # 90s ago
+cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{"bootstrap": true, "wrote_at_ms": $STALE_MS, "session_id": "$SESSION_ID"}
+EOF
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "Bootstrap sentinel.*stale" "I8c bootstrap sentinel stale → deny"
+
+# I8d: codex round-1 F2 on PR #246 — non-numeric wrote_at_ms must emit a
+# proper deny JSON, NOT a bash arithmetic error. Without the numeric guard,
+# behavior depended on Claude Code's hook-error fallback.
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{"bootstrap": true, "wrote_at_ms": "123abc", "session_id": "$SESSION_ID"}
+EOF
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "non-numeric wrote_at_ms" "I8d non-numeric wrote_at_ms → proper deny JSON"
+
+# I8e: empty wrote_at_ms also fail-closed
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
+{"bootstrap": true, "wrote_at_ms": "", "session_id": "$SESSION_ID"}
+EOF
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "non-numeric wrote_at_ms" "I8e empty wrote_at_ms → deny"
+
+# I7a: Bash invocation with --target last-prompt → DENY (agent spoof attempt)
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target last-prompt --session-id agent-spoof\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7a agent --target last-prompt → deny"
+
+# I7b: Bash invocation with --target preflight (legitimate) → no I7 deny
+# (other gate checks still apply: the marker write itself proceeds).
+TF="$(mktmp)"; stage_fixture "$TF"
+out="$(printf '{"tool_name":"Bash","tool_input":{"command":"node %s/scripts/preflight-marker-write.mjs --root %s --target preflight"},"cwd":"%s","session_id":"%s"}' \
+  "$TF" "$TF" "$TF" "$SESSION_ID" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
+if [ -z "$out" ] || ! printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("reserved for the UserPromptSubmit hook")' >/dev/null 2>&1; then
+  echo "  ✓ I7b --target preflight not blocked by I7 deny"
+  passed=$((passed+1))
+else
+  echo "  ✗ I7b --target preflight false-blocked: $out"
+  failed=$((failed+1))
+fi
+
+# Regex tightening: `test-preflight-marker-write.mjs` in argv should NOT
+# trigger the helper-invocation deny. (Before C5 it did — false-positive
+# blocking `node --test tests/test-marker-write-helper.mjs`-style usage.)
+TF="$(mktmp)"; stage_fixture "$TF"
+out="$(printf '{"tool_name":"Bash","tool_input":{"command":"node --test tests/test-preflight-marker-write.mjs"},"cwd":"%s","session_id":"%s"}' "$TF" "$SESSION_ID" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
+# M-4 tightening: pass iff out is empty OR permissionDecision is NOT "deny".
+# (Previous form passed when the reason didn't match a specific string —
+# any OTHER deny reason also satisfied it.)
+decision="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // ""' 2>/dev/null || echo "")"
+if [ -z "$out" ] || [ "$decision" != "deny" ]; then
+  echo "  ✓ regex no longer false-positives on test-preflight-marker-write.mjs"
+  passed=$((passed+1))
+else
+  echo "  ✗ regex still false-positives: $out"
+  failed=$((failed+1))
+fi
+
+# Regex still catches the real basename
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node preflight-marker-write.mjs --target preflight\"}" \
+  "deny" "invoked without explicit --root" "regex still catches bare basename sans --root"
+
+# Direct Write to session-namespaced last-prompt file → DENY
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Write" "{\"file_path\":\"$TF/.checkpoints/.last-user-prompt.fake-sid.json\",\"content\":\"x\"}" \
+  "deny" "forbidden|helper" "direct Write to namespaced last-prompt → DENY"
+
+# P2-1 (code-review FU): malicious session_id from stdin → conservative deny
+# Without the gate-side regex check, a session_id containing path-traversal
+# could escape .checkpoints/ via the constructed LAST_PROMPT_SID_PATH.
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+out="$(printf '{"tool_name":"Bash","tool_input":{"command":"codex exec foo"},"cwd":"%s","session_id":"../etc/passwd"}' "$TF" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
+if printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 && \
+   printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -qE "invalid chars"; then
+  echo "  ✓ P2-1 invalid session_id from stdin → deny + 'invalid chars' reason"
+  passed=$((passed+1))
+else
+  echo "  ✗ P2-1 invalid session_id path-traversal not caught: $out"
+  failed=$((failed+1))
+fi
+
+# I9: gate's read path is canonicalized — symlink target outside expected
+# location should be denied conservatively.
+# (Symlink edge-case test: replace the last-user-prompt file with a dangling
+# symlink and confirm conservative deny rather than ambiguous allow.)
+TF="$(mktmp)"; stage_fixture "$TF"
+write_valid_marker "$TF"
+ln -s "$TF/.checkpoints/non-existent-target.json" "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json"
+run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "does not exist|cannot.*canonicalize|cannot.*verify" "I9 dangling symlink for ground-truth → deny"
 
 # ---------------------------------------------------------------------------
 # Results
