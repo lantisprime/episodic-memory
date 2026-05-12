@@ -531,14 +531,16 @@ echo ""
 echo "--- F5-series: project-root binding ---"
 
 # F5a: gate spawned from caller cwd != target → marker artifacts under target
+# Updated for C2 plan-v2: last-prompt is now session-namespaced. Pass --session-id.
 TF="$(mktmp)"; stage_fixture "$TF"
 CALLER="$(mktmp)"
-echo '{"x":1}' | (cd "$CALLER" && node "$TF/scripts/preflight-marker-write.mjs" --root "$TF" --target last-prompt) >/dev/null
-if [ -f "$TF/.checkpoints/.last-user-prompt.json" ] && [ ! -f "$CALLER/.checkpoints/.last-user-prompt.json" ]; then
+F5A_SID="f5a-fixture"
+echo '{"x":1}' | (cd "$CALLER" && node "$TF/scripts/preflight-marker-write.mjs" --root "$TF" --target last-prompt --session-id "$F5A_SID") >/dev/null
+if [ -f "$TF/.checkpoints/.last-user-prompt.${F5A_SID}.json" ] && [ ! -f "$CALLER/.checkpoints/.last-user-prompt.${F5A_SID}.json" ]; then
   echo "  ✓ F5a artifacts land under --root, not caller cwd"
   passed=$((passed+1))
 else
-  echo "  ✗ F5a — TF: $([ -f "$TF/.checkpoints/.last-user-prompt.json" ] && echo yes || echo no), CALLER: $([ -f "$CALLER/.checkpoints/.last-user-prompt.json" ] && echo yes || echo no)"
+  echo "  ✗ F5a — TF: $([ -f "$TF/.checkpoints/.last-user-prompt.${F5A_SID}.json" ] && echo yes || echo no), CALLER: $([ -f "$CALLER/.checkpoints/.last-user-prompt.${F5A_SID}.json" ] && echo yes || echo no)"
   failed=$((failed+1))
 fi
 
