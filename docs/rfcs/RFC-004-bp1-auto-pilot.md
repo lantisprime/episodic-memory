@@ -1862,3 +1862,57 @@ Per-branch coverage now explicit; v9.3 ε rule satisfied.
 **Status (v3.8):** still `draft`. Verified locally via `codex review` CLI; will re-run after v3.8 push to confirm clean. If clean, file async em-store request as audit trail.
 
 ---
+
+### v3.13 — Post-acceptance doc catch-up after PR-1c-A + PR-1c-B (2026-05-13)
+
+Post-acceptance maintenance pass. The RFC was flipped to `accepted` at v3.12 (2026-05-06); M1 BP-1 Foundation shipped via PR #200 (commit `2827ec3`, `init-run` + HMAC + canonicalize + run-state) and PR #206 (commit `40c8e02`, finalize-replay slice 2). This v3.13 entry catches the RFC text up to the shipped code per the resolutions pinned in decision episode `20260507-113139-m1-rfc-ambiguity-resolutions-before-plan-2e12`.
+
+#### Scope (doc-only)
+
+1. §567-569 — distinguish `bp1-run-started` (M1 cold-start, HMAC by per-run `run.key`) from `bp1-activation` (M5 flag-flip, HMAC by `verify-key`).
+2. §689-719 — canonical-payload subsection for `state-transition:run-started` pinning the 5 fields signed in M1 (`scheduled_tasks_capability`, `probe_reason`, `degraded_mode_statement`, `native_probe_performed`, `t2_fallback`). Tamper × 5 tests at `tests/test-bp1-canonicalize.mjs:134-167` (already shipped).
+3. §"Run-state index schema" (new under HMAC/canonicalize/replay) — pin path `<project>/.episodic-memory/runs/_index.json`, schema, **state enum** `active|complete|aborted|abandoned|archived` (terminal subset = `{complete, aborted, abandoned, archived}` per `VALID_TERMINAL_STATES` at `scripts/lib/bp1-run-state.mjs:58`), atomicity contract (lockdir mutex + 30s stale + tier-2 mtime fallback, per-process unique temp + renameSync).
+4. §815 + §824 H17 — invariant-preservation note: shred-before-terminal ordering (steps 6→7) MUST be preserved per PR #206 BLOCKER-2 closure; the reverse order re-opens I-4 ("terminal state after no usable live `run.key` remains"). Issue #190 patch 4's proposed reorder is REJECTED. H17 wording expanded to name `finalize-recover` State A/B/D recovery paths.
+5. §777 + H27/H28 — parameterized across local + global stores (H27a/b + H28a/b); explicit "direct file scan, not em-search" wording to clarify the implementation contract at `scripts/bp1-orchestrator.mjs:484-486` (`decisionLogFence`).
+6. Frontmatter: `version: 3.12` → `3.13`; `last_modified: 2026-05-06` → `2026-05-13`.
+
+#### Review trail (Rule 18 step 2)
+
+| Round | Reviewer | Verdict | Episode |
+|---|---|---|---|
+| Plan-time matrix | `negative-scenario-planner` (Anthropic Agent SDK) | HOLD → path-split | inline output (session 2026-05-13) |
+| Codex r1 | OpenAI Codex via second-opinion harness | HOLD with 2 P2 follow-ups | reply `20260512-231824-reply-codex-to-20260512-231603-rfc-004-v-09a5` |
+| Codex r2 (HOLD close-out) | OpenAI Codex via second-opinion harness | **ACCEPT** | reply `20260512-232411-reply-codex-to-20260512-232234-rfc-004-v-92ee` |
+
+#### Path A vs Path B decision (planner-agent matrix)
+
+Issue #190 patch 4 originally proposed reordering `finalizeRun` steps 6 (shred) and 7 (markTerminal). The plan-time matrix found this would reopen the **I-4** invariant gap closed by PR #206 BLOCKER-2 (reply episode `20260509-030119-pr-1c-b-slice-2-codex-code-review-r-2d2f`) — leaving a post-crash window of `state == 'complete'` AND a live `run.key` on disk would permit forged-signed evidence after the run is declared terminal.
+
+The matrix also surfaced that the reorder would break the G5_TABLE crash-recovery contract at `tests/test-bp1-finalize-run.mjs:607-616` (which locks `N=6 ⇒ keyAfter=false`), widen the "terminal" semantics, and force `finalize-recover` State A to handle "terminal + key-live" as the normal post-crash path instead of a tolerated re-run edge.
+
+**Path A** (chosen): drop the code reorder; add an invariant-preservation explanation citing BLOCKER-2; expand H17 wording to name the recovery states. No code changes, no test changes.
+
+**Path B** (rejected): the reorder. Would require superseding the BLOCKER-2 decision episode with new evidence, rewriting §846 state machine, flipping G5_TABLE, updating `finalize-recover` State A, and adding multi-actor race tests.
+
+#### Round-1 findings (resolved in this v3.13 entry)
+
+- **P2 — Make Second opinion v3.13 entry mandatory in scope.** Resolved: this section.
+- **P2 — §"Run-state index schema" must include the state enum, not only the object shape.** Resolved: enum + terminal subset pinned in the new §"Run-state index schema" subsection.
+
+#### Verification
+
+Codex r2 independently re-ran:
+- `node scripts/validate-rfc-canonical-fields.mjs` — PASS (19 canonical fields)
+- `node scripts/validate-rfc-failure-table.mjs` — PASS (37 prose rows / 37 YAML)
+- `node tests/test-bp1-orchestrator-init-run.mjs` — PASS 12/12
+- `node tests/test-bp1-finalize-run.mjs` — PASS 45/45
+- `node tests/test-bp1-canonicalize.mjs` — PASS 21/21
+
+No code paths edited → no test regression risk.
+
+#### Issues closed by v3.13
+
+- **#185** — M1 acceptance: activation episode must canonically sign the 5 probe fields. Acceptance 1-3 verified shipped at `scripts/lib/bp1-canonicalize.mjs:70-77` (registration), `scripts/bp1-orchestrator.mjs:308-340` (signing path), `tests/test-bp1-canonicalize.mjs:134-167` (per-field tamper × 5). Note Issue body said "the activation episode"; the shipped name is `bp1-run-started` per Resolution 4 / §567-569 distinction.
+- **#190** — RFC v3.13 patch list: items 1 (§203/§567-569), 2 (§800 / new run-state schema subsection), 3 (§689-719 verified already-correct, 5-fields subsection at line 716+), 4 (REJECTED reorder; replaced with §815 + §824 invariant-preservation note per planner matrix + Codex consensus), 5 (H17 wording expanded inline as part of patch 4 resolution), 6 (§777 + H27/H28 parameterized). CI gate update from patch 3 is N/A — `validate-rfc-canonical-fields.mjs` already bidirectionally validates via `TYPE_SPECIFIC_CANONICAL_FIELDS`; no edit needed.
+
+---
