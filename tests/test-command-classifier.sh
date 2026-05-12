@@ -486,6 +486,17 @@ assert_preflight_cmd "Q56 direnv exec ." \
 # Q57: stacked runner + classic wrapper
 assert_preflight_cmd "Q57 sudo + uv run codex" \
   'sudo -u root uv run codex exec foo' "codex-review-handoff"
+# Q58-Q62: systemd-run boolean flags (codex round 4 finding `...fa74`)
+assert_preflight_cmd "Q58 systemd-run --user only" \
+  'systemd-run --user codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q59 systemd-run --scope --user" \
+  'systemd-run --scope --user codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q60 systemd-run --pty --user" \
+  'systemd-run --pty --user codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q61 systemd-run with arg-taking" \
+  'systemd-run --unit myapp --user codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "Q62 systemd-run -G boolean" \
+  'systemd-run -G codex exec foo' "codex-review-handoff"
 
 echo ""
 echo "--- classify_preflight_path ---"

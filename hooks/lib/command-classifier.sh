@@ -1356,8 +1356,15 @@ _preflight_unwrap_index() {
           long_arg_re='^--(pid|sched-runtime|sched-deadline|sched-period)$'
           ;;
         systemd-run)
-          arg_re='^-[uGtMpES]$'
-          long_arg_re='^--(unit|user|machine|property|setenv|description|slice|on-active|on-boot|on-startup|on-unit-active|on-unit-inactive|on-calendar|service-type|exec-directory|state-directory|cache-directory|logs-directory|configuration-directory|working-directory|gid|uid|nice)$'
+          # Only short opts that ACTUALLY take an argument:
+          #   -u (--unit), -M (--machine), -p (--property), -E (--setenv).
+          # NOT: -G (--collect, boolean), -t (--pty, boolean), -S (--shell, boolean).
+          arg_re='^-[uMpE]$'
+          # Long opts that take an argument. Booleans intentionally excluded:
+          # --user, --system, --scope, --pty, --tty, --quiet, --no-block,
+          # --no-ask-password, --collect, --remain-after-exit, --send-sighup,
+          # --pipe, --shell, --wait. Codex r4 finding `...fa74`.
+          long_arg_re='^--(unit|machine|property|setenv|description|slice|on-active|on-boot|on-startup|on-unit-active|on-unit-inactive|on-calendar|service-type|exec-directory|state-directory|cache-directory|logs-directory|configuration-directory|working-directory|gid|uid|nice)$'
           ;;
         flatpak-spawn)
           arg_re=''
