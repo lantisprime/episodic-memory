@@ -752,9 +752,10 @@ function isCarveOutAllow_v5(r) {
   else bad('5.6', 'expected block when no baseline anywhere')
 }
 
-// 5.7 plan-pending lstat ENOENT-equivalent (we test the "absent" branch
-// covered by ENOENT being silently skipped — same as U2). At gate level:
-// no plan-pending anywhere → exemption ineligible → existing carve-out path.
+// 5.7 NEGATIVE class — no plan-pending anywhere → exemption ineligible
+// (anyExisted=false). Tests the negative class of the eligibility predicate;
+// the strict-lstat-fails-with-non-ENOENT branch is covered by 5.11/5.12 +
+// U4 in tests/test-em-strict-lstat.mjs (code-review C2 renaming).
 {
   const d = mkRepo('5-7'); cleanupDirs.push(d)
   const claudeDir = path.join(d, '.checkpoints')
@@ -763,7 +764,7 @@ function isCarveOutAllow_v5(r) {
   fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
   // No plan-pending — exemption ineligible. Carve-out evaluates;
   // checkpoint-required is stale, baseline is current → carve-out fires → defer
-  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.7: no plan-pending → exemption ineligible, carve-out defers')
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.7 (C2 negative class): no plan-pending → exemption ineligible, carve-out defers')
   else bad('5.7', 'expected carve-out defer when no plan-pending')
 }
 
@@ -858,6 +859,33 @@ function isCarveOutAllow_v5(r) {
   } else {
     bad('5.11', 'expected block when primary marker dir is unreadable (ENOTDIR)')
   }
+}
+
+// 5.13 (code-review B1): active plan-pending + active checkpoint-required
+// → exemption fires → defer. Documents the intentional behavior change in
+// rank-1 v7: the new exemption supersedes the carve-out's TASK_SIGNAL_MARKERS
+// check when plan-pending is in flight, because the agent is in the plan-
+// review phase (no writes happening), and the triangle deadlock between
+// checkpoint-gate + plan-gate + stop-gate would otherwise be unrecoverable.
+// Plan-gate provides the writer-side defense; stop-gate stepping aside is
+// the deadlock-break.
+{
+  const d = mkRepo('5-13'); cleanupDirs.push(d)
+  const claudeDir = path.join(d, '.checkpoints')
+  fs.writeFileSync(path.join(claudeDir, '.session-baseline'), '')
+  setMtime(path.join(claudeDir, '.session-baseline'), Date.now() - 30_000)
+  // checkpoint-required ACTIVE (mid-session re-arm)
+  const preReq = path.join(claudeDir, '.checkpoint-required')
+  fs.writeFileSync(preReq, '')
+  setMtime(preReq, Date.now() + 5_000)
+  // plan-pending ACTIVE
+  const planP = path.join(claudeDir, '.plan-approval-pending')
+  fs.writeFileSync(planP, '')
+  setMtime(planP, Date.now() + 5_000)
+  // Pre-fix: carve-out would block (active TASK_SIGNAL_MARKERS).
+  // Post-fix: exemption fires first → defer (intentional).
+  if (isCarveOutAllow_v5(runGateStop(d))) ok('5.13 (B1): active plan-pending + active checkpoint-required → defer (exemption supersedes carve-out)')
+  else bad('5.13', 'expected exemption to fire and defer even with another active TASK_SIGNAL marker')
 }
 
 // 5.12 ENOTDIR on primary baseline (.checkpoints is a regular file) +

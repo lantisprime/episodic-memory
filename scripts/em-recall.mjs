@@ -201,6 +201,16 @@ if (gateFlag === 'stop') {
   // BOTH evaluated across primary and legacy. resolveMarkerRead's primary-
   // first ordering would have recreated the deadlock when primary is stale
   // and legacy is active during burn-in.
+  //
+  // Code-review B1: this exemption INTENTIONALLY supersedes the
+  // stopGateCarveOutApplies() check below for the active-plan-pending case.
+  // If plan-pending is mid-session active, the agent is in plan-review
+  // (no writes happening), and the checkpoint-gate + plan-gate + stop-gate
+  // triangle would otherwise be unrecoverable. Plan-gate provides the
+  // writer-side defense via its independent .plan-approval-pending check;
+  // stop-gate stepping aside is the deadlock-break. The exemption fires
+  // EVEN when other TASK_SIGNAL_MARKERS (.checkpoint-required,
+  // .post-checkpoint-required) are also active — see test 5.13.
   const planPending = _maxMtimeAcrossRootsStrict(REPO_ROOT, '.plan-approval-pending')
   const baseStrict = _maxMtimeAcrossRootsStrict(REPO_ROOT, BASELINE_NAME)
   if (

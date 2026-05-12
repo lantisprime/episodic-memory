@@ -153,13 +153,30 @@ _is_canonical_marker_path() {
   return 1
 }
 
-# Codex round-4 F12 + round-5 F15: relative-marker-reference detection.
-# Matches `.checkpoints/<marker>` or `.claude/<marker>` as a RELATIVE
-# path (no leading `/`). (^|[^/])(\./)* handles bare, ./, ././, ../ forms.
+# Code-review A1: strip shell quote/escape characters before regex match.
+# Bash quoting that breaks the contiguous `.checkpoints/<marker>` substring
+# (e.g. `touch ".checkpoints"/.pre-checkpoint-done`) evades the raw regex
+# while the actual tool still writes to the unquoted path. Quote-stripping
+# preserves the path's effective shape for detection purposes; it's a
+# defense-in-depth lexer, not a full bash parser (eval/$() expansion is
+# out of scope — classify_command labels those `unsafe_complex`).
+_strip_shell_quotes() {
+  local s="$1"
+  s="${s//\"/}"
+  s="${s//\'/}"
+  s="${s//\\/}"
+  printf '%s' "$s"
+}
+
+# Codex round-4 F12 + round-5 F15 + code-review A1: relative-marker-reference
+# detection. Matches `.checkpoints/<marker>` or `.claude/<marker>` as a
+# RELATIVE path (no leading `/`). (^|[^/])(\./)* handles bare, ./, ././, ../.
+# Runs on the quote-stripped command so quote-broken bypasses are caught.
 # Returns 0 iff a relative marker path is referenced.
 _command_has_relative_marker_path() {
-  local cmd="$1"
-  printf '%s' "$cmd" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)'
+  local cmd_stripped
+  cmd_stripped="$(_strip_shell_quotes "$1")"
+  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)'
 }
 
 # E2E-discovered absolute-non-canonical detection: for Bash commands where
@@ -170,19 +187,32 @@ _command_has_relative_marker_path() {
 # marker case. Echoes the first offending path on match (exit 0); empty on
 # no match (exit 1).
 _command_first_absolute_noncanonical_marker() {
-  local cmd="$1"
+  # Empty output = no wrong-root marker found; non-empty = the offending
+  # path. Function always returns 0 so `x="$(...)"` under `set -e` never
+  # triggers script exit on the no-match case (caller uses `[ -n "$x" ]`).
+  local cmd
+  cmd="$(_strip_shell_quotes "$1")"
   local matches p basename
   matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)' 2>/dev/null || true)
-  [ -z "$matches" ] && return 1
+  [ -z "$matches" ] && return 0
   while IFS= read -r p; do
     [ -z "$p" ] && continue
+    # If the extracted path appears as `.<p>` in the command, that's a
+    # relative-form reference (./<p> or part of ../<p>) — already handled
+    # by _command_has_relative_marker_path. Skip to avoid false-positive
+    # blocking of canonical writes from MAIN cwd (e.g.
+    # `echo x > ./.checkpoints/<marker>` with cwd == REPO_ROOT). Uses
+    # `grep -F` for literal substring match.
+    if printf '%s' "$cmd" | grep -qF ".${p}"; then
+      continue
+    fi
     basename="${p##*/}"
     if [ "$p" != "$PRIMARY_DIR/$basename" ] && [ "$p" != "$LEGACY_DIR/$basename" ]; then
       printf '%s' "$p"
       return 0
     fi
   done <<< "$matches"
-  return 1
+  return 0
 }
 
 # Emit wrong-root BLOCK decision for absolute-path attempts (Write/Edit or
@@ -270,17 +300,19 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     _block_relative_marker_in_worktree "$COMMAND"
   fi
 
-  # E2E-discovered: when CWD != REPO_ROOT and the command has an ABSOLUTE
-  # non-canonical marker path (typically worktree-absolute like
-  # `touch $WT_DIR/.checkpoints/X`), classifier returns shared_write so the
-  # marker_write branch never fires. Check explicitly here so the
-  # wrong-root block reason is emitted instead of falling through to the
-  # generic pre-gate reason.
-  if [ "$CWD" != "$REPO_ROOT" ]; then
-    NONCANON_ABS="$(_command_first_absolute_noncanonical_marker "$COMMAND")"
-    if [ -n "$NONCANON_ABS" ]; then
-      _block_wrong_root_marker "$NONCANON_ABS"
-    fi
+  # Code-review A2: drop the `CWD != REPO_ROOT` guard so this check ALSO
+  # fires from MAIN cwd. The predicate itself filters non-canonical paths
+  # by exact-equality vs $PRIMARY_DIR/$basename / $LEGACY_DIR/$basename,
+  # so it cannot false-positive on canonical absolute paths.
+  #
+  # Catches: ABSOLUTE non-canonical marker paths in Bash commands from
+  # any cwd, e.g. `touch /tmp/.checkpoints/X` from main cwd OR
+  # `touch $WT_DIR/.checkpoints/X` from worktree cwd. Classifier returns
+  # shared_write for touch/mv/cp/install/dd-of with empty TARGET, so the
+  # marker_write branch can't see them; this precheck fills that gap.
+  NONCANON_ABS="$(_command_first_absolute_noncanonical_marker "$COMMAND")"
+  if [ -n "$NONCANON_ABS" ]; then
+    _block_wrong_root_marker "$NONCANON_ABS"
   fi
 
   # marker_write deadlock-prevention allowlist. Only allow when the gate's

@@ -956,6 +956,57 @@ assert_marker_absent "B-23b. After B-23: canonical marker NOT created (no PRE_DO
 assert_marker_exists "B-23c. After B-23: trigger marker (PRE_REQ) preserved" \
   "$PRE_REQ"
 
+# ---- Code-review A1 — quote-broken bypasses ----
+# Bash quoting that breaks the contiguous `.checkpoints/<marker>` substring
+# must still be detected because the shell evaluates the quotes before
+# the actual write occurs.
+
+assert_blocked "B-24 (A1). Bash: touch with double-quoted .checkpoints from worktree" \
+  "$(mock_json_cwd 'Bash' 'touch ".checkpoints"/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-25 (A1). Bash: touch with single-quoted .checkpoints from worktree" \
+  "$(mock_json_cwd 'Bash' "touch '.checkpoints'/.pre-checkpoint-done" "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-26 (A1). Bash: echo with single-quoted marker basename from worktree" \
+  "$(mock_json_cwd 'Bash' "echo x > .checkpoints/'.pre-checkpoint-done'" "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+assert_blocked "B-27 (A1). Bash: backslash-broken marker from worktree" \
+  "$(mock_json_cwd 'Bash' 'touch .checkpo\ints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
+  "Relative marker reference"
+
+# ---- Code-review A2 — absolute non-canonical from MAIN cwd (shared_write verbs) ----
+# Pre-fix the absolute-noncanonical detection was gated on CWD != REPO_ROOT,
+# so `touch /tmp/.checkpoints/<marker>` from main cwd fell through to
+# shared_write -> pre-gate. Now it must block as wrong-root.
+
+assert_blocked "B-28 (A2). Bash: touch /tmp/.checkpoints/<marker> from MAIN cwd" \
+  "$(mock_json_cwd 'Bash' "touch /tmp/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-29 (A2). Bash: mv to /tmp/.checkpoints/<marker> from MAIN cwd" \
+  "$(mock_json_cwd 'Bash' "mv /tmp/x /tmp/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-30 (A2). Bash: cp to /tmp/.checkpoints/<marker> from MAIN cwd" \
+  "$(mock_json_cwd 'Bash' "cp /tmp/x /tmp/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-31 (A2). Bash: install to /tmp/.checkpoints/<marker> from MAIN cwd" \
+  "$(mock_json_cwd 'Bash' "install /tmp/x /tmp/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+assert_blocked "B-32 (A2). Bash: dd of=/tmp/.checkpoints/<marker> from MAIN cwd" \
+  "$(mock_json_cwd 'Bash' "dd if=/tmp/x of=/tmp/.checkpoints/.pre-checkpoint-done" "$TEST_DIR")" \
+  "non-canonical path"
+
+# A2 no-FP: canonical absolute marker from MAIN cwd should still NOT
+# trigger the wrong-root block (predicate filters canonical paths).
+assert_no_wrong_root_block "B-33 (A2 no-FP). Bash: touch on canonical $MARKER_DIR/<marker> from MAIN cwd" \
+  "$(mock_json_cwd 'Bash' "touch $MARKER_DIR/.checkpoint-required" "$TEST_DIR")"
+
 # Cleanup B-test worktree
 git -C "$TEST_DIR" worktree remove --force "$WORKTREE_DIR" 2>/dev/null
 git -C "$TEST_DIR" branch -D test-wt-branch 2>/dev/null
