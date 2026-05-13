@@ -53,6 +53,21 @@ function flag(name) {
   return argv[i + 1]
 }
 
+// flagAll(name) — collect every value of a repeated flag. Skips values that
+// start with -- (next flag, not a tag). Mirrors em-store/em-revise.
+function flagAll(name) {
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === name && i + 1 < argv.length) {
+      const val = argv[i + 1]
+      if (val.startsWith('--')) continue
+      out.push(val)
+      i++
+    }
+  }
+  return out
+}
+
 function hasFlag(name) {
   return argv.indexOf(name) !== -1
 }
@@ -219,7 +234,16 @@ async function cmdRequest() {
 
   // Write request via chosen storage.
   const summary = flag('--summary') || `second-opinion request (${provider})`
-  const tagsRaw = flag('--tags') || ''
+  // Merge --tags <a,b> + repeated --tag <x> into a single comma-separated
+  // string for downstream consumers (preamble composer, meta). Dedup +
+  // lowercase. Same shape as em-store/em-revise. Codex r1 same-class catch.
+  const _tagsRawFlag = flag('--tags') || ''
+  const _tagRepeats = flagAll('--tag')
+  const _mergedTags = [...new Set([
+    ..._tagsRawFlag.split(','),
+    ..._tagRepeats,
+  ].map(t => t.trim().toLowerCase()).filter(Boolean))].sort()
+  const tagsRaw = _mergedTags.join(',')
   const workArea = flag('--work-area') || ''
   const round = flag('--round') || '1'
   const meta = { summary, tags: tagsRaw, 'work-area': workArea, round, provider }

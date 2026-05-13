@@ -63,7 +63,12 @@ function flag(name) {
 function flagAll(name) {
   const out = []
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === name && i + 1 < argv.length) out.push(argv[i + 1])
+    if (argv[i] === name && i + 1 < argv.length) {
+      const val = argv[i + 1]
+      if (val.startsWith('--')) continue
+      out.push(val)
+      i++
+    }
   }
   return out
 }
@@ -87,6 +92,7 @@ const commandInventoryRef = flag('--command-inventory-ref')
 const triggeredBy = flag('--triggered-by')
 const projectFlag = flag('--project')
 const tagsRaw = flag('--tags')
+const tagRepeats = flagAll('--tag')
 const scope = flag('--scope') || 'inherit'
 const dryRun = hasFlag('--dry-run')
 const patternId = flag('--pattern-id') || 'bp-001-implementation-workflow'
@@ -428,7 +434,7 @@ if (dryRun) {
 // Write episode (mirrors em-store.mjs primitives)
 // ---------------------------------------------------------------------------
 const project = projectFlag || path.basename(process.cwd())
-const inputTags = (tagsRaw ? tagsRaw.split(',') : []).map(t => t.trim().toLowerCase()).filter(Boolean)
+const inputTags = [...(tagsRaw ? tagsRaw.split(',') : []), ...tagRepeats].map(t => t.trim().toLowerCase()).filter(Boolean)
 const baseTags = ['workflow.lifecycle', 'review-request', `task:${task.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`]
 const tags = [...new Set([...baseTags, ...inputTags])].sort()
 
