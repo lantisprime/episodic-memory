@@ -30,6 +30,27 @@ jobs:
       - name: Run plan-marker cross-session E2E tests (X1-X13)
         run: node tests/test-plan-marker-cross-session.mjs
 
+      - name: Run plan-marker classifier tests (E1-E5 + E5b + F-3 + F17/F18)
+        run: bash tests/test-plan-marker-classifier.sh
+
+      - name: Run checkpoints-migration regression (verifies F12 + legacy preserved)
+        run: node tests/test-checkpoints-migration.mjs
+
+      - name: Run em-recall session-start orphan-sweep regression
+        run: node tests/test-em-recall-session-start-early-exit.mjs
+
+      - name: Run em-strict-lstat regression
+        run: node tests/test-em-strict-lstat.mjs
+
+      - name: Run issue-146 plan-pending deferral regression
+        run: node tests/test-issue-146.mjs
+
+      - name: Run command-classifier full regression
+        run: bash tests/test-command-classifier.sh
+
+      - name: Run stop-gate regression
+        run: bash tests/test-stop-gate.sh
+
       - name: Run preflight-gate regression tests
         run: bash tests/test-preflight-gate.sh
 
