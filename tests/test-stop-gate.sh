@@ -306,7 +306,12 @@ mkdir -p "$L3_MAIN/.claude"
 touch "$L3_MAIN/.claude/.checkpoint-required"
 rm -f "$L3_MAIN/.claude/.post-checkpoint-done"
 input_with_cwd="$(printf '{"cwd":"%s","stop_hook_active":false}' "$L3_MAIN")"
-out="$(cd /private/tmp 2>/dev/null && echo "$input_with_cwd" | HOME="$L3_HOME" bash "$HOOK" 2>/dev/null)"
+# Use a platform-agnostic temp dir for "outside any project" cwd. `/private/tmp`
+# was macOS-specific; on Linux it doesn't exist and `cd` failed under set -e
+# (bash 5 errexit extends to assignment-with-cmdsubst). PR #271 CI catch.
+OUTSIDE_DIR="$(mktemp -d)"
+out="$(cd "$OUTSIDE_DIR" 2>/dev/null && echo "$input_with_cwd" | HOME="$L3_HOME" bash "$HOOK" 2>/dev/null)"
+rmdir "$OUTSIDE_DIR" 2>/dev/null || true
 if echo "$out" | grep -qE '"decision":[[:space:]]*"block"'; then
   pass "L3.8: hook from /private/tmp + input cwd→armed repo → blocks (Codex finding 1 regression)"
 else
