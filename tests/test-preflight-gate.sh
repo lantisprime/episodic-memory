@@ -45,6 +45,8 @@ stage_fixture() {
   cp "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/local-dir.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$tmp/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$tmp/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/hooks/preflight-gate.sh" "$tmp/hooks/"
   cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$tmp/hooks/lib/"
   cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$tmp/hooks/lib/"

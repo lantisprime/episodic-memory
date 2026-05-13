@@ -38,6 +38,8 @@ stage_repo() {
   cp "$REPO_ROOT/scripts/lib/preflight-prompt-canon.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$target/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$target/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$target/hooks/lib/"
   # Make it git-detectable so resolve_repo_root returns this dir, not /.
   ( cd "$target" && git init -q && git config user.email t@t && git config user.name t )

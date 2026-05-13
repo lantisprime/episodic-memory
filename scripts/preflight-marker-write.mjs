@@ -60,7 +60,8 @@ import path from 'path'
 import process from 'process'
 
 import { ensurePrimaryDir, primaryMarkerPath } from './lib/marker-paths.mjs'
-import { canonicalizePathTolerant } from './lib/canonicalize-path-tolerant.mjs'
+import { SESSION_ID_RE } from './lib/session-id.mjs'
+import { validateRoot, RootValidationError } from './lib/marker-root-validation.mjs'
 
 // preflight target → fixed basename; last-prompt target → suffix template
 // where {sid} is substituted with the validated --session-id value.
@@ -69,11 +70,9 @@ const VALID_TARGETS = {
   'last-prompt': { kind: 'session', template: '.last-user-prompt.{sid}.json' }
 }
 
-// session_id format: alphanumeric, underscore, dash. No dots (could collide
-// with the `.json` suffix), no slashes (path traversal), length-capped.
-// Claude Code session IDs are UUIDs (hyphenated hex); this regex covers
-// them while rejecting anything that could escape the basename.
-const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
+// SESSION_ID_RE imported from ./lib/session-id.mjs (shared with plan-marker.mjs
+// per #268 fix). Char-class: [A-Za-z0-9_-], length 1..128. No dots (could
+// collide with the `.json` suffix), no slashes (path traversal).
 
 function fail(code, message) {
   process.stderr.write(`preflight-marker-write: ${message}\n`)
@@ -118,36 +117,15 @@ function resolveBasename(target, sessionId) {
   return spec.template.replace('{sid}', sessionId)
 }
 
-function validateRoot(rootArg) {
-  if (!rootArg) fail(4, 'ROOT_REQUIRED: --root <abs> is mandatory; no cwd fallback')
-  if (!path.isAbsolute(rootArg)) fail(5, `ROOT_INVALID: --root must be absolute, got: ${rootArg}`)
-
-  let canonical
+// validateRoot extracted to ./lib/marker-root-validation.mjs (#268 fix).
+// Helper wraps the throwing API so callers retain fail()-based exit semantics.
+function validateRootOrExit(rootArg) {
   try {
-    canonical = canonicalizePathTolerant(rootArg, process.cwd())
+    return validateRoot(rootArg)
   } catch (e) {
-    fail(5, `ROOT_INVALID: canonicalization failed: ${e.message}`)
+    if (e instanceof RootValidationError) fail(e.code, e.message)
+    throw e
   }
-
-  let stat
-  try {
-    stat = fs.statSync(canonical)
-  } catch (e) {
-    fail(5, `ROOT_INVALID: ${canonical} does not exist (${e.code})`)
-  }
-  if (!stat.isDirectory()) fail(5, `ROOT_INVALID: ${canonical} is not a directory`)
-
-  // Repo signal: must contain .git OR .checkpoints OR .episodic-memory.
-  // Any one is sufficient — the project may have any subset depending on
-  // initialization state. Refusing without a signal prevents writing markers
-  // into arbitrary user directories.
-  const signals = ['.git', '.checkpoints', '.episodic-memory']
-  const hasSignal = signals.some((s) => fs.existsSync(path.join(canonical, s)))
-  if (!hasSignal) {
-    fail(5, `ROOT_NOT_REPO: ${canonical} has none of [${signals.join(', ')}]`)
-  }
-
-  return canonical
 }
 
 function readStdinSync() {
@@ -165,7 +143,7 @@ function main() {
     fail(6, `TARGET_INVALID: ${target}; valid: ${Object.keys(VALID_TARGETS).join(', ')}`)
   }
 
-  const canonicalRoot = validateRoot(root)
+  const canonicalRoot = validateRootOrExit(root)
   const basename = resolveBasename(target, sessionId)
   const finalPath = primaryMarkerPath(canonicalRoot, basename)
 
