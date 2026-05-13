@@ -178,6 +178,12 @@ export function resolveLatestEpisodeId(referencedId, projectRoot) {
     stdio: ['ignore', 'pipe', 'ignore'],
     timeout: 5000,
     cwd: projectRoot,
+    // Explicit env inheritance: HOME + PATH must propagate so em-search's
+    // os.homedir() + node resolution behave correctly. Documenting the
+    // dependency prevents future "hardening" PRs from minimizing env and
+    // silently breaking the --scope local + HOME-redirection contract
+    // (A12g would lose discrimination). Per negative-scenario-reviewer F3.
+    env: process.env,
   })
   const parsed = JSON.parse(out)
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.chain)) {

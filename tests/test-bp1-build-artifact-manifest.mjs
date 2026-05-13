@@ -484,9 +484,16 @@ tap('A12d: linked-worktree resolution (contract-preservation, not regression gua
 })
 
 // ---------------------------------------------------------------------------
-// A12e: nested cwd inside target — binding still pins to target root
+// A12e: nested cwd inside target (CONTRACT-PRESERVATION ONLY)
+// `resolveLocalDir(target/subdir)` walks up via `git rev-parse --git-common-dir`
+// and resolves to target's .episodic-memory anyway. So caller-cwd=target/subdir
+// resolves the SAME store as caller-cwd=target — A12e is NOT a discriminating
+// regression guard for the cwd-binding bug (it would pass even if cwd:
+// projectRoot were silently removed). Documented contract-preservation only;
+// A12c (caller-with-conflicting-chain) and A12f (non-git caller) are the
+// discriminating cwd-binding tests. Per negative-scenario-reviewer F1.
 // ---------------------------------------------------------------------------
-tap('A12e: nested cwd inside target — resolution still pins to target', () => {
+tap('A12e: nested cwd resolution (contract-preservation, not regression guard)', () => {
   const ROOT_ID = '20260506-100000-nested-root-aaaa'
   const TERM_ID = '20260507-100000-nested-term-bbbb'
   const target = makeProjWithEpisodes('a12e', [
@@ -502,7 +509,7 @@ tap('A12e: nested cwd inside target — resolution still pins to target', () => 
 
   const r = runCopiedBuilder(target, { callerCwd: nested })
   assert.equal(r.manifest.canonical_prompts[0].latest_prompt_episode_id, TERM_ID,
-    'A12e: nested cwd inside target resolves target terminal')
+    'A12e: nested cwd inside target resolves target terminal (contract preserved)')
 })
 
 // ---------------------------------------------------------------------------
@@ -612,8 +619,14 @@ tap('A12i: terminal selection throws on malformed em-search chain entry (V2 guar
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
   } catch (e) {
     threw = true
-    assert.ok(/malformed terminal entry/.test(e.message + (e.stderr || '')),
-      `V2 guard must fire on chain entry without id; got: ${e.message}`)
+    // Per negative-scenario-reviewer F2: tighten assertion. Check stderr
+    // explicitly (Buffer.toString()) + require nonzero exit, rather than
+    // concatenating message+stderr which can Buffer-coerce ambiguously.
+    const stderr = (e.stderr || '').toString()
+    assert.ok(typeof e.status === 'number' && e.status !== 0,
+      `V2 guard must produce nonzero exit; got status=${e.status}`)
+    assert.ok(stderr.includes('malformed terminal entry'),
+      `V2 guard must emit "malformed terminal entry" in stderr; got: ${stderr.slice(0, 500)}`)
   }
   assert.ok(threw, 'builder must propagate V2 guard error')
 })
