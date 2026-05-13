@@ -525,6 +525,15 @@ _classify_segment() {
         printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
         return 0
         ;;
+      # #268 fix E1: per-session plan-marker via redirect. Same shape as
+      # the legacy literal case-arm above. Loose glob here; strict validation
+      # via plan_marker_basename_matches happens in checkpoint-gate.sh.
+      .plan-approval-pending.*)
+        local abs_target
+        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
+        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
+        return 0
+        ;;
       .so-runbook-shown.*)
         # Runbook UX-marker (second-opinion-gate). Same-class with the
         # other marker write surfaces; classifies as marker_write so the
@@ -542,10 +551,16 @@ _classify_segment() {
   done
 
   # ---- Strip leading env-assignment tokens (VAR=value) ----
+  # #268 fix F17/F18: also count how many env-prefix tokens were stripped
+  # so plan-marker helper detection (below) can reject command-local env
+  # override attacks (`CLAUDE_CODE_SESSION_ID=B node plan-marker.mjs --rm …`).
+  # Pattern is POSIX `name = [A-Za-z_][A-Za-z0-9_]*` (lowercase + digits + _).
   local idx=0
+  local env_prefix_count=0
   while [ $idx -lt ${#TOKS[@]} ]; do
     case "${TOKS[$idx]}" in
       [A-Za-z_]*=*)
+        env_prefix_count=$((env_prefix_count+1))
         idx=$((idx+1))
         ;;
       *)
@@ -595,6 +610,78 @@ _classify_segment() {
       ;;
   esac
 
+  # ---- #268 fix E5b: plan-marker.mjs helper invocation ----
+  # Recognize `node */plan-marker.mjs --touch|--rm --root <abs>` and emit
+  # marker_write with TARGET = canonical per-session marker path. This is
+  # the canonical Rule 8 approval invocation; plan-gate.sh must allow it
+  # while a plan-pending marker exists for this session.
+  #
+  # F17/F18 reject: any leading POSIX-name env assignment (env_prefix_count
+  # > 0) → emit unsafe_complex. Otherwise session A could write
+  #   CLAUDE_CODE_SESSION_ID=B node ~/.episodic-memory/scripts/plan-marker.mjs --rm --root /repo
+  # and remove session B's marker while the classifier computes TARGET for
+  # session A. The shell command-local env assignment overrides
+  # process.env for the spawned `node` process; classifier and helper
+  # would target different markers (split-brain bypass).
+  if [ "$first" = "node" ]; then
+    local _next_idx=$((idx+1))
+    local _script_arg=""
+    if [ $_next_idx -lt ${#TOKS[@]} ]; then
+      _script_arg="${TOKS[$_next_idx]}"
+    fi
+    case "$_script_arg" in
+      */plan-marker.mjs)
+        # F17/F18: reject any leading env assignment.
+        if [ $env_prefix_count -gt 0 ]; then
+          printf '%s\t\t%s\n' "unsafe_complex" "plan_marker_env_override"
+          return 0
+        fi
+        # Parse --root <ARG> from remaining tokens
+        local _helper_root="" _has_touch=0 _has_rm=0
+        local _k=$((_next_idx+1))
+        while [ $_k -lt ${#TOKS[@]} ]; do
+          case "${TOKS[$_k]}" in
+            --root)
+              _k=$((_k+1))
+              if [ $_k -lt ${#TOKS[@]} ]; then
+                _helper_root="${TOKS[$_k]}"
+              fi
+              ;;
+            --touch) _has_touch=1 ;;
+            --rm)    _has_rm=1 ;;
+          esac
+          _k=$((_k+1))
+        done
+        # Resolve session-id from env (same source the helper will read).
+        local _env_sid="${CLAUDE_CODE_SESSION_ID:-}"
+        # Compose target. If --root or sid is missing, emit marker_write
+        # with empty TARGET; gate's existing equality check will fail and
+        # block — helper would also fail-closed anyway.
+        local _target=""
+        if [ -n "$_helper_root" ] && [ -n "$_env_sid" ]; then
+          _target="${_helper_root}/.checkpoints/.plan-approval-pending.${_env_sid}"
+        fi
+        local _reason="plan_marker_helper"
+        if [ $_has_touch -eq 1 ] && [ $_has_rm -eq 1 ]; then
+          # Mutex violation in args — helper will exit 6 anyway. Classify as
+          # unsafe_complex; gate blocks.
+          printf '%s\t\t%s\n' "unsafe_complex" "plan_marker_mutex_violation"
+          return 0
+        elif [ $_has_touch -eq 1 ]; then
+          _reason="plan_marker_touch"
+        elif [ $_has_rm -eq 1 ]; then
+          _reason="plan_marker_rm"
+        else
+          # Missing action — helper will exit 6. Classify as unsafe_complex.
+          printf '%s\t\t%s\n' "unsafe_complex" "plan_marker_missing_action"
+          return 0
+        fi
+        printf '%s\t%s\t%s\n' "marker_write" "$_target" "$_reason"
+        return 0
+        ;;
+    esac
+  fi
+
   case "$first" in
     bash|sh|zsh|dash|ksh)
       # Is there a -c flag?
@@ -638,6 +725,14 @@ _classify_segment() {
       # and re-opens the trust-based hole the gate exists to close.
       case "$tbase" in
         .plan-approval-pending|.pre-checkpoint-done|.post-checkpoint-done|.checkpoint-required|.post-checkpoint-required|.preflight-done|.last-user-prompt.json)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
+          return 0
+          ;;
+        # #268 fix E2: per-session plan-marker via rm. Loose glob; strict
+        # validation happens at checkpoint-gate.sh marker_basename_for_target.
+        .plan-approval-pending.*)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
@@ -688,6 +783,13 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
           return 0
           ;;
+        # #268 fix E3: per-session plan-marker via tee.
+        .plan-approval-pending.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
+          return 0
+          ;;
         .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
@@ -723,6 +825,13 @@ _classify_segment() {
       local tbase="$(basename "$t")"
       case "$tbase" in
         .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.checkpoint-required|.post-checkpoint-required|.preflight-done|.last-user-prompt.json)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
+          return 0
+          ;;
+        # #268 fix E4: per-session plan-marker via touch.
+        .plan-approval-pending.*)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
@@ -1308,6 +1417,13 @@ classify_path() {
   base="$(basename "$p")"
   case "$base" in
     .plan-approval-pending|.pre-checkpoint-done|.post-checkpoint-done)
+      local abs
+      abs="$(_resolve_marker_path "$p" "$repo_root")"
+      printf '%s\t%s\t%s\n' "marker_write" "$abs" "path_marker"
+      return 0
+      ;;
+    # #268 fix E5: per-session plan-marker via classify_path (Write/Edit).
+    .plan-approval-pending.*)
       local abs
       abs="$(_resolve_marker_path "$p" "$repo_root")"
       printf '%s\t%s\t%s\n' "marker_write" "$abs" "path_marker"
