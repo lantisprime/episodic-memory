@@ -1,46 +1,49 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-05-09.1
+# episodic-memory-hook-version: 2026-05-13.1
 # plan-gate.sh — PreToolUse hook
 #
-# Blocks write tools while .plan-approval-pending exists (at either root)
-# in the repo root. Read-only tools are always allowed (planning needs them).
+# Blocks write tools while a plan-approval marker exists for the current
+# session (per-session basename `.plan-approval-pending.<session_id>`) OR
+# while the legacy suffix-less `.plan-approval-pending` exists (burn-in
+# carry-forward). Read-only tools are always allowed.
+#
+# 2026-05-13 #268 fix: per-session namespaced markers.
+#   - Each session's plan-approval state lives at
+#       <root>/.checkpoints/.plan-approval-pending.<own-session-id>
+#   - One session's orphan no longer blocks unrelated sessions
+#   - Legacy suffix-less form still recognized for burn-in compat
+#   - F14 fail-CLOSED on missing/empty/invalid session_id IF any plan
+#     marker exists (runtime probe-drift threat is distinct from
+#     honest-agent forgery threat — see plan v6 §2)
 #
 # 2026-05-09 .checkpoints/ migration: marker WRITES go to
 # <repo-root>/.checkpoints/ via hooks/lib/marker-paths.sh; READS check
 # .checkpoints/ first then fall back to .claude/ until burn-in completes.
 # Marker REMOVAL is allowed at EITHER path during burn-in.
 #
-# Bash classification uses hooks/lib/command-classifier.sh (Session 1,
-# closes #86 PR-B). Replaces the prior regex-based marker-rm allowlist
-# with a quote/heredoc-aware classifier so quoted body text containing
-# `gh pr create` or `.plan-approval-pending` does not false-positive
-# (the `...a1e0` shape).
+# Bash classification uses hooks/lib/command-classifier.sh.
 #
-# Allowlist:
+# Allowlist (while a plan-marker exists):
 #   - Read-only tools (always)
-#   - Bash with classifier label `read_only` (#89: ls, cat, git status, etc.)
-#   - Bash that classifies as `marker_write` whose TARGET basename is
-#     .plan-approval-pending under either marker dir (deadlock prevention).
-#     Codex review ...3503: plan marker REMOVAL is the only plan-gate marker
-#     action allowed; checkpoint pre/post writes are NOT allowed by plan-gate.
-#
-# All other tool calls block while the marker exists.
+#   - Bash with classifier label `read_only`
+#   - Bash that classifies as `marker_write` whose TARGET basename
+#     matches plan_marker_basename_matches AND lives at primary or
+#     legacy marker dir (deadlock prevention — plan marker rm/touch).
 
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
+MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-# Source classifier + repo-root resolver + marker paths. Use BASH_SOURCE so
-# symlinked hook invocations resolve correctly (Codex ...3503: $(dirname
-# "$0") breaks under macOS without coreutils readlink -f).
+# Source classifier + repo-root resolver + marker paths + session-id.
+# Use BASH_SOURCE so symlinked hook invocations resolve correctly.
 HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 LIB_DIR="$HOOK_DIR/lib"
-if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ]; then
-  # Lib missing — fail loud rather than silently allowing
-  echo '{"decision": "block", "reason": "plan-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh). Re-run install.mjs --install-hooks."}'
+if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ] || [ ! -f "$LIB_DIR/session-id.sh" ]; then
+  echo '{"decision": "block", "reason": "plan-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh, session-id.sh). Re-run install.mjs --install-hooks."}'
   exit 0
 fi
 # shellcheck disable=SC1091
@@ -49,24 +52,80 @@ source "$LIB_DIR/repo-root.sh"
 source "$LIB_DIR/command-classifier.sh"
 # shellcheck disable=SC1091
 source "$LIB_DIR/marker-paths.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/session-id.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 
-# Canonical write path (always primary). Used in the block-message reason
-# so the agent knows where to put a fresh marker if needed.
-PLAN_PENDING_W="$(write_marker_path "$REPO_ROOT" .plan-approval-pending)"
-PRIMARY_PATH="$REPO_ROOT/$PRIMARY_MARKER_DIR/.plan-approval-pending"
-LEGACY_PATH="$REPO_ROOT/$LEGACY_MARKER_DIR/.plan-approval-pending"
+# Path resolution for marker variants:
+#   LEGACY_PRIMARY: <root>/.checkpoints/.plan-approval-pending      (no sid)
+#   LEGACY_LEGACY:  <root>/.claude/.plan-approval-pending           (no sid, fallback root)
+#   SUFFIXED_PRIMARY (when sid valid): <root>/.checkpoints/.plan-approval-pending.<sid>
+#   SUFFIXED_LEGACY  (when sid valid): <root>/.claude/.plan-approval-pending.<sid>
+PLAN_PENDING_W="$(write_marker_path "$REPO_ROOT" "$PLAN_MARKER_LEGACY_BASENAME")"
+LEGACY_PRIMARY="$REPO_ROOT/$PRIMARY_MARKER_DIR/$PLAN_MARKER_LEGACY_BASENAME"
+LEGACY_LEGACY="$REPO_ROOT/$LEGACY_MARKER_DIR/$PLAN_MARKER_LEGACY_BASENAME"
 
-# Read-only tools — always allowed.
+SID_VALID=false
+SUFFIXED_PRIMARY=""
+SUFFIXED_LEGACY=""
+if validate_session_id "$MY_SID"; then
+  SID_VALID=true
+  SUFFIXED_PRIMARY="$REPO_ROOT/$PRIMARY_MARKER_DIR/$(plan_marker_basename_for_session "$MY_SID")"
+  SUFFIXED_LEGACY="$REPO_ROOT/$LEGACY_MARKER_DIR/$(plan_marker_basename_for_session "$MY_SID")"
+fi
+
+# any_plan_marker_exists — true if ANY plan marker (legacy or any suffixed)
+# exists at either root. Used for F14 fail-closed-on-invalid-sid decision.
+any_plan_marker_exists() {
+  [ -e "$LEGACY_PRIMARY" ] && return 0
+  [ -e "$LEGACY_LEGACY" ] && return 0
+  local p
+  for p in "$REPO_ROOT/$PRIMARY_MARKER_DIR"/.plan-approval-pending.*; do
+    [ -e "$p" ] && return 0
+  done
+  for p in "$REPO_ROOT/$LEGACY_MARKER_DIR"/.plan-approval-pending.*; do
+    [ -e "$p" ] && return 0
+  done
+  return 1
+}
+
+# Read-only tools — always allowed (planning needs them).
 case "$TOOL_NAME" in
   Read|Glob|Grep|Agent|WebFetch|WebSearch|AskUserQuestion|EnterPlanMode|ExitPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|Skill|NotebookRead|ToolSearch|mcp__*)
     exit 0
     ;;
 esac
 
-# If no marker at either root, allow everything.
-if [ ! -e "$PRIMARY_PATH" ] && [ ! -e "$LEGACY_PATH" ]; then
+# F14 fail-closed: invalid/missing/empty session_id is a probe-drift threat
+# distinct from honest-agent forgery. If ANY plan marker exists, BLOCK with
+# a clear reason — the agent must either provide a valid session_id in
+# stdin (Claude Code does this by default) or clear the marker via
+# plan-marker.mjs --rm.
+if ! $SID_VALID; then
+  if any_plan_marker_exists; then
+    jq -nc --arg path "$PLAN_PENDING_W" \
+      '{decision: "block", reason: ("Plan approval pending; session_id missing/invalid in PreToolUse stdin — failing closed. Provide a valid session_id (PreToolUse JSON .session_id field) or clear the marker at " + $path + ". Hook: plan-gate.sh.")}'
+    exit 0
+  fi
+  # No plan marker exists → no plan to gate. Allow as today.
+  exit 0
+fi
+
+# SID_VALID: check own-session OR legacy.
+OWN_MARKER_EXISTS=false
+if [ -e "$SUFFIXED_PRIMARY" ] || [ -e "$SUFFIXED_LEGACY" ]; then
+  OWN_MARKER_EXISTS=true
+fi
+LEGACY_MARKER_EXISTS=false
+if [ -e "$LEGACY_PRIMARY" ] || [ -e "$LEGACY_LEGACY" ]; then
+  LEGACY_MARKER_EXISTS=true
+fi
+
+# No own marker AND no legacy marker → allow.
+# (Other sessions' suffixed markers `.plan-approval-pending.OTHER_SID`
+#  are intentionally ignored — that's the #268 fix.)
+if ! $OWN_MARKER_EXISTS && ! $LEGACY_MARKER_EXISTS; then
   exit 0
 fi
 
@@ -80,25 +139,22 @@ if [ "$TOOL_NAME" = "Bash" ]; then
 
   case "$LABEL" in
     read_only)
-      # #89 fix: read-only Bash should not be blocked while planning.
       exit 0
       ;;
     marker_write)
-      # Only allow exact removal/touch of the plan-approval marker at either
-      # root. Codex ...3503 P1: TARGET must equal one of the two marker
-      # paths, not any other marker. Path traversal / symlink / cwd≠repo
-      # blocked by the equality check against the resolved repo-root paths.
-      #
-      # Dual-root acceptance during burn-in: legacy `.claude/` rm targets
-      # are still allowed so cleanup of orphan markers works without flag
-      # changes.
-      if [ "$TARGET" = "$PRIMARY_PATH" ] || [ "$TARGET" = "$LEGACY_PATH" ]; then
-        exit 0
+      # Allow plan-marker rm/touch under primary or legacy marker dir.
+      # Use the strict matcher to reject path-traversal / invalid suffixes.
+      target_basename="${TARGET##*/}"
+      target_dir="${TARGET%/*}"
+      if plan_marker_basename_matches "$target_basename"; then
+        if [ "$target_dir" = "$REPO_ROOT/$PRIMARY_MARKER_DIR" ] || [ "$target_dir" = "$REPO_ROOT/$LEGACY_MARKER_DIR" ]; then
+          exit 0
+        fi
       fi
       ;;
   esac
 fi
 
-# Marker exists — block.
+# Marker exists (own session or legacy) — block.
 jq -nc --arg path "$PLAN_PENDING_W" \
   '{decision: "block", reason: ("Plan approval pending. Review the plan above and approve before implementation. To approve, say \"go\" or \"approved\". The " + $path + " marker will be removed and implementation will proceed.")}'
