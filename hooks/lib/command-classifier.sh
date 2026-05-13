@@ -555,6 +555,17 @@ _classify_segment() {
   # so plan-marker helper detection (below) can reject command-local env
   # override attacks (`CLAUDE_CODE_SESSION_ID=B node plan-marker.mjs --rm …`).
   # Pattern is POSIX `name = [A-Za-z_][A-Za-z0-9_]*` (lowercase + digits + _).
+  #
+  # #272 F-4: walk only recognizes the LEADING `VAR=value` form. Sequential
+  # env mutation via `unset CLAUDE_CODE_SESSION_ID; node plan-marker.mjs …`
+  # OR `export CLAUDE_CODE_SESSION_ID=B; node plan-marker.mjs …` is not
+  # detected here — but both shapes hit `shell_keyword_or_group` /
+  # multi-command-segment paths upstream and the plan-marker helper itself
+  # fails closed (exit 8) when the resolved sid doesn't match its own
+  # session-id env var. Honest-agent threat: low (the helper is the
+  # authoritative defense, not the classifier). FU candidate: extend the
+  # tokenizer to track env-state across segments if a future repro shows
+  # a classifier-only bypass path.
   local idx=0
   local env_prefix_count=0
   while [ $idx -lt ${#TOKS[@]} ]; do

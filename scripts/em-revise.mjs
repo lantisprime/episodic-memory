@@ -3,9 +3,13 @@
  * em-revise.mjs — Revise/supersede an existing decision.
  *
  * Usage:
- *   node em-revise.mjs --original <id> --project <name> --tags <t1,t2>
+ *   node em-revise.mjs --original <id> --project <name>
+ *                      (--tags <t1,t2> | --tag <t1> --tag <t2> | both)
  *                      --summary <text> (--body <text> | --body-file <path>)
  *                      [--scope inherit|local|global]
+ *
+ * Tag forms accepted (merged + deduplicated; mirrors em-store):
+ *   --tags a,b,c       --tag a --tag b       --tags a,b --tag c
  *
  * --scope defaults to "inherit" (write the revision to the same store as the
  * original). Pass "local" or "global" only to force a cross-scope revision.
@@ -39,9 +43,26 @@ function flag(name) {
   return argv[i + 1]
 }
 
+// flagAll(name) — collect every value of a repeated flag. Mirrors em-store's
+// helper; lets users pass `--tag a --tag b` in addition to `--tags a,b`.
+// Skips a position whose value starts with `--` (next flag, not a tag value).
+function flagAll(name) {
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === name && i + 1 < argv.length) {
+      const val = argv[i + 1]
+      if (val.startsWith('--')) continue
+      out.push(val)
+      i++
+    }
+  }
+  return out
+}
+
 const originalId = flag('--original')
 const project = flag('--project')
 const tagsRaw = flag('--tags')
+const tagRepeats = flagAll('--tag')
 const summary = flag('--summary')
 const bodyArg = flag('--body')
 const bodyFile = flag('--body-file')
@@ -69,7 +90,7 @@ if (bodyFile !== undefined) {
 if (!originalId || !summary || !body) {
   console.log(JSON.stringify({
     status: 'error',
-    message: 'Missing required args. Usage: --original <id> --project <name> --tags <t1,t2> --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global]'
+    message: 'Missing required args. Usage: --original <id> --project <name> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global]'
   }))
   process.exit(1)
 }
@@ -158,12 +179,17 @@ const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g,
 const randSuffix = crypto.randomBytes(2).toString('hex')
 const id = `${ts}-${slug}-${randSuffix}`
 
-function normalizeTags(raw) {
-  if (!raw) return []
-  const arr = (Array.isArray(raw) ? raw : raw.split(','))
+function normalizeTags(raw, repeats = []) {
+  let fromRaw = []
+  if (Array.isArray(raw)) {
+    fromRaw = raw
+  } else if (raw) {
+    fromRaw = raw.split(',')
+  }
+  const all = [...fromRaw, ...repeats]
     .map(t => t.trim().toLowerCase())
     .filter(Boolean)
-  return [...new Set(arr)].sort()
+  return [...new Set(all)].sort()
 }
 
 function updateTagsIndex(dataDir, episodeId, tags) {
@@ -181,7 +207,7 @@ function updateTagsIndex(dataDir, episodeId, tags) {
   fs.renameSync(tmpFile, tagsFile)
 }
 
-const tags = normalizeTags(tagsRaw)
+const tags = normalizeTags(tagsRaw, tagRepeats)
 const resolvedProject = origProject || path.basename(process.cwd())
 
 // Inherit original episode's tags (captured during first index pass above)

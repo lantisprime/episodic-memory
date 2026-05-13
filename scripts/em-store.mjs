@@ -3,9 +3,15 @@
  * em-store.mjs — Create a new episodic memory entry.
  *
  * Usage:
- *   node em-store.mjs --project <name> --category <cat> --tags <t1,t2>
+ *   node em-store.mjs --project <name> --category <cat>
+ *                     (--tags <t1,t2> | --tag <t1> --tag <t2> | both)
  *                     --summary <text> (--body <text> | --body-file <path>)
  *                     [--scope local|global]
+ *
+ * Tag forms (any combination accepted; merged + deduplicated + sorted):
+ *   --tags a,b,c       — comma-separated single flag
+ *   --tag a --tag b    — repeated flag, one tag per occurrence
+ *   --tags a,b --tag c — mixed
  *
  * `--body-file` reads body content from a file (UTF-8, BOM stripped, exactly
  * one trailing newline stripped). Mutually exclusive with `--body`. Use it
@@ -37,9 +43,30 @@ function flag(name) {
   return argv[i + 1]
 }
 
+// flagAll(name) — collect every value of a repeated flag.
+// Used for --tag where users may pass `--tag a --tag b --tag c`. Returns []
+// when the flag is absent. Skips an occurrence whose value position would
+// fall outside argv (trailing `--tag`) OR whose value starts with `--` (the
+// next option, not a tag value). Single-dash values like `-foo` are accepted
+// because tags can legitimately contain leading hyphens; the `--` guard is
+// just to catch the missing-value-followed-by-next-flag shape.
+function flagAll(name) {
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === name && i + 1 < argv.length) {
+      const val = argv[i + 1]
+      if (val.startsWith('--')) continue
+      out.push(val)
+      i++
+    }
+  }
+  return out
+}
+
 const project = flag('--project')
 const category = flag('--category')
 const tagsRaw = flag('--tags')
+const tagRepeats = flagAll('--tag')
 const summary = flag('--summary')
 const bodyArg = flag('--body')
 const bodyFile = flag('--body-file')
@@ -48,7 +75,7 @@ const scope = flag('--scope') || 'global'
 
 const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation', 'workflow.lifecycle']
 
-const USAGE = `--project <name> --category <${VALID_CATEGORIES.join('|')}> --tags <t1,t2> --summary <text> (--body <text> | --body-file <path>) [--scope local|global]`
+const USAGE = `--project <name> --category <${VALID_CATEGORIES.join('|')}> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope local|global]`
 
 if (bodyArg !== undefined && bodyFile !== undefined) {
   console.log(JSON.stringify({
@@ -96,12 +123,12 @@ const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g,
 const randSuffix = crypto.randomBytes(2).toString('hex')
 const id = `${ts}-${slug}-${randSuffix}`
 
-function normalizeTags(raw) {
-  if (!raw) return []
-  const arr = (Array.isArray(raw) ? raw : raw.split(','))
+function normalizeTags(raw, repeats = []) {
+  const fromComma = raw ? raw.split(',') : []
+  const all = [...fromComma, ...repeats]
     .map(t => t.trim().toLowerCase())
     .filter(Boolean)
-  return [...new Set(arr)].sort()
+  return [...new Set(all)].sort()
 }
 
 function updateTagsIndex(dataDir, episodeId, tags) {
@@ -119,7 +146,7 @@ function updateTagsIndex(dataDir, episodeId, tags) {
   fs.renameSync(tmpFile, tagsFile)
 }
 
-const tags = normalizeTags(tagsRaw)
+const tags = normalizeTags(tagsRaw, tagRepeats)
 
 const fmLines = [
   '---',

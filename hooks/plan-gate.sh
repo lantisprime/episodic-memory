@@ -75,19 +75,13 @@ if validate_session_id "$MY_SID"; then
   SUFFIXED_LEGACY="$REPO_ROOT/$LEGACY_MARKER_DIR/$(plan_marker_basename_for_session "$MY_SID")"
 fi
 
-# any_plan_marker_exists — true if ANY plan marker (legacy or any suffixed)
-# exists at either root. Used for F14 fail-closed-on-invalid-sid decision.
-any_plan_marker_exists() {
-  [ -e "$LEGACY_PRIMARY" ] && return 0
-  [ -e "$LEGACY_LEGACY" ] && return 0
-  local p
-  for p in "$REPO_ROOT/$PRIMARY_MARKER_DIR"/.plan-approval-pending.*; do
-    [ -e "$p" ] && return 0
-  done
-  for p in "$REPO_ROOT/$LEGACY_MARKER_DIR"/.plan-approval-pending.*; do
-    [ -e "$p" ] && return 0
-  done
-  return 1
+# any_plan_marker_exists is sourced from hooks/lib/marker-paths.sh. It takes
+# <repo-root> as a positional arg (was previously inlined here with implicit
+# REPO_ROOT capture). Rule 14 drift fix — single definition shared with
+# checkpoint-gate.sh. Local wrapper retained so existing call-sites read the
+# same way and don't need to thread REPO_ROOT each time.
+_any_plan_marker_exists_local() {
+  any_plan_marker_exists "$REPO_ROOT"
 }
 
 # Read-only tools — always allowed (planning needs them).
@@ -103,7 +97,7 @@ esac
 # stdin (Claude Code does this by default) or clear the marker via
 # plan-marker.mjs --rm.
 if ! $SID_VALID; then
-  if any_plan_marker_exists; then
+  if _any_plan_marker_exists_local; then
     jq -nc --arg path "$PLAN_PENDING_W" \
       '{decision: "block", reason: ("Plan approval pending; session_id missing/invalid in PreToolUse stdin — failing closed. Provide a valid session_id (PreToolUse JSON .session_id field) or clear the marker at " + $path + ". Hook: plan-gate.sh.")}'
     exit 0
