@@ -109,6 +109,31 @@ warn_hook_freshness() {
 
 warn_hook_freshness
 
+# ─── second-opinion runbook UX-marker cleanup ────────────────────────────
+# Glob-clear all `.checkpoints/.so-runbook-shown.*` files at canonical repo
+# root so the next session re-injects the runbook on the first harness
+# invocation. Bound to canonical root (not $CWD) via repo-root.sh so
+# linked-worktree session starts converge on the same place the gate writes.
+#
+# Codex r4 Q1: contained-subshell sourcing so any internal failure in
+# repo-root.sh (or missing lib on partial install) falls back to $CWD
+# without aborting SessionStart under `set -e`.
+CANONICAL_ROOT="$(
+  bash -c '
+    LIB_DIR="$1/lib"
+    LIB="$LIB_DIR/repo-root.sh"
+    [ -f "$LIB" ] || { printf "%s" "$2"; exit 0; }
+    # shellcheck disable=SC1090
+    . "$LIB" 2>/dev/null || { printf "%s" "$2"; exit 0; }
+    resolve_repo_root "$2" 2>/dev/null || printf "%s" "$2"
+  ' _ "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" "$CWD"
+)"
+[ -z "$CANONICAL_ROOT" ] && CANONICAL_ROOT="$CWD"
+if [ -d "$CANONICAL_ROOT/.checkpoints" ]; then
+  # shellcheck disable=SC2086
+  rm -f "$CANONICAL_ROOT"/.checkpoints/.so-runbook-shown.* 2>/dev/null || true
+fi
+
 # Soft-fail if em-recall isn't installed — sessions without episodic-memory
 # should still start cleanly.
 if [ ! -f "$EM_RECALL" ]; then

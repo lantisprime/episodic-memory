@@ -121,6 +121,7 @@ _marker_basename_in_set() {
     .checkpoint-required|.post-checkpoint-required|.preflight-done| \
     .last-user-prompt.json) return 0 ;;
     .last-user-prompt.*.json) return 0 ;;
+    .so-runbook-shown.*) return 0 ;;
   esac
   return 1
 }
@@ -192,7 +193,7 @@ _escape_bash_glob() {
 _command_has_relative_marker_path() {
   local cmd_stripped
   cmd_stripped="$(_strip_shell_quotes "$1")"
-  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)'
+  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
 }
 
 # E2E-discovered absolute-non-canonical detection: for Bash commands where
@@ -209,7 +210,7 @@ _command_first_absolute_noncanonical_marker() {
   local cmd
   cmd="$(_strip_shell_quotes "$1")"
   local matches p basename
-  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json)' 2>/dev/null || true)
+  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
   [ -z "$matches" ] && return 0
   while IFS= read -r p; do
     [ -z "$p" ] && continue
@@ -354,6 +355,19 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     if _is_wrong_root_marker_write "$TARGET"; then
       _block_wrong_root_marker "$TARGET"
     fi
+
+    # Runbook UX-marker exemption (second-opinion-gate). EXACT-BASENAME
+    # scoped via case, evaluated AFTER wrong-root check (canonical-root
+    # binding already verified above) and BEFORE cross-gate plan-pending
+    # invariant. The runbook UX-marker has no gate-lifecycle dependency
+    # (it tracks "model has seen the runbook this session" — orthogonal
+    # to checkpoint/plan lifecycle), so it must work under
+    # .plan-approval-pending AND .checkpoint-required.
+    case "${TARGET##*/}" in
+      .so-runbook-shown.*)
+        exit 0
+        ;;
+    esac
 
     TARGET_BN="$(marker_basename_for_target "$TARGET")"
 

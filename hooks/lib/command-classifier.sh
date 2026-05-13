@@ -525,6 +525,16 @@ _classify_segment() {
         printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
         return 0
         ;;
+      .so-runbook-shown.*)
+        # Runbook UX-marker (second-opinion-gate). Same-class with the
+        # other marker write surfaces; classifies as marker_write so the
+        # touch/rm/tee/redirect paths share the wrong-root detection +
+        # exemption flow in checkpoint-gate.sh.
+        local abs_target
+        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
+        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
+        return 0
+        ;;
       *)
         has_nonmarker_redirect=1
         ;;
@@ -639,6 +649,15 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
           return 0
           ;;
+        .so-runbook-shown.*)
+          # Runbook UX-marker (second-opinion-gate). Same-class with other
+          # marker rm surfaces. SessionStart cleanup uses rm at canonical
+          # root; this classification keeps the touch/rm pair symmetric.
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
+          return 0
+          ;;
       esac
       j=$((j+1))
     done
@@ -675,9 +694,62 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
           return 0
           ;;
+        .so-runbook-shown.*)
+          # Runbook UX-marker (second-opinion-gate). Same-class with other
+          # marker tee surfaces. Kept symmetric with rm/touch/redirect.
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
+          return 0
+          ;;
       esac
       break
     done
+  fi
+
+  # ---- touch with marker ----
+  # Same-class with rm/tee/redirect handlers. Recognizes the full closed
+  # marker set so touch becomes a first-class marker_write path, not a
+  # silent fall-through to shared_write (which would block the touch under
+  # an active .checkpoint-required pre-gate). Codex r1 P1: hooks/runbooks
+  # touch must classify as marker_write so the exemption case fires.
+  if [ "$first" = "touch" ]; then
+    local j=$((idx+1))
+    while [ $j -lt ${#TOKS[@]} ]; do
+      local t="${TOKS[$j]}"
+      case "$t" in
+        -*) j=$((j+1)); continue ;;
+      esac
+      local tbase="$(basename "$t")"
+      case "$tbase" in
+        .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.checkpoint-required|.post-checkpoint-required|.preflight-done|.last-user-prompt.json)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
+          return 0
+          ;;
+        .last-user-prompt.*.json)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
+          return 0
+          ;;
+        .so-runbook-shown.*)
+          # Runbook UX-marker (second-opinion-gate). Model writes this
+          # marker after Read of the runbook contents; classification as
+          # marker_write routes the write through checkpoint-gate's
+          # exemption case (canonical-root check + plan-pending bypass).
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
+          return 0
+          ;;
+      esac
+      j=$((j+1))
+    done
+    # touch of non-marker → shared_write (matches rm semantics)
+    printf '%s\t\t%s\n' "shared_write" "touch_non_marker"
+    return 0
   fi
 
   # ---- git ----

@@ -2,7 +2,23 @@
 /**
  * second-opinion-gate.mjs — Claude Code PreToolUse hook for second-opinion harness.
  *
- * Block-class matrix per v3 §Hook block-class matrix:
+ * Two responsibilities, ordered:
+ *
+ *   1. RUNBOOK GATE (codex r2 P1 — runbook injection):
+ *      For Bash tool calls matching `node ... second-opinion.mjs ... request`,
+ *      block on the FIRST invocation per session with the runbook quickref
+ *      inlined in the reason field. Marker `.checkpoints/.so-runbook-shown.<sha8>`
+ *      at canonical repo root tracks "runbook has been shown this session";
+ *      sha8 binds to runbook content so in-session edits force re-inject.
+ *      Runs BEFORE validator/snapshot load so a missing/bad snapshot cannot
+ *      preempt the runbook block.
+ *
+ *   2. DIRECT-PROVIDER BLOCK (existing v1 behavior):
+ *      Block direct provider CLI calls (codex/etc.) that bypass the harness.
+ *      Reads installed provider snapshot at ~/.claude/hooks/second-opinion-providers.json
+ *      and applies cli_match / agent_block_patterns from the snapshot.
+ *
+ * Block-class matrix per v3 §Hook block-class matrix (existing flow):
  *
  * Bash branch (tool_name == "Bash"):
  *   For each provider in install snapshot, if tool_input.command matches
@@ -19,54 +35,45 @@
  *   provider.agent_block_patterns AND NOT in provider.agent_allow_patterns
  *   → block.
  *
- * Fail-closed cases (block on snapshot problems — any direct provider call
- * could be the bypass):
- *   - Snapshot file missing  → block.
- *   - Snapshot JSON parse fails → block.
- *   - Snapshot missing source_hash → block.
+ * Fail-closed cases (block on snapshot/runbook problems):
+ *   - Runbook gate: runbook file missing/empty/too-short/no-sentinel → block.
+ *   - Snapshot file missing/parse-failed/missing-source-hash → block.
  *
  * Hook contract (Claude Code spec):
  *   - stdin = JSON: {tool_name, tool_input, cwd, ...}
  *   - exit 0 + stdout JSON {decision: "block", reason: "..."} → block
  *   - exit 0 + no stdout → allow
- *
- * Out-of-scope bypass classes (documented in commit; users can add gates):
- *   - Shell aliases / functions resolving to provider CLI
- *   - eval indirection
- *   - Wrapper scripts (npm scripts, project-local shell scripts)
- *   - Background provider runs spawned outside Claude Code
- *   - Provider invocations via SSH / remote tools
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
+
+// resolveRepoRoot is dynamically imported inside checkRunbookGate so a
+// missing local-dir.mjs (orphan/partial install) cannot preempt the gate
+// at module load. Fallback resolver below handles the case where the
+// installed lib is missing.
 
 const SNAPSHOT_PATH = process.env.SO_INSTALL_SNAPSHOT_PATH ||
   path.join(os.homedir(), '.claude', 'hooks', 'second-opinion-providers.json')
 
-// Dynamic import of validator so the hook can emit a structured block
-// decision if the colocated ./lib/registry-validator.mjs is missing or
-// malformed (partial install / orphan hook). A static import would crash
-// the hook at module-load with empty stdout — ambiguous fail-open class.
-// F4 from post-implementation code review.
-let validateProviderRegistry
-try {
-  const mod = await import(new URL('./lib/registry-validator.mjs', import.meta.url).href)
-  validateProviderRegistry = mod.validateProviderRegistry
-} catch (e) {
-  // Emit a fail-closed block decision and exit. Same envelope shape as
-  // every other block path so Claude Code can parse the JSON.
-  console.log(JSON.stringify({
-    decision: 'block',
-    code: 'snapshot-validator-load-failed',
-    reason: `second-opinion-gate: cannot load validator at ./lib/registry-validator.mjs ` +
-      `(detail: ${e.message}). Run: node install.mjs --install-second-opinion to ` +
-      `reinstall the colocated validator lib.`,
-    detail: e.message,
-  }))
-  process.exit(0)
-}
+const RUNBOOK_PATH = process.env.SO_RUNBOOK_PATH ||
+  path.join(os.homedir(), '.claude', 'hooks', 'runbooks', 'second-opinion-harness.md')
+
+const QUICKREF_PATH = process.env.SO_QUICKREF_PATH ||
+  path.join(os.homedir(), '.claude', 'hooks', 'runbooks', 'second-opinion-harness.quickref.md')
+
+// Sentinel substring required to be present in the full runbook. The
+// canonical runbook's load-bearing section is "## ⚠️ Self-trigger checklist";
+// the substring drops the emoji to avoid regex/encoding fragility.
+const RUNBOOK_SENTINEL = 'Self-trigger checklist'
+const MIN_RUNBOOK_BYTES = 256
+const MIN_QUICKREF_BYTES = 64
+
+// ---------------------------------------------------------------------------
+// Pure helpers — no side effects at module load.
+// ---------------------------------------------------------------------------
 
 function emitBlock(reason, extra = {}) {
   console.log(JSON.stringify({ decision: 'block', reason, ...extra }))
@@ -79,27 +86,133 @@ function emitAllow() {
 }
 
 function readStdinSync() {
-  // Claude Code provides stdin as a finite JSON blob, not a stream.
   let data = ''
   try {
     data = fs.readFileSync(0, 'utf8')
   } catch (e) {
-    // No stdin — Claude Code always provides one; treat as fail-open
-    // (test/CLI invocation without stdin should not block real tools).
     return null
   }
   if (!data.trim()) return null
   try {
     return JSON.parse(data)
   } catch (e) {
-    // Malformed input — Claude Code internal contract violation.
-    // Fail-open per the spec for unknown inputs (don't block on parse error
-    // of stdin we can't trust the schema of).
     return null
   }
 }
 
-function loadSnapshot() {
+/**
+ * Occurrence-scoped harness detection. Strips shell quote/escape chars (mirrors
+ * `_strip_shell_quotes` in checkpoint-gate.sh:163), then matches the literal
+ * `second-opinion.mjs ... request` substring. Accepts splice patterns
+ * (&& / ; / env-prefix), quoted script names, and absolute paths. Known
+ * false-positive: `echo "node second-opinion.mjs request"` — acceptable
+ * trade-off per plan v4 (asymmetric cost: false-positive = one extra prompt
+ * round; false-negative = runbook never loaded).
+ */
+function isHarnessRequest(command) {
+  if (!command) return false
+  const stripped = command.replace(/["'\\]/g, '')
+  return /\bsecond-opinion\.mjs\s+request\b/.test(stripped) ||
+         /\bsecond-opinion\.mjs\b[^|;&]*\brequest\b/.test(stripped)
+}
+
+function computeSha8(content) {
+  return crypto.createHash('sha256').update(content).digest('hex').slice(0, 8)
+}
+
+function loadAndValidateRunbook() {
+  if (!fs.existsSync(RUNBOOK_PATH)) {
+    return { error: 'runbook-missing', detail: RUNBOOK_PATH }
+  }
+  if (!fs.existsSync(QUICKREF_PATH)) {
+    return { error: 'quickref-missing', detail: QUICKREF_PATH }
+  }
+  let runbook, quickref
+  try {
+    runbook = fs.readFileSync(RUNBOOK_PATH, 'utf8')
+    quickref = fs.readFileSync(QUICKREF_PATH, 'utf8')
+  } catch (e) {
+    return { error: 'runbook-read-failed', detail: e.message }
+  }
+  if (runbook.trim().length < MIN_RUNBOOK_BYTES) {
+    return { error: 'runbook-too-short' }
+  }
+  if (!runbook.includes(RUNBOOK_SENTINEL)) {
+    return { error: 'runbook-missing-sentinel' }
+  }
+  if (quickref.trim().length < MIN_QUICKREF_BYTES) {
+    return { error: 'quickref-too-short' }
+  }
+  return { ok: true, runbook, quickref, sha8: computeSha8(runbook) }
+}
+
+async function checkRunbookGate(input) {
+  const cwd = input.cwd || process.cwd()
+  let canonicalRoot = cwd
+  const localDirUrl = new URL('./lib/local-dir.mjs', import.meta.url).href
+  try {
+    const mod = await import(localDirUrl)
+    canonicalRoot = mod.resolveRepoRoot(cwd)
+  } catch (e) {
+    // PR-level review P1: distinguish missing DIRECT target from transitive
+    // ERR_MODULE_NOT_FOUND (broken inner import). Only direct-target ENOENT
+    // is the "orphan install" case that gets the CWD-fallback degradation.
+    // Any other failure mode (transitive missing, syntax error, runtime
+    // error) indicates installed-lib corruption → fail closed.
+    const isDirectMissing = e.code === 'ERR_MODULE_NOT_FOUND' &&
+      typeof e.url === 'string' &&
+      e.url === localDirUrl
+    if (isDirectMissing) {
+      canonicalRoot = cwd
+    } else {
+      emitBlock(
+        `second-opinion runbook gate: local-dir.mjs failed to load ` +
+        `(${e.code || e.name}: ${e.message}). The installed lib at ` +
+        `~/.claude/hooks/lib/local-dir.mjs appears corrupted (transitive ` +
+        `missing dep or syntax/runtime error, NOT just a missing direct ` +
+        `target). Run: node install.mjs --tool claude-code --install-second-opinion to reinstall.`,
+        { code: 'runbook-canonicalize-failed', detail: e.message }
+      )
+    }
+  }
+  const loaded = loadAndValidateRunbook()
+  if (loaded.error) {
+    emitBlock(
+      `second-opinion runbook gate: ${loaded.error}` +
+      (loaded.detail ? ` (${loaded.detail})` : '') +
+      `. Run: node install.mjs --tool claude-code --install-second-opinion to install/refresh the runbook.`,
+      { code: 'runbook-load-failed', detail: loaded.error }
+    )
+  }
+  const markerPath = path.join(
+    canonicalRoot, '.checkpoints', `.so-runbook-shown.${loaded.sha8}`
+  )
+  if (fs.existsSync(markerPath)) emitAllow()
+
+  // Marker absent → block with quickref inlined. Marker is NOT self-written
+  // by the hook (codex r2 / r3 design): the model must Read the full runbook
+  // and `touch <markerPath>` to acknowledge. The touch passes through
+  // command-classifier's touch handler → marker_write → checkpoint-gate's
+  // runbook exemption case (canonical-root check + plan-pending bypass).
+  emitBlock(
+    `${loaded.quickref}\n\n` +
+    `=== Full runbook ===\n${RUNBOOK_PATH}\n` +
+    `After reading the full runbook, run: touch ${markerPath} — then retry your original command. ` +
+    `Marker resets at next SessionStart.`,
+    {
+      code: 'runbook-injection-required',
+      runbook_sha: loaded.sha8,
+      runbook_path: RUNBOOK_PATH,
+      marker_path: markerPath,
+    }
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Provider snapshot helpers — only called for non-harness flow.
+// ---------------------------------------------------------------------------
+
+function loadSnapshot(validateProviderRegistry) {
   if (!fs.existsSync(SNAPSHOT_PATH)) {
     return { error: 'snapshot-not-installed' }
   }
@@ -117,9 +230,6 @@ function loadSnapshot() {
   if (!parsed.source_hash) {
     return { error: 'snapshot-missing-source-hash' }
   }
-  // I-NEW-B: validate providers[] shape so the hook fail-closes on bad
-  // registry rather than silently skipping providers with bad regex via
-  // compileCliMatch's null-return fallback.
   try {
     validateProviderRegistry({ schema_version: 1, providers: parsed.providers })
   } catch (e) {
@@ -134,9 +244,6 @@ function loadSnapshot() {
 }
 
 function isWorktreeCwd(cwd) {
-  // Linked worktree: <cwd>/.git is a FILE (containing gitdir: ...), not a dir.
-  // Main repo: <cwd>/.git is a directory.
-  // Non-git: <cwd>/.git doesn't exist.
   const gitPath = path.join(cwd, '.git')
   if (!fs.existsSync(gitPath)) return false
   try {
@@ -162,7 +269,6 @@ function checkBashBranch(toolInput, cwd, snapshot) {
     const cliRe = compileCliMatch(provider.cli_match || '')
     if (!cliRe || !cliRe.test(command)) continue
 
-    // Block class 1: run_in_background
     if (runInBackground) {
       return {
         block: true,
@@ -171,7 +277,6 @@ function checkBashBranch(toolInput, cwd, snapshot) {
       }
     }
 
-    // Block class 2: command length > prompt_max_chars
     if (provider.prompt_max_chars > 0 && command.length > provider.prompt_max_chars) {
       return {
         block: true,
@@ -180,7 +285,6 @@ function checkBashBranch(toolInput, cwd, snapshot) {
       }
     }
 
-    // Block class 3: cwd is worktree + no --allow-worktree
     if (isWorktreeCwd(cwd) && !command.includes('--allow-worktree')) {
       return {
         block: true,
@@ -190,8 +294,6 @@ function checkBashBranch(toolInput, cwd, snapshot) {
     }
   }
 
-  // Block class 4: em-store --scope local from worktree (PR #218 class).
-  // Independent of provider match; applies to any em-store call.
   if (/\bem-store\b/.test(command) && /--scope\s+local/.test(command) && isWorktreeCwd(cwd)) {
     return {
       block: true,
@@ -226,49 +328,69 @@ function checkAgentBranch(toolInput, snapshot) {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Main — stdin FIRST, runbook gate FIRST, validator LAZY.
 // ---------------------------------------------------------------------------
-const input = readStdinSync()
-if (!input) {
-  // No / unparseable stdin. Allow (Claude Code spec: hooks should not block
-  // on malformed inputs; the actual tool dispatcher handles its own validation).
+
+async function main() {
+  const input = readStdinSync()
+  if (!input) emitAllow()
+
+  const toolName = input.tool_name || ''
+  const toolInput = input.tool_input || {}
+  const cwd = input.cwd || process.cwd()
+
+  // ─── Runbook gate fires BEFORE validator/snapshot work. ───────────────
+  // Codex r2 P1: validator import failure / snapshot errors MUST NOT
+  // preempt the runbook block on harness invocations.
+  if (toolName === 'Bash' && isHarnessRequest(toolInput.command || '')) {
+    await checkRunbookGate(input)
+    return
+  }
+
+  // ─── Lazy validator load for non-harness flow. ────────────────────────
+  let validateProviderRegistry
+  try {
+    const mod = await import(new URL('./lib/registry-validator.mjs', import.meta.url).href)
+    validateProviderRegistry = mod.validateProviderRegistry
+  } catch (e) {
+    emitBlock(
+      `second-opinion-gate: cannot load validator at ./lib/registry-validator.mjs ` +
+      `(detail: ${e.message}). Run: node install.mjs --tool claude-code --install-second-opinion ` +
+      `to reinstall the colocated validator lib.`,
+      { code: 'snapshot-validator-load-failed', detail: e.message }
+    )
+  }
+
+  const snap = loadSnapshot(validateProviderRegistry)
+  if (snap.error) {
+    const extra = { code: snap.error }
+    if (snap.field) extra.field = snap.field
+    if (snap.provider) extra.provider = snap.provider
+    if (snap.detail) extra.detail = snap.detail
+    const detailSuffix = snap.field
+      ? ` (field: ${snap.field}${snap.provider ? `, provider: ${snap.provider}` : ''})`
+      : ''
+    emitBlock(
+      `second-opinion-gate: ${snap.error}${detailSuffix}. ` +
+      `Run: node install.mjs --tool claude-code --install-second-opinion to install/refresh the registry. ` +
+      `(Direct provider calls cannot be safely gated without a valid install snapshot.)`,
+      extra
+    )
+  }
+
+  if (toolName === 'Bash') {
+    const decision = checkBashBranch(toolInput, cwd, snap.snapshot)
+    if (decision.block) emitBlock(decision.reason)
+    emitAllow()
+  }
+
+  if (toolName === 'Agent' || toolName === 'Task') {
+    const decision = checkAgentBranch(toolInput, snap.snapshot)
+    if (decision.block) emitBlock(decision.reason)
+    emitAllow()
+  }
+
   emitAllow()
 }
 
-const snap = loadSnapshot()
-if (snap.error) {
-  const extra = { code: snap.error }
-  if (snap.field) extra.field = snap.field
-  if (snap.provider) extra.provider = snap.provider
-  if (snap.detail) extra.detail = snap.detail
-  const detailSuffix = snap.field
-    ? ` (field: ${snap.field}${snap.provider ? `, provider: ${snap.provider}` : ''})`
-    : ''
-  emitBlock(
-    `second-opinion-gate: ${snap.error}${detailSuffix}. ` +
-    `Run: node install.mjs --install-second-opinion to install/refresh the registry. ` +
-    `(Direct provider calls cannot be safely gated without a valid install snapshot.)`,
-    extra
-  )
-}
-
-const snapshot = snap.snapshot
-const toolName = input.tool_name || ''
-const toolInput = input.tool_input || {}
-const cwd = input.cwd || process.cwd()
-
-if (toolName === 'Bash') {
-  const decision = checkBashBranch(toolInput, cwd, snapshot)
-  if (decision.block) emitBlock(decision.reason)
-  emitAllow()
-}
-
-if (toolName === 'Agent' || toolName === 'Task') {
-  // Claude Code's Agent tool may report as 'Task' depending on version.
-  const decision = checkAgentBranch(toolInput, snapshot)
-  if (decision.block) emitBlock(decision.reason)
-  emitAllow()
-}
-
-// Other tools: allow.
-emitAllow()
+main()
