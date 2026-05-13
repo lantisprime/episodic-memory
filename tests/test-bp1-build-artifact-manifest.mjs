@@ -467,10 +467,16 @@ tap('A12d: linked-worktree resolution (contract-preservation, not regression gua
     `See canonical prompt episode ${ROOT_ID}.\n`)
   installRuntimeIntoProj(target)
 
-  // Create linked worktree
+  // Create linked worktree. CI runners may have no global git user config,
+  // so scope identity to this invocation only (-c) — avoids polluting global
+  // config and lets the test run anywhere git is installed.
   const wtDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp1-mfst-a12d-wt-'))
-  execFileSync('git', ['-C', target, 'commit', '--allow-empty', '-m', 'init', '-q'],
-    { stdio: ['ignore', 'pipe', 'pipe'] })
+  execFileSync('git', [
+    '-C', target,
+    '-c', 'user.email=test@example.com',
+    '-c', 'user.name=test',
+    'commit', '--allow-empty', '-m', 'init', '-q'
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
   execFileSync('git', ['-C', target, 'worktree', 'add', '-q', wtDir, '-b', 'a12d-wt-branch'],
     { stdio: ['ignore', 'pipe', 'pipe'] })
 
