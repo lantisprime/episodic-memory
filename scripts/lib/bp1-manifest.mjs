@@ -136,10 +136,6 @@ function buildAgentLoaders(projectRoot) {
 }
 
 function buildCanonicalPrompts(projectRoot, agentLoaders) {
-  // Each loader file has a "canonical prompt episode" reference. Find the
-  // first matching episode-id pattern in the loader, then resolve the
-  // terminal-revision episode-id via em-search (--history). For the M0 ship
-  // with zero bp1 agents installed, this returns an empty array.
   const out = []
   for (const loader of agentLoaders) {
     const abs = path.join(projectRoot, loader.path)
@@ -149,47 +145,60 @@ function buildCanonicalPrompts(projectRoot, agentLoaders) {
     const referencedId = m[1]
     out.push({
       loader: loader.path,
-      latest_prompt_episode_id: resolveLatestEpisodeId(referencedId)
+      latest_prompt_episode_id: resolveLatestEpisodeId(referencedId, projectRoot)
     })
   }
   return out
 }
 
-function resolveLatestEpisodeId(referencedId) {
-  // Walk supersedes chain via em-search --history.
-  //
-  // Two distinct failure classes:
-  //   - em-search not present (script file missing): expected legitimate
-  //     fallback to the referenced id. Tracked by #180 for M3 hardening.
-  //   - em-search present but the subprocess errored or returned malformed
-  //     JSON: a real signal that propagates. The outer try/catch in
-  //     bp1-flag-check.mjs catches it and surfaces as bp1-flag-version-drift.
-  //
-  // Codex round-3 finding: bare catch{} swallowing ALL errors made the
-  // I-P2-1 fail-closed invariant overbroad. Narrowed here.
+// Exported for direct unit testing of the V1 trust-boundary guard
+// (codex r9 P1: testing through buildCanonicalPrompts is preempted by
+// Node's path.join() TypeError before the guard executes).
+export function resolveLatestEpisodeId(referencedId, projectRoot) {
+  // V1 guard (codex r2 F2 + r3 B2 + validation-contract audit): bind the
+  // em-search subprocess to the target project, never silently fall back to
+  // caller cwd. Without this guard, cwd: undefined re-introduces the
+  // canonical-prompt resolution drift bug invisibly on refactors.
+  if (typeof projectRoot !== 'string' || !path.isAbsolute(projectRoot)) {
+    throw new TypeError(
+      `resolveLatestEpisodeId: projectRoot must be an absolute path string; got ${projectRoot}`
+    )
+  }
   const repoScripts = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
   const script = path.join(repoScripts, 'em-search.mjs')
   if (!fs.existsSync(script)) return referencedId
 
-  // From here on, throw — flag-check's outer try/catch surfaces as drift.
-  const out = execFileSync('node', [script, '--history', referencedId, '--no-track'], {
+  const out = execFileSync('node', [
+    script,
+    '--history', referencedId,
+    '--no-track',
+    '--scope', 'local',
+  ], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
     timeout: 5000,
+    cwd: projectRoot,
+    // Explicit env inheritance: HOME + PATH must propagate so em-search's
+    // os.homedir() + node resolution behave correctly. Documenting the
+    // dependency prevents future "hardening" PRs from minimizing env and
+    // silently breaking the --scope local + HOME-redirection contract
+    // (A12g would lose discrimination). Per negative-scenario-reviewer F3.
+    env: process.env,
   })
   const parsed = JSON.parse(out)
-  // em-search --history emits {status, count, chain: [...]} — NOT episodes.
-  // (Round-3 bug: original lib checked parsed.episodes, masked by bare catch.)
-  // Three valid cases:
-  //   - {chain: [...]} non-empty → use terminal id
-  //   - {chain: []}            → id not in store, legitimate fallback
-  //   - parsed has no chain array at all → malformed, propagate
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.chain)) {
     throw new Error(`em-search returned unexpected shape for history of ${referencedId}`)
   }
   if (parsed.chain.length) {
-    // History is ordered chain; terminal is the one not superseded.
-    const terminal = parsed.chain.find(e => !e.superseded_by) || parsed.chain[parsed.chain.length - 1]
+    // em-search --history emits chain root→terminal with `supersedes` (forward
+    // pointer), not `superseded_by`. Prior `.find(e => !e.superseded_by)`
+    // matched every entry → returned root, not terminal (codex r4 P1).
+    const terminal = parsed.chain[parsed.chain.length - 1]
+    if (!terminal || typeof terminal.id !== 'string') {
+      throw new Error(
+        `em-search history returned malformed terminal entry for ${referencedId}: ${JSON.stringify(terminal)}`
+      )
+    }
     return terminal.id
   }
   return referencedId
