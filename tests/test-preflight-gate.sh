@@ -45,6 +45,8 @@ stage_fixture() {
   cp "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/local-dir.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$tmp/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$tmp/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/hooks/preflight-gate.sh" "$tmp/hooks/"
   cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$tmp/hooks/lib/"
   cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$tmp/hooks/lib/"
@@ -496,11 +498,18 @@ else
 fi
 
 # F4c: overwrite → file replaced atomically (different inode)
+# Platform-agnostic stat: macOS uses `stat -f %i`, Linux uses `stat -c %i`.
+# PR #271 CI catch: hardcoded `stat -f` failed on Ubuntu.
+if stat -f '%i' / >/dev/null 2>&1; then
+  STAT_INO=(stat -f %i)
+else
+  STAT_INO=(stat -c %i)
+fi
 TF="$(mktmp)"; stage_fixture "$TF"
 echo '{"v":1}' | node "$TF/scripts/preflight-marker-write.mjs" --root "$TF" --target preflight >/dev/null
-ino1="$(stat -f '%i' "$TF/.checkpoints/.preflight-done")"
+ino1="$("${STAT_INO[@]}" "$TF/.checkpoints/.preflight-done")"
 echo '{"v":2}' | node "$TF/scripts/preflight-marker-write.mjs" --root "$TF" --target preflight >/dev/null
-ino2="$(stat -f '%i' "$TF/.checkpoints/.preflight-done")"
+ino2="$("${STAT_INO[@]}" "$TF/.checkpoints/.preflight-done")"
 v2="$(jq -r '.v' "$TF/.checkpoints/.preflight-done")"
 if [ "$ino1" != "$ino2" ] && [ "$v2" = "2" ]; then
   echo "  ✓ F4c overwrite is atomic (different inode after rename)"

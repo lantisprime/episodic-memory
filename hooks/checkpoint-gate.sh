@@ -46,14 +46,15 @@ set -e
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
+MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-# Source classifier + repo-root resolver + shared marker paths. Use
-# BASH_SOURCE for symlink safety.
+# Source classifier + repo-root resolver + shared marker paths + session-id.
+# Use BASH_SOURCE for symlink safety.
 HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 LIB_DIR="$HOOK_DIR/lib"
-if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ]; then
-  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh). Re-run install.mjs --install-hooks."}'
+if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ] || [ ! -f "$LIB_DIR/session-id.sh" ]; then
+  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh, session-id.sh). Re-run install.mjs --install-hooks."}'
   exit 0
 fi
 # shellcheck disable=SC1091
@@ -62,6 +63,8 @@ source "$LIB_DIR/repo-root.sh"
 source "$LIB_DIR/command-classifier.sh"
 # shellcheck disable=SC1091
 source "$LIB_DIR/marker-paths.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/session-id.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 
@@ -102,7 +105,75 @@ marker_basename_for_target() {
       return 0
     fi
   done
+  # #268 fix E13: also accept any per-session plan-marker basename
+  # `.plan-approval-pending.<sid>` at either root. Strict validation via
+  # plan_marker_basename_matches (rejects path traversal / oversize / invalid chars).
+  local target_basename="${target##*/}"
+  local target_dir="${target%/*}"
+  case "$target_basename" in
+    .plan-approval-pending.*)
+      if plan_marker_basename_matches "$target_basename"; then
+        if [ "$target_dir" = "$PRIMARY_DIR" ] || [ "$target_dir" = "$LEGACY_DIR" ]; then
+          printf '%s' "$target_basename"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   printf ''
+}
+
+# #268 fix E13: plan_marker_exists_for_session — is there a plan-approval
+# marker blocking THIS session? Returns 0 (true) on any of:
+#   - <root>/.checkpoints/.plan-approval-pending.<sid>          (own session, primary)
+#   - <root>/.claude/.plan-approval-pending.<sid>               (own session, legacy)
+#   - <root>/.checkpoints/.plan-approval-pending                (legacy suffix-less)
+#   - <root>/.claude/.plan-approval-pending                     (legacy suffix-less)
+# Cross-session suffixed markers (.plan-approval-pending.OTHER_SID) are
+# IGNORED — that's the #268 fix.
+plan_marker_exists_for_session() {
+  local sid="$1"
+  [ -e "$PRIMARY_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
+  [ -e "$LEGACY_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
+  if validate_session_id "$sid"; then
+    local basename
+    basename="$(plan_marker_basename_for_session "$sid")"
+    [ -e "$PRIMARY_DIR/$basename" ] && return 0
+    [ -e "$LEGACY_DIR/$basename" ] && return 0
+  fi
+  return 1
+}
+
+# #268 fix F14 helper: any_plan_marker_exists — true if ANY plan marker
+# (legacy suffix-less OR any suffixed form) exists at either root. Used
+# for fail-closed-on-invalid-sid decisions.
+any_plan_marker_exists() {
+  [ -e "$PRIMARY_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
+  [ -e "$LEGACY_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
+  local p
+  for p in "$PRIMARY_DIR"/.plan-approval-pending.*; do
+    [ -e "$p" ] && return 0
+  done
+  for p in "$LEGACY_DIR"/.plan-approval-pending.*; do
+    [ -e "$p" ] && return 0
+  done
+  return 1
+}
+
+# #268 fix: composite predicate combining E13 + F14. Returns 0 (true) if
+# THIS session is plan-blocked by either:
+#   (a) invalid/empty/missing sid AND any plan marker exists (F14
+#       fail-closed for probe-drift threat — per plan v6 §2)
+#   (b) valid sid AND plan_marker_exists_for_session true
+# Returns 1 (false) otherwise.
+plan_pending_blocks_this_session() {
+  local sid="$1"
+  if ! validate_session_id "$sid"; then
+    any_plan_marker_exists && return 0
+    return 1
+  fi
+  plan_marker_exists_for_session "$sid" && return 0
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -122,6 +193,10 @@ _marker_basename_in_set() {
     .last-user-prompt.json) return 0 ;;
     .last-user-prompt.*.json) return 0 ;;
     .so-runbook-shown.*) return 0 ;;
+    # #268 fix E7: per-session plan-marker `.plan-approval-pending.<sid>`.
+    # Loose glob here for set-membership routing; strict validation via
+    # plan_marker_basename_matches happens at marker_basename_for_target.
+    .plan-approval-pending.*) return 0 ;;
   esac
   return 1
 }
@@ -193,7 +268,7 @@ _escape_bash_glob() {
 _command_has_relative_marker_path() {
   local cmd_stripped
   cmd_stripped="$(_strip_shell_quotes "$1")"
-  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
+  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
 }
 
 # E2E-discovered absolute-non-canonical detection: for Bash commands where
@@ -210,7 +285,7 @@ _command_first_absolute_noncanonical_marker() {
   local cmd
   cmd="$(_strip_shell_quotes "$1")"
   local matches p basename
-  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
+  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
   [ -z "$matches" ] && return 0
   while IFS= read -r p; do
     [ -z "$p" ] && continue
@@ -372,10 +447,17 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     TARGET_BN="$(marker_basename_for_target "$TARGET")"
 
     # Cross-gate invariant: checkpoint marker writes are blocked while
-    # .plan-approval-pending exists (Codex ...3503 P1).
-    if marker_exists .plan-approval-pending; then
-      if [ "$TARGET_BN" = ".plan-approval-pending" ]; then
-        # Allow plan-marker removal — plan-gate.sh is what cares about this.
+    # the current session's plan-approval-pending exists (Codex ...3503 P1).
+    # #268 fix E14: session-aware via plan_pending_blocks_this_session.
+    # Codex code-tier r1 BLOCKER-B1: narrow plan-marker allowance to
+    # OWN-SESSION basename only (legacy literal OR own suffixed). Other-
+    # session suffixed markers MUST NOT be writable via direct Bash —
+    # without this narrowing, session A could `rm .plan-approval-pending.B`
+    # while plan-blocked on its own marker.
+    if plan_pending_blocks_this_session "$MY_SID"; then
+      own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
+      if [ "$TARGET_BN" = "$PLAN_MARKER_LEGACY_BASENAME" ] || [ "$TARGET_BN" = "$own_session_basename" ]; then
+        # Allow plan-marker removal/touch — plan-gate.sh decides.
         exit 0
       fi
       _block_plan_pending
@@ -432,8 +514,13 @@ case "$TOOL_NAME" in
         fi
 
         TARGET_BN="$(marker_basename_for_target "$TARGET")"
-        # Cross-gate invariant
-        if marker_exists .plan-approval-pending && [ "$TARGET_BN" != ".plan-approval-pending" ]; then
+        # Cross-gate invariant (#268 fix E15 + codex code-tier r1 B1 narrowing):
+        # block Write/Edit unless target is THIS session's own plan-marker
+        # basename (legacy literal OR own suffixed).
+        own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
+        if plan_pending_blocks_this_session "$MY_SID" \
+           && [ "$TARGET_BN" != "$PLAN_MARKER_LEGACY_BASENAME" ] \
+           && [ "$TARGET_BN" != "$own_session_basename" ]; then
           _block_plan_pending
         fi
         case "$TARGET_BN" in
@@ -478,7 +565,9 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   # .claude/ until fallback is removed. Iteration over the shared
   # TASK_SIGNAL_MARKERS array keeps the cleanup set in lockstep with the
   # carve-out's marker set in em-recall.mjs.
-  if ! marker_exists .plan-approval-pending; then
+  # #268 fix E17: session-aware check — only cleanup if THIS session has
+  # no plan-pending. Other sessions' suffixed markers do not block cleanup.
+  if ! plan_pending_blocks_this_session "$MY_SID"; then
     for _m in "${CHECKPOINT_CLEANUP_MARKERS[@]}"; do
       rm -f "$PRIMARY_DIR/$_m" "$LEGACY_DIR/$_m" 2>/dev/null || true
     done

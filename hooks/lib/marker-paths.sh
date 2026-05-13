@@ -136,3 +136,54 @@ both_marker_paths() {
 ensure_primary_dir() {
   mkdir -p "$1/$PRIMARY_MARKER_DIR" 2>/dev/null
 }
+
+# ---------------------------------------------------------------------------
+# #268 fix — per-session .plan-approval-pending marker contract.
+#
+# Shell parity for scripts/lib/marker-paths.mjs PLAN_MARKER_*. Drift caught
+# by scripts/validate-plan-marker-sites.mjs Direction 0.
+# ---------------------------------------------------------------------------
+
+readonly PLAN_MARKER_LEGACY_BASENAME='.plan-approval-pending'
+readonly PLAN_MARKER_BASENAME_GLOB='.plan-approval-pending*'       # bash case glob (loose; for routing)
+readonly PLAN_MARKER_SUFFIX_CHARCLASS='A-Za-z0-9_-'
+readonly PLAN_MARKER_SUFFIX_MAXLEN=128
+readonly PLAN_MARKER_BASENAME_GREP_PATTERN='\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?'
+
+# plan_marker_basename_matches <basename>
+# Strict match. Accepts ONLY:
+#   .plan-approval-pending                          (legacy suffix-less)
+#   .plan-approval-pending.<sid>                    (sid matches char-class + length)
+# Rejects:
+#   .plan-approval-pending-extra                    (suffix without dot separator)
+#   .plan-approval-pending.                         (empty suffix)
+#   .plan-approval-pending./traversal               (slash in suffix)
+#   .plan-approval-pending..                        (dot in suffix)
+#   .plan-approval-pending.<129-char>               (oversize suffix)
+#
+# Used by checkpoint-gate's marker_basename_for_target equality refinement
+# and plan-gate's existence check (defense in depth — shell-case sites use
+# loose glob for routing, then this strict helper for validation).
+plan_marker_basename_matches() {
+  local basename="$1"
+  case "$basename" in
+    .plan-approval-pending) return 0 ;;
+    .plan-approval-pending.*)
+      local suffix="${basename#.plan-approval-pending.}"
+      [ -z "$suffix" ] && return 1
+      [ "${#suffix}" -gt "$PLAN_MARKER_SUFFIX_MAXLEN" ] && return 1
+      case "$suffix" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# plan_marker_basename_for_session <sid>
+# Compose the per-session marker basename. Caller MUST validate_session_id
+# (from hooks/lib/session-id.sh) BEFORE calling this; not re-validated here.
+plan_marker_basename_for_session() {
+  printf '.plan-approval-pending.%s' "$1"
+}

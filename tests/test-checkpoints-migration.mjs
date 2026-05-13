@@ -219,39 +219,86 @@ test('removes stale legacy + primary markers below prior baseline', () => {
 
 console.log('\nSessionEnd cleanup sweeps BOTH roots for ALL_MIGRATED_MARKERS:')
 
-test('em-session-end-prompt removes 6 markers across both roots', () => {
+test('em-session-end-prompt removes non-plan markers; F12 preserves legacy + removes own-session plan-marker', () => {
+  // #268 fix F12 (codex r1 F1): SessionEnd no longer unconditionally removes
+  // .plan-approval-pending. Legacy is read-only-during-burn-in; only
+  // .plan-approval-pending.<own-sid> (provided via stdin .session_id) gets
+  // removed. Cross-session safety: B's SessionEnd does not delete A's marker.
   const root = setupRepo()
-  // Seed all 6 markers at BOTH roots.
-  const markers = [
+  const sid = 'session-test-A'
+
+  // Seed 5 non-plan migrated markers at BOTH roots.
+  const nonPlanMarkers = [
     '.checkpoint-required',
     '.post-checkpoint-required',
-    '.plan-approval-pending',
     '.pre-checkpoint-done',
     '.post-checkpoint-done',
     '.session-baseline'
   ]
   for (const dir of ['.checkpoints', '.claude']) {
     fs.mkdirSync(path.join(root, dir), { recursive: true })
-    for (const name of markers) {
+    for (const name of nonPlanMarkers) {
+      const p = path.join(root, dir, name)
+      fs.writeFileSync(p, 'x')
+      assertExists(p, `pre-condition: ${dir}/${name}`)
+    }
+    // Also seed legacy plan-marker and own-session suffixed plan-marker.
+    for (const name of ['.plan-approval-pending', `.plan-approval-pending.${sid}`]) {
       const p = path.join(root, dir, name)
       fs.writeFileSync(p, 'x')
       assertExists(p, `pre-condition: ${dir}/${name}`)
     }
   }
 
-  // em-session-end-prompt resolves the repo root via resolveRepoRoot —
-  // running from within the test repo's cwd resolves to that repo. HOME
-  // isolation matches runRecall.
+  // Run SessionEnd with stdin {session_id: <sid>} — F12 reads stdin.
   execSync(`node ${SESSION_END}`, {
     cwd: root,
-    stdio: ['ignore', 'pipe', 'ignore'],
+    input: JSON.stringify({ session_id: sid, hook_event_name: 'SessionEnd' }),
+    stdio: ['pipe', 'pipe', 'ignore'],
     env: { ...process.env, HOME: root }
   })
 
+  // 5 non-plan markers: removed at BOTH roots (unchanged behavior).
   for (const dir of ['.checkpoints', '.claude']) {
-    for (const name of markers) {
+    for (const name of nonPlanMarkers) {
       assertMissing(path.join(root, dir, name), `${dir}/${name} should be removed by SessionEnd sweep`)
     }
+  }
+  // F12: legacy plan-marker PRESERVED at BOTH roots (never removed by SessionEnd).
+  for (const dir of ['.checkpoints', '.claude']) {
+    assertExists(path.join(root, dir, '.plan-approval-pending'),
+      `F12: ${dir}/.plan-approval-pending must be PRESERVED (read-only-during-burn-in)`)
+  }
+  // F12: own-session suffixed plan-marker REMOVED at BOTH roots.
+  for (const dir of ['.checkpoints', '.claude']) {
+    assertMissing(path.join(root, dir, `.plan-approval-pending.${sid}`),
+      `F12: ${dir}/.plan-approval-pending.${sid} should be removed (own-session cleanup)`)
+  }
+})
+
+test('SessionEnd with invalid session_id leaves all plan-markers untouched', () => {
+  // F12: invalid sid → skip plan-marker cleanup entirely. Non-plan markers
+  // continue to clean up normally.
+  const root = setupRepo()
+  for (const dir of ['.checkpoints', '.claude']) {
+    fs.mkdirSync(path.join(root, dir), { recursive: true })
+    fs.writeFileSync(path.join(root, dir, '.plan-approval-pending'), 'x')
+    fs.writeFileSync(path.join(root, dir, '.plan-approval-pending.session-A'), 'x')
+    fs.writeFileSync(path.join(root, dir, '.checkpoint-required'), 'x')
+  }
+  execSync(`node ${SESSION_END}`, {
+    cwd: root,
+    input: JSON.stringify({ session_id: '../evil', hook_event_name: 'SessionEnd' }),
+    stdio: ['pipe', 'pipe', 'ignore'],
+    env: { ...process.env, HOME: root }
+  })
+  for (const dir of ['.checkpoints', '.claude']) {
+    assertExists(path.join(root, dir, '.plan-approval-pending'),
+      `invalid sid: ${dir}/.plan-approval-pending preserved`)
+    assertExists(path.join(root, dir, '.plan-approval-pending.session-A'),
+      `invalid sid: ${dir}/.plan-approval-pending.session-A preserved (cross-session safety)`)
+    assertMissing(path.join(root, dir, '.checkpoint-required'),
+      `invalid sid: ${dir}/.checkpoint-required still removed (non-plan unchanged)`)
   }
 })
 

@@ -23,6 +23,9 @@ import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 import {
   TASK_SIGNAL_MARKERS,
   BASELINE_NAME,
+  PRIMARY_MARKER_DIR,
+  LEGACY_MARKER_DIR,
+  PLAN_MARKER_LEGACY_BASENAME,
   primaryMarkerPath,
   legacyMarkerPath,
   resolveMarkerRead,
@@ -30,7 +33,10 @@ import {
   ensurePrimaryDir,
   bothMarkerPaths
 } from './lib/marker-paths.mjs'
-import { _maxMtimeAcrossRootsStrict } from './lib/stop-gate-helpers.mjs'
+import {
+  _maxMtimeAcrossRootsStrict,
+  _maxMtimeAcrossRootsForPlanMarkerStrict,
+} from './lib/stop-gate-helpers.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -161,6 +167,47 @@ function _maxMtimeAcrossRoots(repoRoot, basename) {
   return { mtime, hadSymlink, anyExisted }
 }
 
+// #268 fix E19: non-strict plan-marker variant for carve-out. Scans BOTH
+// legacy `.plan-approval-pending` AND any `.plan-approval-pending.<sid>`
+// at primary + legacy roots; returns max mtime across the set.
+//
+// Symmetric with _maxMtimeAcrossRoots (relaxed: lstat errors silently
+// skipped). Use this for carve-out (NON-fail-closed) sites; for stop-gate
+// fail-closed sites use _maxMtimeAcrossRootsForPlanMarkerStrict from
+// stop-gate-helpers.mjs.
+function _maxMtimeAcrossRootsForPlanMarker(repoRoot) {
+  let mtime = -Infinity
+  let hadSymlink = false
+  let anyExisted = false
+  for (const p of [
+    primaryMarkerPath(repoRoot, PLAN_MARKER_LEGACY_BASENAME),
+    legacyMarkerPath(repoRoot, PLAN_MARKER_LEGACY_BASENAME),
+  ]) {
+    try {
+      const st = fs.lstatSync(p)
+      if (st.isSymbolicLink()) { hadSymlink = true; continue }
+      anyExisted = true
+      if (st.mtimeMs > mtime) mtime = st.mtimeMs
+    } catch {}
+  }
+  const prefix = `${PLAN_MARKER_LEGACY_BASENAME}.`
+  for (const dir of [path.join(repoRoot, PRIMARY_MARKER_DIR), path.join(repoRoot, LEGACY_MARKER_DIR)]) {
+    let entries
+    try { entries = fs.readdirSync(dir) } catch { continue }
+    for (const name of entries) {
+      if (!name.startsWith(prefix)) continue
+      const p = path.join(dir, name)
+      try {
+        const st = fs.lstatSync(p)
+        if (st.isSymbolicLink()) { hadSymlink = true; continue }
+        anyExisted = true
+        if (st.mtimeMs > mtime) mtime = st.mtimeMs
+      } catch {}
+    }
+  }
+  return { mtime, hadSymlink, anyExisted }
+}
+
 function stopGateCarveOutApplies(repoRoot) {
   const base = _maxMtimeAcrossRoots(repoRoot, BASELINE_NAME)
   if (base.hadSymlink) return false
@@ -168,7 +215,10 @@ function stopGateCarveOutApplies(repoRoot) {
   const baselineMtime = base.mtime
 
   for (const name of TASK_SIGNAL_MARKERS) {
-    const m = _maxMtimeAcrossRoots(repoRoot, name)
+    // #268 fix E19: plan-marker member glob-expands suffixed forms.
+    const m = (name === PLAN_MARKER_LEGACY_BASENAME)
+      ? _maxMtimeAcrossRootsForPlanMarker(repoRoot)
+      : _maxMtimeAcrossRoots(repoRoot, name)
     // Symlink at either root → fail closed.
     if (m.hadSymlink) return false
     // Marker absent at both roots → no signal; skip.
@@ -211,7 +261,9 @@ if (gateFlag === 'stop') {
   // stop-gate stepping aside is the deadlock-break. The exemption fires
   // EVEN when other TASK_SIGNAL_MARKERS (.checkpoint-required,
   // .post-checkpoint-required) are also active — see test 5.13.
-  const planPending = _maxMtimeAcrossRootsStrict(REPO_ROOT, '.plan-approval-pending')
+  // #268 fix E19: plan-pending deferral fires for ANY plan-marker variant
+  // (legacy literal OR any suffixed) — own session or other.
+  const planPending = _maxMtimeAcrossRootsForPlanMarkerStrict(REPO_ROOT)
   const baseStrict = _maxMtimeAcrossRootsStrict(REPO_ROOT, BASELINE_NAME)
   if (
     planPending.anyExisted && !planPending.hadSymlink && !planPending.hadOtherError &&
@@ -585,6 +637,28 @@ if (sessionStartFlag) {
 
     if (priorBaselineMtime !== null) {
       for (const name of TASK_SIGNAL_MARKERS) {
+        // #268 fix E20: plan-marker member glob-expands suffixed forms.
+        // Sweep legacy `.plan-approval-pending` + every `.plan-approval-pending.<sid>`
+        // at both roots whose mtime <= prior baseline (stale orphan).
+        if (name === PLAN_MARKER_LEGACY_BASENAME) {
+          const prefix = `${PLAN_MARKER_LEGACY_BASENAME}.`
+          for (const dir of [path.join(REPO_ROOT, PRIMARY_MARKER_DIR), path.join(REPO_ROOT, LEGACY_MARKER_DIR)]) {
+            let entries = []
+            try { entries = fs.readdirSync(dir) } catch { continue }
+            for (const e of entries) {
+              if (e !== PLAN_MARKER_LEGACY_BASENAME && !e.startsWith(prefix)) continue
+              const p = path.join(dir, e)
+              try {
+                const st = fs.lstatSync(p)
+                if (st.isSymbolicLink()) continue
+                if (st.mtimeMs <= priorBaselineMtime) {
+                  fs.rmSync(p, { force: true })
+                }
+              } catch {}
+            }
+          }
+          continue
+        }
         for (const p of bothMarkerPaths(REPO_ROOT, name)) {
           try {
             const st = fs.lstatSync(p)
