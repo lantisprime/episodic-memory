@@ -231,13 +231,13 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - Score ALL results before applying `limit` (replaces date-based sort)
 - Health check for `em-recall.mjs` deferred to Phase 3 (script doesn't exist yet)
 
-**Detailed plan:** `docs/rfcs/RFC-001-phase2-plan.md`
+**Detailed plan:** `docs/rfcs/archived/RFC-001-phase2-plan.md`
 
 ### Phase 3: Proactive Recall — IN PROGRESS
 
 **Files created:** `em-recall.mjs` (~260 lines) — multi-pass retrieval (project match, tag match, recent cross-project), output as `{ "preflight_warnings": [], "episodes": [...] }` object wrapper (designed for RFC-002 Phase 3 extension)
 **Depends on:** Phase 2 (scoring + access tracking)
-**Detailed plan:** `docs/rfcs/RFC-001-phase3-plan.md`
+**Detailed plan:** `docs/rfcs/archived/RFC-001-phase3-plan.md`
 
 ### Phase 4: Semantic Consolidation — NOT STARTED
 
