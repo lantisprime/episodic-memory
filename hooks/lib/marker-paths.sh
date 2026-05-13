@@ -187,3 +187,25 @@ plan_marker_basename_matches() {
 plan_marker_basename_for_session() {
   printf '.plan-approval-pending.%s' "$1"
 }
+
+# any_plan_marker_exists <repo-root>
+# True if ANY plan-approval marker (legacy suffix-less OR any suffixed form)
+# exists at either primary or legacy marker dir under <repo-root>. Used by:
+#   - plan-gate.sh F14 fail-closed-on-invalid-sid decision
+#   - checkpoint-gate.sh probe-drift defense + plan_pending_blocks_this_session
+# Per-Rule-14 drift risk: previously duplicated across both gates with
+# identical body; centralized here so future surface additions (new plan
+# marker basenames, new root dirs) land in one place.
+any_plan_marker_exists() {
+  local root="$1"
+  [ -e "$root/$PRIMARY_MARKER_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
+  [ -e "$root/$LEGACY_MARKER_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
+  local p
+  for p in "$root/$PRIMARY_MARKER_DIR"/.plan-approval-pending.*; do
+    [ -e "$p" ] && return 0
+  done
+  for p in "$root/$LEGACY_MARKER_DIR"/.plan-approval-pending.*; do
+    [ -e "$p" ] && return 0
+  done
+  return 1
+}

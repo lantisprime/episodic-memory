@@ -144,20 +144,11 @@ plan_marker_exists_for_session() {
   return 1
 }
 
-# #268 fix F14 helper: any_plan_marker_exists — true if ANY plan marker
-# (legacy suffix-less OR any suffixed form) exists at either root. Used
-# for fail-closed-on-invalid-sid decisions.
-any_plan_marker_exists() {
-  [ -e "$PRIMARY_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
-  [ -e "$LEGACY_DIR/$PLAN_MARKER_LEGACY_BASENAME" ] && return 0
-  local p
-  for p in "$PRIMARY_DIR"/.plan-approval-pending.*; do
-    [ -e "$p" ] && return 0
-  done
-  for p in "$LEGACY_DIR"/.plan-approval-pending.*; do
-    [ -e "$p" ] && return 0
-  done
-  return 1
+# any_plan_marker_exists is sourced from hooks/lib/marker-paths.sh. Local
+# wrapper threads REPO_ROOT through so call-sites read the same way. Rule 14
+# drift fix — single definition shared with plan-gate.sh.
+_any_plan_marker_exists_local() {
+  any_plan_marker_exists "$REPO_ROOT"
 }
 
 # #268 fix: composite predicate combining E13 + F14. Returns 0 (true) if
@@ -169,7 +160,7 @@ any_plan_marker_exists() {
 plan_pending_blocks_this_session() {
   local sid="$1"
   if ! validate_session_id "$sid"; then
-    any_plan_marker_exists && return 0
+    _any_plan_marker_exists_local && return 0
     return 1
   fi
   plan_marker_exists_for_session "$sid" && return 0

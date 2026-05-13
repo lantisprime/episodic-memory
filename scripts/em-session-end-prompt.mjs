@@ -29,11 +29,17 @@ import { validateSessionId } from './lib/session-id.mjs'
 // ---------------------------------------------------------------------------
 // Load known patterns from _index.json
 // ---------------------------------------------------------------------------
-function loadPatternsIndex() {
+// #272 C2-minor: accept repoRoot (resolved from stdin .cwd) as the first
+// candidate. Previously this read `process.cwd()/patterns/_index.json`
+// which — after B2 bound cleanup to stdin .cwd — was the last remaining
+// caller-cwd dependency in this script. Worktree-cwd invocations no longer
+// silently fall through to the global HOME copy.
+function loadPatternsIndex(repoRoot) {
   const candidates = [
+    repoRoot ? path.join(repoRoot, 'patterns', '_index.json') : null,
     path.join(process.cwd(), 'patterns', '_index.json'),
     path.join(os.homedir(), '.episodic-memory', 'patterns', '_index.json')
-  ]
+  ].filter(Boolean)
   for (const p of candidates) {
     try {
       const data = JSON.parse(fs.readFileSync(p, 'utf8'))
@@ -77,17 +83,35 @@ function loadPatternsIndex() {
 // stdin. The hook target's cwd is the project the SessionEnd applies to;
 // using process.cwd() would bind cleanup to the caller, which is wrong
 // for linked-worktree / nested-cwd invocations.
+//
+// #272 C1-minor: skip the synchronous stdin read when stdin is a TTY. Hook
+// contract is "Claude Code always supplies stdin JSON," but a manual
+// interactive run (`node em-session-end-prompt.mjs` at a shell) would
+// otherwise block on fs.readFileSync(0) waiting for EOF. The TTY guard
+// makes the script safe to invoke ad-hoc for debugging while preserving
+// the hook contract.
+//
+// #272 F-5: if sessionEndSid is invalid/missing AFTER this read, the
+// per-session plan-marker cleanup (loop below) is skipped entirely. The
+// orphan-sweep at the NEXT session's SessionStart handles those leftovers
+// via mtime check (see em-recall.mjs orphan-sweep path). Audit trace:
+// SessionEnd → (skip) → SessionStart orphan-sweep → mtime-aged stale
+// markers cleaned. This is the documented fallback for the
+// invalid-sid-on-SessionEnd path; do not add eager cleanup here without
+// re-running plan v6 §F12 threat model (cross-session marker deletion).
 let sessionEndSid = null
 let sessionEndCwd = null
 try {
-  const stdinData = fs.readFileSync(0, 'utf8')
-  if (stdinData) {
-    const stdinJson = JSON.parse(stdinData)
-    if (stdinJson && typeof stdinJson.session_id === 'string') {
-      sessionEndSid = stdinJson.session_id
-    }
-    if (stdinJson && typeof stdinJson.cwd === 'string') {
-      sessionEndCwd = stdinJson.cwd
+  if (!process.stdin.isTTY) {
+    const stdinData = fs.readFileSync(0, 'utf8')
+    if (stdinData) {
+      const stdinJson = JSON.parse(stdinData)
+      if (stdinJson && typeof stdinJson.session_id === 'string') {
+        sessionEndSid = stdinJson.session_id
+      }
+      if (stdinJson && typeof stdinJson.cwd === 'string') {
+        sessionEndCwd = stdinJson.cwd
+      }
     }
   }
 } catch { /* best-effort; stdin missing/non-JSON → null sid + cwd */ }
@@ -118,7 +142,7 @@ for (const marker of ALL_MIGRATED_MARKERS) {
   }
 }
 
-const patterns = loadPatternsIndex()
+const patterns = loadPatternsIndex(repoRoot)
 
 const knownPatterns = patterns.map(p => ({
   pattern_id: p.pattern_id,
