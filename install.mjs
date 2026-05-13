@@ -1176,44 +1176,194 @@ if (installHooks) {
 if (installSecondOpinion) {
   const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
   const userHooksLibDir = path.join(userHooksDir, 'lib')
-  try {
-    // Copy hooks/second-opinion-gate.mjs to ~/.claude/hooks/.
-    fs.mkdirSync(userHooksDir, { recursive: true })
-    const repoGateSrc = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
-    const userGateDst = path.join(userHooksDir, 'second-opinion-gate.mjs')
-    if (fs.existsSync(repoGateSrc)) {
-      fs.copyFileSync(repoGateSrc, userGateDst)
-      fs.chmodSync(userGateDst, 0o755)
-      console.log(`Installed second-opinion gate hook: ${userGateDst}`)
-    } else {
-      console.log(`Warning: ${repoGateSrc} not found; hook gate not installed.`)
-      installFailed = true
+  const userRunbooksDir = path.join(userHooksDir, 'runbooks')
+
+  // ─── Codex r1 P1-3: pre-flight source existence + quickref derivation. ───
+  // Validate ALL sources upfront so a missing/bad source doesn't leave a
+  // partial install. Quickref derivation is the most failure-prone step
+  // (section sentinel must be present + size-bounded); run it first so
+  // we fail fast before any copy is attempted.
+  const repoGateSrc       = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
+  const repoValidatorSrc  = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
+  const repoLocalDirSrc   = path.join(REPO_DIR, 'scripts', 'lib', 'local-dir.mjs')
+  const repoRunbookSrc    = path.join(REPO_HOOKS, 'runbooks', 'second-opinion-harness.md')
+
+  const userGateDst       = path.join(userHooksDir, 'second-opinion-gate.mjs')
+  const userValidatorDst  = path.join(userHooksLibDir, 'registry-validator.mjs')
+  const userLocalDirDst   = path.join(userHooksLibDir, 'local-dir.mjs')
+  const userRunbookDst    = path.join(userRunbooksDir, 'second-opinion-harness.md')
+  const userQuickrefDst   = path.join(userRunbooksDir, 'second-opinion-harness.quickref.md')
+
+  // deriveQuickref: extract the "Self-trigger checklist" section from the
+  // full runbook. Fail-closed if the section is missing or out of range.
+  // Codex r4: section rename/removal in canonical runbook → install throws.
+  function deriveQuickref(fullRunbookPath) {
+    if (!fs.existsSync(fullRunbookPath)) {
+      throw new Error(`runbook source not found at ${fullRunbookPath}`)
     }
-  } catch (e) {
-    console.error(`Failed to copy second-opinion gate hook: ${e.message}`)
+    const body = fs.readFileSync(fullRunbookPath, 'utf8')
+    // Locate header line (emoji-tolerant), then scan forward for the next
+    // `## ` heading. Avoids multiline-mode `$` ambiguity.
+    const headerRe = /^## [^\n]*Self-trigger checklist[^\n]*\n/m
+    const headerMatch = body.match(headerRe)
+    if (!headerMatch) {
+      throw new Error(
+        `quickref-derivation-failed: section "Self-trigger checklist" not found in ${fullRunbookPath}. ` +
+        `Either restore the section in the runbook or update the install script's headerRe.`
+      )
+    }
+    const startIdx = headerMatch.index
+    const afterHeader = startIdx + headerMatch[0].length
+    const nextHeader = body.indexOf('\n## ', afterHeader)
+    const endIdx = nextHeader === -1 ? body.length : nextHeader
+    const section = body.substring(startIdx, endIdx).trim()
+    if (section.length < 64) {
+      throw new Error(`quickref-derivation-failed: section too short (${section.length} chars)`)
+    }
+    if (section.length > 2048) {
+      throw new Error(
+        `quickref-derivation-failed: section too long (${section.length} chars > 2048 cap); ` +
+        `distill before installing or update the cap in install.mjs:deriveQuickref.`
+      )
+    }
+    return section + '\n'
+  }
+
+  // Pre-flight all source existence checks.
+  const preflightMissing = []
+  for (const src of [repoGateSrc, repoValidatorSrc, repoLocalDirSrc, repoRunbookSrc]) {
+    if (!fs.existsSync(src)) preflightMissing.push(src)
+  }
+  if (preflightMissing.length > 0) {
+    console.error('second-opinion install pre-flight failed; missing sources:')
+    for (const m of preflightMissing) console.error(`  ${m}`)
     installFailed = true
   }
 
-  try {
-    // Copy registry-validator.mjs alongside the hook so the installed hook can
-    // import './lib/registry-validator.mjs' (single source of truth — in-tree
-    // hook tests resolve through the hooks/lib/ symlink; installed hook reads
-    // this dereferenced copy).
-    fs.mkdirSync(userHooksLibDir, { recursive: true })
-    const repoValidatorSrc = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
-    const userValidatorDst = path.join(userHooksLibDir, 'registry-validator.mjs')
-    if (fs.existsSync(repoValidatorSrc)) {
-      // fs.copyFileSync dereferences symlinks by default — destination is a
-      // regular file with the validator source's content.
-      fs.copyFileSync(repoValidatorSrc, userValidatorDst)
-      console.log(`Installed second-opinion validator lib: ${userValidatorDst}`)
-    } else {
-      console.log(`Warning: ${repoValidatorSrc} not found; validator lib not installed.`)
+  let derivedQuickref = null
+  if (!installFailed) {
+    try {
+      derivedQuickref = deriveQuickref(repoRunbookSrc)
+      console.log(`Derived quickref: ${derivedQuickref.length} chars`)
+    } catch (e) {
+      console.error(`Quickref derivation failed: ${e.message}`)
       installFailed = true
     }
-  } catch (e) {
-    console.error(`Failed to copy second-opinion validator lib: ${e.message}`)
-    installFailed = true
+  }
+
+  // Codex post-impl review F1 (HOLD P1): make runtime install atomic via
+  // rollback. Each successful copy is recorded; on failure, all copies are
+  // reverted by quarantining (rename to .stale.<ts>) so the install never
+  // leaves a half-updated runtime that disagrees with the snapshot below.
+  const runtimeInstalled = []  // array of {dest, prevQuarantine?} entries
+
+  function safeCopy(label, src, dst, mode = null) {
+    if (installFailed) return
+    let prevQuarantine = null
+    let entryPushed = false
+    try {
+      const dir = path.dirname(dst)
+      fs.mkdirSync(dir, { recursive: true })
+      // If dst already exists, move it aside so rollback can restore.
+      if (fs.existsSync(dst)) {
+        prevQuarantine = `${dst}.preinstall.${Date.now()}`
+        fs.renameSync(dst, prevQuarantine)
+        // PR-level review P1: record rollback metadata IMMEDIATELY after
+        // quarantine so a later copy/chmod failure restores prevQuarantine.
+        // Without this push, a first-copy failure leaves the rollback array
+        // empty and rollbackRuntime() is a no-op while the original file
+        // sits quarantined unrecoverably.
+        runtimeInstalled.push({ dest: dst, prevQuarantine })
+        entryPushed = true
+      }
+      fs.copyFileSync(src, dst)
+      if (mode !== null) fs.chmodSync(dst, mode)
+      if (!entryPushed) {
+        runtimeInstalled.push({ dest: dst, prevQuarantine })
+      }
+      console.log(`Installed ${label}: ${dst}`)
+    } catch (e) {
+      console.error(`Failed to install ${label}: ${e.message}`)
+      // If we quarantined but didn't push (shouldn't happen now), still
+      // attempt direct restore here so the caller's rollbackRuntime can
+      // proceed. The post-fix push above means this catch is mostly safety net.
+      if (prevQuarantine && !entryPushed) {
+        try {
+          if (!fs.existsSync(dst)) fs.renameSync(prevQuarantine, dst)
+        } catch {}
+      }
+      installFailed = true
+    }
+  }
+
+  function safeWrite(label, dst, content) {
+    if (installFailed) return
+    let prevQuarantine = null
+    let entryPushed = false
+    try {
+      const dir = path.dirname(dst)
+      fs.mkdirSync(dir, { recursive: true })
+      if (fs.existsSync(dst)) {
+        prevQuarantine = `${dst}.preinstall.${Date.now()}`
+        fs.renameSync(dst, prevQuarantine)
+        runtimeInstalled.push({ dest: dst, prevQuarantine })
+        entryPushed = true
+      }
+      fs.writeFileSync(dst, content)
+      if (!entryPushed) {
+        runtimeInstalled.push({ dest: dst, prevQuarantine })
+      }
+      console.log(`Installed ${label}: ${dst}`)
+    } catch (e) {
+      console.error(`Failed to install ${label}: ${e.message}`)
+      if (prevQuarantine && !entryPushed) {
+        try {
+          if (!fs.existsSync(dst)) fs.renameSync(prevQuarantine, dst)
+        } catch {}
+      }
+      installFailed = true
+    }
+  }
+
+  function rollbackRuntime() {
+    if (runtimeInstalled.length === 0) return
+    console.error('Rolling back runtime install due to failure...')
+    // Reverse order — last-installed quarantined first.
+    for (let i = runtimeInstalled.length - 1; i >= 0; i--) {
+      const { dest, prevQuarantine } = runtimeInstalled[i]
+      try {
+        if (fs.existsSync(dest)) {
+          const failQuarantine = `${dest}.rollback.${Date.now()}`
+          fs.renameSync(dest, failQuarantine)
+          console.error(`  Quarantined: ${dest} -> ${failQuarantine}`)
+        }
+        if (prevQuarantine && fs.existsSync(prevQuarantine)) {
+          fs.renameSync(prevQuarantine, dest)
+          console.error(`  Restored:    ${prevQuarantine} -> ${dest}`)
+        }
+      } catch (re) {
+        console.error(`  Rollback failed for ${dest}: ${re.message}`)
+      }
+    }
+  }
+
+  safeCopy('second-opinion gate hook', repoGateSrc, userGateDst, 0o755)
+  safeCopy('second-opinion validator lib', repoValidatorSrc, userValidatorDst)
+  safeCopy('second-opinion local-dir lib', repoLocalDirSrc, userLocalDirDst)
+  safeCopy('runbook', repoRunbookSrc, userRunbookDst)
+  if (!installFailed && derivedQuickref) {
+    safeWrite(`quickref (${derivedQuickref.length} chars)`, userQuickrefDst, derivedQuickref)
+  }
+
+  if (installFailed) {
+    rollbackRuntime()
+  } else {
+    // Clean up pre-install quarantines (success path — old files no longer needed).
+    for (const { prevQuarantine } of runtimeInstalled) {
+      if (prevQuarantine && fs.existsSync(prevQuarantine)) {
+        try { fs.unlinkSync(prevQuarantine) } catch {}
+      }
+    }
   }
 
   // Unified quarantine: if ANY snapshot-refresh step fails after the global
@@ -1239,7 +1389,20 @@ if (installSecondOpinion) {
     }
   }
 
+  // Codex post-impl review F1: skip snapshot refresh entirely if runtime
+  // install failed. Quarantine pre-existing snapshot so the gate
+  // fail-closes on a partial runtime rather than reading a stale-valid
+  // snapshot against the rolled-back runtime files.
   try {
+    if (installFailed) {
+      const { snapshotPath } = await import(
+        new URL('./scripts/second-opinion/lib/install-snapshot.mjs', import.meta.url).href
+      )
+      snapshotPathFn = snapshotPath
+      quarantineExistingSnapshot()
+      throw new Error('runtime install failed — snapshot refresh skipped, runtime rolled back, pre-existing snapshot quarantined')
+    }
+
     const { computeSourceHash } = await import(
       new URL('./scripts/second-opinion/lib/source-hash.mjs', import.meta.url).href
     )

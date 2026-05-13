@@ -23,6 +23,20 @@
 #   .post-checkpoint-done          | CHECKPOINT_CLEANUP only
 #   .session-baseline              | BASELINE only
 #
+# Adjacent UX-marker classes (NOT in any of the above sets):
+#
+#   .so-runbook-shown.<sha8>       | UX-marker only — tracks "model has been
+#                                    shown the second-opinion harness runbook
+#                                    this session." Excluded from TASK_SIGNAL
+#                                    (would break stop-gate carve-out per
+#                                    20260512-...d4fc) AND from CHECKPOINT_CLEANUP
+#                                    (push-gate shouldn't clear it; session
+#                                    lifecycle via SessionStart glob is the
+#                                    only cleanup path). Recognized by the
+#                                    classifier marker_write handlers (touch/
+#                                    rm/tee/redirect) and by checkpoint-gate's
+#                                    runbook exemption case.
+#
 # Set semantics:
 #   TASK_SIGNAL_MARKERS         3 markers — em-recall stop-gate carve-out
 #                               class (mid-session mtime > baseline = task
