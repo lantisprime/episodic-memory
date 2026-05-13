@@ -5,9 +5,9 @@ title: "BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow"
 status: accepted
 champion: Charlton Ho
 created: 2026-05-06
-last_modified: 2026-05-06
+last_modified: 2026-05-13
 accepted: 2026-05-06
-version: 3.12
+version: 3.13
 supersedes: ~
 superseded_by: ~
 ---
@@ -565,8 +565,10 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 **Probe sequence (M0 deliverable, run by orchestrator on every cold start):**
 
 1. Call `mcp__scheduled-tasks__list_scheduled_tasks` (any mode — even an empty list confirms the capability is wired).
-2. On success: orchestrator records `scheduled_tasks_capability: native` in the activation episode.
-3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. **T1 (deadline-tick / Path A) and T1b (naked-entry-sweep / Path B)** must run via the unified fallback `bp1-deadline-sweep.mjs --once` until the next probe succeeds. **T2 (weekly meta-audit) does NOT have a fallback path** — when scheduled-tasks are unavailable, T2 degrades to a manual `node scripts/bp1-security-audit.mjs --once` invocation surfaced in the operator runbook (see below); operators are explicitly informed of the degraded mode in the activation episode body.
+2. On success: orchestrator records `scheduled_tasks_capability: native` in the **`bp1-run-started` episode** (M1 cold-start, HMAC-signed by the per-run `run.key`; canonical fields per the `#### Canonical bytes (what each HMAC signs)` 5-fields appendix for `state-transition:run-started`).
+3. On `ToolNotFound` / connection error / schema mismatch: record `scheduled_tasks_capability: fallback`. **T1 (deadline-tick / Path A) and T1b (naked-entry-sweep / Path B)** must run via the unified fallback `bp1-deadline-sweep.mjs --once` until the next probe succeeds. **T2 (weekly meta-audit) does NOT have a fallback path** — when scheduled-tasks are unavailable, T2 degrades to a manual `node scripts/bp1-security-audit.mjs --once` invocation surfaced in the operator runbook (see below); operators are explicitly informed of the degraded mode in the `bp1-run-started` episode body (in the `degraded_mode_statement` canonical field).
+
+> **Episode-name distinction (v3.13 — closes Issue #190 patch 1):** the cold-start probe result lives in the per-run `bp1-run-started` episode (M1 deliverable, HMAC-signed by `run.key`). This is **distinct from** `bp1-activation`, which records the M5 flag-flip event (per-project, HMAC-signed by the global `verify-key`; see the `### Flip mechanism (per-project)` subsection under `## Activation flag (M2-safety envelope)` above). Prior RFC drafts conflated the two by saying "the activation episode" in the probe step; v3.13 disambiguates because the canonical fields, signing key, and emission moment differ.
 
 **Fallback: `scripts/bp1-deadline-sweep.mjs --once`** (M0 deliverable, EXTENDED v3.8 to also cover Path B naked-entry sweep):
 
@@ -793,12 +795,16 @@ The records hold everything replay needs to detect tampering **without `run.key`
 
 Verification failure → `bp1-hmac-fail` (live, row 16) or `bp1-manifest-fail` (post-terminal, row 30).
 
-**Negative test (NEW v3.10 — addresses CLI v3.9 F1):**
+**Direct file scan, not em-search (v3.13 — closes Issue #190 patch 6):** the cross-store equality check at step 5 reads source-of-truth episode files **directly** via `fs.readdirSync` over `<project>/.episodic-memory/episodes/` AND `~/.episodic-memory/episodes/` — it does NOT consult the em-search index, because the index may lag the on-disk truth at finalize time (e.g. an episode written within the same run that hasn't yet been indexed, or an index rebuild lag). Reading the directory directly is the only way to detect the "extra file added" attack (H27 family) without relying on an index that an attacker might also be able to delay. See `scripts/bp1-orchestrator.mjs:484-486` (`decisionLogFence`) and `scripts/lib/bp1-manifest.mjs` (`collectEpisodeRecords`) for the implementation.
+
+**Negative tests (NEW v3.10; PARAMETERIZED v3.13 per Issue #190 patch 6 — local + global stores):**
 
 | # | Scenario | Expected outcome |
 |---|---|---|
-| H27 (NEW v3.10) | Post-terminal: attacker adds an extra episode file to `<project>/.episodic-memory/episodes/` with the same `run_id` as a finalized run, but the manifest is unchanged | Replay step 5 (on-disk-set equality check) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
-| H28 (NEW v3.10) | Post-terminal: attacker deletes an on-disk episode file that IS listed in the manifest's records | Replay step 5 detects missing episode; `bp1-manifest-fail` with reason `missing-episode` |
+| H27a (PARAM v3.13; was H27 v3.10) | Post-terminal: attacker adds an extra episode file to **`<project>/.episodic-memory/episodes/` (local store)** with the same `run_id` as a finalized run, but the manifest is unchanged | Replay step 5 (direct file scan) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
+| H27b (NEW v3.13) | Post-terminal: attacker adds an extra episode file to **`~/.episodic-memory/episodes/` (global store)** with the same `run_id` as a finalized run (e.g. forged `bp1-lesson`), but the manifest is unchanged | Replay step 5 (direct file scan across BOTH stores) detects the extra episode; `bp1-manifest-fail` with reason `extra-episode` |
+| H28a (PARAM v3.13; was H28 v3.10) | Post-terminal: attacker deletes an on-disk episode file from **the local store** that IS listed in the manifest's records | Replay step 5 detects missing episode; `bp1-manifest-fail` with reason `missing-episode` |
+| H28b (NEW v3.13) | Post-terminal: attacker deletes an on-disk episode file from **the global store** that IS listed in the manifest's records (e.g. a `bp1-lesson` that landed in global per the storage policy) | Replay step 5 detects missing episode in either store; `bp1-manifest-fail` with reason `missing-episode` |
 
 #### Finalize-run sequence
 
@@ -813,6 +819,55 @@ Verification failure → `bp1-hmac-fail` (live, row 16) or `bp1-manifest-fail` (
 7. Mark run as terminal in run-state index.
 
 If steps 1-5 fail, the run remains in non-terminal state and the per-run key is preserved (safe rollback). Step 6 shred only happens after step 5 success.
+
+**Step 6 → step 7 ordering invariant (v3.13 — codex code-review BLOCKER-2 closure):** the shred MUST precede the terminal-state mark. The reverse order (mark-terminal-then-shred) re-opens **I-4** ("terminal state after no usable live `run.key` remains, single-process semantics") — a post-step-6 crash would leave the run with `state == 'complete'` AND a live `run.key` on disk, which permits forged-signed evidence after the run is declared terminal. Under the shipped order, a step-6 shred failure with key-still-on-disk fails closed without marking terminal (the orchestrator returns exit 4 and emits signed `bp1-finalize-fence-fail` evidence); an operator can then re-run `finalize-recover` after addressing the shred root cause. See `scripts/bp1-orchestrator.mjs:751-756` fail-closed comment and PR #206 BLOCKER-2 reply episode `20260509-030119-codex-cli-code-review-reply-round-1-pr-1-2d2f`. Issue #190 patch 4 originally proposed the reverse order to "close" a post-step-7 markTerminal-fail gap; the planner-agent 8-axis matrix (session 2026-05-13) found this would trade one gap for a worse I-4 violation, so Path A keeps the shipped order and treats the markTerminal-fail residual as an exit-3 (non-fence) condition handled by `finalize-recover` State B/D idempotent re-mark.
+
+#### Run-state index schema (v3.13 — closes Issue #190 patch 2)
+
+The per-project run-state index lives at:
+
+```
+<project>/.episodic-memory/runs/_index.json
+```
+
+JSON schema (source-of-truth in code at `scripts/lib/bp1-run-state.mjs`):
+
+```json
+{
+  "schema_version": 1,
+  "runs": {
+    "<run_id>": {
+      "project_root": "<canonical realpath of project root>",
+      "state": "active|complete|aborted|abandoned|archived",
+      "created_at": "<ISO-8601 UTC>",
+      "terminal_at": "<ISO-8601 UTC | null>"
+    }
+  }
+}
+```
+
+**State enum (v3.13 — codex r1 P2 closure, mirrors `VALID_TERMINAL_STATES` in code):**
+
+| State | Set by | Meaning |
+|---|---|---|
+| `active` | `appendRun()` on `init-run` step 4 | Run is live; `run.key` exists on disk; HMAC-signed episodes can land. |
+| `complete` | `markTerminal(..., 'complete')` on `finalize-run` step 7 (or `finalize-recover`) | Happy-path terminal closure; manifest sealed; `run.key` shredded. |
+| `aborted` | `markTerminal(..., 'aborted')` | Operator-driven abort (M2+); manifest may or may not exist. |
+| `abandoned` | `bp1-archive-ghosts.mjs` after `needs_human` exceeds 7-day SLA (per the `## State machine — transitions` table below) | Auto-archived; no further state transitions. |
+| `archived` | M5 post-run cleanup (long-tail; future) | Final tombstone; no further reads expected. |
+
+`active` is the only non-terminal value. The terminal subset is `{complete, aborted, abandoned, archived}`; `markTerminal()` enforces this set via `VALID_TERMINAL_STATES.includes(terminalState)` (rejects `'invalid-state'`).
+
+**Atomicity contract:**
+
+- Writes go through `withRunStateLock(projectRoot, fn)` — atomic `fs.mkdirSync` at `<runs-dir>/_index.lock` provides POSIX-atomic mutex.
+- Stale-lock detection is two-tier: (1) PID + timestamp file inside the lockdir; (2) lockdir `mtimeMs` fallback for crashes between `mkdirSync` and PID-file write. Both use the same `STALE_LOCK_MS = 30_000` threshold.
+- Index writes use per-process unique temp filenames (`<target>.tmp.<pid>.<ts>.<rand>`) + `fs.renameSync` for crash-atomic visibility.
+- Read-only callers may use `getRunState(projectRoot, runId)` without acquiring the lock; `fs.readFileSync` is atomic on POSIX, so readers see either the previous valid state or the new state — never partial.
+
+Filesystem scoping: this contract assumes local POSIX-like semantics (atomic `mkdir` + per-inode monotonic mtime). NFS/CIFS are best-effort; distributed-FS support is a future RFC.
+
+**Cross-store note (v3.13 close-out):** the run-state index is local-only (per-project). Cross-store invariants discussed in the `#### Verification flow` H27/H28 negative tests apply to **episode** files, not the run-state index — the latter is per-project metadata, not part of the manifest replay set.
 
 #### Negative tests (M1, alongside the implementation)
 
@@ -834,7 +889,7 @@ If steps 1-5 fail, the run remains in non-terminal state and the per-run key is 
 | **H14** | **Verify-key rotation attempted while run in non-terminal state** | rotation refused; emit `bp1-rotate-blocked` | live |
 | **H15** | **Verify-key file mode drift to `0644`** | `bp1-flag-key-drift` (refuse to use) | both |
 | **H16** | **Verify-key fingerprint mismatch between activation entry and live key** | `bp1-flag-key-drift` (project flips to inert) | live |
-| **H17** | **Finalize crashes between manifest write and key shred** | recovery: manifest exists + key file exists; replay still works; next session detects state and completes shred via `bp1-finalize-recover` | crash |
+| **H17** | **Finalize crashes between step 5 (manifest disk re-read fence) and step 7 (mark terminal)** | recovery: manifest exists; replay still works; `bp1-finalize-recover` branches on key presence — State A (key still on disk, post-step-5 / pre-step-6 crash) re-runs shred then markTerminal; State B (key already shredded, post-step-6 / pre-step-7 crash) idempotent markTerminal; State D (key damaged) unlinks then markTerminal. The shipped step ordering (shred at 6, markTerminal at 7) preserves I-4 across both crash points — see the "Step 6 → step 7 ordering invariant" note in the `#### Finalize-run sequence` subsection above. | crash |
 | **H18 (NEW v3.4)** | **Tampered episode canonical fields (frontmatter run_id swap, parent_episode swap, etc.) post-terminal** | `bp1-manifest-fail` — recomputed `canonical_sha256` mismatches manifest's stored `canonical_sha256` for that record | post-terminal |
 | **H19 (NEW v3.4)** | **Self-consistent forgery: tamper body AND on-disk frontmatter `hmac_signature` to match each other** | `bp1-manifest-fail` — on-disk `hmac_signature` mismatches manifest's stored `hmac_signature` for that record (records are signed by verify-key, can't be forged in step) | post-terminal |
 | **H20 (NEW v3.4)** | **Replay against manifest with body_sha256/canonical_sha256 fields stripped** | `bp1-manifest-fail` — manifest signature invalidates (records-list-shape covered by manifest_signature) | post-terminal |
@@ -1132,7 +1187,7 @@ The token cap (default 200k) is enforced by `bp1-sentinel` as a pre-dispatch HAL
 | 29 | HMAC key file missing/unreadable (live-run) | orchestrator startup | C | `bp1-hmac-keyfile-fail` | yes |
 | 30 | `bp1-run-manifest` verification fail (post-terminal: signature, records_root, canonical_sha256, body_sha256, or hmac field mismatch) | replay | C | `bp1-manifest-fail` | yes |
 | 31 | Finalize-run quiescence fence violated | finalize-run | rollback | `bp1-finalize-fence-fail` | yes |
-| 32 | Finalize-run crash between manifest write and key shred | next-session recovery | A (auto-recover) | `bp1-finalize-recover` | no |
+| 32 | Finalize-run crash between step 5 (manifest disk re-read fence) and step 7 (mark terminal) — covers post-step-5/pre-step-6 (State A: key live, manifest valid) and post-step-6/pre-step-7 (State B: key shredded, terminal not yet marked) | next-session recovery via `bp1-finalize-recover` | A (auto-recover; State A re-shreds then markTerminal; State B idempotent markTerminal; State D unlinks damaged key then markTerminal) | `bp1-finalize-recover` | no |
 | 33 | Verify-key rotation attempted while run non-terminal | rotate-verify-key | rollback | `bp1-rotate-blocked` | no |
 | 34 | Codex request-sent evidence missing for ANY `codex_review` entry (any attempt_number) — crash-recovery via naked-entry sweep | naked-entry sweep (Path B, 5-min window) → state-transition lock | A (re-issue) | `bp1-codex-request-recovered` | yes |
 | 36 | Naked-entry sweep finds entry but request was issued during lock-wait | naked-entry sweep | A (no-op) | `bp1-naked-sweep-superseded` | no |
@@ -1332,7 +1387,7 @@ failure_modes:
     evidence: bp1-finalize-fence-fail
     lesson: true
   - id: 32
-    failure: Finalize-run crash between manifest write and key shred
+    failure: Finalize-run crash between step 5 (manifest disk re-read fence) and step 7 (mark terminal) — covers State A (key live) and State B (key shredded, terminal not yet marked)
     detector: next-session-recovery
     terminal: A
     evidence: bp1-finalize-recover
@@ -1805,5 +1860,59 @@ Per-branch coverage now explicit; v9.3 ε rule satisfied.
 | I7 (NEW v3.8) | `bp1-naked-entry-sweep` is wired into ALL 6 contract surfaces: scheduled-tasks inventory, activation-gated artifacts, scripts inventory, fallback, M2 milestone, M5 dry-run gate. | yes (each surface has an explicit row/line citing T1b or `bp1-naked-entry-sweep.mjs`) | yes |
 
 **Status (v3.8):** still `draft`. Verified locally via `codex review` CLI; will re-run after v3.8 push to confirm clean. If clean, file async em-store request as audit trail.
+
+---
+
+### v3.13 — Post-acceptance doc catch-up after PR-1c-A + PR-1c-B (2026-05-13)
+
+Post-acceptance maintenance pass. The RFC was flipped to `accepted` at v3.12 (2026-05-06); M1 BP-1 Foundation shipped via PR #200 (commit `2827ec3`, `init-run` + HMAC + canonicalize + run-state) and PR #206 (commit `40c8e02`, finalize-replay slice 2). This v3.13 entry catches the RFC text up to the shipped code per the resolutions pinned in decision episode `20260507-113139-m1-rfc-ambiguity-resolutions-before-plan-2e12`.
+
+#### Scope (doc-only)
+
+1. `#### Scheduled-task probe + fallback (M0)` — distinguish `bp1-run-started` (M1 cold-start, HMAC by per-run `run.key`) from `bp1-activation` (M5 flag-flip, HMAC by `verify-key`).
+2. `#### Canonical bytes (what each HMAC signs)` — 5-fields appendix for `state-transition:run-started` pinning the fields signed in M1 (`scheduled_tasks_capability`, `probe_reason`, `degraded_mode_statement`, `native_probe_performed`, `t2_fallback`). Tamper × 5 tests at `tests/test-bp1-canonicalize.mjs:134-167` (already shipped).
+3. §"Run-state index schema" (new under HMAC/canonicalize/replay) — pin path `<project>/.episodic-memory/runs/_index.json`, schema, **state enum** `active|complete|aborted|abandoned|archived` (terminal subset = `{complete, aborted, abandoned, archived}` per `VALID_TERMINAL_STATES` at `scripts/lib/bp1-run-state.mjs:58`), atomicity contract (lockdir mutex + 30s stale + tier-2 mtime fallback, per-process unique temp + renameSync).
+4. `#### Finalize-run sequence` "Step 6 → step 7 ordering invariant" note + `#### Negative tests (M1, alongside the implementation)` H17 row — invariant-preservation note: shred-before-terminal ordering (steps 6→7) MUST be preserved per PR #206 BLOCKER-2 closure; the reverse order re-opens I-4 ("terminal state after no usable live `run.key` remains"). Issue #190 patch 4's proposed reorder is REJECTED. H17 wording expanded to name `finalize-recover` State A/B/D recovery paths. §11.5 failure-table row 32 prose + YAML mirror updated to match the new H17 wording.
+5. `#### Verification flow` — H27/H28 parameterized across local + global stores (H27a/b + H28a/b); explicit "direct file scan, not em-search" wording to clarify the implementation contract at `scripts/bp1-orchestrator.mjs:484-486` (`decisionLogFence`).
+6. Frontmatter: `version: 3.12` → `3.13`; `last_modified: 2026-05-06` → `2026-05-13`.
+
+#### Review trail (Rule 18 step 2)
+
+| Round | Reviewer | Verdict | Episode |
+|---|---|---|---|
+| Plan-time matrix | `negative-scenario-planner` (Anthropic Agent SDK) | HOLD → path-split | inline output (session 2026-05-13) |
+| Codex r1 | OpenAI Codex via second-opinion harness | HOLD with 2 P2 follow-ups | reply `20260512-231824-reply-codex-to-20260512-231603-rfc-004-v-09a5` |
+| Codex r2 (HOLD close-out) | OpenAI Codex via second-opinion harness | **ACCEPT** | reply `20260512-232411-reply-codex-to-20260512-232234-rfc-004-v-92ee` |
+
+#### Path A vs Path B decision (planner-agent matrix)
+
+Issue #190 patch 4 originally proposed reordering `finalizeRun` steps 6 (shred) and 7 (markTerminal). The plan-time matrix found this would reopen the **I-4** invariant gap closed by PR #206 BLOCKER-2 (reply episode `20260509-030119-codex-cli-code-review-reply-round-1-pr-1-2d2f`) — leaving a post-crash window of `state == 'complete'` AND a live `run.key` on disk would permit forged-signed evidence after the run is declared terminal.
+
+The matrix also surfaced that the reorder would break the G5_TABLE crash-recovery contract at `tests/test-bp1-finalize-run.mjs:607-616` (which locks `N=6 ⇒ keyAfter=false`), widen the "terminal" semantics, and force `finalize-recover` State A to handle "terminal + key-live" as the normal post-crash path instead of a tolerated re-run edge.
+
+**Path A** (chosen): drop the code reorder; add an invariant-preservation explanation citing BLOCKER-2; expand H17 wording to name the recovery states. No code changes, no test changes.
+
+**Path B** (rejected): the reorder. Would require superseding the BLOCKER-2 decision episode with new evidence, rewriting the `## State machine — transitions` table, flipping G5_TABLE, updating `finalize-recover` State A, and adding multi-actor race tests.
+
+#### Round-1 findings (resolved in this v3.13 entry)
+
+- **P2 — Make Second opinion v3.13 entry mandatory in scope.** Resolved: this section.
+- **P2 — §"Run-state index schema" must include the state enum, not only the object shape.** Resolved: enum + terminal subset pinned in the new §"Run-state index schema" subsection.
+
+#### Verification
+
+Codex r2 independently re-ran:
+- `node scripts/validate-rfc-canonical-fields.mjs` — PASS (19 canonical fields)
+- `node scripts/validate-rfc-failure-table.mjs` — PASS (37 prose rows / 37 YAML)
+- `node tests/test-bp1-orchestrator-init-run.mjs` — PASS 12/12
+- `node tests/test-bp1-finalize-run.mjs` — PASS 45/45
+- `node tests/test-bp1-canonicalize.mjs` — PASS 21/21
+
+No code paths edited → no test regression risk.
+
+#### Issues closed by v3.13
+
+- **#185** — M1 acceptance: activation episode must canonically sign the 5 probe fields. Acceptance 1-3 verified shipped at `scripts/lib/bp1-canonicalize.mjs:70-77` (registration), `scripts/bp1-orchestrator.mjs:308-340` (signing path), `tests/test-bp1-canonicalize.mjs:134-167` (per-field tamper × 5). Note Issue body said "the activation episode"; the shipped name is `bp1-run-started` per Resolution 4 / the `#### Scheduled-task probe + fallback (M0)` distinction.
+- **#190** — RFC v3.13 patch list: items 1 (`#### Flip mechanism (per-project)` + `#### Scheduled-task probe + fallback (M0)` distinction), 2 (new `#### Run-state index schema` subsection), 3 (`#### Canonical bytes (what each HMAC signs)` 5-fields appendix verified already-correct), 4 (REJECTED reorder; replaced with `#### Finalize-run sequence` ordering-invariant note per planner matrix + Codex consensus), 5 (H17 wording in `#### Negative tests (M1, alongside the implementation)` expanded + §11.5 row 32 mirror updated), 6 (`#### Verification flow` H27/H28 parameterized). CI gate update from patch 3 is N/A — `validate-rfc-canonical-fields.mjs` already bidirectionally validates via `TYPE_SPECIFIC_CANONICAL_FIELDS`; no edit needed.
 
 ---
