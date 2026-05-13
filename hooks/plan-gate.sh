@@ -142,11 +142,15 @@ if [ "$TOOL_NAME" = "Bash" ]; then
       exit 0
       ;;
     marker_write)
-      # Allow plan-marker rm/touch under primary or legacy marker dir.
-      # Use the strict matcher to reject path-traversal / invalid suffixes.
+      # Allow plan-marker rm/touch under primary or legacy marker dir, but
+      # ONLY for THIS session's basename (legacy suffix-less OR
+      # `.plan-approval-pending.<MY_SID>`). Other-session suffixed forms
+      # are NOT allowed — that's the codex r1 BLOCKER-B1 fix: without this
+      # narrowing, session A could `rm` session B's marker via direct Bash.
       target_basename="${TARGET##*/}"
       target_dir="${TARGET%/*}"
-      if plan_marker_basename_matches "$target_basename"; then
+      own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
+      if [ "$target_basename" = "$PLAN_MARKER_LEGACY_BASENAME" ] || [ "$target_basename" = "$own_session_basename" ]; then
         if [ "$target_dir" = "$REPO_ROOT/$PRIMARY_MARKER_DIR" ] || [ "$target_dir" = "$REPO_ROOT/$LEGACY_MARKER_DIR" ]; then
           exit 0
         fi

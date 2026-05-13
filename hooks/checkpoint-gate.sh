@@ -448,10 +448,15 @@ if [ "$TOOL_NAME" = "Bash" ]; then
 
     # Cross-gate invariant: checkpoint marker writes are blocked while
     # the current session's plan-approval-pending exists (Codex ...3503 P1).
-    # #268 fix E14: session-aware via plan_pending_blocks_this_session +
-    # plan_marker_basename_matches for any-form plan-marker allowance.
+    # #268 fix E14: session-aware via plan_pending_blocks_this_session.
+    # Codex code-tier r1 BLOCKER-B1: narrow plan-marker allowance to
+    # OWN-SESSION basename only (legacy literal OR own suffixed). Other-
+    # session suffixed markers MUST NOT be writable via direct Bash —
+    # without this narrowing, session A could `rm .plan-approval-pending.B`
+    # while plan-blocked on its own marker.
     if plan_pending_blocks_this_session "$MY_SID"; then
-      if plan_marker_basename_matches "$TARGET_BN"; then
+      own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
+      if [ "$TARGET_BN" = "$PLAN_MARKER_LEGACY_BASENAME" ] || [ "$TARGET_BN" = "$own_session_basename" ]; then
         # Allow plan-marker removal/touch — plan-gate.sh decides.
         exit 0
       fi
@@ -509,8 +514,13 @@ case "$TOOL_NAME" in
         fi
 
         TARGET_BN="$(marker_basename_for_target "$TARGET")"
-        # Cross-gate invariant (#268 fix E15)
-        if plan_pending_blocks_this_session "$MY_SID" && ! plan_marker_basename_matches "$TARGET_BN"; then
+        # Cross-gate invariant (#268 fix E15 + codex code-tier r1 B1 narrowing):
+        # block Write/Edit unless target is THIS session's own plan-marker
+        # basename (legacy literal OR own suffixed).
+        own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
+        if plan_pending_blocks_this_session "$MY_SID" \
+           && [ "$TARGET_BN" != "$PLAN_MARKER_LEGACY_BASENAME" ] \
+           && [ "$TARGET_BN" != "$own_session_basename" ]; then
           _block_plan_pending
         fi
         case "$TARGET_BN" in

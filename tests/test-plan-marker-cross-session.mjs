@@ -66,9 +66,15 @@ function runPlanGate({ root, sid, toolName, toolInput }) {
     cwd: root,
     session_id: sid,
   })
+  // Set CLAUDE_CODE_SESSION_ID in the gate's env to match stdin sid. In
+  // production Claude Code sets both the hook process env AND the spawned
+  // Bash subprocess env to the same session-id — the classifier reads the
+  // env, the gate reads stdin. Tests must mirror that invariant.
+  const env = { ...process.env, CLAUDE_CODE_SESSION_ID: sid }
   const r = spawnSync('bash', [path.join(root, 'hooks', 'plan-gate.sh')], {
     input: payload,
     encoding: 'utf8',
+    env,
   })
   let decision = 'allow'
   if (r.stdout && r.stdout.trim()) {
@@ -229,6 +235,53 @@ function check(cond, label) {
     toolInput: { command: cmd },
   })
   check(r.decision === 'allow', `X12 helper --rm via Bash classified marker_write → ALLOW (got ${r.decision})`)
+}
+
+// ---------------- X14: BLOCKER-B1 — direct Bash cannot rm other-session marker ----
+// Codex code-tier r1 finding: plan-gate marker_write allowance must narrow to
+// own-session basename only (legacy literal OR `.plan-approval-pending.<MY_SID>`).
+// Other-session suffixed markers MUST NOT be writable via direct Bash even
+// while own session is plan-blocked.
+{
+  const root = mkTmpRepo()
+  const markerA = path.join(root, '.checkpoints', '.plan-approval-pending.session-A')
+  const markerB = path.join(root, '.checkpoints', '.plan-approval-pending.session-B')
+  fs.writeFileSync(markerA, '')
+  fs.writeFileSync(markerB, '')
+  // Session A (plan-blocked by own marker) attempts to rm session B's marker.
+  const cmd = `rm ${markerB}`
+  const r = runPlanGate({
+    root, sid: 'session-A',
+    toolName: 'Bash',
+    toolInput: { command: cmd },
+  })
+  check(r.decision === 'block', `X14 cross-session rm via direct Bash → BLOCK (B1; got ${r.decision})`)
+}
+
+// ---------------- X15: BLOCKER-B2 — SessionEnd binds to stdin.cwd, not process.cwd ----
+// Codex code-tier r1 finding: em-session-end-prompt.mjs must use stdin .cwd
+// to resolve the hook target project, not process.cwd().
+{
+  const target = mkTmpRepo()
+  const callerCwd = mkTmpRepo()
+  const sid = 'session-Z'
+  // Seed own-session markers at BOTH target and caller.
+  fs.writeFileSync(path.join(target, '.checkpoints', `.plan-approval-pending.${sid}`), '')
+  fs.writeFileSync(path.join(callerCwd, '.checkpoints', `.plan-approval-pending.${sid}`), '')
+  const r = spawnSync('node', [SESSION_END], {
+    input: JSON.stringify({ session_id: sid, cwd: target, hook_event_name: 'SessionEnd' }),
+    cwd: callerCwd,  // process.cwd() will be CALLER, but stdin.cwd is TARGET
+    encoding: 'utf8',
+  })
+  check(r.status === 0, `X15 SessionEnd exit 0 (got ${r.status})`)
+  check(
+    !fs.existsSync(path.join(target, '.checkpoints', `.plan-approval-pending.${sid}`)),
+    `X15: TARGET marker removed (B2 fix: stdin.cwd binding)`
+  )
+  check(
+    fs.existsSync(path.join(callerCwd, '.checkpoints', `.plan-approval-pending.${sid}`)),
+    `X15: CALLER marker UNTOUCHED (cleanup correctly bound to stdin.cwd, not process.cwd)`
+  )
 }
 
 // ---------------- X13: classifier rejects env-prefix on helper (F17) ---------

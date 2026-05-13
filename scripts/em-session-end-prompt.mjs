@@ -73,7 +73,12 @@ function loadPatternsIndex() {
 // session A's active `.plan-approval-pending.A` marker.
 
 // Read SessionEnd stdin (best-effort; non-blocking-safe via readFileSync(0)).
+// Codex code-tier r1 BLOCKER-B2 fix: extract BOTH session_id AND cwd from
+// stdin. The hook target's cwd is the project the SessionEnd applies to;
+// using process.cwd() would bind cleanup to the caller, which is wrong
+// for linked-worktree / nested-cwd invocations.
 let sessionEndSid = null
+let sessionEndCwd = null
 try {
   const stdinData = fs.readFileSync(0, 'utf8')
   if (stdinData) {
@@ -81,10 +86,17 @@ try {
     if (stdinJson && typeof stdinJson.session_id === 'string') {
       sessionEndSid = stdinJson.session_id
     }
+    if (stdinJson && typeof stdinJson.cwd === 'string') {
+      sessionEndCwd = stdinJson.cwd
+    }
   }
-} catch { /* best-effort; stdin missing/non-JSON → null sid */ }
+} catch { /* best-effort; stdin missing/non-JSON → null sid + cwd */ }
 
-const repoRoot = resolveRepoRoot()
+// Pass stdin.cwd to resolveRepoRoot so cleanup binds to the hook target
+// project, not the caller cwd. Use `|| undefined` so null/empty falls
+// through to resolveRepoRoot's default-arg (process.cwd()) for manual
+// interactive runs without stdin.
+const repoRoot = resolveRepoRoot(sessionEndCwd || undefined)
 for (const marker of ALL_MIGRATED_MARKERS) {
   if (marker === PLAN_MARKER_LEGACY_BASENAME) {
     // F12: never delete legacy plan-marker on SessionEnd.
