@@ -47,7 +47,7 @@ const historyId = flag('--history')
 const noScore = argv.includes('--no-score')
 const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
-const warnCount = parseInt(flag('--warn-count') || '500', 10)
+const warnCount = parseInt(flag('--warn-count') || '5000', 10)
 
 const VALID_SCOPES_SEARCH = ['local', 'global', 'all']
 if (!VALID_SCOPES_SEARCH.includes(scope)) {
