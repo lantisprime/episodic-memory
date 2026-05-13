@@ -229,3 +229,52 @@ export function projectProbeResultToFrontmatter(probeResult) {
     t2_fallback: probeResult.t2_fallback,
   }
 }
+
+// ---------------------------------------------------------------------------
+// canonicalizeFrontmatterBytes — RFC-004 §"rfc-scan contract" (slice 2b)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical-form sha256 over RFC frontmatter content (the bytes between the
+ * two `---` fences, exclusive of the fences themselves).
+ *
+ * Canonicalization rules (slice 2b plan v3):
+ *   1. Decode UTF-8 (caller is responsible for ensuring bytes ARE UTF-8;
+ *      `parseBp1Frontmatter` rejects non-UTF-8 input upstream).
+ *   2. Normalize line endings to LF (CRLF → LF, lone CR → LF).
+ *   3. Strip trailing spaces/tabs from each line (CR cleanup is done in step 2).
+ *   4. Strip trailing empty lines (a fence-adjacent blank line is informational,
+ *      not a semantic field).
+ *   5. Compute sha256 over the normalized UTF-8 bytes; emit lowercase hex.
+ *
+ * The result is the full 64-hex digest — NOT truncated. Slice 2b plan v3 P1
+ * fix: v1's `<8-hex>` was 32 bits, insufficient for an evidence-chain hash
+ * binding RFC body to a classifier dispatch under TOCTOU pressure.
+ *
+ * The fences themselves are EXCLUDED from the canonical input. This lets the
+ * scanner read the frontmatter section even if the caller indented the fences
+ * differently (we only accept `---` on its own line per parseBp1Frontmatter,
+ * but the canonicalization is independent of fence representation).
+ *
+ * @param {Buffer|Uint8Array|string} rawFrontmatterBytes — bytes between fences
+ * @returns {{ canonical: string, sha256: string }} — canonical text + 64-hex digest
+ */
+export function canonicalizeFrontmatterBytes(rawFrontmatterBytes) {
+  let text
+  if (Buffer.isBuffer(rawFrontmatterBytes) || rawFrontmatterBytes instanceof Uint8Array) {
+    text = Buffer.from(rawFrontmatterBytes).toString('utf8')
+  } else if (typeof rawFrontmatterBytes === 'string') {
+    text = rawFrontmatterBytes
+  } else {
+    throw new TypeError('canonicalizeFrontmatterBytes: input must be Buffer, Uint8Array, or string')
+  }
+  // Normalize line endings: CRLF → LF first, then any remaining lone CR → LF.
+  const lfText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  // Strip trailing whitespace per line.
+  const lines = lfText.split('\n').map(line => line.replace(/[ \t]+$/, ''))
+  // Strip trailing empty lines.
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  const canonical = lines.join('\n')
+  const sha256 = crypto.createHash('sha256').update(canonical, 'utf8').digest('hex')
+  return { canonical, sha256 }
+}

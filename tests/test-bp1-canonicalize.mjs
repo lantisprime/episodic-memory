@@ -25,6 +25,7 @@ const {
   GENERIC_CANONICAL_FIELDS,
   TYPE_SPECIFIC_CANONICAL_FIELDS,
   canonicalize,
+  canonicalizeFrontmatterBytes,
   projectProbeResultToFrontmatter,
   subtypeKey,
 } = cmod
@@ -303,6 +304,63 @@ tap('subtypeKey returns evidence:bp1-codex-request-sent when tag present', () =>
     subtypeKey({ type: 'evidence', tags: ['something-else', 'bp1-codex-request-sent'] }),
     'evidence:bp1-codex-request-sent',
   )
+})
+
+// =============================================================================
+// canonicalizeFrontmatterBytes (slice 2b — RFC frontmatter canonical form)
+// =============================================================================
+
+tap('canonicalizeFrontmatterBytes: simple LF input is byte-identical canonical', () => {
+  const input = 'id: RFC-001\nstatus: accepted\nsummary: "test"'
+  const r = canonicalizeFrontmatterBytes(input)
+  assert.equal(r.canonical, input)
+  assert.match(r.sha256, /^[0-9a-f]{64}$/)
+})
+
+tap('canonicalizeFrontmatterBytes: CRLF normalizes to LF (same sha as LF)', () => {
+  const lf = 'id: RFC-001\nstatus: accepted'
+  const crlf = 'id: RFC-001\r\nstatus: accepted'
+  const rLf = canonicalizeFrontmatterBytes(lf)
+  const rCrlf = canonicalizeFrontmatterBytes(crlf)
+  assert.equal(rLf.sha256, rCrlf.sha256, 'CRLF and LF must canonicalize identically')
+})
+
+tap('canonicalizeFrontmatterBytes: lone CR also normalizes to LF', () => {
+  const lf = 'id: a\nstatus: b'
+  const cr = 'id: a\rstatus: b'
+  assert.equal(
+    canonicalizeFrontmatterBytes(lf).sha256,
+    canonicalizeFrontmatterBytes(cr).sha256,
+  )
+})
+
+tap('canonicalizeFrontmatterBytes: trailing whitespace per line is stripped', () => {
+  const dirty = 'id: a   \nstatus: b\t\t'
+  const clean = 'id: a\nstatus: b'
+  assert.equal(
+    canonicalizeFrontmatterBytes(dirty).sha256,
+    canonicalizeFrontmatterBytes(clean).sha256,
+  )
+})
+
+tap('canonicalizeFrontmatterBytes: trailing empty lines are stripped', () => {
+  const trailing = 'id: a\nstatus: b\n\n\n'
+  const clean = 'id: a\nstatus: b'
+  assert.equal(
+    canonicalizeFrontmatterBytes(trailing).sha256,
+    canonicalizeFrontmatterBytes(clean).sha256,
+  )
+})
+
+tap('canonicalizeFrontmatterBytes: Buffer input accepted', () => {
+  const text = 'id: a\nstatus: b'
+  const buf = Buffer.from(text, 'utf8')
+  assert.equal(canonicalizeFrontmatterBytes(text).sha256, canonicalizeFrontmatterBytes(buf).sha256)
+})
+
+tap('canonicalizeFrontmatterBytes: throws on invalid input type', () => {
+  assert.throws(() => canonicalizeFrontmatterBytes(123), /must be Buffer/)
+  assert.throws(() => canonicalizeFrontmatterBytes(null), /must be Buffer/)
 })
 
 console.log(`# tests ${pass + fail}`)
