@@ -46,7 +46,7 @@
       "id": "RFC-006",
       "slug": "codex-review-adapter",
       "title": "Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback",
-      "status": "draft",
+      "status": "withdrawn",
       "champion": "Charlton Ho",
       "file": "RFC-006-codex-review-adapter.md"
     }

@@ -2,13 +2,20 @@
 rfc_id: RFC-006
 slug: codex-review-adapter
 title: "Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback"
-status: draft
+status: withdrawn
 champion: Charlton Ho
 created: 2026-05-06
-last_modified: 2026-05-06
+last_modified: 2026-05-14
 supersedes: ~
 superseded_by: ~
 ---
+
+> **Status:** WITHDRAWN on 2026-05-14. The in-session use case is covered by the
+> second-opinion harness shipped via PR #222 (`e3c8dc9`). The adapter/queue/claim
+> architecture proposed below was never realized; the residual provider-hardening
+> items are tracked as informal harness follow-ons, not under this RFC.
+> See [Withdrawal note](#withdrawal-note) at the bottom for the full disposition.
+
 
 # RFC-006 — Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback
 
@@ -560,7 +567,104 @@ Per the project's review-rigor toolkit discipline #17, every fix introduces new 
 
 ## Withdrawal note
 
-> Populate only if status changes to `withdrawn`.
+**Withdrawn on 2026-05-14** by Charlton Ho. Status went `draft` → `withdrawn` (no
+intermediate `accepted` / `implemented` states).
+
+### What changed between draft (2026-05-06) and withdrawal (2026-05-14)
+
+The second-opinion harness shipped via [PR #222](https://github.com/lantisprime/episodic-memory/pull/222)
+(commit `e3c8dc9`, 2026-05-10) covers the in-session review use case that
+motivated this RFC, via a different architecture than the one proposed here.
+The harness is a synchronous CLI (`scripts/second-opinion.mjs`) with pluggable
+providers (`codex`, `claude-subagent`, `gemini`, `stub`) and storage backends
+(`files`, `episodic`), composed preambles, an install-snapshot freshness gate
+(I-27a), preamble-tamper detection (I-27b), and a `--consensus` loop with
+verdict parsing. The Claude Code PreToolUse hook
+(`hooks/second-opinion-gate.mjs`) routes direct codex invocations through the
+harness, fail-closed on missing/malformed snapshot.
+
+This design intentionally skips the queue-based architecture proposed below:
+no typed-request inbox, no separate adapter process, no `--once` consumer, no
+cross-lane claim primitive. In-session reviews are synchronous; the harness
+runs in the foreground and returns the reply in the same invocation.
+
+### Disposition of RFC-006's in-scope items
+
+| RFC-006 item | Disposition under harness |
+|---|---|
+| `requests/codex-review.json` typed-request registry entry | Obsolete — harness uses synchronous CLI, not a queue |
+| `scripts/em-claim.mjs` O_EXCL claim primitive | Obsolete — single-lane synchronous; no cross-lane race to arbitrate |
+| `adapters/codex/` directory + manifest | Obsolete — provider lives at `scripts/second-opinion/providers/codex.mjs`, not as a separate adapter |
+| `em-dispatch-codex --once --dry-run` entrypoint | Obsolete — harness `--dispatch` runs synchronously; `--dry-run` not needed for in-session use |
+| Schema fields `review_chain_id`, `review_round`, `fallback_from` (request body); `source`, `inspected.*` (reply body) | Partially obsolete — `--consensus --max-rounds` covers within-invocation rounds; cross-invocation chain identity is unused. Reply `source` distinction is moot in single-provider invocations. |
+| In-session trigger checklist (5-item gate) | Obsolete as designed — turn-end auto-dispatch is now gated by `hooks/second-opinion-gate.mjs` PreToolUse hook, a different mechanism with different semantics |
+| `em-watch-codex.mjs` extension for `local-reviewer` tag | Obsolete — no fallback request stream to watch |
+| Update to `memory/reference_codex_review_flow.md` | DONE under PR #222; see `memory/reference_second_opinion_harness.md` (the v9.4 toolkit + per-session pin in MEMORY.md) |
+
+### Residual items kept as informal harness follow-ons (NOT RFC-tracked)
+
+These four items from RFC-006's scope retain real value but don't share an
+architectural premise — they're independent provider-hardening enhancements
+against `scripts/second-opinion/providers/codex.mjs` (and peers). They will be
+filed as GitHub issues when picked up, not under a new RFC.
+
+1. **Runtime context validation (cwd binding + `git rev-parse` cross-check).**
+   The harness composes from arbitrary `--project <absolute>`; the codex
+   provider should `spawn` with `cwd: <project>` and verify
+   `worktree/branch/head` match the request context before invoking. Fail-
+   closed on mismatch with a `review-context-mismatch` event.
+2. **Failure classification ladder (auth / quota / network / binary-missing /
+   unknown).** Currently the harness bubbles raw `spawn` errors. The
+   classification design from §"Failure classification and fallback" above
+   is portable to the codex provider as-is — multi-signal ladder, fail-closed
+   to `unknown` on ambiguity.
+3. **Stderr redaction module.** Raw codex stderr can leak API tokens, email
+   addresses, $HOME paths, stack-trace addresses. The redaction recipe from
+   §"Stderr redaction" above is portable as a small module reused by all
+   providers.
+4. **Local-agent fallback path (`source: local-fallback`).** When codex is
+   unreachable (auth expired, quota exhausted, binary missing), the harness
+   should optionally fall back to invoking the local
+   `.claude/agents/negative-scenario-reviewer.md` subagent and tag the reply
+   `source: local-fallback`. Opt-in via a harness flag (`--fallback local`),
+   off by default.
+
+### Why not re-issue as RFC-006-v2 "Codex provider hardening"?
+
+The four residual items don't share an architectural premise — they're
+independent provider enhancements. Bundling them under one RFC adds ceremony
+without coherence; the substrate (harness contract, provider plugin
+interface, episode envelope) is already established and stable. Each
+enhancement is a self-contained PR or pair of PRs.
+
+If the queue-driven / async / cron-driven review use case ever emerges (e.g.,
+CI bot reviews, post-merge automated audits), draft a fresh RFC at that time.
+The harness's storage and provider plugin contracts will absorb that surface
+cleanly — the typed-request envelope from this RFC is still the right shape
+for a queue-driven design, but the surrounding architecture would be
+re-derived against the harness as substrate, not built parallel to it as
+proposed here.
+
+### Open questions — resolution under withdrawal
+
+- **OQ-1** (20-line trigger threshold): N/A — no auto-trigger; user invokes
+  harness explicitly.
+- **OQ-2** (quota backoff policy): folds into residual item 2 (failure
+  classification).
+- **OQ-3** (UUID vs content-hash for `review_chain_id`): N/A — chain identity
+  is unused.
+- **OQ-4** (TTL ↔ timeout coupling): N/A — no claim primitive.
+- **OQ-5** (`local-fallback` reply counting toward `review_round`): folds into
+  residual item 4 (fallback semantics).
+- **OQ-6** (`em-claim` filename collisions with episode parsers): N/A — no
+  claim primitive.
+- **OQ-7** (recovery + release via generation counter): N/A — no claim primitive.
+
+### Index updates accompanying this withdrawal
+
+- `docs/rfcs/_index.json` — status flipped `draft` → `withdrawn`
+- `docs/rfcs/README.md` — status column updated
+- Workplan v64 → v65 (em-revise) — rank-9 marked closed
 
 ---
 
