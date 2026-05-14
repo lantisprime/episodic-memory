@@ -600,6 +600,8 @@ runs in the foreground and returns the reply in the same invocation.
 | In-session trigger checklist (5-item gate) | Obsolete as designed — turn-end auto-dispatch is now gated by `hooks/second-opinion-gate.mjs` PreToolUse hook, a different mechanism with different semantics |
 | `em-watch-codex.mjs` extension for `local-reviewer` tag | Obsolete — no fallback request stream to watch |
 | Update to `memory/reference_codex_review_flow.md` | DONE under PR #222; see `memory/reference_second_opinion_harness.md` (the v9.4 toolkit + per-session pin in MEMORY.md) |
+| `--type codex-review` mode on `scripts/em-review-request.mjs` (PR-1 scope) | Obsolete-by-supersession — never shipped; the harness covers the in-session request shape via `scripts/second-opinion.mjs request --provider codex --body-file <plan> --summary <slug>`. No `--type` flag is needed because provider selection IS the request type. Verified: `grep -n "\-\-type" scripts/em-review-request.mjs` returns no matches. |
+| `claude mcp add codex` setup in `docs/USER_MANUAL.md` (PR-4 scope) | Obsolete-by-supersession — never shipped to USER_MANUAL. The codex MCP wire-up is no longer the trigger path: the Claude Code PreToolUse hook (`hooks/second-opinion-gate.mjs`) routes direct codex invocations through the harness instead, fail-closed on missing/malformed install snapshot. Verified: `grep -rn "claude mcp add codex" docs/` matches only this RFC. |
 
 ### Residual items kept as informal harness follow-ons (NOT RFC-tracked)
 
