@@ -534,6 +534,15 @@ _classify_segment() {
         printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
         return 0
         ;;
+      # #279 fix: per-session preflight-marker via redirect. Sibling of the
+      # .plan-approval-pending.* arm. Loose glob; strict validation via
+      # preflight_marker_basename_matches at gate layer.
+      .preflight-done.*)
+        local abs_target
+        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
+        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
+        return 0
+        ;;
       .so-runbook-shown.*)
         # Runbook UX-marker (second-opinion-gate). Same-class with the
         # other marker write surfaces; classifies as marker_write so the
@@ -749,6 +758,13 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
           return 0
           ;;
+        # #279 fix: per-session preflight-marker via rm. Sibling shape.
+        .preflight-done.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
+          return 0
+          ;;
         .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
@@ -801,6 +817,13 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
           return 0
           ;;
+        # #279 fix: per-session preflight-marker via tee.
+        .preflight-done.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
+          return 0
+          ;;
         .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
@@ -843,6 +866,13 @@ _classify_segment() {
           ;;
         # #268 fix E4: per-session plan-marker via touch.
         .plan-approval-pending.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
+          return 0
+          ;;
+        # #279 fix: per-session preflight-marker via touch.
+        .preflight-done.*)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"

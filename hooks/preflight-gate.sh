@@ -60,7 +60,11 @@ source "$LIB_DIR/marker-paths.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
-PREFLIGHT_MARKER="$PRIMARY_DIR/.preflight-done"
+# #279 fix: prefer per-session marker, fall back to legacy during burn-in.
+# Resolution happens AFTER SESSION_ID is validated (below); the actual marker
+# path used by claim-class validation is set as PREFLIGHT_MARKER_RESOLVED.
+PREFLIGHT_MARKER_LEGACY="$PRIMARY_DIR/.preflight-done"
+PREFLIGHT_MARKER_SID=""   # set after SESSION_ID validation if present
 LAST_PROMPT_MARKER="$PRIMARY_DIR/.last-user-prompt.json"
 HELPER_PATH="$REPO_ROOT/scripts/preflight-marker-write.mjs"
 CANON_LIB="$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs"
@@ -102,6 +106,8 @@ if [ -n "$SESSION_ID" ]; then
   if [ ${#SESSION_ID} -gt 128 ]; then
     _emit_deny "preflight-gate.sh: session_id from stdin exceeds 128 chars; cannot evaluate prompt-binding."
   fi
+  # #279 fix: SESSION_ID has been validated, safe to interpolate into path.
+  PREFLIGHT_MARKER_SID="$PRIMARY_DIR/.preflight-done.${SESSION_ID}"
 fi
 
 # _canonicalize_one <input-path> <hook-cwd>
@@ -136,7 +142,7 @@ case "$TOOL_NAME" in
       set +e
       CANON_TOOL="$(_canonicalize_one "$TOOL_PATH" "$CWD")"
       ec_tool=$?
-      CANON_PREFLIGHT="$(_canonicalize_one "$PREFLIGHT_MARKER" "$REPO_ROOT")"
+      CANON_PREFLIGHT="$(_canonicalize_one "$PREFLIGHT_MARKER_LEGACY" "$REPO_ROOT")"
       ec_pf=$?
       CANON_LAST_PROMPT="$(_canonicalize_one "$LAST_PROMPT_MARKER" "$REPO_ROOT")"
       ec_lp=$?
@@ -159,16 +165,30 @@ case "$TOOL_NAME" in
       # .last-user-prompt.<sid>.json under .checkpoints/ (the session-
       # namespaced files written by the helper via the UserPromptSubmit
       # hook — agents must never write these directly).
+      # #279 fix: also deny .preflight-done.<sid> (the new per-session
+      # marker form) regardless of which session — helper-only contract.
       _tool_basename="$(basename "$CANON_TOOL")"
       _tool_parent="$(dirname "$CANON_TOOL")"
       _last_prompt_namespaced=0
+      _preflight_namespaced=0
       if [ "$_tool_parent" = "$CANON_PRIMARY_DIR" ]; then
         case "$_tool_basename" in
           .last-user-prompt.*.json) _last_prompt_namespaced=1 ;;
+          .preflight-done.*)
+            # Validate suffix shape ([A-Za-z0-9_-]{1,128}) so .preflight-done.bak
+            # / .preflight-done. / .preflight-done./traversal don't slip.
+            _suffix="${_tool_basename#.preflight-done.}"
+            if [ -n "$_suffix" ] && [ ${#_suffix} -le 128 ]; then
+              case "$_suffix" in
+                *[!A-Za-z0-9_-]*) : ;;
+                *) _preflight_namespaced=1 ;;
+              esac
+            fi
+            ;;
         esac
       fi
-      if [ "$CANON_TOOL" = "$CANON_PREFLIGHT" ] || [ "$CANON_TOOL" = "$CANON_LAST_PROMPT" ] || [ $_last_prompt_namespaced -eq 1 ]; then
-        _emit_deny "Direct $TOOL_NAME to preflight marker is forbidden. Use the atomic helper: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight (or --target last-prompt). Resolved tool path: $CANON_TOOL."
+      if [ "$CANON_TOOL" = "$CANON_PREFLIGHT" ] || [ "$CANON_TOOL" = "$CANON_LAST_PROMPT" ] || [ $_last_prompt_namespaced -eq 1 ] || [ $_preflight_namespaced -eq 1 ]; then
+        _emit_deny "Direct $TOOL_NAME to preflight marker is forbidden. Use the atomic helper: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id $SESSION_ID (or --target last-prompt). Resolved tool path: $CANON_TOOL."
       fi
     fi
     ;;
@@ -196,7 +216,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     HELPER_BASENAME_RE='(^|[ /])preflight-marker-write\.mjs( |$)'
     if printf '%s' "$NORMALIZED_CMD" | grep -qE "$HELPER_BASENAME_RE"; then
       if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
-        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt>. No cwd fallback (ROOT_REQUIRED)."
+        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED)."
       fi
       # I7 (plan-v2 audit F2): the UserPromptSubmit hook is the ONLY
       # sanctioned writer of `.last-user-prompt.<sid>.json`. The hook
@@ -226,18 +246,34 @@ if [ "$CLAIM_CLASS" != "codex-review-handoff" ]; then
   exit 0
 fi
 
-# Marker existence
-if [ ! -f "$PREFLIGHT_MARKER" ]; then
-  _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight. Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+# #279 fix: prefer per-session marker `.preflight-done.<SESSION_ID>`, fall
+# back to legacy `.preflight-done` during burn-in. Resolution is purely a
+# local file existence check; the cross-session-stomp bug occurs only on
+# the legacy filename, so reading the suffixed form deterministically
+# returns THIS session's marker even when sibling sessions ran.
+PREFLIGHT_MARKER_RESOLVED=""
+if [ -n "$PREFLIGHT_MARKER_SID" ] && [ -f "$PREFLIGHT_MARKER_SID" ]; then
+  PREFLIGHT_MARKER_RESOLVED="$PREFLIGHT_MARKER_SID"
+elif [ -f "$PREFLIGHT_MARKER_LEGACY" ]; then
+  PREFLIGHT_MARKER_RESOLVED="$PREFLIGHT_MARKER_LEGACY"
+fi
+
+# Marker existence — name both candidate paths so callers know where to write.
+if [ -z "$PREFLIGHT_MARKER_RESOLVED" ]; then
+  if [ -n "$PREFLIGHT_MARKER_SID" ]; then
+    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_SID via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id $SESSION_ID. Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+  else
+    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_LEGACY via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id <sid>. (stdin missing session_id — gate cannot derive per-session path; legacy path used.) Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+  fi
 fi
 
 # JSON parse
-MARKER_JSON="$(cat "$PREFLIGHT_MARKER" 2>/dev/null || true)"
+MARKER_JSON="$(cat "$PREFLIGHT_MARKER_RESOLVED" 2>/dev/null || true)"
 if [ -z "$MARKER_JSON" ]; then
-  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER is empty. Write a valid JSON marker via the helper. May indicate a write-in-progress race; retry."
+  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER_RESOLVED is empty. Write a valid JSON marker via the helper. May indicate a write-in-progress race; retry."
 fi
 if ! printf '%s' "$MARKER_JSON" | jq empty 2>/dev/null; then
-  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER is not valid JSON. Re-write via $HELPER_PATH (which validates JSON.parse before writing)."
+  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER_RESOLVED is not valid JSON. Re-write via $HELPER_PATH (which validates JSON.parse before writing)."
 fi
 
 # Field-by-field validation

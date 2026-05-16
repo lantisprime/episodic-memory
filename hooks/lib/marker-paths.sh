@@ -209,3 +209,70 @@ any_plan_marker_exists() {
   done
   return 1
 }
+
+# ---------------------------------------------------------------------------
+# #279 fix — per-session .preflight-done marker contract.
+#
+# Shell parity for scripts/lib/marker-paths.mjs PREFLIGHT_MARKER_*. Sibling
+# of PLAN_MARKER_* (#268 / PR #271). Drift caught by
+# scripts/validate-plan-marker-sites.mjs.
+# ---------------------------------------------------------------------------
+
+readonly PREFLIGHT_MARKER_LEGACY_BASENAME='.preflight-done'
+readonly PREFLIGHT_MARKER_BASENAME_GLOB='.preflight-done*'             # bash case glob (loose; for routing)
+readonly PREFLIGHT_MARKER_SUFFIX_CHARCLASS='A-Za-z0-9_-'
+readonly PREFLIGHT_MARKER_SUFFIX_MAXLEN=128
+readonly PREFLIGHT_MARKER_BASENAME_GREP_PATTERN='\.preflight-done(\.[A-Za-z0-9_-]{1,128})?'
+
+# preflight_marker_basename_matches <basename>
+# Strict match. Accepts ONLY:
+#   .preflight-done                                 (legacy suffix-less)
+#   .preflight-done.<sid>                           (sid matches char-class + length)
+# Rejects:
+#   .preflight-done-extra                           (suffix without dot separator)
+#   .preflight-done.                                (empty suffix)
+#   .preflight-done./traversal                      (slash in suffix)
+#   .preflight-done..                               (dot in suffix)
+#   .preflight-done.<129-char>                      (oversize suffix)
+preflight_marker_basename_matches() {
+  local basename="$1"
+  case "$basename" in
+    .preflight-done) return 0 ;;
+    .preflight-done.*)
+      local suffix="${basename#.preflight-done.}"
+      [ -z "$suffix" ] && return 1
+      [ "${#suffix}" -gt "$PREFLIGHT_MARKER_SUFFIX_MAXLEN" ] && return 1
+      case "$suffix" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# preflight_marker_basename_for_session <sid>
+# Compose the per-session marker basename. Caller MUST validate_session_id
+# BEFORE calling this; not re-validated here.
+preflight_marker_basename_for_session() {
+  printf '.preflight-done.%s' "$1"
+}
+
+# any_preflight_marker_exists <repo-root>
+# True if ANY preflight-done marker (legacy OR any suffixed form) exists at
+# either primary or legacy marker dir under <repo-root>. Used by:
+#   - preflight-gate.sh existence check (session-aware after #279 fix)
+#   - SessionStart orphan-sweep
+any_preflight_marker_exists() {
+  local root="$1"
+  [ -e "$root/$PRIMARY_MARKER_DIR/$PREFLIGHT_MARKER_LEGACY_BASENAME" ] && return 0
+  [ -e "$root/$LEGACY_MARKER_DIR/$PREFLIGHT_MARKER_LEGACY_BASENAME" ] && return 0
+  local p
+  for p in "$root/$PRIMARY_MARKER_DIR"/.preflight-done.*; do
+    [ -e "$p" ] && return 0
+  done
+  for p in "$root/$LEGACY_MARKER_DIR"/.preflight-done.*; do
+    [ -e "$p" ] && return 0
+  done
+  return 1
+}

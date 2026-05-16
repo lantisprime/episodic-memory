@@ -182,6 +182,57 @@ export function planMarkerBasenameForSession(sid) {
 }
 
 // ---------------------------------------------------------------------------
+// #279 fix — per-session .preflight-done marker contract.
+//
+// Canonical (new):   .preflight-done.<session_id>     (per-session)
+// Legacy (burn-in):  .preflight-done                  (suffix-less)
+//
+// Sibling of PLAN_MARKER_* (#268 / PR #271). Both forms accepted by
+// readers/gates during burn-in. Helper writes only the suffixed form when
+// --session-id is provided to --target preflight. SessionStart orphan-sweep
+// clears both. SessionEnd own-session-only deletes the suffixed form for
+// the ending session.
+//
+// Shell parity: hooks/lib/marker-paths.sh PREFLIGHT_MARKER_*. Drift caught
+// by scripts/validate-plan-marker-sites.mjs (Direction 0, registry-driven).
+// ---------------------------------------------------------------------------
+
+export const PREFLIGHT_MARKER_LEGACY_BASENAME = '.preflight-done'
+export const PREFLIGHT_MARKER_BASENAME_TEMPLATE = '.preflight-done.{sid}'
+export const PREFLIGHT_MARKER_BASENAME_RE = /^\.preflight-done(\.[A-Za-z0-9_-]{1,128})?$/
+
+/**
+ * Strict match for preflight-marker basenames. Accepts ONLY:
+ *   .preflight-done                                 (legacy suffix-less)
+ *   .preflight-done.<sid>                           (sid matches char-class + length)
+ * Rejects:
+ *   .preflight-done-extra                           (suffix without dot separator)
+ *   .preflight-done.                                (empty suffix)
+ *   .preflight-done./traversal                      (slash in suffix)
+ *   .preflight-done..                               (dot in suffix)
+ *   .preflight-done.<129-char>                      (oversize suffix)
+ *
+ * Mirrors hooks/lib/marker-paths.sh preflight_marker_basename_matches().
+ *
+ * @param {string} basename
+ * @returns {boolean}
+ */
+export function preflightMarkerBasenameMatches(basename) {
+  return typeof basename === 'string' && PREFLIGHT_MARKER_BASENAME_RE.test(basename)
+}
+
+/**
+ * Compose the per-session preflight-marker basename for a given session id.
+ * Caller MUST validateSessionId(sid) first; this helper does not re-validate.
+ *
+ * @param {string} sid — valid session-id (matches SESSION_ID_RE)
+ * @returns {string} '.preflight-done.<sid>'
+ */
+export function preflightMarkerBasenameForSession(sid) {
+  return PREFLIGHT_MARKER_BASENAME_TEMPLATE.replace('{sid}', sid)
+}
+
+// ---------------------------------------------------------------------------
 // Enforcement-site registry — single source of truth for the validator.
 //
 // Every place in the codebase that recognizes, gates, iterates, or otherwise

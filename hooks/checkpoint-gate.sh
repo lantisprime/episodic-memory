@@ -188,6 +188,10 @@ _marker_basename_in_set() {
     # Loose glob here for set-membership routing; strict validation via
     # plan_marker_basename_matches happens at marker_basename_for_target.
     .plan-approval-pending.*) return 0 ;;
+    # #279 fix: per-session preflight-marker `.preflight-done.<sid>`.
+    # Sibling of plan-approval-pending; loose glob, strict validation
+    # via preflight_marker_basename_matches happens at gate layer.
+    .preflight-done.*) return 0 ;;
   esac
   return 1
 }
@@ -259,7 +263,7 @@ _escape_bash_glob() {
 _command_has_relative_marker_path() {
   local cmd_stripped
   cmd_stripped="$(_strip_shell_quotes "$1")"
-  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
+  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
 }
 
 # E2E-discovered absolute-non-canonical detection: for Bash commands where
@@ -276,7 +280,7 @@ _command_first_absolute_noncanonical_marker() {
   local cmd
   cmd="$(_strip_shell_quotes "$1")"
   local matches p basename
-  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
+  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
   [ -z "$matches" ] && return 0
   while IFS= read -r p; do
     [ -z "$p" ] && continue

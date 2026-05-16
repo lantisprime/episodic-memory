@@ -24,14 +24,22 @@
  *   echo '<JSON>'  | node /abs/path/preflight-marker-write.mjs --root /abs/repo --target last-prompt --session-id <sid>
  *   cat input.json | node /abs/path/preflight-marker-write.mjs --root /abs/repo --target preflight
  *
- * Per-session namespacing (`--target last-prompt`):
- *   The last-prompt file is keyed by session_id to avoid cross-session
- *   liveness collisions (plan-time audit F4, scratch/238-plan-v2.md).
- *   Basename: `.last-user-prompt.<session_id>.json`. session_id is required
- *   for that target and must match `[A-Za-z0-9_-]{1,128}` (no dots, no
- *   slashes — prevents basename injection past the `.json` suffix).
- *   The preflight target is unchanged: single `.preflight-done` per repo,
- *   session-bound via marker JSON content.
+ * Per-session namespacing (`--target last-prompt` AND `--target preflight`):
+ *   Both files are keyed by session_id to avoid cross-session liveness
+ *   collisions. last-prompt: plan-time audit F4, scratch/238-plan-v2.md.
+ *   preflight: #279 fix mirroring PR #271's plan-approval-pending pattern.
+ *
+ *   - last-prompt basename: `.last-user-prompt.<session_id>.json`
+ *                           (session-id REQUIRED)
+ *   - preflight   basename: `.preflight-done.<session_id>` (new in #279)
+ *                           or `.preflight-done` legacy form during burn-in.
+ *                           (session-id OPTIONAL: writes legacy filename
+ *                            when absent so existing callers keep working;
+ *                            gate prefers per-session form when present.)
+ *
+ *   session_id must match `[A-Za-z0-9_-]{1,128}` when given (no dots —
+ *   could collide with `.json` suffix on last-prompt — no slashes —
+ *   path traversal).
  *
  * Exit codes:
  *   0 — success; stdout is `{"status":"ok","path":"<final>","bytes":N}`
@@ -41,7 +49,7 @@
  *   5 — `--root` invalid (non-existent OR not a repo root signal)
  *   6 — `--target` missing or invalid value
  *   7 — stdin read error
- *   8 — `--session-id` missing/invalid when target=last-prompt
+ *   8 — `--session-id` missing when target=last-prompt; or invalid format for either target
  *
  * Discovered: codex r2 reply `20260512-071449-...-6e90` (atomicity invariant
  *   not locally verifiable for agent-side Write).
@@ -63,10 +71,12 @@ import { ensurePrimaryDir, primaryMarkerPath } from './lib/marker-paths.mjs'
 import { SESSION_ID_RE } from './lib/session-id.mjs'
 import { validateRoot, RootValidationError } from './lib/marker-root-validation.mjs'
 
-// preflight target → fixed basename; last-prompt target → suffix template
-// where {sid} is substituted with the validated --session-id value.
+// #279 burn-in: --target preflight accepts both forms.
+//   With    --session-id <sid> → writes .preflight-done.<sid>  (new, canonical)
+//   Without --session-id        → writes .preflight-done       (legacy)
+// last-prompt is always session-keyed (--session-id required).
 const VALID_TARGETS = {
-  preflight: { kind: 'fixed', basename: '.preflight-done' },
+  preflight: { kind: 'session-optional', legacyBasename: '.preflight-done', template: '.preflight-done.{sid}' },
   'last-prompt': { kind: 'session', template: '.last-user-prompt.{sid}.json' }
 }
 
@@ -92,7 +102,8 @@ function parseArgs(argv) {
     } else if (a === '--help' || a === '-h') {
       process.stdout.write(
         'Usage: echo "<JSON>" | preflight-marker-write.mjs --root <abs> --target <preflight|last-prompt> [--session-id <sid>]\n' +
-        '  --session-id required when --target=last-prompt (alphanumeric/underscore/dash, max 128 chars)\n'
+        '  --session-id required for --target=last-prompt; optional for --target=preflight (burn-in #279).\n' +
+        '  Format: alphanumeric/underscore/dash, max 128 chars.\n'
       )
       process.exit(0)
     } else {
@@ -102,12 +113,20 @@ function parseArgs(argv) {
   return args
 }
 
-// Resolve the marker basename for a target, validating any required
-// per-target args (e.g. --session-id for last-prompt).
+// Resolve the marker basename for a target.
+//   kind=session           — --session-id required; substitutes into template.
+//   kind=session-optional  — --session-id optional; legacy basename if absent,
+//                             else substituted template (#279 burn-in).
 function resolveBasename(target, sessionId) {
   const spec = VALID_TARGETS[target]
-  if (spec.kind === 'fixed') return spec.basename
-  // kind === 'session'
+  if (spec.kind === 'session-optional') {
+    if (!sessionId) return spec.legacyBasename
+    if (!SESSION_ID_RE.test(sessionId)) {
+      fail(8, `SESSION_ID_INVALID: must match ${SESSION_ID_RE.source}, got: ${sessionId}`)
+    }
+    return spec.template.replace('{sid}', sessionId)
+  }
+  // kind === 'session' — --session-id is mandatory
   if (!sessionId) {
     fail(8, `SESSION_ID_REQUIRED: --session-id <sid> is mandatory when --target=${target}`)
   }
