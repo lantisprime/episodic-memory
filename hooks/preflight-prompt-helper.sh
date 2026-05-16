@@ -191,13 +191,29 @@ MEMORY_ROOT=""
 CONFIG_FILE="$REPO_ROOT/.episodic-memory/config.json"
 if [ -f "$CONFIG_FILE" ]; then
   MEMORY_ROOT="$(jq -r '.claude_memory_root // ""' "$CONFIG_FILE" 2>/dev/null)"
+  if [ -n "$MEMORY_ROOT" ] && [ ! -d "$MEMORY_ROOT" ]; then
+    MEMORY_ROOT=""
+  fi
+fi
+if [ -z "$MEMORY_ROOT" ]; then
+  # Keep this bounded and deterministic: derive candidates only from the
+  # resolved repo root, mirroring session-handoff-prompt.sh. The observed
+  # Claude project path on this machine has existed in both canonical
+  # `charltondho` and drifted `charltond-ho` forms; pick the first candidate
+  # that actually contains memory markdown, not merely an empty directory.
+  SANITIZED="$(printf '%s' "$REPO_ROOT" | sed 's|/|-|g; s|\.|-|g')"
+  CANONICAL_MEM="${HOME:-/}/.claude/projects/${SANITIZED}/memory"
+  VARIANT_SANITIZED="$(printf '%s' "$SANITIZED" | sed 's|charltondho|charltond-ho|')"
+  VARIANT_MEM="${HOME:-/}/.claude/projects/${VARIANT_SANITIZED}/memory"
+  for cand in "$CANONICAL_MEM" "$VARIANT_MEM"; do
+    if [ -d "$cand" ] && ls "$cand"/*.md >/dev/null 2>&1; then
+      MEMORY_ROOT="$cand"
+      break
+    fi
+  done
 fi
 if [ -z "$MEMORY_ROOT" ] || [ ! -d "$MEMORY_ROOT" ]; then
-  SANITIZED="$(printf '%s' "$REPO_ROOT" | sed 's|/|-|g')"
-  MEMORY_ROOT="${HOME:-/}/.claude/projects/${SANITIZED}/memory"
-fi
-if [ ! -d "$MEMORY_ROOT" ]; then
-  _log_and_exit_safe_post_lp "memory_root not resolvable from config or HOME; rolling back last-prompt marker so gate denies cleanly"
+  _log_and_exit_safe_post_lp "memory_root not resolvable from config or bounded HOME candidates; rolling back last-prompt marker so gate denies cleanly"
 fi
 
 # Extract component basenames from the bundle's json:bundle-manifest block.

@@ -28,6 +28,22 @@ mktmp() {
   ( cd -P "$d" && pwd )
 }
 
+write_review_components() {
+  local target="$1"
+  mkdir -p "$target"
+  for f in \
+    reference_codex_review_flow.md \
+    feedback_codex_cli_episode_messaging.md \
+    feedback_subagent_cli_episode_messaging.md \
+    feedback_canonical_agent_dispatch_trigger.md \
+    feedback_codex_review_request_preamble.md \
+    feedback_second_opinion_harness_runbook.md \
+    reference_second_opinion_harness.md
+  do
+    printf 'stub content for %s\n' "$f" > "$target/$f"
+  done
+}
+
 stage_repo() {
   # Stage a minimal repo fixture so resolve_repo_root finds a root and the
   # in-repo scripts/lib path resolves.
@@ -51,17 +67,7 @@ stage_repo() {
   # Stage the 7 review-channel components at the local memory_root +
   # a config.json that points the hook there. Stub content per file —
   # the gate validates loaded sha against disk, not against bundle-recorded.
-  for f in \
-    reference_codex_review_flow.md \
-    feedback_codex_cli_episode_messaging.md \
-    feedback_subagent_cli_episode_messaging.md \
-    feedback_canonical_agent_dispatch_trigger.md \
-    feedback_codex_review_request_preamble.md \
-    feedback_second_opinion_harness_runbook.md \
-    reference_second_opinion_harness.md
-  do
-    printf 'stub content for %s\n' "$f" > "$target/.episodic-memory/memory/$f"
-  done
+  write_review_components "$target/.episodic-memory/memory"
   jq -nc --arg p "$target/.episodic-memory/memory" '{claude_memory_root: $p}' > "$target/.episodic-memory/config.json"
   # Make it git-detectable so resolve_repo_root returns this dir, not /.
   ( cd "$target" && git init -q && git config user.email t@t && git config user.name t )
@@ -221,6 +227,62 @@ else
 fi
 
 rm -rf "$TF"
+
+# ---------- I2c: memory_root fallback handles observed Claude path variant ----------
+
+echo "--- I2c: memory_root fallback chooses non-empty bounded variant ---"
+
+BASE="$(mktmp)"
+TF="$BASE/Users/charltondho/Developer/projects/episodic-memory"
+mkdir -p "$TF"
+stage_repo "$TF"
+rm -rf "$TF/.episodic-memory"
+
+HOME_FIXTURE="$BASE/home"
+SANITIZED="$(printf '%s' "$TF" | sed 's|/|-|g; s|\.|-|g')"
+VARIANT_SANITIZED="$(printf '%s' "$SANITIZED" | sed 's|charltondho|charltond-ho|')"
+CANONICAL_MEM="$HOME_FIXTURE/.claude/projects/$SANITIZED/memory"
+VARIANT_MEM="$HOME_FIXTURE/.claude/projects/$VARIANT_SANITIZED/memory"
+mkdir -p "$CANONICAL_MEM/session_summaries"
+write_review_components "$VARIANT_MEM"
+
+SID="i2c-test-session"
+PROMPT="review handoff prompt from variant memory root"
+INPUT="$(jq -nc --arg p "$PROMPT" --arg s "$SID" --arg c "$TF" \
+  '{prompt: $p, session_id: $s, cwd: $c, transcript_path: "/tmp/transcript.jsonl", hook_event_name: "UserPromptSubmit"}')"
+( cd "$TF" && printf '%s' "$INPUT" | HOME="$HOME_FIXTURE" bash "$HOOK" ) 2>/dev/null
+EC=$?
+
+if [ $EC -ne 0 ]; then
+  echo "  ✗ I2c hook exit $EC (expected 0)"
+  failed=$((failed+1))
+elif [ ! -f "$TF/.checkpoints/.preflight-done.${SID}" ]; then
+  echo "  ✗ I2c preflight marker not written via variant memory root"
+  failed=$((failed+1))
+else
+  echo "  ✓ I2c hook wrote preflight marker via variant memory root"
+  passed=$((passed+1))
+fi
+
+MARKER_MEM="$(jq -r '.memory_root // ""' "$TF/.checkpoints/.preflight-done.${SID}" 2>/dev/null || true)"
+if [ "$MARKER_MEM" = "$VARIANT_MEM" ]; then
+  echo "  ✓ I2c marker records the non-empty variant memory root"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2c memory_root=$MARKER_MEM (expected $VARIANT_MEM)"
+  failed=$((failed+1))
+fi
+
+GATE_OUT="$(HOME="$HOME_FIXTURE" run_gate "$TF" "$SID" 2>&1 || true)"
+if [ -z "$GATE_OUT" ]; then
+  echo "  ✓ I2c gate accepts marker built from variant memory root"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2c gate denied variant-root marker: $GATE_OUT"
+  failed=$((failed+1))
+fi
+
+rm -rf "$BASE"
 
 # ---------- I2b (PR #291 A1): bundle missing → roll back last-prompt ----------
 
