@@ -167,6 +167,34 @@ fi
 
 rm -rf "$TF"
 
+# ---------- I2b (PR #291 A1): bundle missing → roll back last-prompt ----------
+
+echo "--- I2b: bundle missing → roll back last-prompt marker for clean re-attempt ---"
+
+TF="$(mktmp)"; stage_repo "$TF"
+rm -f "$TF/bundles/codex-review-channel-current.md"
+SID="i2b-test-session"
+run_hook "$TF" "review handoff prompt" "$SID" 2>/dev/null
+EC=$?
+
+if [ $EC -eq 0 ]; then
+  echo "  ✓ I2b hook fail-safe (exit 0) when bundle missing"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2b hook exit $EC (expected 0)"
+  failed=$((failed+1))
+fi
+
+if [ ! -f "$TF/.checkpoints/.last-user-prompt.${SID}.json" ] && [ ! -f "$TF/.checkpoints/.preflight-done.${SID}" ]; then
+  echo "  ✓ I2b both markers absent → next-prompt cycle starts clean"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2b stale markers leaked: last=$(test -f "$TF/.checkpoints/.last-user-prompt.${SID}.json" && echo Y || echo N) preflight=$(test -f "$TF/.checkpoints/.preflight-done.${SID}" && echo Y || echo N)"
+  failed=$((failed+1))
+fi
+
+rm -rf "$TF"
+
 # ---------- I3: fail-safe on malformed inputs ----------
 
 echo "--- I3: fail-safe — never block on internal errors ---"

@@ -51,6 +51,16 @@ _log_and_exit_safe() {
   exit 0
 }
 
+_log_and_exit_safe_post_lp() {
+  # PR #291 A1: used on skip paths that fire AFTER the last-prompt marker
+  # has already been written. Unlinks it so the next UserPromptSubmit
+  # cycle starts clean instead of leaving fresh last-prompt + stale
+  # preflight markers (which would cause the gate to deny on a generic
+  # sha-mismatch rather than the actual cause).
+  rm -f "$REPO_ROOT/.checkpoints/.last-user-prompt.${SESSION_ID}.json" 2>/dev/null || true
+  _log_and_exit_safe "$1"
+}
+
 if [ -z "$INPUT" ]; then
   _log_and_exit_safe "empty stdin; skipping"
 fi
@@ -162,13 +172,13 @@ fi
 # brittle duplicate parser for the bundle's prose manifest.
 BUNDLE_PATH="$REPO_ROOT/bundles/codex-review-channel-current.md"
 if [ ! -f "$BUNDLE_PATH" ]; then
-  _log_and_exit_safe "codex review bundle missing at $BUNDLE_PATH; last-prompt marker written, preflight marker skipped"
+  _log_and_exit_safe_post_lp "codex review bundle missing at $BUNDLE_PATH; rolling back last-prompt marker so gate denies cleanly"
 fi
 
 BUNDLE_SHA="$(shasum -a 256 "$BUNDLE_PATH" 2>/dev/null | awk '{print $1}')"
 BUNDLE_MTIME="$(node -e "process.stdout.write(String(require('fs').statSync(process.argv[1]).mtimeMs))" "$BUNDLE_PATH" 2>/dev/null || true)"
 if [ -z "$BUNDLE_SHA" ] || [ -z "$BUNDLE_MTIME" ]; then
-  _log_and_exit_safe "could not stat/hash codex review bundle; last-prompt marker written, preflight marker skipped"
+  _log_and_exit_safe_post_lp "could not stat/hash codex review bundle; rolling back last-prompt marker so gate denies cleanly"
 fi
 
 PREFLIGHT_JSON="$(jq -nc \
@@ -198,13 +208,13 @@ PREFLIGHT_JSON="$(jq -nc \
     created_at_ms: $ms
   }')"
 if [ -z "$PREFLIGHT_JSON" ]; then
-  _log_and_exit_safe "jq composition of preflight marker JSON failed; last-prompt marker written, preflight marker skipped"
+  _log_and_exit_safe_post_lp "jq composition of preflight marker JSON failed; rolling back last-prompt marker so gate denies cleanly"
 fi
 
 PREFLIGHT_OUT="$(printf '%s' "$PREFLIGHT_JSON" | node "$HELPER" --root "$REPO_ROOT" --target preflight --session-id "$SESSION_ID" 2>&1)"
 PREFLIGHT_EC=$?
 if [ $PREFLIGHT_EC -ne 0 ]; then
-  _log_and_exit_safe "preflight marker-write helper exit $PREFLIGHT_EC: $PREFLIGHT_OUT"
+  _log_and_exit_safe_post_lp "preflight marker-write helper exit $PREFLIGHT_EC: $PREFLIGHT_OUT"
 fi
 
 # Success — exit 0 with no stdout. Claude Code's hooks framework treats
