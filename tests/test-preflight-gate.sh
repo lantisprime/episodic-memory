@@ -362,13 +362,123 @@ echo "--- F3-series: helper invocation enforcement ---"
 TF="$(mktmp)"; stage_fixture "$TF"
 # F3-gate: Bash invoking helper without --root → DENY at gate
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --target preflight\"}" "deny" "ROOT_REQUIRED|--root" "F3-gate helper sans --root → DENY"
-# F3-gate: Bash invoking helper WITH --root → not blocked by gate (helper itself runs)
-run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" "allow" "" "F3-gate helper with --root → allowed by gate"
-# A1: bare/npx/script-shebang invocation also denied without --root
-run_gate "$TF" "Bash" '{"command":"./scripts/preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1a bare script invocation sans --root → DENY"
-run_gate "$TF" "Bash" '{"command":"npx preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1b npx invocation sans --root → DENY"
-# A3: tab/multi-space variants
+# F3-gate (PR #291 codex r3 P1): Bash invoking helper WITH --root and any
+# --target (or none) → DENY class-wide. The agent has no sanctioned path;
+# helper is reserved for the UserPromptSubmit hook subprocess (which does
+# not fire PreToolUse).
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate helper --root --target preflight → DENY (codex r3 class-wide)"
+# F3-gate codex r3 regressions: quoted and escaped --target values used to
+# bypass the prior NORMALIZED_CMD greps. The class-wide deny closes them.
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target \\\"preflight\\\"\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 quoted --target \"preflight\" → DENY"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target pre\\\\flight\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 escaped --target pre\\flight → DENY"
+# F3-gate codex r3: helper with --root and NO --target → still DENY (class-wide).
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 helper --root only (no --target) → DENY"
+# A1: bare/npx invocation denied. Codex r4: tokenized detection emits
+# specific deny reasons (bare-helper / wrapper). The --root diagnostic
+# only fires for the canonical `node <helper>` path where T[1]=helper.
+run_gate "$TF" "Bash" '{"command":"./scripts/preflight-marker-write.mjs --target preflight"}' "deny" "Bare invocation" "A1a bare script invocation → DENY (bare-helper)"
+run_gate "$TF" "Bash" '{"command":"npx preflight-marker-write.mjs --target preflight"}' "deny" "wrapper basename 'npx'" "A1b npx invocation → DENY (wrapper)"
+# A3: tab/multi-space variants — node + helper, missing --root → ROOT_REQUIRED first.
 run_gate "$TF" "Bash" "{\"command\":\"node\\tscripts/preflight-marker-write.mjs   --target preflight\"}" "deny" "ROOT_REQUIRED|--root" "A3 tab+multi-space sans --root → DENY"
+
+# ---------------------------------------------------------------------------
+# R4-series (codex PR #291 r4): tokenized helper-invocation detection
+# ---------------------------------------------------------------------------
+# Bypass cases — quoted/escaped helper PATHS (not just --target values)
+# that defeated the r3 raw-text regex prefilter. _tokenize normalizes
+# them to scripts/preflight-marker-write.mjs at helper runtime, so the
+# tokenized detector must catch them too.
+
+TF="$(mktmp)"; stage_fixture "$TF"
+# R4-B1: quoted helper path
+run_gate "$TF" "Bash" "{\"command\":\"node \\\"$TF/scripts/preflight-marker-write.mjs\\\" --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R4-B1 quoted helper path → DENY (tokenized)"
+# R4-B2: escaped dot in helper path
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write\\\\.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R4-B2 escaped helper path → DENY (tokenized)"
+# R4-B3: ./relative form
+TF="$(mktmp)"; stage_fixture "$TF"
+payload="$(printf "$GATE_INPUT_TMPL" "Bash" '{"command":"node ./scripts/preflight-marker-write.mjs --root '"$TF"' --target preflight"}' "$TF" "$SESSION_ID")"
+out="$(printf '%s' "$payload" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
+decision="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // ""' 2>/dev/null || echo "")"
+reason="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')"
+if [ "$decision" = "deny" ] && printf '%s' "$reason" | grep -q "reserved for the UserPromptSubmit hook"; then
+  echo "  ✓ R4-B3 ./relative helper path → DENY (tokenized)"
+  passed=$((passed+1))
+else echo "  ✗ R4-B3 — out: $out"; failed=$((failed+1)); fi
+
+# R4-B4: absolute path via ENV-prefix wrapper (NODE_ENV allowed → OK
+# class-wide deny). Tests that env-prefix walk doesn't lose the helper.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"NODE_ENV=test node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R4-B4 NODE_ENV prefix + helper → DENY (tokenized)"
+
+# R4-B5: disallowed env-prefix + helper → DENY env-prefix
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"WEIRD_VAR=1 node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" \
+  "deny" "env-prefix wrapper.*WEIRD_VAR" "R4-B5 disallowed env-prefix + helper → DENY (env-prefix)"
+
+# False-positive controls (per codex r4 handoff). MUST NOT deny.
+
+# R4-FP1: node --test pointed at a DIFFERENT basename (test-preflight-marker-write.mjs).
+# Substring prefilter matches but tokenized detector returns NO_MATCH
+# because T[idx+1] basename ('--test') and T[idx+2] basename
+# (test-preflight-marker-write.mjs) don't equal preflight-marker-write.mjs.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"node --test tests/test-preflight-marker-write.mjs"}' "allow" "" "R4-FP1 node --test test-preflight-marker-write.mjs → ALLOW"
+
+# R4-FP2: printf with helper basename as data argument. exec=printf (not
+# in real-wrapper list) so tokenized detector returns NO_MATCH.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" $'{"command":"printf \'preflight-marker-write.mjs\\\\n\'"}' "allow" "" "R4-FP2 printf 'preflight-marker-write.mjs' → ALLOW"
+
+# R4-FP3: node + OTHER script + helper basename as data arg. T[idx+1]
+# is other-script.mjs (NOT helper) → wrong-helper → NO_MATCH.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"node some-other-script.mjs preflight-marker-write.mjs"}' "allow" "" "R4-FP3 node other.mjs + helper as data → ALLOW"
+
+# R4-FP4: grep with helper basename as pattern → NO_MATCH (grep not a wrapper).
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"grep -r preflight-marker-write.mjs scripts/"}' "allow" "" "R4-FP4 grep preflight-marker-write.mjs → ALLOW"
+
+# R4-FP5: command string contains the stem but no helper invocation
+# (e.g. echo a note about it).
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" $'{"command":"echo \'see preflight-marker-write helper notes\'"}' "allow" "" "R4-FP5 echo mentioning helper stem → ALLOW"
+
+# ---------------------------------------------------------------------------
+# R5-series (codex PR #291 r5): unconditional tokenized detection
+# ---------------------------------------------------------------------------
+# Bypass cases — basename spellings broken by shell escapes/quotes that
+# defeated the r4 raw-substring prefilter (`grep -qF preflight-marker-write`).
+# Bash collapses these to the canonical basename at runtime; _tokenize
+# normalizes the same way. r5 removed the raw prefilter so every Bash
+# command flows through _detect_helper_invocation directly.
+TF="$(mktmp)"; stage_fixture "$TF"
+# R5-B1: backslash-escaped char inside the basename — Bash collapses
+# `preflight-marker-wri\te.mjs` → `preflight-marker-write.mjs`.
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-wri\\\\te.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R5-B1 escaped-basename helper → DENY (tokenized)"
+
+# R5-B2: double-quote concatenation inside the basename — Bash collapses
+# `preflight-marker-"write".mjs` → `preflight-marker-write.mjs`.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-\\\"write\\\".mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R5-B2 quote-concat basename helper → DENY (tokenized)"
+
+# R5-B3: single-quote concatenation inside the basename.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-'write'.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R5-B3 single-quote-concat basename helper → DENY (tokenized)"
+
+# False-positive controls — benign Bash commands without the helper
+# substring at all. Previously short-circuited on the raw prefilter; now
+# flow through _detect_helper_invocation which returns NO_MATCH. Locks in
+# the unconditional-call contract from codex r5.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"ls -la"}' "allow" "" "R5-FP1 ls -la (no helper substring) → ALLOW"
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"git status --porcelain"}' "allow" "" "R5-FP2 git status (no helper substring) → ALLOW"
 
 # F3a: helper directly (out of gate) without --root → exit 4
 set +e
@@ -695,23 +805,32 @@ cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
 EOF
 run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "non-numeric wrote_at_ms" "I8e empty wrote_at_ms → deny"
 
-# I7a: Bash invocation with --target last-prompt → DENY (agent spoof attempt)
+# I7a: Bash invocation with --target last-prompt → DENY (codex r3 class-wide
+# deny — was per-flag in r2; flipped to class-wide because quoted/escaped
+# target values bypassed the regex while runtime tokenizer normalized them).
 TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target last-prompt --session-id agent-spoof\"}" \
-  "deny" "reserved for the UserPromptSubmit hook" "I7a agent --target last-prompt → deny"
+  "deny" "reserved for the UserPromptSubmit hook" "I7a agent --target last-prompt → deny (codex r3 class-wide)"
 
-# I7b: Bash invocation with --target preflight (legitimate) → no I7 deny
-# (other gate checks still apply: the marker write itself proceeds).
+# I7b (PR #291 codex r3 P1): Bash invocation with --target preflight → DENY
+# via class-wide unconditional deny (no longer a --target preflight regex).
 TF="$(mktmp)"; stage_fixture "$TF"
-out="$(printf '{"tool_name":"Bash","tool_input":{"command":"node %s/scripts/preflight-marker-write.mjs --root %s --target preflight"},"cwd":"%s","session_id":"%s"}' \
-  "$TF" "$TF" "$TF" "$SESSION_ID" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
-if [ -z "$out" ] || ! printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("reserved for the UserPromptSubmit hook")' >/dev/null 2>&1; then
-  echo "  ✓ I7b --target preflight not blocked by I7 deny"
-  passed=$((passed+1))
-else
-  echo "  ✗ I7b --target preflight false-blocked: $out"
-  failed=$((failed+1))
-fi
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight --session-id agent-forge\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7b agent --target preflight → deny (codex r3 class-wide)"
+
+# I7c codex r3: equivalent Bash forms that bypassed the r2 NORMALIZED_CMD
+# regex (--target "preflight" quoted; --target pre\flight escaped) all tokenize
+# to target=preflight at helper runtime. Class-wide deny closes them.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target \\\"preflight\\\" --session-id agent-forge\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7c-quoted agent --target \"preflight\" → deny (codex r3)"
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target pre\\\\flight --session-id agent-forge\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7c-escaped agent --target pre\\flight → deny (codex r3)"
+# And the same bypass shape for last-prompt.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target \\\"last-prompt\\\" --session-id agent-spoof\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7c-quoted agent --target \"last-prompt\" → deny (codex r3)"
 
 # Regex tightening: `test-preflight-marker-write.mjs` in argv should NOT
 # trigger the helper-invocation deny. (Before C5 it did — false-positive

@@ -4,6 +4,7 @@
 #
 # Plan-v2 §I1, I3, I5, I6 coverage:
 #   I1  Hook writes .last-user-prompt.<sid>.json atomically with canonical sha
+#   I2  Hook writes .preflight-done.<sid> for the same prompt/session
 #   I3  Fail-safe: any internal error → exit 0 + stderr log; never block
 #   I5  Idempotent for same prompt+session: byte-identical file content
 #   I6  External-contract documentation — UserPromptSubmit ordering verified
@@ -32,15 +33,36 @@ stage_repo() {
   # in-repo scripts/lib path resolves.
   local target="$1"
   mkdir -p "$target/.checkpoints"
+  mkdir -p "$target/bundles"
   mkdir -p "$target/scripts/lib"
   mkdir -p "$target/hooks/lib"
+  mkdir -p "$target/.episodic-memory/memory"
   cp "$REPO_ROOT/scripts/preflight-marker-write.mjs" "$target/scripts/"
   cp "$REPO_ROOT/scripts/lib/preflight-prompt-canon.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$target/scripts/lib/"
+  cp "$REPO_ROOT/hooks/preflight-gate.sh" "$target/hooks/"
+  cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/hooks/lib/marker-paths.sh" "$target/hooks/lib/"
   cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/bundles/codex-review-channel-current.md" "$target/bundles/"
+  # Stage the 7 review-channel components at the local memory_root +
+  # a config.json that points the hook there. Stub content per file —
+  # the gate validates loaded sha against disk, not against bundle-recorded.
+  for f in \
+    reference_codex_review_flow.md \
+    feedback_codex_cli_episode_messaging.md \
+    feedback_subagent_cli_episode_messaging.md \
+    feedback_canonical_agent_dispatch_trigger.md \
+    feedback_codex_review_request_preamble.md \
+    feedback_second_opinion_harness_runbook.md \
+    reference_second_opinion_harness.md
+  do
+    printf 'stub content for %s\n' "$f" > "$target/.episodic-memory/memory/$f"
+  done
+  jq -nc --arg p "$target/.episodic-memory/memory" '{claude_memory_root: $p}' > "$target/.episodic-memory/config.json"
   # Make it git-detectable so resolve_repo_root returns this dir, not /.
   ( cd "$target" && git init -q && git config user.email t@t && git config user.name t )
 }
@@ -54,6 +76,14 @@ run_hook() {
   # The hook resolves repo from cwd via git -C; we cd into the repo so the
   # resolution matches the cwd field exactly.
   ( cd "$repo" && printf '%s' "$input" | bash "$HOOK" )
+}
+
+run_gate() {
+  local repo="$1" sid="$2" cmd="${3:-codex exec foo}"
+  local payload
+  payload="$(jq -nc --arg c "$repo" --arg s "$sid" --arg cmd "$cmd" \
+    '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$c, session_id:$s, transcript_path:"/tmp/transcript.jsonl"}')"
+  ( cd "$repo" && printf '%s' "$payload" | bash "$repo/hooks/preflight-gate.sh" )
 }
 
 # ---------- I1: hook writes namespaced file with correct sha ----------
@@ -95,6 +125,126 @@ if jq -e '.session_id and .transcript_path and .cwd and .repo_root and .wrote_at
   passed=$((passed+1))
 else
   echo "  ✗ I1 file missing required fields"
+  failed=$((failed+1))
+fi
+
+rm -rf "$TF"
+
+# ---------- I2: hook writes prompt-bound preflight marker ----------
+
+echo "--- I2: hook writes namespaced preflight marker ---"
+
+TF="$(mktmp)"; stage_repo "$TF"
+SID="i2-test-session"
+PROMPT="review handoff prompt"
+run_hook "$TF" "$PROMPT" "$SID" 2>/dev/null
+EC=$?
+
+if [ $EC -ne 0 ]; then
+  echo "  ✗ I2 hook exit $EC (expected 0)"
+  failed=$((failed+1))
+elif [ ! -f "$TF/.checkpoints/.preflight-done.${SID}" ]; then
+  echo "  ✗ I2 preflight marker not written"
+  failed=$((failed+1))
+else
+  echo "  ✓ I2 hook wrote namespaced preflight marker"
+  passed=$((passed+1))
+fi
+
+LAST_SHA="$(jq -r '.prompt_sha256' "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+PREFLIGHT_SHA="$(jq -r '.prompt_sha256' "$TF/.checkpoints/.preflight-done.${SID}")"
+PREFLIGHT_CLAIM="$(jq -r '.claim_class' "$TF/.checkpoints/.preflight-done.${SID}")"
+if [ "$LAST_SHA" = "$PREFLIGHT_SHA" ] && [ "$PREFLIGHT_CLAIM" = "codex-review-handoff" ]; then
+  echo "  ✓ I2 preflight marker is bound to same prompt and claim class"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 marker mismatch: last_sha=$LAST_SHA preflight_sha=$PREFLIGHT_SHA claim=$PREFLIGHT_CLAIM"
+  failed=$((failed+1))
+fi
+
+if jq -e --arg b "$TF/bundles/codex-review-channel-current.md" \
+    '(.required_files // []) | index($b) != null' \
+    "$TF/.checkpoints/.preflight-done.${SID}" >/dev/null; then
+  echo "  ✓ I2 preflight marker lists canonical bundle"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 preflight marker missing canonical bundle"
+  failed=$((failed+1))
+fi
+
+# I2-A (codex round-1 finding #1): marker must list all 7 components + the
+# bundle in required_files, and loaded_files must have a matching entry per
+# required_files entry with sha256 that matches disk.
+REQ_COUNT="$(jq -r '.required_files // [] | length' "$TF/.checkpoints/.preflight-done.${SID}")"
+LOADED_COUNT="$(jq -r '.loaded_files // [] | length' "$TF/.checkpoints/.preflight-done.${SID}")"
+if [ "$REQ_COUNT" = "8" ] && [ "$LOADED_COUNT" = "8" ]; then
+  echo "  ✓ I2 marker has 8 required_files + 8 loaded_files (bundle + 7 components)"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 marker has req=$REQ_COUNT loaded=$LOADED_COUNT (expected 8/8)"
+  failed=$((failed+1))
+fi
+
+# Cross-check: every loaded_files[i].sha256 matches disk shasum at .path
+SHA_DRIFT="$(jq -r '.loaded_files // [] | map([.path, .sha256] | @tsv) | .[]' "$TF/.checkpoints/.preflight-done.${SID}" | while IFS=$'\t' read -r p s; do
+  actual="$(shasum -a 256 "$p" 2>/dev/null | awk '{print $1}')"
+  if [ "$actual" != "$s" ]; then printf '%s ' "$p"; fi
+done)"
+if [ -z "$SHA_DRIFT" ]; then
+  echo "  ✓ I2 every loaded_files[i].sha256 matches disk"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 sha drift on: $SHA_DRIFT"
+  failed=$((failed+1))
+fi
+
+GATE_OUT="$(run_gate "$TF" "$SID" 2>&1 || true)"
+if [ -z "$GATE_OUT" ]; then
+  echo "  ✓ I2 hook-owned marker lets preflight-gate allow codex handoff"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 gate denied after hook-owned marker: $GATE_OUT"
+  failed=$((failed+1))
+fi
+
+# I2-B (codex round-1 finding #2): gate must ACCEPT the actual harness
+# command shape `node scripts/second-opinion.mjs request --provider codex
+# --dispatch ...` once the hook-owned marker is in place.
+HARNESS_CMD="node $TF/scripts/second-opinion.mjs request --provider codex --dispatch --summary 'test' --body 'test'"
+GATE_OUT="$(run_gate "$TF" "$SID" "$HARNESS_CMD" 2>&1 || true)"
+if [ -z "$GATE_OUT" ]; then
+  echo "  ✓ I2 gate accepts actual second-opinion.mjs --provider codex --dispatch shape"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 gate denied harness command: $GATE_OUT"
+  failed=$((failed+1))
+fi
+
+rm -rf "$TF"
+
+# ---------- I2b (PR #291 A1): bundle missing → roll back last-prompt ----------
+
+echo "--- I2b: bundle missing → roll back last-prompt marker for clean re-attempt ---"
+
+TF="$(mktmp)"; stage_repo "$TF"
+rm -f "$TF/bundles/codex-review-channel-current.md"
+SID="i2b-test-session"
+run_hook "$TF" "review handoff prompt" "$SID" 2>/dev/null
+EC=$?
+
+if [ $EC -eq 0 ]; then
+  echo "  ✓ I2b hook fail-safe (exit 0) when bundle missing"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2b hook exit $EC (expected 0)"
+  failed=$((failed+1))
+fi
+
+if [ ! -f "$TF/.checkpoints/.last-user-prompt.${SID}.json" ] && [ ! -f "$TF/.checkpoints/.preflight-done.${SID}" ]; then
+  echo "  ✓ I2b both markers absent → next-prompt cycle starts clean"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2b stale markers leaked: last=$(test -f "$TF/.checkpoints/.last-user-prompt.${SID}.json" && echo Y || echo N) preflight=$(test -f "$TF/.checkpoints/.preflight-done.${SID}" && echo Y || echo N)"
   failed=$((failed+1))
 fi
 

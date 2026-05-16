@@ -93,10 +93,11 @@ manifest_source=$(jq -r '.source_repo' "$TEST_HOME/.episodic-memory/hook-install
 assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT" "$manifest_source"
 
 managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
-# 4 hook .sh files (checkpoint-gate, plan-gate, em-recall-sessionstart,
-# stop-gate) + 3 hooks/lib/.sh files (command-classifier, repo-root, +
-# marker-paths added 2026-05-09 with the .checkpoints/ migration) = 7.
-assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "9" "$managed_count"
+# 6 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
+# preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 4
+# hooks/lib/.sh files (command-classifier, repo-root, marker-paths,
+# session-id) = 10.
+assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "10" "$managed_count"
 
 pg_manifest=$(jq -r '.files[] | select(.relative_path == "hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"

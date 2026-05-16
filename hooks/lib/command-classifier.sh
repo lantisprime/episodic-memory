@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# episodic-memory-hook-version: 2026-05-08.1
+# episodic-memory-hook-version: 2026-05-16.1
 # command-classifier.sh — Quote/heredoc-aware Bash command classifier.
 #
 # Closes #86 PR-B + #89 + #101 via a shared helper. Replaces ad-hoc regex
@@ -448,6 +448,14 @@ _tokenize() {
 readonly _ROUTINE_ENV_ALLOWLIST="NODE_ENV DEBUG CI PYTHONPATH LOG_LEVEL"
 readonly _NODE_BINARY_BASENAME_ALLOWLIST="node"
 
+# Helper basename for tokenized invocation detection (codex PR #291 r4).
+readonly _HELPER_BASENAME="preflight-marker-write.mjs"
+
+# Real wrappers: target executable is the first non-flag positional arg.
+# Distinct from data-taking commands (printf/echo/grep/cat) where a
+# token like the helper basename is data, not exec position.
+_HELPER_REAL_WRAPPER_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec|systemd-run|flatpak-spawn|uv|poetry|pixi|direnv|nix|npx|bash|sh|zsh|dash|ksh|fish|python|python3|ruby|perl|time|xargs)$'
+
 # _is_in_space_list <needle> <space-separated-list>
 # True iff <needle> appears as a whole token in <space-separated-list>.
 _is_in_space_list() {
@@ -484,7 +492,14 @@ _is_in_space_list() {
 _check_helper_invocation_grammar() {
   local cmd="$1"
   local -a TOKS=()
-  local line tok_text
+  local line tok_text stream
+  # Capture _tokenize output BEFORE iterating, so an early `return` inside
+  # the loop does not close the pipe while _tokenize is still writing — on
+  # Linux that triggers SIGPIPE and emits `printf: write error: Broken
+  # pipe` to stderr, which pollutes the gate's JSON output. macOS hides
+  # SIGPIPE by default; CI Linux does not. (Same idiom used at lines ~1654
+  # and ~2015.)
+  stream="$(_tokenize "$cmd")"
   while IFS= read -r line; do
     case "$line" in
       "T "*)
@@ -503,7 +518,7 @@ _check_helper_invocation_grammar() {
         ;;
       *) ;;
     esac
-  done < <(_tokenize "$cmd")
+  done <<< "$stream"
 
   local idx=0
   # Step 2: walk env-prefix tokens
@@ -567,6 +582,156 @@ _check_helper_invocation_grammar() {
 
   printf 'OK\t%d\t%s\n' "$idx" "$exec_base"
   return 0
+}
+
+# _detect_tokens_contain_helper <cmd>
+# Returns 0 iff any tokenized T-record has basename == _HELPER_BASENAME.
+# Used by _detect_helper_invocation to distinguish helper-invocation
+# attempts (with disallowed shape) from false-positives where the
+# basename appears only as a data argument.
+_detect_tokens_contain_helper() {
+  local cmd="$1"
+  local line tok_text base stream
+  # Same SIGPIPE-avoidance as _check_helper_invocation_grammar: capture
+  # _tokenize output first, then iterate via here-string. The early
+  # `return 0` below would otherwise close the pipe mid-write on Linux
+  # CI, leaking `printf: write error: Broken pipe` to stderr and breaking
+  # the gate's JSON output parse in tests A1b / R4-B5.
+  stream="$(_tokenize "$cmd")"
+  while IFS= read -r line; do
+    case "$line" in
+      "T "*)
+        tok_text="${line:2}"
+        base="${tok_text##*/}"
+        if [ "$base" = "$_HELPER_BASENAME" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  done <<< "$stream"
+  return 1
+}
+
+# _detect_helper_invocation <cmd>
+#
+# Tokenized helper-invocation detector (codex PR #291 r4 P1). Replaces
+# the prior HELPER_BASENAME_RE/NORMALIZED_CMD raw-text prefilter in the
+# gate, which was bypassed by quoted/escaped helper paths
+# (`node "scripts/preflight-marker-write.mjs" ...`, `node
+# scripts/preflight-marker-write\.mjs ...`) because _tokenize normalized
+# both to `scripts/preflight-marker-write.mjs` at helper runtime while
+# the regex saw raw shell text.
+#
+# Returns exactly one of (printed to stdout):
+#   NO_MATCH
+#       This command is not a helper invocation attempt. Allow to fall
+#       through to the rest of the gate.
+#   OK\t<idx>\t<exec_basename>
+#       Clean agent-side `node <path>/preflight-marker-write.mjs`.
+#       Caller (gate) should emit class-wide deny (with --root diagnostic
+#       if missing).
+#   DENY\t<kind>\t<detail>
+#       Helper invocation attempt with disallowed shape. Kinds:
+#         env-prefix         non-allowlist env-prefix wraps helper call
+#         env-prefix-invalid env-prefix token has invalid POSIX shape
+#         wrapper            non-node exec wrapper (npx/sudo/env/...)
+#                            with helper basename in argv
+#         bare-helper        ./preflight-marker-write.mjs (helper as exec)
+#         tokenize           compound/unsafe command containing helper
+#
+# Always returns 0; verdict expressed in echoed string.
+#
+# Algorithm:
+#   1. Run _check_helper_invocation_grammar (env-prefix walk + exec
+#      basename check + T[idx+1] helper basename check).
+#   2. Re-categorize the grammar verdict:
+#      - OK preserved as-is.
+#      - DENY wrong-helper/no-helper/no-exec → NO_MATCH (T[idx+1] isn't
+#        the helper, or there's no exec — false-positive class includes
+#        `node --test tests/test-preflight-marker-write.mjs` (different
+#        basename) and `node some-other.mjs preflight-marker-write.mjs`
+#        (basename as data arg to another script). Codex r4 handoff
+#        flagged both as required false-positive controls.
+#      - DENY tokenize → scan tokens; if helper basename present, DENY
+#        (defense-in-depth against `... ; node helper ...` smuggling),
+#        else NO_MATCH.
+#      - DENY env-prefix / env-prefix-invalid → scan tokens; if helper
+#        basename present, DENY env-prefix, else NO_MATCH (env-only
+#        command on unrelated target).
+#      - DENY wrapper <exec_base>:
+#          * exec_base == helper basename → DENY bare-helper
+#          * exec_base in real-wrapper list AND helper basename in tokens
+#            → DENY wrapper
+#          * otherwise → NO_MATCH (random data-cmd like printf/grep with
+#            helper basename as a data argument — false-positive class).
+_detect_helper_invocation() {
+  local cmd="$1"
+  local result
+  result="$(_check_helper_invocation_grammar "$cmd")"
+  local verdict="${result%%	*}"
+
+  case "$verdict" in
+    OK)
+      printf '%s\n' "$result"
+      return 0
+      ;;
+    DENY)
+      local rest="${result#*	}"
+      local kind="${rest%%	*}"
+      local detail="${rest#*	}"
+
+      case "$kind" in
+        wrong-helper|no-helper|no-exec)
+          # Grammar: exec=node but next token isn't helper, or no exec at
+          # all. Per codex r4 handoff, these are false-positive controls
+          # (`node --test test-preflight-marker-write.mjs`, `node
+          # other.mjs preflight-marker-write.mjs`, `node` alone).
+          echo "NO_MATCH"
+          return 0
+          ;;
+        tokenize)
+          if _detect_tokens_contain_helper "$cmd"; then
+            printf 'DENY\ttokenize\t%s\n' "$detail"
+          else
+            echo "NO_MATCH"
+          fi
+          return 0
+          ;;
+        env-prefix|env-prefix-invalid)
+          if _detect_tokens_contain_helper "$cmd"; then
+            printf 'DENY\t%s\t%s\n' "$kind" "$detail"
+          else
+            echo "NO_MATCH"
+          fi
+          return 0
+          ;;
+        wrapper)
+          if [ "$detail" = "$_HELPER_BASENAME" ]; then
+            printf 'DENY\tbare-helper\t%s\n' "$detail"
+            return 0
+          fi
+          if [[ "$detail" =~ $_HELPER_REAL_WRAPPER_RE ]]; then
+            if _detect_tokens_contain_helper "$cmd"; then
+              printf 'DENY\twrapper\t%s\n' "$detail"
+              return 0
+            fi
+          fi
+          echo "NO_MATCH"
+          return 0
+          ;;
+        *)
+          # Unknown DENY kind: pass through unchanged. Should not occur.
+          printf '%s\n' "$result"
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      # Shouldn't reach. Conservative NO_MATCH.
+      echo "NO_MATCH"
+      return 0
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -1648,8 +1813,8 @@ _PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|i
 #   nix develop -c CMD | nix shell -c CMD
 _PREFLIGHT_RUNNERS_RE='^(uv|poetry|pixi|direnv|nix)$'
 
-# Tag-name fragments that, when found in --tag/--tags/--summary args, mark
-# an em-* invocation as a codex-review handoff.
+# Tag-name fragments that, when found in --tag/--tags args, mark an em-*
+# invocation as a codex-review handoff.
 _PREFLIGHT_REVIEW_TAG_RE='codex|review|second-opinion|plan-review|code-review|cross-tool-review|meta-review'
 
 # em-* CLI verbs that route review traffic. Bare names AND `node */<name>.mjs`
@@ -1820,7 +1985,11 @@ _preflight_unwrap_index() {
 }
 
 # _preflight_scan_em_args — return 0 if em-* invocation has review-handoff
-# signals in --tag/--tags/--summary args; 1 otherwise.
+# signals in explicit routing tags; 1 otherwise.
+#
+# #285: do not inspect free-text fields such as --summary or --body. Those
+# fields often describe review/preflight concepts as lesson content, which is
+# not the same intent as routing a review handoff.
 # Args: $1 = start_index; $2..$N = tokens.
 _preflight_scan_em_args() {
   local i=$1
@@ -1830,14 +1999,14 @@ _preflight_scan_em_args() {
   while [ $i -lt $n ]; do
     local t="${T[$i]}"
     case "$t" in
-      --tag|--tags|--summary)
+      --tag|--tags)
         local v="${T[$((i+1))]:-}"
         if [[ "$v" =~ $_PREFLIGHT_REVIEW_TAG_RE ]]; then
           return 0
         fi
         i=$((i+2))
         ;;
-      --tag=*|--tags=*|--summary=*)
+      --tag=*|--tags=*)
         local v="${t#*=}"
         if [[ "$v" =~ $_PREFLIGHT_REVIEW_TAG_RE ]]; then
           return 0

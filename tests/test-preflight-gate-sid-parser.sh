@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 #
-# tests/test-preflight-gate-sid-parser.sh — #279 Stream 2 grammar tests.
+# tests/test-preflight-gate-sid-parser.sh — #279 Stream 2 grammar tests
+#   REVISED for PR #291 / codex r6 (hook-owned markers).
 #
-# Tests the structural command-form grammar enforced at the preflight-gate's
-# helper-invocation branch:
+# Tests the tokenized helper-invocation detector + class-wide deny:
 #
 #   <command> := <env-prefix>* <executable> <helper-script-path> <helper-flags>*
 #   <env-prefix> name ∈ _ROUTINE_ENV_ALLOWLIST  (NODE_ENV, DEBUG, CI, PYTHONPATH, LOG_LEVEL)
 #   <executable> basename ∈ _NODE_BINARY_BASENAME_ALLOWLIST  (node)
 #
-# Class A (8 accept) proves the allow combinatorial.
-# Class B (19 deny) proves each rule branch fires across variant classes.
-# Class C (sid-form: --session-id A vs --session-id=A vs duplicate vs missing
-#   etc.) lives in test-preflight-gate.sh M/N-series — not re-tested here.
+# PR #291 inverted the verdict shape: under #279 the grammar's "well-formed
+# direct invocation" returned ALLOW; under #291 it returns DENY with the
+# UserPromptSubmit-reservation reason (agent-side invocation is forbidden
+# regardless of form — the helper is reserved for the hook). The grammar
+# walk itself is unchanged; only the OK-branch verdict flipped from allow
+# to deny in hooks/preflight-gate.sh.
 #
-# Codex r9 plan-tier ACCEPT-with-FU; B19 added per the inline FU.
+# Class A — direct well-formed invocations: now DENY (class-wide reservation).
+# Class B — wrapper/env-prefix rule branches: still DENY with the
+#   wrapper-specific reason (env-prefix wrapper, basename '<wrapper>', etc.).
+# Class C — wrong-position / non-helper-invocation forms: ALLOW
+#   (tokenized detector returns NO_MATCH; aligns with r4/r5 FP controls).
+# sid-form combinatorial (--session-id A vs --session-id=A vs duplicate vs
+#   missing etc.) lives in test-preflight-gate.sh M/N-series.
+#
+# Codex r9 plan-tier ACCEPT-with-FU; r6 P1: revised for PR #291 hook ownership.
 
 set -e
 
@@ -91,39 +101,45 @@ TF="$(mktmp)"; _track "$TF"; stage_fixture "$TF"
 HELPER="$TF/scripts/preflight-marker-write.mjs"
 COMMON_FLAGS="--root $TF --target preflight --session-id $SESSION_ID"
 
-echo "--- Class A: ACCEPT (proves the allow combinatorial) ---"
+echo "--- Class A: well-formed direct invocations → DENY (PR #291 class-wide) ---"
+# Pre-#291 these returned ALLOW (the grammar's OK branch). Under PR #291
+# hook ownership the OK branch emits a class-wide deny with the
+# UserPromptSubmit-reservation reason. Grammar walk itself unchanged —
+# same combinatorial, opposite verdict.
+
+DENY_RE="reserved for the UserPromptSubmit hook"
 
 # A1: bare node invocation, no env-prefix
-run_gate_grammar "$TF" "node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A1 bare node invocation, no env-prefix"
+run_gate_grammar "$TF" "node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A1 bare node invocation → DENY class-wide reservation"
 
 # A2: path-spelled node
-run_gate_grammar "$TF" "/usr/bin/node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A2 /usr/bin/node path-spelled"
+run_gate_grammar "$TF" "/usr/bin/node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A2 /usr/bin/node path-spelled → DENY class-wide reservation"
 
 # A3: different node install path
-run_gate_grammar "$TF" "/usr/local/bin/node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A3 /usr/local/bin/node path"
+run_gate_grammar "$TF" "/usr/local/bin/node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A3 /usr/local/bin/node path → DENY class-wide reservation"
 
 # A4: relative path node
-run_gate_grammar "$TF" "./node_modules/.bin/node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A4 ./node_modules/.bin/node relative path"
+run_gate_grammar "$TF" "./node_modules/.bin/node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A4 ./node_modules/.bin/node → DENY class-wide reservation"
 
 # A5: single allowlist env-prefix
-run_gate_grammar "$TF" "NODE_ENV=production node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A5 NODE_ENV=production allowlist env-prefix"
+run_gate_grammar "$TF" "NODE_ENV=production node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A5 NODE_ENV=production + node → DENY class-wide reservation"
 
 # A6: multiple allowlist env-prefixes
-run_gate_grammar "$TF" "NODE_ENV=production DEBUG=1 node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A6 NODE_ENV + DEBUG (multiple allowlist)"
+run_gate_grammar "$TF" "NODE_ENV=production DEBUG=1 node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A6 NODE_ENV + DEBUG + node → DENY class-wide reservation"
 
 # A7: three allowlist env-prefixes
-run_gate_grammar "$TF" "CI=true PYTHONPATH=. LOG_LEVEL=debug node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A7 CI + PYTHONPATH + LOG_LEVEL (full multi)"
+run_gate_grammar "$TF" "CI=true PYTHONPATH=. LOG_LEVEL=debug node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A7 CI + PYTHONPATH + LOG_LEVEL + node → DENY class-wide reservation"
 
 # A8: allowlist env-prefix + path-spelled node
-run_gate_grammar "$TF" "DEBUG=1 /usr/bin/node $HELPER $COMMON_FLAGS" "allow" "" \
-  "A8 DEBUG=1 + /usr/bin/node (combined)"
+run_gate_grammar "$TF" "DEBUG=1 /usr/bin/node $HELPER $COMMON_FLAGS" "deny" "$DENY_RE" \
+  "A8 DEBUG=1 + /usr/bin/node → DENY class-wide reservation"
 
 echo ""
 echo "--- Class B: DENY (one row per rule branch, not per variant) ---"
@@ -172,25 +188,31 @@ run_gate_grammar "$TF" "NODE_ENV=production sudo node $HELPER $COMMON_FLAGS" "de
 run_gate_grammar "$TF" "NODE_ENV=production SKIP_PREFLIGHT=1 node $HELPER $COMMON_FLAGS" "deny" "SKIP_PREFLIGHT" \
   "B17 benign-prefix walk → suspicious-prefix (step 2 deny)"
 
-# B18: T[p] is a flag, not an executable
-# In practice the grammar walk would see `--session-id` as T[idx] and treat
-# basename as `--session-id` which is not 'node'. The helper-basename regex
-# also fires here. Reasonable verdict: wrapper deny on the flag's basename.
-run_gate_grammar "$TF" "--session-id A $HELPER --root $TF --target preflight" "deny" "basename '--session-id'|invalid POSIX-name" \
-  "B18 T[p]=--session-id (flag at exec position)"
+echo ""
+echo "--- Class C: NO_MATCH false-positive controls → ALLOW (codex r4/r5) ---"
+# Forms that LOOK helper-shaped but the tokenized detector classifies as
+# not-a-helper-invocation (T[idx+1] basename != helper, helper basename
+# only appears as a data arg, flag at exec position, malformed token).
+# Pre-#291 these tripped grammar deny branches; under r4/r5 the
+# _detect_helper_invocation re-categorization returns NO_MATCH so the
+# gate falls through to claim-class. Aligns with R4-FP3 (`node other.mjs
+# preflight-marker-write.mjs`) etc.
 
-# B19: trailing-slash token (per codex r9 P3 FU). _tokenize emits the path
-# as-is; `${path##*/}` yields empty string for trailing slash → not in
-# allowlist → deny.
-run_gate_grammar "$TF" "/usr/bin/node/ $HELPER $COMMON_FLAGS" "deny" "basename ''" \
-  "B19 trailing-slash token → empty basename → deny (codex r9 FU)"
+# C1: flag at exec position (`--session-id`). Not 'node', not a wrapper,
+# not env-prefix shape → no helper-invocation pattern matched → NO_MATCH.
+run_gate_grammar "$TF" "--session-id A $HELPER --root $TF --target preflight" "allow" "" \
+  "C1 --session-id at exec position → NO_MATCH → ALLOW"
 
-# B20: wrong-helper basename (per codex PR-r1 P3). Grammar verifies T[idx+1]
-# basename matches preflight-marker-write.mjs; injected alternate scripts
-# deny. Even though the outer gate regex matched the helper basename
-# somewhere in argv, the grammar walk enforces position.
-run_gate_grammar "$TF" "node /tmp/other.mjs $HELPER --root $TF --target preflight --session-id $SESSION_ID" "deny" "expected 'preflight-marker-write.mjs'" \
-  "B20 wrong-helper at T[idx+1] → grammar deny (codex PR-r1 P3)"
+# C2: trailing-slash node path. basename of `/usr/bin/node/` is empty →
+# not 'node', not a wrapper → NO_MATCH.
+run_gate_grammar "$TF" "/usr/bin/node/ $HELPER $COMMON_FLAGS" "allow" "" \
+  "C2 trailing-slash node path → empty basename → NO_MATCH → ALLOW"
+
+# C3: wrong-helper at T[idx+1]. T[0]=node, T[1]=/tmp/other.mjs (not the
+# helper). Helper basename appears later as a data arg. Detector returns
+# wrong-helper → NO_MATCH per FP-control re-categorization.
+run_gate_grammar "$TF" "node /tmp/other.mjs $HELPER --root $TF --target preflight --session-id $SESSION_ID" "allow" "" \
+  "C3 node + other.mjs + helper-as-data → NO_MATCH → ALLOW"
 
 echo ""
 echo "=================================================="

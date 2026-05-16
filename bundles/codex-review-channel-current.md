@@ -5,17 +5,20 @@
 **Claim class:** `codex-review-handoff`
 **Gated by:** `hooks/preflight-gate.sh`
 
-This bundle declares the canonical reading list an agent MUST load before
-issuing any codex review handoff (em-store / em-revise / em-violation with
-codex-review tags, `codex exec|review`, second-opinion harness, or
-Agent dispatch with `codex:*|negative-scenario-*` subagent_type).
+This bundle declares the canonical review-channel contract for any codex
+review handoff (em-store / em-revise / em-violation with codex-review tags,
+`codex exec|review`, second-opinion harness, or Agent dispatch with
+`codex:*|negative-scenario-*` subagent_type).
 
-The pre-flight gate requires the agent's `.checkpoints/.preflight-done`
-marker to:
+Since #285, prompt-bound preflight marker ownership lives in the
+`preflight-prompt-helper.sh` UserPromptSubmit hook, not in an agent-side
+bootstrap step. The hook writes `.checkpoints/.preflight-done.<session_id>`
+for each real prompt, and the pre-flight gate requires that marker to:
 
-1. List THIS bundle file in `required_files`.
-2. Include each component listed below in `loaded_files` with the current
-   sha256 + mtime_ms from disk.
+1. List THIS bundle file AND each of the 7 components (per the
+   machine-readable manifest below) in `required_files`.
+2. Include every listed `required_files` entry in `loaded_files` with the
+   current sha256 + mtime_ms from disk.
 3. Declare `claim_class = "codex-review-handoff"`.
 4. Bind to the current `session_id` + `prompt_sha256`.
 
@@ -41,21 +44,18 @@ machine-specific paths). Each developer adds the allowlist locally. The
 gate enforces helper-only writes regardless of allowlist state — the
 allowlist only controls Claude Code's prompt UI.
 
-## How to load (agent recipe)
+## How the marker is written
 
-```bash
-# 1. Resolve memory_root (Cause 7 — see Plan §"Memory-root validation"):
-#    Either read .episodic-memory/config.json:claude_memory_root OR compute
-#    ~/.claude/projects/<sanitized-cwd>/memory.
+The `preflight-prompt-helper.sh` UserPromptSubmit hook computes the canonical
+prompt sha, hashes this bundle, and writes both prompt-state files via
+`scripts/preflight-marker-write.mjs`:
 
-# 2. For each component below, Read the file from <memory_root>/<basename>.
+- `.checkpoints/.last-user-prompt.<session_id>.json`
+- `.checkpoints/.preflight-done.<session_id>`
 
-# 3. Compute current sha256 + mtime_ms for each loaded file.
-
-# 4. Construct marker JSON (see schema below) and write atomically:
-echo '<JSON>' | node $REPO_ROOT/scripts/preflight-marker-write.mjs \
-  --root $REPO_ROOT --target preflight
-```
+This keeps the marker bound to the real prompt and removes the agent-side
+pipe/redirect/bootstrap deadlock that caused #285. Agent-side direct writes to
+the final marker remain forbidden by `preflight-gate.sh`.
 
 ## Components (7 files)
 
@@ -100,8 +100,7 @@ current real prompt are rejected.
   "memory_root": "...",
   "claim_class": "codex-review-handoff",
   "matched_triggers": {
-    "tool_target": ["Bash:em-store --tags codex-review", "Bash:codex exec"],
-    "prompt_phrase": ["second opinion"]
+    "hook": ["UserPromptSubmit:codex-review-handoff"]
   },
   "required_files": [
     "<repo>/bundles/codex-review-channel-current.md",
@@ -114,9 +113,11 @@ current real prompt are rejected.
     "<memory_root>/reference_second_opinion_harness.md"
   ],
   "loaded_files": [
-    {"path": "<abs-path>", "mtime_ms": 1746735000000, "sha256": "..."}
+    {"path": "<repo>/bundles/codex-review-channel-current.md", "mtime_ms": 1746735000000, "sha256": "..."},
+    {"path": "<memory_root>/reference_codex_review_flow.md", "mtime_ms": 1746735000000, "sha256": "..."}
+    // ...one entry per required_files path, sha256 must match disk
   ],
-  "artifact_steps_done": ["memory-pre-pass", "channel-discipline-note", "work-area-tags"],
+  "artifact_steps_done": ["user-prompt-submit-hook", "codex-review-bundle-hash", "codex-review-components-hash"],
   "created_at_ms": 1746735000000
 }
 ```

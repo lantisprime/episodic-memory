@@ -645,7 +645,7 @@ REST required 8 round trips per mobile screen...
 
 ### "The AI isn't recalling anything"
 
-- Check that the instruction file was installed: look for `.cursor/rules/episodic-memory.mdc`, `.claude/skills/episodic-memory/SKILL.md`, `AGENTS.md`, or `.windsurfrules` in your project
+- Check that the instruction file was installed: look for `.cursor/rules/episodic-memory.mdc`, `.claude/skills/episodic-memory/SKILL.md`, `.agents/skills/episodic-memory/SKILL.md`, or `.windsurfrules` in your project
 - Check that scripts exist at `~/.episodic-memory/scripts/`
 - Re-run the installer: `node ~/episodic-memory/install.mjs --tool <your-tool> --project .`
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-05-12.1
+# episodic-memory-hook-version: 2026-05-16.1
 # preflight-gate.sh — Layer D narrow PreToolUse gate.
 #
 # Closes the bp-010 cluster: codex/Agent/em-store review handoffs (and
@@ -216,65 +216,69 @@ esac
 if [ "$TOOL_NAME" = "Bash" ]; then
   CMD="$(printf '%s' "$TOOL_INPUT_JSON" | jq -r '.command // ""')"
   if [ -n "$CMD" ]; then
-    # Normalize whitespace (tabs / multi-space / line continuations) so
-    # variants like `node\t/abs/.../preflight-marker-write.mjs` or
-    # `node \\` + newline + path slip through to the same matcher (A3).
-    NORMALIZED_CMD="$(printf '%s' "$CMD" | tr '\t\n' '  ' | sed 's/\\ / /g; s/  */ /g')"
-    # Match the helper basename when it's a real invocation: must be
-    # preceded by start-of-string, space, or slash (i.e. it IS the basename
-    # of a path or a bare invocation), AND followed by space or end. The
-    # previous regex used `\b...\b` which matched ANY word-boundary,
-    # producing false-positives on `test-preflight-marker-write.mjs`.
-    HELPER_BASENAME_RE='(^|[ /])preflight-marker-write\.mjs( |$)'
-    if printf '%s' "$NORMALIZED_CMD" | grep -qE "$HELPER_BASENAME_RE"; then
-      # #279 Stream 2: structural command-form check.
-      # _check_helper_invocation_grammar is sourced from command-classifier.sh.
-      GRAMMAR_RESULT="$(_check_helper_invocation_grammar "$CMD")"
-      GRAMMAR_VERDICT="${GRAMMAR_RESULT%%	*}"
-      if [ "$GRAMMAR_VERDICT" = "DENY" ]; then
-        GRAMMAR_REST="${GRAMMAR_RESULT#*	}"
-        GRAMMAR_KIND="${GRAMMAR_REST%%	*}"
-        GRAMMAR_DETAIL="${GRAMMAR_REST#*	}"
-        case "$GRAMMAR_KIND" in
+    # Tokenized helper-invocation detector (codex PR #291 r4 P1 + r5 P1).
+    # Called UNCONDITIONALLY for every Bash command — r5 removed the raw
+    # `grep -qF preflight-marker-write` prefilter that previously wrapped
+    # this dispatch. Rationale: the prefilter saw raw shell text, so basename
+    # spellings broken by shell escapes/quotes — `preflight-marker-wri\te.mjs`,
+    # `preflight-marker-"write".mjs`, `preflight-marker-'write'.mjs` —
+    # missed the substring and skipped the detector entirely, while Bash
+    # collapsed them to the canonical basename at runtime. NO_MATCH is the
+    # cheap safe-exit path; the tokenizer is fast enough to run per Bash
+    # call. Detection walks _tokenize output via _detect_helper_invocation
+    # with NO_MATCH | OK | DENY semantics.
+    DETECT_RESULT="$(_detect_helper_invocation "$CMD")"
+    DETECT_VERDICT="${DETECT_RESULT%%	*}"
+
+    case "$DETECT_VERDICT" in
+      OK)
+        # Clean agent-side `node <path>/preflight-marker-write.mjs`.
+        # Diagnostic: surface "missing --root" first so a benign caller
+        # missing the flag gets actionable text instead of the class-wide
+        # deny. The --root check still uses NORMALIZED_CMD (raw text) —
+        # if a caller managed to pass --root through the tokenizer it
+        # will be present in the raw text too.
+        NORMALIZED_CMD="$(printf '%s' "$CMD" | tr '\t\n' '  ' | sed 's/\\ / /g; s/  */ /g')"
+        if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
+          _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form (hook-only): node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED). NOTE: agent-side invocation is forbidden regardless of --root — see class-wide deny below."
+        fi
+        _emit_deny "preflight-marker-write.mjs is reserved for the UserPromptSubmit hook (PR #291 / #285 / codex r4+r5). Agent invocation at PreToolUse is forbidden — the hook writes both .preflight-done.<sid> and .last-user-prompt.<sid>.json automatically with prompt-bound shas + bundle component hashes. If the marker is missing or stale, the install may be incomplete: re-run install.mjs --install-hooks. (Tokenized argv detection runs unconditionally per codex r5: closes raw-text bypasses across both --target values AND helper paths under quoting/escaping — _tokenize normalizes them all to the canonical basename at helper runtime.)"
+        ;;
+      DENY)
+        DETECT_REST="${DETECT_RESULT#*	}"
+        DETECT_KIND="${DETECT_REST%%	*}"
+        DETECT_DETAIL="${DETECT_REST#*	}"
+        case "$DETECT_KIND" in
           env-prefix)
-            _emit_deny "Helper invocation env-prefix wrapper ($GRAMMAR_DETAIL=...) not in routine allowlist. Only routine framework env vars permitted before helper: NODE_ENV, DEBUG, CI, PYTHONPATH, LOG_LEVEL. Per env-prefix-discipline-v1.md. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            _emit_deny "Helper invocation env-prefix wrapper ($DETECT_DETAIL=...) not in routine allowlist. Only routine framework env vars permitted: NODE_ENV, DEBUG, CI, PYTHONPATH, LOG_LEVEL. Per env-prefix-discipline-v1.md. Helper is reserved for the UserPromptSubmit hook regardless of wrapper shape (PR #291 / #285 / codex r4)."
             ;;
           env-prefix-invalid)
-            _emit_deny "Helper invocation env-prefix token has invalid POSIX-name shape: $GRAMMAR_DETAIL. Names must match [A-Za-z_][A-Za-z0-9_]*. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            _emit_deny "Helper invocation env-prefix token has invalid POSIX-name shape: $DETECT_DETAIL. Helper is reserved for the UserPromptSubmit hook regardless (PR #291 / #285 / codex r4)."
             ;;
           wrapper)
-            _emit_deny "Helper must be invoked via a token whose basename is 'node'. Got basename '$GRAMMAR_DETAIL'. Wrappers (env, sudo, npx, nohup, time, exec, bash, python, etc.) not permitted at executable position. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            _emit_deny "Helper must be invoked via a token whose basename is 'node'. Got wrapper basename '$DETECT_DETAIL'. Wrappers (env, sudo, npx, nohup, time, exec, bash, python, uv, poetry, etc.) not permitted at executable position. Helper is reserved for the UserPromptSubmit hook regardless of wrapper shape (PR #291 / #285 / codex r4)."
+            ;;
+          bare-helper)
+            _emit_deny "Bare invocation of preflight-marker-write.mjs (helper basename at executable position, without 'node' executable) is forbidden. Helper is reserved for the UserPromptSubmit hook; agent has no sanctioned invocation form (PR #291 / #285 / codex r4)."
             ;;
           tokenize)
-            _emit_deny "Helper invocation could not be safely tokenized ($GRAMMAR_DETAIL). Use a simple form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
-            ;;
-          no-exec)
-            _emit_deny "Helper invocation has no executable token after env-prefix walk. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
-            ;;
-          no-helper)
-            _emit_deny "Helper invocation: executable token (node) present but no helper-script-path token follows. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
-            ;;
-          wrong-helper)
-            _emit_deny "Helper invocation: token after 'node' has basename '$GRAMMAR_DETAIL'; expected 'preflight-marker-write.mjs'. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            _emit_deny "Helper invocation embedded in compound/unsafe command (tokenizer: $DETECT_DETAIL). Helper is reserved for the UserPromptSubmit hook regardless of surrounding shell context (PR #291 / #285 / codex r4)."
             ;;
           *)
-            _emit_deny "Helper invocation grammar denied ($GRAMMAR_KIND): $GRAMMAR_DETAIL"
+            _emit_deny "Helper invocation detector denied ($DETECT_KIND): $DETECT_DETAIL. Helper is reserved for the UserPromptSubmit hook (PR #291 / #285 / codex r4)."
             ;;
         esac
-      fi
-      # Grammar passed (T[idx]=node). Still enforce existing --root and
-      # --target last-prompt rules on the helper flags.
-      if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
-        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED)."
-      fi
-      # I7 (plan-v2 audit F2): UserPromptSubmit hook is the ONLY sanctioned
-      # writer of `.last-user-prompt.<sid>.json`. PreToolUse-time invocation
-      # of the helper with `--target last-prompt` is an agent attempt to
-      # spoof the prompt-binding.
-      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
-        _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
-      fi
-    fi
+        ;;
+      NO_MATCH)
+        : # Tokenized detector confirmed this is not a helper invocation
+          # attempt (cheap safe-exit). Covers benign Bash commands AND
+          # false-positive controls where the helper basename appears as
+          # data — node --test tests/test-preflight-marker-write.mjs;
+          # printf preflight-marker-write.mjs; node other.mjs
+          # preflight-marker-write.mjs; grep preflight-marker-write file.
+          # Fall through to claim-class.
+        ;;
+    esac
   fi
 fi
 
@@ -307,9 +311,9 @@ fi
 # Marker existence — name both candidate paths so callers know where to write.
 if [ -z "$PREFLIGHT_MARKER_RESOLVED" ]; then
   if [ -n "$PREFLIGHT_MARKER_SID" ]; then
-    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_SID via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id $SESSION_ID. Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+    _emit_deny "Pre-flight marker required for codex-review-handoff at $PREFLIGHT_MARKER_SID. The UserPromptSubmit hook should write this prompt-bound marker automatically for session $SESSION_ID. If it is missing, send a new prompt once; if it stays missing, re-run install.mjs --install-hooks so preflight-prompt-helper.sh is wired. Required marker fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
   else
-    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_LEGACY via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id <sid>. (stdin missing session_id — gate cannot derive per-session path; legacy path used.) Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+    _emit_deny "Pre-flight marker required for codex-review-handoff, but stdin missing session_id so the gate cannot derive the per-session path. The UserPromptSubmit hook should write .preflight-done.<sid> automatically; re-run install.mjs --install-hooks if hook stdin omits session_id. Legacy fallback path checked: $PREFLIGHT_MARKER_LEGACY. Required marker fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
   fi
 fi
 
@@ -338,7 +342,7 @@ if [ "$M_REPO_ROOT" != "$REPO_ROOT" ]; then
   _emit_deny "Pre-flight marker repo_root is '$M_REPO_ROOT'; gate-resolved repo_root is '$REPO_ROOT'. Re-write with the correct repo_root."
 fi
 if [ -n "$SESSION_ID" ] && [ "$M_SESSION" != "$SESSION_ID" ]; then
-  _emit_deny "Pre-flight marker session_id '$M_SESSION' does not match current session '$SESSION_ID'. Stale-session marker; re-write."
+  _emit_deny "Pre-flight marker session_id '$M_SESSION' does not match current session '$SESSION_ID'. Stale-session marker; the UserPromptSubmit hook should replace it on the next prompt. If it persists, re-run install.mjs --install-hooks."
 fi
 if [ -z "$M_PROMPT_SHA" ]; then
   _emit_deny "Pre-flight marker missing prompt_sha256. Re-write with the current user prompt's sha256."

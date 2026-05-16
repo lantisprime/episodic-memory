@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# episodic-memory-hook-version: 2026-05-12.2
+# episodic-memory-hook-version: 2026-05-16.1
 # preflight-prompt-helper.sh — UserPromptSubmit hook for true prompt-binding.
 #
-# Maintains `<repo>/.checkpoints/.last-user-prompt.<session_id>.json` with the
-# canonical sha256 of the current real user prompt. The preflight-gate
-# (hooks/preflight-gate.sh) cross-checks that file's `prompt_sha256` against
-# any codex-review-handoff pre-flight marker — closing the trust-based hole
-# left open by PR #240 (which took the FALLBACK path of trusting agent-supplied
-# sha values without comparison to ground truth).
+# Maintains prompt-bound preflight state for the current session:
+#   - `<repo>/.checkpoints/.last-user-prompt.<session_id>.json`
+#   - `<repo>/.checkpoints/.preflight-done.<session_id>`
+#
+# The preflight-gate (hooks/preflight-gate.sh) cross-checks the latter marker's
+# `prompt_sha256` against the former. Keeping both writes in UserPromptSubmit
+# means marker ownership follows the hook that actually sees the prompt; the
+# agent no longer has to bootstrap prompt-bound gate state mid-session.
 #
 # Plan provenance: scratch/238-plan-v2.md C3 (workplan v49 rank 0). Closes
 # #238 PR1 FU-C2. Audit findings folded in: F3 (pin canonicalization),
@@ -23,6 +25,8 @@
 #   4) Compose marker JSON (sha + session_id + transcript_path + cwd + wrote_at_ms).
 #   5) Pipe to scripts/preflight-marker-write.mjs --target last-prompt
 #      --session-id <sid>, which atomically temp+renames the file into place.
+#   6) Compose + atomically write a codex-review-handoff preflight marker for
+#      the same sid/prompt hash. This is intentionally hook-owned (#285).
 #
 # Fail-safe (audit F3 I3): on ANY internal error (malformed stdin, helper
 # missing, session_id invalid, jq failure, repo-root unresolvable), exit 0
@@ -45,6 +49,16 @@ _log_and_exit_safe() {
   # user's prompt flow is not blocked.
   printf 'preflight-prompt-helper: %s\n' "$1" >&2
   exit 0
+}
+
+_log_and_exit_safe_post_lp() {
+  # PR #291 A1: used on skip paths that fire AFTER the last-prompt marker
+  # has already been written. Unlinks it so the next UserPromptSubmit
+  # cycle starts clean instead of leaving fresh last-prompt + stale
+  # preflight markers (which would cause the gate to deny on a generic
+  # sha-mismatch rather than the actual cause).
+  rm -f "$REPO_ROOT/.checkpoints/.last-user-prompt.${SESSION_ID}.json" 2>/dev/null || true
+  _log_and_exit_safe "$1"
 }
 
 if [ -z "$INPUT" ]; then
@@ -147,6 +161,112 @@ HELPER_OUT="$(printf '%s' "$MARKER_JSON" | node "$HELPER" --root "$REPO_ROOT" --
 HELPER_EC=$?
 if [ $HELPER_EC -ne 0 ]; then
   _log_and_exit_safe "marker-write helper exit $HELPER_EC: $HELPER_OUT"
+fi
+
+# ---------------------------------------------------------------------------
+# Compose the hook-owned preflight marker (#285)
+# ---------------------------------------------------------------------------
+# The gate currently requires the canonical bundle itself in required_files and
+# validates all required_files against loaded_files. Keep this marker small and
+# deterministic: it proves hook ownership + prompt binding, while avoiding a
+# brittle duplicate parser for the bundle's prose manifest.
+BUNDLE_PATH="$REPO_ROOT/bundles/codex-review-channel-current.md"
+if [ ! -f "$BUNDLE_PATH" ]; then
+  _log_and_exit_safe_post_lp "codex review bundle missing at $BUNDLE_PATH; rolling back last-prompt marker so gate denies cleanly"
+fi
+
+BUNDLE_SHA="$(shasum -a 256 "$BUNDLE_PATH" 2>/dev/null | awk '{print $1}')"
+BUNDLE_MTIME="$(node -e "process.stdout.write(String(require('fs').statSync(process.argv[1]).mtimeMs))" "$BUNDLE_PATH" 2>/dev/null || true)"
+if [ -z "$BUNDLE_SHA" ] || [ -z "$BUNDLE_MTIME" ]; then
+  _log_and_exit_safe_post_lp "could not stat/hash codex review bundle; rolling back last-prompt marker so gate denies cleanly"
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve memory_root + parse bundle manifest for the 7 review-channel
+# components (PR #291 codex round-1 finding #1: marker must hash all
+# components, not just the bundle, to preserve the gate's review-channel
+# invariant).
+# ---------------------------------------------------------------------------
+MEMORY_ROOT=""
+CONFIG_FILE="$REPO_ROOT/.episodic-memory/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  MEMORY_ROOT="$(jq -r '.claude_memory_root // ""' "$CONFIG_FILE" 2>/dev/null)"
+fi
+if [ -z "$MEMORY_ROOT" ] || [ ! -d "$MEMORY_ROOT" ]; then
+  SANITIZED="$(printf '%s' "$REPO_ROOT" | sed 's|/|-|g')"
+  MEMORY_ROOT="${HOME:-/}/.claude/projects/${SANITIZED}/memory"
+fi
+if [ ! -d "$MEMORY_ROOT" ]; then
+  _log_and_exit_safe_post_lp "memory_root not resolvable from config or HOME; rolling back last-prompt marker so gate denies cleanly"
+fi
+
+# Extract component basenames from the bundle's json:bundle-manifest block.
+COMPONENT_BASENAMES="$(node -e "
+const fs = require('fs');
+const md = fs.readFileSync(process.argv[1], 'utf8');
+const m = md.match(/\`\`\`json:bundle-manifest\n([\s\S]*?)\n\`\`\`/);
+if (!m) { process.stderr.write('bundle-manifest fence not found'); process.exit(1); }
+const data = JSON.parse(m[1]);
+if (!Array.isArray(data.components)) { process.stderr.write('components is not an array'); process.exit(2); }
+process.stdout.write(data.components.map(c => c.basename).join('\n'));
+" "$BUNDLE_PATH" 2>/dev/null)"
+if [ -z "$COMPONENT_BASENAMES" ]; then
+  _log_and_exit_safe_post_lp "could not parse bundle manifest for components; rolling back last-prompt marker so gate denies cleanly"
+fi
+
+# Seed required_files / loaded_files with the bundle itself, then append
+# every component listed in the manifest (resolved under memory_root).
+REQUIRED_PATHS_JSON="$(jq -nc --arg p "$BUNDLE_PATH" '[$p]')"
+LOADED_ENTRIES_JSON="$(jq -nc --arg p "$BUNDLE_PATH" --arg s "$BUNDLE_SHA" --argjson mt "$BUNDLE_MTIME" '[{path: $p, mtime_ms: $mt, sha256: $s}]')"
+
+while IFS= read -r BASENAME; do
+  [ -z "$BASENAME" ] && continue
+  COMP_PATH="$MEMORY_ROOT/$BASENAME"
+  if [ ! -f "$COMP_PATH" ]; then
+    _log_and_exit_safe_post_lp "bundle component $BASENAME not at $COMP_PATH; rolling back last-prompt marker so gate denies cleanly"
+  fi
+  COMP_SHA="$(shasum -a 256 "$COMP_PATH" 2>/dev/null | awk '{print $1}')"
+  COMP_MTIME="$(node -e "process.stdout.write(String(require('fs').statSync(process.argv[1]).mtimeMs))" "$COMP_PATH" 2>/dev/null || true)"
+  if [ -z "$COMP_SHA" ] || [ -z "$COMP_MTIME" ]; then
+    _log_and_exit_safe_post_lp "could not hash/stat bundle component $BASENAME at $COMP_PATH; rolling back last-prompt marker so gate denies cleanly"
+  fi
+  REQUIRED_PATHS_JSON="$(printf '%s' "$REQUIRED_PATHS_JSON" | jq -c --arg p "$COMP_PATH" '. + [$p]')"
+  LOADED_ENTRIES_JSON="$(printf '%s' "$LOADED_ENTRIES_JSON" | jq -c --arg p "$COMP_PATH" --arg s "$COMP_SHA" --argjson mt "$COMP_MTIME" '. + [{path: $p, mtime_ms: $mt, sha256: $s}]')"
+done <<< "$COMPONENT_BASENAMES"
+
+PREFLIGHT_JSON="$(jq -nc \
+  --arg sid "$SESSION_ID" \
+  --arg tp "$TRANSCRIPT_PATH" \
+  --arg sha "$PROMPT_SHA" \
+  --arg cwd "$CWD" \
+  --arg root "$REPO_ROOT" \
+  --arg memory_root "$MEMORY_ROOT" \
+  --argjson required "$REQUIRED_PATHS_JSON" \
+  --argjson loaded "$LOADED_ENTRIES_JSON" \
+  --argjson ms "$WROTE_AT_MS" \
+  '{
+    session_id: $sid,
+    transcript_path: $tp,
+    prompt_sha256: $sha,
+    prompt_index: 0,
+    cwd: $cwd,
+    repo_root: $root,
+    memory_root: $memory_root,
+    claim_class: "codex-review-handoff",
+    matched_triggers: {hook: ["UserPromptSubmit:codex-review-handoff"]},
+    required_files: $required,
+    loaded_files: $loaded,
+    artifact_steps_done: ["user-prompt-submit-hook", "codex-review-bundle-hash", "codex-review-components-hash"],
+    created_at_ms: $ms
+  }')"
+if [ -z "$PREFLIGHT_JSON" ]; then
+  _log_and_exit_safe_post_lp "jq composition of preflight marker JSON failed; rolling back last-prompt marker so gate denies cleanly"
+fi
+
+PREFLIGHT_OUT="$(printf '%s' "$PREFLIGHT_JSON" | node "$HELPER" --root "$REPO_ROOT" --target preflight --session-id "$SESSION_ID" 2>&1)"
+PREFLIGHT_EC=$?
+if [ $PREFLIGHT_EC -ne 0 ]; then
+  _log_and_exit_safe_post_lp "preflight marker-write helper exit $PREFLIGHT_EC: $PREFLIGHT_OUT"
 fi
 
 # Success — exit 0 with no stdout. Claude Code's hooks framework treats
