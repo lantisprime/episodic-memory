@@ -251,6 +251,12 @@ if [ "$TOOL_NAME" = "Bash" ]; then
           no-exec)
             _emit_deny "Helper invocation has no executable token after env-prefix walk. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
             ;;
+          no-helper)
+            _emit_deny "Helper invocation: executable token (node) present but no helper-script-path token follows. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          wrong-helper)
+            _emit_deny "Helper invocation: token after 'node' has basename '$GRAMMAR_DETAIL'; expected 'preflight-marker-write.mjs'. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
           *)
             _emit_deny "Helper invocation grammar denied ($GRAMMAR_KIND): $GRAMMAR_DETAIL"
             ;;

@@ -464,14 +464,20 @@ _is_in_space_list() {
 #   <command> := <env-prefix>* <executable> <helper-script-path> <helper-flags>*
 #
 # Echoes one of:
-#   OK\t<idx>\t<basename>             — grammar satisfied; idx is the index
-#                                       of the executable token in TOKS
+#   OK\t<idx>\t<basename>             — grammar satisfied (env-prefix walk +
+#                                       executable + helper-script-path
+#                                       basename all verified); idx is the
+#                                       index of the executable token in TOKS
 #   DENY\tenv-prefix\t<name>          — non-allowlist env-prefix at position
 #   DENY\twrapper\t<basename>         — non-node basename at exec position
 #   DENY\tenv-prefix-invalid\t<tok>   — token shape rejected (POSIX-name re)
-#   DENY\ttokenize\t<reason>          — tokenizer emitted E
+#   DENY\ttokenize\t<reason>          — tokenizer emitted E or O (control op)
 #   DENY\tno-exec\t                   — no executable token after env-prefix
 #                                       walk (env-only command)
+#   DENY\tno-helper\t                 — executable present but no helper-script
+#                                       token follows
+#   DENY\twrong-helper\t<basename>    — T[idx+1] basename is not
+#                                       preflight-marker-write.mjs (codex PR-r1 P3)
 #
 # Caller (preflight-gate.sh) parses the result, formats user-facing reason.
 # Returns 0 always; failure expressed in echoed verdict.
@@ -537,6 +543,25 @@ _check_helper_invocation_grammar() {
   local exec_base="${exec_tok##*/}"
   if ! _is_in_space_list "$exec_base" "$_NODE_BINARY_BASENAME_ALLOWLIST"; then
     printf 'DENY\twrapper\t%s\n' "$exec_base"
+    return 0
+  fi
+
+  # Step 4 (codex PR-r1 P3): verify T[idx+1] is the preflight-marker-write
+  # helper. The outer gate regex already matched the helper basename in the
+  # command string; this is defense in depth that ALSO catches injected
+  # alternate scripts like `node /tmp/other.mjs ; node helper.mjs ...` (the
+  # tokenizer emits an O control operator for `;` and we deny earlier; but
+  # for `node /tmp/other.mjs preflight-marker-write.mjs ...` no operator
+  # fires and the outer regex still matches). Tightens grammar claim.
+  local helper_idx=$((idx+1))
+  if [ $helper_idx -ge ${#TOKS[@]} ]; then
+    printf 'DENY\tno-helper\t\n'
+    return 0
+  fi
+  local helper_tok="${TOKS[$helper_idx]}"
+  local helper_base="${helper_tok##*/}"
+  if [ "$helper_base" != "preflight-marker-write.mjs" ]; then
+    printf 'DENY\twrong-helper\t%s\n' "$helper_base"
     return 0
   fi
 

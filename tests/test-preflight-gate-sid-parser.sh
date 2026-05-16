@@ -185,6 +185,13 @@ run_gate_grammar "$TF" "--session-id A $HELPER --root $TF --target preflight" "d
 run_gate_grammar "$TF" "/usr/bin/node/ $HELPER $COMMON_FLAGS" "deny" "basename ''" \
   "B19 trailing-slash token → empty basename → deny (codex r9 FU)"
 
+# B20: wrong-helper basename (per codex PR-r1 P3). Grammar verifies T[idx+1]
+# basename matches preflight-marker-write.mjs; injected alternate scripts
+# deny. Even though the outer gate regex matched the helper basename
+# somewhere in argv, the grammar walk enforces position.
+run_gate_grammar "$TF" "node /tmp/other.mjs $HELPER --root $TF --target preflight --session-id $SESSION_ID" "deny" "expected 'preflight-marker-write.mjs'" \
+  "B20 wrong-helper at T[idx+1] → grammar deny (codex PR-r1 P3)"
+
 echo ""
 echo "=================================================="
 echo "Results: $passed passed, $failed failed"
