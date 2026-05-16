@@ -348,6 +348,195 @@ tap('288-7 trivial happy path: classified_episode_id + route_episode_id persiste
   assert.equal(run.route_episode_id, out.route_episode_id, 'idx must persist route_episode_id')
 })
 
+// ===========================================================================
+// 288-8 — F1 planning: signed orphan planning with mismatched source_class
+// must be rejected as field-mismatch (NOT silently attached).
+// ===========================================================================
+tap('288-8 F1: Phase B planning orphan with mismatched source_class → field-mismatch exit 5', () => {
+  const ctx = setupPreDispatched()
+  const resultFile = writeResultFile(ctx.project, { class: 'trivial', confidence: 0.85, rationale: 'r', classified_fields: ['x'] })
+
+  // Valid classified for decided_class=trivial.
+  const classifiedEp = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'classified',
+    summary: 'classified trivial', parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
+    customFm: { decided_class: 'trivial', classifier_confidence: '0.85' },
+    tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
+  })
+  // Signed planning episode with RIGHT parent but WRONG source_class.
+  writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'planning',
+    summary: 'tampered planning', parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
+    customFm: { source_class: 'tampered' },   // ≠ 'trivial'
+    tags: ['bp1-planning'], body: '# p\n', filenameSuffix: 'planning',
+  })
+  withRunStateLockExclusive(ctx.project, () => {
+    const idx = loadIndexLocked(ctx.project)
+    idx.runs[ctx.runId].state = 'classified'
+    idx.runs[ctx.runId].decided_class = 'trivial'
+    idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
+    writeIndex(ctx.project, idx)
+  })
+
+  // Phase B orphan-scan: parent matches but source_class doesn't → field-mismatch.
+  const r = runRecordClassification(ctx, resultFile)
+  assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
+  assert.match(r.stderr, /recoverable-canonical-drift/)
+})
+
+// ===========================================================================
+// 288-9 — F1 needs-human: signed orphan with mismatched decided_class field
+// must be rejected (NOT silently attached). Same fractal-shape sibling.
+// ===========================================================================
+tap('288-9 F1: Phase B needs-human orphan with mismatched decided_class → field-mismatch exit 5', () => {
+  const ctx = setupPreDispatched()
+  const resultFile = writeResultFile(ctx.project, { class: 'security', confidence: 0.7, rationale: 'r', classified_fields: ['x'] })
+
+  // Valid classified for decided_class=security.
+  const classifiedEp = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'classified',
+    summary: 'classified security', parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
+    customFm: { decided_class: 'security', classifier_confidence: '0.7' },
+    tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
+  })
+  // Signed needs-human with right parent but customFm.decided_class flipped.
+  writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'needs-human',
+    summary: 'tampered needs-human', parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
+    customFm: { reason: 'risky-class', decided_class: 'schema' },   // ≠ 'security'
+    tags: ['bp1-needs-human'], body: '# nh\n', filenameSuffix: 'needs-human',
+  })
+  withRunStateLockExclusive(ctx.project, () => {
+    const idx = loadIndexLocked(ctx.project)
+    idx.runs[ctx.runId].state = 'classified'
+    idx.runs[ctx.runId].decided_class = 'security'
+    idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
+    writeIndex(ctx.project, idx)
+  })
+
+  const r = runRecordClassification(ctx, resultFile)
+  assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
+  assert.match(r.stderr, /recoverable-canonical-drift/)
+})
+
+// ===========================================================================
+// 288-10 — F2 state=planning but decided_class implies needs-human → reject.
+// ===========================================================================
+tap('288-10 F2: run.state=planning but decided_class=schema (targetState mismatch) → state-violation exit 5', () => {
+  const ctx = setupPreDispatched()
+  const resultFile = writeResultFile(ctx.project, { class: 'schema', confidence: 0.7, rationale: 'r', classified_fields: ['x'] })
+
+  // Valid classified.
+  const classifiedEp = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'classified',
+    summary: 'classified schema', parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
+    customFm: { decided_class: 'schema', classifier_confidence: '0.7' },
+    tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
+  })
+  // Idx: state advanced to wrong target (planning), decided_class=schema implies needs-human.
+  withRunStateLockExclusive(ctx.project, () => {
+    const idx = loadIndexLocked(ctx.project)
+    idx.runs[ctx.runId].state = 'planning'   // inconsistent with decided_class
+    idx.runs[ctx.runId].decided_class = 'schema'
+    idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
+    writeIndex(ctx.project, idx)
+  })
+
+  const r = runRecordClassification(ctx, resultFile)
+  assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
+  assert.match(r.stderr, /state-violation \(Phase B\)/)
+  assert.match(r.stderr, /targetState=needs-human/)
+})
+
+// ===========================================================================
+// 288-11 — F2 sibling: state=needs-human but decided_class=trivial → reject.
+// ===========================================================================
+tap('288-11 F2: run.state=needs-human but decided_class=trivial (targetState mismatch) → state-violation exit 5', () => {
+  const ctx = setupPreDispatched()
+  const resultFile = writeResultFile(ctx.project, { class: 'trivial', confidence: 0.85, rationale: 'r', classified_fields: ['x'] })
+
+  const classifiedEp = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'classified',
+    summary: 'classified trivial', parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
+    customFm: { decided_class: 'trivial', classifier_confidence: '0.85' },
+    tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
+  })
+  withRunStateLockExclusive(ctx.project, () => {
+    const idx = loadIndexLocked(ctx.project)
+    idx.runs[ctx.runId].state = 'needs-human'   // inconsistent
+    idx.runs[ctx.runId].decided_class = 'trivial'
+    idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
+    writeIndex(ctx.project, idx)
+  })
+
+  const r = runRecordClassification(ctx, resultFile)
+  assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
+  assert.match(r.stderr, /state-violation \(Phase B\)/)
+  assert.match(r.stderr, /targetState=planning/)
+})
+
+// ===========================================================================
+// 288-12 — happy path PARALLEL: non-trivial → needs-human (sibling of 288-7).
+// Closes the "test trivial only" coverage gap the reviewer flagged.
+// ===========================================================================
+tap('288-12 needs-human happy path: classified + route ids persisted in idx', () => {
+  const ctx = setupPreDispatched()
+  const resultFile = writeResultFile(ctx.project, { class: 'security', confidence: 0.92, rationale: 'r', classified_fields: ['x'] })
+  const r = runRecordClassification(ctx, resultFile)
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.state, 'needs-human')
+  assert.equal(out.decided_class, 'security')
+  const idx = loadIndex(ctx.project)
+  const run = idx.runs[ctx.runId]
+  assert.equal(run.state, 'needs-human')
+  assert.equal(run.classified_episode_id, out.classified_episode_id)
+  assert.equal(run.route_episode_id, out.route_episode_id)
+})
+
+// ===========================================================================
+// 288-13 — F1 backfill: state=needs-human + route_episode_id null + signed
+// needs-human on disk with WRONG reason field → field-mismatch (not attach).
+// ===========================================================================
+tap('288-13 F1: backfill rejects signed route with mismatched reason field', () => {
+  const ctx = setupPreDispatched()
+  const resultFile = writeResultFile(ctx.project, { class: 'security', confidence: 0.8, rationale: 'r', classified_fields: ['x'] })
+
+  const classifiedEp = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'classified',
+    summary: 'classified', parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
+    customFm: { decided_class: 'security', classifier_confidence: '0.8' },
+    tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
+  })
+  // Signed needs-human with right parent, right decided_class, but WRONG reason.
+  writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'needs-human',
+    summary: 'wrong-reason nh', parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
+    customFm: { reason: 'tampered-reason', decided_class: 'security' },   // reason ≠ 'risky-class'
+    tags: ['bp1-needs-human'], body: '# nh\n', filenameSuffix: 'needs-human',
+  })
+  withRunStateLockExclusive(ctx.project, () => {
+    const idx = loadIndexLocked(ctx.project)
+    idx.runs[ctx.runId].state = 'needs-human'
+    idx.runs[ctx.runId].decided_class = 'security'
+    idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
+    idx.runs[ctx.runId].route_episode_id = null   // pre-bump backfill path
+    writeIndex(ctx.project, idx)
+  })
+
+  const r = runRecordClassification(ctx, resultFile)
+  assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
+  assert.match(r.stderr, /recoverable-canonical-drift/)
+})
+
 if (fail > 0) {
   console.log(`\n# FAIL ${pass}/${pass + fail} passed`)
   process.exit(1)

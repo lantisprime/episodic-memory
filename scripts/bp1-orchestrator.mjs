@@ -1188,9 +1188,10 @@ function recordClassifierDispatchPre(args) {
       // current args; if not, recoverable-canonical-drift error.
       // -------------------------------------------------------------------
       if (run.state === 'classifier-dispatch-pending') {
-        if (!run.pre_episode_id) {
+        if (!run.pre_episode_id || typeof run.pre_episode_id !== 'string'
+            || !EPISODE_ID_RE.test(run.pre_episode_id)) {
           process.stderr.write(
-            'error: recoverable-no-parent: state=classifier-dispatch-pending but pre_episode_id is null\n',
+            `error: recoverable-no-parent: state=classifier-dispatch-pending but pre_episode_id=${JSON.stringify(run.pre_episode_id)} (null or malformed)\n`,
           )
           exitCode = 5
           return
@@ -1203,10 +1204,12 @@ function recordClassifierDispatchPre(args) {
           },
         )
         if (lookup.status !== 'match' || lookup.episodeId !== run.pre_episode_id) {
+          const ids = lookup.status === 'field-mismatch'
+            ? ` [${lookup.candidates.map(c => c.episodeId).join(', ')}]` : ''
           process.stderr.write(
             `error: recoverable-canonical-drift: state=classifier-dispatch-pending ` +
             `pre_episode_id=${run.pre_episode_id} does not match args ` +
-            `(lookup.status=${lookup.status})\n`,
+            `(lookup.status=${lookup.status})${ids}\n`,
           )
           exitCode = 5
           return
@@ -1396,6 +1399,34 @@ function validateClassifierOutput(obj) {
   return { ok: true }
 }
 
+// Phase B route-episode spec. Single source-of-truth for the routeFields
+// predicate AND the fresh-emit writeBp1Episode call: customFm is what
+// orphan-attach uses to disambiguate signed episodes on disk, AND what
+// the writer persists. The two CANNOT drift.
+// targetState is derived from decided_class, NOT read from run.state — so
+// Phase B's resume branches can compare run.state against targetState and
+// reject inconsistent state/decided_class pairs (closes F2).
+function deriveRouteSpec(decidedClass, runId) {
+  if (decidedClass === 'trivial') {
+    return {
+      targetState: 'planning',
+      customFm: { source_class: 'trivial' },
+      tags: ['bp1-planning'],
+      summary: `BP-1 planning (source: trivial): ${runId}`,
+      body: `# bp1-planning — ${runId}\n\nsource_class: \`trivial\`\n`,
+      filenameSuffix: 'planning',
+    }
+  }
+  return {
+    targetState: 'needs-human',
+    customFm: { reason: 'risky-class', decided_class: decidedClass },
+    tags: ['bp1-needs-human'],
+    summary: `BP-1 needs-human (risky-class ${decidedClass}): ${runId}`,
+    body: `# bp1-needs-human — ${runId}\n\nreason: \`risky-class\`\ndecided_class: \`${decidedClass}\`\n`,
+    filenameSuffix: 'needs-human',
+  }
+}
+
 function recordClassification(args) {
   if (!args.project) { usage(); return 2 }
   if (!args.runId) {
@@ -1568,9 +1599,10 @@ function recordClassification(args) {
           return
         }
         if (backfill.status === 'field-mismatch') {
+          const ids = backfill.candidates.map(c => c.episodeId).join(', ')
           process.stderr.write(
             `error: recoverable-canonical-drift: state=${run.state} but classified_episode_id null; ` +
-            `${backfill.candidates.length} signed candidate(s) do not match current args\n`,
+            `${backfill.candidates.length} signed candidate(s) [${ids}] do not match current args\n`,
           )
           phaseAExit = 5
           return
@@ -1680,6 +1712,11 @@ function recordClassification(args) {
   // ---------------------------------------------------------------------
   // Phase B: emit route (planning|needs-human) + persist state/route_episode_id
   // ---------------------------------------------------------------------
+  // Single source-of-truth for the route episode: customFm IS the predicate.
+  // Closes F1 (orphan-attach predicate-completeness) and F2 (state-vs-
+  // targetState consistency) — both Phase B parallel branches now inherit
+  // Phase A's invariant-discipline.
+  const routeSpec = deriveRouteSpec(decidedClass, args.runId)
   let nextState = null
   let routeEpisodeId = null
   let phaseBExit = 0
@@ -1691,49 +1728,69 @@ function recordClassification(args) {
         return
       }
 
-      const targetState = run.decided_class === 'trivial' ? 'planning' : 'needs-human'
-      const routeFields = { parent_episode: run.classified_episode_id }
+      const targetState = routeSpec.targetState
+      // routeFields predicate = parent + customFm. Identical to what
+      // fresh-emit writes, so orphan-attach can never silently accept a
+      // stale signed route episode with mismatched contents.
+      const routeFields = { parent_episode: run.classified_episode_id, ...routeSpec.customFm }
+
+      // F2: state-vs-targetState consistency. If a past run advanced state
+      // to the *wrong* route relative to current decided_class (which
+      // shouldn't happen under any legal trajectory, but is detectable),
+      // refuse rather than silently re-route.
+      if ((run.state === 'planning' || run.state === 'needs-human')
+          && run.state !== targetState) {
+        process.stderr.write(
+          `error: state-violation (Phase B): run.state=${run.state} but ` +
+          `decided_class=${run.decided_class} implies targetState=${targetState}\n`,
+        )
+        phaseBExit = 5
+        return
+      }
 
       // Idempotent past-Phase-B no-op: state advanced + route_episode_id set.
-      if ((run.state === 'planning' || run.state === 'needs-human') && run.route_episode_id) {
+      if (run.state === targetState && run.route_episode_id) {
         const verify = findSignedStateEpisode(
-          projectRoot, args.runId, run.state, key32B, routeFields,
+          projectRoot, args.runId, targetState, key32B, routeFields,
         )
         if (verify.status !== 'match' || verify.episodeId !== run.route_episode_id) {
+          const ids = verify.status === 'field-mismatch'
+            ? ` [${verify.candidates.map(c => c.episodeId).join(', ')}]` : ''
           process.stderr.write(
-            `error: recoverable-canonical-drift: state=${run.state} ` +
-            `route_episode_id=${run.route_episode_id} does not match expected parent ` +
-            `(verify.status=${verify.status})\n`,
+            `error: recoverable-canonical-drift: state=${targetState} ` +
+            `route_episode_id=${run.route_episode_id} does not match args ` +
+            `(verify.status=${verify.status})${ids}\n`,
           )
           phaseBExit = 5
           return
         }
-        nextState = run.state
+        nextState = targetState
         routeEpisodeId = run.route_episode_id
         return
       }
 
       // Backfill: state advanced but route_episode_id null.
-      if (run.state === 'planning' || run.state === 'needs-human') {
+      if (run.state === targetState) {
         const backfill = findSignedStateEpisode(
-          projectRoot, args.runId, run.state, key32B, routeFields,
+          projectRoot, args.runId, targetState, key32B, routeFields,
         )
         if (backfill.status === 'match') {
           run.route_episode_id = backfill.episodeId
-          nextState = run.state
+          nextState = targetState
           routeEpisodeId = backfill.episodeId
           return
         }
         if (backfill.status === 'field-mismatch') {
+          const ids = backfill.candidates.map(c => c.episodeId).join(', ')
           process.stderr.write(
-            `error: recoverable-canonical-drift: state=${run.state} but route_episode_id null; ` +
-            `${backfill.candidates.length} signed candidate(s) do not match classified_episode_id\n`,
+            `error: recoverable-canonical-drift: state=${targetState} but route_episode_id null; ` +
+            `${backfill.candidates.length} signed candidate(s) [${ids}] do not match args\n`,
           )
           phaseBExit = 5
           return
         }
         process.stderr.write(
-          `error: recoverable-no-parent: state=${run.state} but route_episode_id null AND no signed route episode on disk\n`,
+          `error: recoverable-no-parent: state=${targetState} but route_episode_id null AND no signed route episode on disk\n`,
         )
         phaseBExit = 5
         return
@@ -1762,36 +1819,24 @@ function recordClassification(args) {
         const ids = orphan.candidates.map(c => c.episodeId).join(', ')
         process.stderr.write(
           `error: recoverable-canonical-drift: ${orphan.candidates.length} signed ${targetState} ` +
-          `episode(s) [${ids}] do not match classified_episode_id=${run.classified_episode_id}\n`,
+          `episode(s) [${ids}] do not match args ` +
+          `(parent_episode=${run.classified_episode_id} + ${JSON.stringify(routeSpec.customFm)})\n`,
         )
         phaseBExit = 5
         return
       }
-      // Fresh emit route.
-      let routeEp
-      if (targetState === 'planning') {
-        routeEp = writeBp1Episode({
-          projectRoot, runId: args.runId, runKey32B: key32B,
-          type: 'state-transition', state: 'planning',
-          summary: `BP-1 planning (source: trivial): ${args.runId}`,
-          parentEpisode: run.classified_episode_id, expectedPostEpisodeId: null,
-          customFm: { source_class: 'trivial' },
-          tags: ['bp1-planning'],
-          body: `# bp1-planning — ${args.runId}\n\nsource_class: \`trivial\`\n`,
-          filenameSuffix: 'planning',
-        })
-      } else {
-        routeEp = writeBp1Episode({
-          projectRoot, runId: args.runId, runKey32B: key32B,
-          type: 'state-transition', state: 'needs-human',
-          summary: `BP-1 needs-human (risky-class ${run.decided_class}): ${args.runId}`,
-          parentEpisode: run.classified_episode_id, expectedPostEpisodeId: null,
-          customFm: { reason: 'risky-class', decided_class: run.decided_class },
-          tags: ['bp1-needs-human'],
-          body: `# bp1-needs-human — ${args.runId}\n\nreason: \`risky-class\`\ndecided_class: \`${run.decided_class}\`\n`,
-          filenameSuffix: 'needs-human',
-        })
-      }
+      // Fresh emit route. customFm/tags/summary/body all derive from routeSpec
+      // so predicate above and write here cannot drift.
+      const routeEp = writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'state-transition', state: targetState,
+        summary: routeSpec.summary,
+        parentEpisode: run.classified_episode_id, expectedPostEpisodeId: null,
+        customFm: routeSpec.customFm,
+        tags: routeSpec.tags,
+        body: routeSpec.body,
+        filenameSuffix: routeSpec.filenameSuffix,
+      })
       run.state = targetState
       run.route_episode_id = routeEp.episodeId
       nextState = targetState
