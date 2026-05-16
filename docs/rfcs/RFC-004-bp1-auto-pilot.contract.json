@@ -60,7 +60,9 @@
         "terminal_at",
         "decided_class",
         "pre_episode_id",
-        "rfc_detected_episode_id"
+        "rfc_detected_episode_id",
+        "classified_episode_id",
+        "route_episode_id"
       ]
     }
   },

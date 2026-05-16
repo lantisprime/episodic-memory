@@ -176,6 +176,33 @@ tap('US6 markTerminal accepts non-active non-terminal v2 states (e.g. rfc-detect
   assert.equal(loadIndex(proj).runs['bp1-run-us6-aabb'].state, 'aborted')
 })
 
+// Cluster #286/#287/#288 — updateRunState patch-field acceptance for the new
+// classified_episode_id / route_episode_id fields. codex round-5 ACCEPT.
+
+tap('US7 updateRunState accepts classified_episode_id patch', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us7-aabb', proj)
+  const r = updateRunState(proj, 'bp1-run-us7-aabb', {
+    state: 'classified',
+    decided_class: 'trivial',
+    classified_episode_id: 'bp1-run-us7-aabb-classified-9999',
+  })
+  assert.ok(r.ok)
+  assert.equal(loadIndex(proj).runs['bp1-run-us7-aabb'].classified_episode_id, 'bp1-run-us7-aabb-classified-9999')
+})
+
+tap('US8 updateRunState accepts route_episode_id patch', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us8-aabb', proj)
+  updateRunState(proj, 'bp1-run-us8-aabb', { state: 'classified', decided_class: 'trivial' })
+  const r = updateRunState(proj, 'bp1-run-us8-aabb', {
+    state: 'planning',
+    route_episode_id: 'bp1-run-us8-aabb-planning-aaaa',
+  })
+  assert.ok(r.ok)
+  assert.equal(loadIndex(proj).runs['bp1-run-us8-aabb'].route_episode_id, 'bp1-run-us8-aabb-planning-aaaa')
+})
+
 tap('RC3 corrupt JSON in _index.json → loadIndex throws (does not silently reset)', () => {
   const proj = makeProjectRoot()
   // Pre-create runs dir + write garbage.

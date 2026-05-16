@@ -56,7 +56,11 @@ import {
 } from './lib/bp1-keys.mjs'
 import {
   appendRun, markTerminal, getRunState, loadIndex, updateRunState,
+  withRunStateLockExclusive, loadIndexLocked, writeIndex,
 } from './lib/bp1-run-state.mjs'
+import {
+  findSignedStateEpisode, withLockedRun, removeRunFromIndex,
+} from './lib/bp1-atomic.mjs'
 import { probeScheduledTasksCapability } from './lib/bp1-probe.mjs'
 import {
   collectEpisodeRecords,
@@ -1016,44 +1020,107 @@ function detectRfcs(args) {
     const rfcId = path.basename(entry.path, '.md')
     const runId = mintRunId(rfcId)
 
-    // Generate run.key + persist.
-    let keyResult
+    // Cluster #287 fix: track per-step progress so we can compensate on
+    // mid-iteration failure. Each step's success is recorded BEFORE moving
+    // to the next; on catch, the rollback walks them in reverse.
+    let keyGenerated = false
+    let appendDone = false
+    let episodePath = null
+    let writtenEpisodeId = null
+
     try {
-      keyResult = generateRunKey(projectRoot, runId)
+      // Step 1: generate run.key.
+      const keyResult = generateRunKey(projectRoot, runId)
+      keyGenerated = true
+      const { key32B } = keyResult
+
+      // Step 2: append run-state row (uses loadIndexLocked internally — CR2-3).
+      const append = appendRun(projectRoot, runId, projectRoot)
+      if (append.error) {
+        throw new Error(`appendRun failed for ${runId}: ${append.error}`)
+      }
+      appendDone = true
+
+      // Step 3: emit bp1-rfc-detected state-transition (atomic via refactored
+      // writer — temp+fsync+rename, see Commit 1).
+      const written = writeBp1Episode({
+        projectRoot, runId, runKey32B: key32B,
+        type: 'state-transition', state: 'rfc-detected',
+        summary: `BP-1 rfc-detected: ${rfcId}`,
+        parentEpisode: null, expectedPostEpisodeId: null,
+        customFm: { rfc_id: rfcId, frontmatter_sha256: entry.frontmatter_sha256 },
+        tags: ['bp1-rfc-detected'],
+        body: `# bp1-rfc-detected — ${runId}\n\nRFC \`${rfcId}\` detected at ${new Date().toISOString()} for project \`${projectRoot}\`.\n`,
+        filenameSuffix: 'rfc-detected',
+      })
+      episodePath = written.episodePath
+      writtenEpisodeId = written.episodeId
+
+      // Step 4: persist rfc_detected_episode_id + state transition.
+      const upd = updateRunState(projectRoot, runId, {
+        state: 'rfc-detected',
+        rfc_detected_episode_id: written.episodeId,
+      })
+      if (upd.error) {
+        throw new Error(`updateRunState failed for ${runId}: ${upd.error}`)
+      }
+      detected.push({ rfc_id: rfcId, run_id: runId, rfc_detected_episode_id: written.episodeId })
     } catch (e) {
-      process.stderr.write(`error: generateRunKey failed for ${runId}: ${e.message}\n`)
+      // Cluster #287 fix: compensating rollback. Reverse-symmetric to the
+      // forward order (generateRunKey → appendRun → writeBp1Episode):
+      // unwind episode → index row → key. If shred-then-index were the
+      // order, a mid-rollback failure could leave the index pointing to a
+      // run with no key (verifier would fail "fingerprint mismatch"
+      // forever). Index-removal-before-shred is the recoverable direction.
+      // codex r1 C2 fix.
+      const rollbackErrors = []
+      if (episodePath) {
+        try { fs.unlinkSync(episodePath) }
+        catch (re) { rollbackErrors.push(`unlink-episode: ${re.message}`) }
+      }
+      if (appendDone) {
+        try {
+          withRunStateLockExclusive(projectRoot, () => {
+            const idx = loadIndexLocked(projectRoot)
+            if (idx.runs[runId]) {
+              delete idx.runs[runId]
+              writeIndex(projectRoot, idx)
+            }
+          })
+        } catch (re) { rollbackErrors.push(`remove-run: ${re.message}`) }
+      }
+      if (keyGenerated) {
+        // shredRunKey reports failure via return value, not throw. codex r1
+        // C1 fix: check the result and surface; without this, key shred
+        // failures were silently lost from rollbackErrors AND the sentinel.
+        const sr = shredRunKey(projectRoot, runId)
+        if (sr && sr.error) rollbackErrors.push(`shred-key: ${sr.error}`)
+      }
+      if (rollbackErrors.length > 0) {
+        // Last-resort observability: write sentinel + stderr-log; never swallow.
+        const sentinel = {
+          original_error: String(e?.message || e),
+          rollback_errors: rollbackErrors,
+          at: new Date().toISOString(),
+          run_id: runId,
+        }
+        const runDir = path.join(projectRoot, '.episodic-memory', 'runs', runId)
+        let sentinelPath = null
+        try {
+          fs.mkdirSync(runDir, { recursive: true })
+          sentinelPath = path.join(runDir, '.rollback-failed.json')
+          fs.writeFileSync(sentinelPath, JSON.stringify(sentinel, null, 2) + '\n')
+          process.stderr.write(`rollback-failed: sentinel at ${sentinelPath}\n`)
+        } catch (sentinelErr) {
+          process.stderr.write(
+            `rollback-failed-sentinel-write-also-failed: ${sentinelErr.message}; ` +
+            `original: ${e?.message}; rollback: ${rollbackErrors.join('; ')}\n`,
+          )
+        }
+      }
+      process.stderr.write(`error: detect-rfcs iteration failed for ${runId}: ${e.message}\n`)
       return 3
     }
-    const { key32B } = keyResult
-
-    // Append run-state row (uses loadIndexLocked internally — CR2-3).
-    const append = appendRun(projectRoot, runId, projectRoot)
-    if (append.error) {
-      process.stderr.write(`error: appendRun failed for ${runId}: ${append.error}\n`)
-      return 3
-    }
-
-    // Emit bp1-rfc-detected state-transition via internal writer.
-    const written = writeBp1Episode({
-      projectRoot, runId, runKey32B: key32B,
-      type: 'state-transition', state: 'rfc-detected',
-      summary: `BP-1 rfc-detected: ${rfcId}`,
-      parentEpisode: null, expectedPostEpisodeId: null,
-      customFm: { rfc_id: rfcId, frontmatter_sha256: entry.frontmatter_sha256 },
-      tags: ['bp1-rfc-detected'],
-      body: `# bp1-rfc-detected — ${runId}\n\nRFC \`${rfcId}\` detected at ${new Date().toISOString()} for project \`${projectRoot}\`.\n`,
-      filenameSuffix: 'rfc-detected',
-    })
-    // Persist rfc_detected_episode_id + state transition.
-    const upd = updateRunState(projectRoot, runId, {
-      state: 'rfc-detected',
-      rfc_detected_episode_id: written.episodeId,
-    })
-    if (upd.error) {
-      process.stderr.write(`error: updateRunState failed for ${runId}: ${upd.error}\n`)
-      return 3
-    }
-    detected.push({ rfc_id: rfcId, run_id: runId, rfc_detected_episode_id: written.episodeId })
   }
 
   process.stdout.write(JSON.stringify({ status: 'ok', detected, inert: false }) + '\n')
@@ -1101,7 +1168,7 @@ function recordClassifierDispatchPre(args) {
     return 1
   }
 
-  // Load run.key.
+  // Load run.key (key load is project-scoped, not run-state-locked).
   const keyResult = loadRunKey(projectRoot, args.runId)
   if (keyResult.error) {
     process.stderr.write(`error: run.key ${keyResult.error} for ${args.runId}\n`)
@@ -1109,77 +1176,161 @@ function recordClassifierDispatchPre(args) {
   }
   const { key32B } = keyResult
 
-  // Load run-state (unlocked loadIndex; this is an inspection).
-  const idx = loadIndex(projectRoot)
-  const run = idx.runs[args.runId]
-  if (!run) {
-    process.stderr.write(`error: run ${args.runId} not found in run-state\n`)
-    return 5
-  }
-  if (run.state !== 'rfc-detected') {
-    process.stderr.write(`error: state-violation: run.state=${JSON.stringify(run.state)} expected=rfc-detected\n`)
-    return 5
-  }
-  if (!run.rfc_detected_episode_id) {
-    // CR2-fix C1: must have rfc_detected_episode_id pointer to verify.
-    process.stderr.write('error: run.rfc_detected_episode_id is null; cannot verify parent\n')
-    return 5
-  }
+  // All run-state reads + verifies + emits + writes inside one locked
+  // section. Cluster #286 fix: race + crash atomicity via withLockedRun
+  // serialization + atomic-writer rename. Three explicit branches on
+  // entry state; no fresh-emit fall-through from already-advanced state.
+  let exitCode = 0
+  let preEpisodeId = null
+  try {
+    withLockedRun(projectRoot, args.runId, ({ run }) => {
+      if (!run) {
+        process.stderr.write(`error: run ${args.runId} not found in run-state\n`)
+        exitCode = 5
+        return
+      }
 
-  // CR2-2: verify parent rfc-detected episode on disk.
-  const verify = verifyEpisodeOnDisk({
-    projectRoot, episodeId: run.rfc_detected_episode_id, runKey32B: key32B,
-    expectedType: 'state-transition', expectedState: 'rfc-detected',
-    expectedRunId: args.runId,
-  })
-  if (!verify.ok) {
-    // Emit bp1-classifier-parent-tamper failure episode (signed with run.key).
-    try {
-      writeBp1Episode({
-        projectRoot, runId: args.runId, runKey32B: key32B,
-        type: 'failure', state: null,
-        summary: `BP-1 classifier parent-tamper at dispatch-pre: ${args.runId}`,
-        parentEpisode: null, expectedPostEpisodeId: null,
-        customFm: {
-          failure_kind: 'classifier-parent-tamper',
-          field_name: 'rfc_detected_episode_id',
-          observed_value: safeTruncate(JSON.stringify(run.rfc_detected_episode_id), 66),
-          violation_reason: verify.errors.join('; '),
-        },
-        tags: ['bp1-classifier-parent-tamper'],
-        body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verify.errors.map(e => `- \`${e}\``).join('\n')}\n`,
-        filenameSuffix: 'parent-tamper',
+      // -------------------------------------------------------------------
+      // Branch 1: state === 'classifier-dispatch-pending' (retry / idempotent).
+      // Do NOT fresh-emit. Verify the stored pre_episode_id satisfies the
+      // current args; if not, recoverable-canonical-drift error.
+      // -------------------------------------------------------------------
+      if (run.state === 'classifier-dispatch-pending') {
+        if (!run.pre_episode_id || typeof run.pre_episode_id !== 'string'
+            || !EPISODE_ID_RE.test(run.pre_episode_id)) {
+          process.stderr.write(
+            `error: recoverable-no-parent: state=classifier-dispatch-pending but pre_episode_id=${JSON.stringify(run.pre_episode_id)} (null or malformed)\n`,
+          )
+          exitCode = 5
+          return
+        }
+        const lookup = findSignedStateEpisode(
+          projectRoot, args.runId, 'classifier-dispatch-pending', key32B,
+          {
+            parent_episode: run.rfc_detected_episode_id,
+            input_sha256: args.inputSha256,
+          },
+        )
+        if (lookup.status !== 'match' || lookup.episodeId !== run.pre_episode_id) {
+          const ids = lookup.status === 'field-mismatch'
+            ? ` [${lookup.candidates.map(c => c.episodeId).join(', ')}]` : ''
+          process.stderr.write(
+            `error: recoverable-canonical-drift: state=classifier-dispatch-pending ` +
+            `pre_episode_id=${run.pre_episode_id} does not match args ` +
+            `(lookup.status=${lookup.status})${ids}\n`,
+          )
+          exitCode = 5
+          return
+        }
+        // Idempotent retry: same args, same parent, same stored pointer.
+        preEpisodeId = run.pre_episode_id
+        return
+      }
+
+      // -------------------------------------------------------------------
+      // Branch 2: any state other than 'rfc-detected' → state-violation.
+      // -------------------------------------------------------------------
+      if (run.state !== 'rfc-detected') {
+        process.stderr.write(
+          `error: state-violation: run.state=${JSON.stringify(run.state)} expected=rfc-detected\n`,
+        )
+        exitCode = 5
+        return
+      }
+      if (!run.rfc_detected_episode_id) {
+        process.stderr.write('error: run.rfc_detected_episode_id is null; cannot verify parent\n')
+        exitCode = 5
+        return
+      }
+
+      // -------------------------------------------------------------------
+      // Branch 3: state === 'rfc-detected' (normal path with orphan-attach).
+      // Parent verify happens inside the lock; failure-episode emit is
+      // inside the lock too (atomic writer + small critical section).
+      // -------------------------------------------------------------------
+      const verify = verifyEpisodeOnDisk({
+        projectRoot, episodeId: run.rfc_detected_episode_id, runKey32B: key32B,
+        expectedType: 'state-transition', expectedState: 'rfc-detected',
+        expectedRunId: args.runId,
       })
-    } catch (_e) { /* best-effort forensic */ }
-    process.stderr.write(`error: parent-tamper: ${verify.errors.join('; ')}\n`)
-    return 5
+      if (!verify.ok) {
+        try {
+          writeBp1Episode({
+            projectRoot, runId: args.runId, runKey32B: key32B,
+            type: 'failure', state: null,
+            summary: `BP-1 classifier parent-tamper at dispatch-pre: ${args.runId}`,
+            parentEpisode: null, expectedPostEpisodeId: null,
+            customFm: {
+              failure_kind: 'classifier-parent-tamper',
+              field_name: 'rfc_detected_episode_id',
+              observed_value: safeTruncate(JSON.stringify(run.rfc_detected_episode_id), 66),
+              violation_reason: verify.errors.join('; '),
+            },
+            tags: ['bp1-classifier-parent-tamper'],
+            body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verify.errors.map(e => `- \`${e}\``).join('\n')}\n`,
+            filenameSuffix: 'parent-tamper',
+          })
+        } catch (_e) { /* best-effort forensic */ }
+        process.stderr.write(`error: parent-tamper: ${verify.errors.join('; ')}\n`)
+        exitCode = 5
+        return
+      }
+
+      // Orphan-attach scan: a previous invocation may have atomically
+      // emitted the pre-episode but crashed before writeIndex landed; the
+      // signed episode is on disk but run.state is still 'rfc-detected'.
+      const orphan = findSignedStateEpisode(
+        projectRoot, args.runId, 'classifier-dispatch-pending', key32B,
+        {
+          parent_episode: run.rfc_detected_episode_id,
+          input_sha256: args.inputSha256,
+        },
+      )
+      if (orphan.status === 'match') {
+        // Attach orphan: same parent + same input_sha256.
+        run.state = 'classifier-dispatch-pending'
+        run.pre_episode_id = orphan.episodeId
+        preEpisodeId = orphan.episodeId
+        return
+      }
+      if (orphan.status === 'field-mismatch') {
+        const ids = orphan.candidates.map(c => c.episodeId).join(', ')
+        process.stderr.write(
+          `error: recoverable-canonical-drift: ${orphan.candidates.length} signed ` +
+          `pre-episode(s) [${ids}] do not match args.input_sha256 or current ` +
+          `rfc_detected_episode_id\n`,
+        )
+        exitCode = 5
+        return
+      }
+      // orphan.status === 'none' → fresh emit (atomic via refactored writer).
+      const written = writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'state-transition', state: 'classifier-dispatch-pending',
+        summary: `BP-1 classifier-dispatch-pre: ${args.runId}`,
+        parentEpisode: run.rfc_detected_episode_id,
+        expectedPostEpisodeId: null,
+        customFm: { input_sha256: args.inputSha256 },
+        tags: ['bp1-classifier-dispatch-pre'],
+        body: `# bp1-classifier-dispatch-pre — ${args.runId}\n\ninput_sha256: \`${args.inputSha256}\`\n`,
+        filenameSuffix: 'pre',
+      })
+      run.state = 'classifier-dispatch-pending'
+      run.pre_episode_id = written.episodeId
+      preEpisodeId = written.episodeId
+    })
+  } catch (e) {
+    if (e.code === 'multiple-signed-match') {
+      process.stderr.write(`error: integrity-anomaly multiple-signed-match: ${e.message}\n`)
+      return 5
+    }
+    throw e
   }
 
-  // Emit bp1-classifier-dispatch-pre state-transition.
-  const written = writeBp1Episode({
-    projectRoot, runId: args.runId, runKey32B: key32B,
-    type: 'state-transition', state: 'classifier-dispatch-pending',
-    summary: `BP-1 classifier-dispatch-pre: ${args.runId}`,
-    parentEpisode: run.rfc_detected_episode_id,
-    expectedPostEpisodeId: null,
-    customFm: { input_sha256: args.inputSha256 },
-    tags: ['bp1-classifier-dispatch-pre'],
-    body: `# bp1-classifier-dispatch-pre — ${args.runId}\n\ninput_sha256: \`${args.inputSha256}\`\n`,
-    filenameSuffix: 'pre',
-  })
-
-  // Persist state + pre_episode_id.
-  const upd = updateRunState(projectRoot, args.runId, {
-    state: 'classifier-dispatch-pending',
-    pre_episode_id: written.episodeId,
-  })
-  if (upd.error) {
-    process.stderr.write(`error: updateRunState failed: ${upd.error}\n`)
-    return 5
-  }
+  if (exitCode !== 0) return exitCode
 
   process.stdout.write(JSON.stringify({
-    status: 'ok', pre_episode_id: written.episodeId, run_id: args.runId,
+    status: 'ok', pre_episode_id: preEpisodeId, run_id: args.runId,
   }) + '\n')
   return 0
 }
@@ -1256,6 +1407,34 @@ function validateClassifierOutput(obj) {
   return { ok: true }
 }
 
+// Phase B route-episode spec. Single source-of-truth for the routeFields
+// predicate AND the fresh-emit writeBp1Episode call: customFm is what
+// orphan-attach uses to disambiguate signed episodes on disk, AND what
+// the writer persists. The two CANNOT drift.
+// targetState is derived from decided_class, NOT read from run.state — so
+// Phase B's resume branches can compare run.state against targetState and
+// reject inconsistent state/decided_class pairs (closes F2).
+function deriveRouteSpec(decidedClass, runId) {
+  if (decidedClass === 'trivial') {
+    return {
+      targetState: 'planning',
+      customFm: { source_class: 'trivial' },
+      tags: ['bp1-planning'],
+      summary: `BP-1 planning (source: trivial): ${runId}`,
+      body: `# bp1-planning — ${runId}\n\nsource_class: \`trivial\`\n`,
+      filenameSuffix: 'planning',
+    }
+  }
+  return {
+    targetState: 'needs-human',
+    customFm: { reason: 'risky-class', decided_class: decidedClass },
+    tags: ['bp1-needs-human'],
+    summary: `BP-1 needs-human (risky-class ${decidedClass}): ${runId}`,
+    body: `# bp1-needs-human — ${runId}\n\nreason: \`risky-class\`\ndecided_class: \`${decidedClass}\`\n`,
+    filenameSuffix: 'needs-human',
+  }
+}
+
 function recordClassification(args) {
   if (!args.project) { usage(); return 2 }
   if (!args.runId) {
@@ -1310,52 +1489,9 @@ function recordClassification(args) {
   }
   const { key32B } = keyResult
 
-  // Load run-state.
-  const idx = loadIndex(projectRoot)
-  const run = idx.runs[args.runId]
-  if (!run) {
-    process.stderr.write(`error: run ${args.runId} not found\n`)
-    return 5
-  }
-  if (run.state !== 'classifier-dispatch-pending') {
-    process.stderr.write(`error: state-violation: run.state=${JSON.stringify(run.state)} expected=classifier-dispatch-pending\n`)
-    return 5
-  }
-  // Equality gate (C2): --pre-episode-id === runState.pre_episode_id.
-  if (args.preEpisodeId !== run.pre_episode_id) {
-    process.stderr.write(`error: state-violation: --pre-episode-id ${args.preEpisodeId} != run.pre_episode_id ${run.pre_episode_id}\n`)
-    return 5
-  }
-
-  // CR2-2: verify parent pre on disk.
-  const verify = verifyEpisodeOnDisk({
-    projectRoot, episodeId: args.preEpisodeId, runKey32B: key32B,
-    expectedType: 'state-transition', expectedState: 'classifier-dispatch-pending',
-    expectedRunId: args.runId,
-  })
-  if (!verify.ok) {
-    try {
-      writeBp1Episode({
-        projectRoot, runId: args.runId, runKey32B: key32B,
-        type: 'failure', state: null,
-        summary: `BP-1 classifier parent-tamper at record-classification: ${args.runId}`,
-        parentEpisode: null, expectedPostEpisodeId: null,
-        customFm: {
-          failure_kind: 'classifier-parent-tamper',
-          field_name: 'pre_episode_id',
-          observed_value: safeTruncate(JSON.stringify(args.preEpisodeId), 66),
-          violation_reason: verify.errors.join('; '),
-        },
-        tags: ['bp1-classifier-parent-tamper'],
-        body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verify.errors.map(e => `- \`${e}\``).join('\n')}\n`,
-        filenameSuffix: 'parent-tamper',
-      })
-    } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
-    process.stderr.write(`error: parent-tamper: ${verify.errors.join('; ')}\n`)
-    return 5
-  }
-
-  // Single read (HOLD C): read result-file ONCE.
+  // Pre-phase: read result-file + parse + validate (no state mutation).
+  // Failure-episodes for schema-violation are emitted here (atomic via
+  // refactored writer); they do not need lock coordination.
   let resultText
   try {
     resultText = fs.readFileSync(args.resultFile, 'utf8')
@@ -1363,15 +1499,12 @@ function recordClassification(args) {
     process.stderr.write(`error: --result-file unreadable: ${e.message}\n`)
     return 5
   }
-  // Compute sha256 from the in-memory bytes (used for forensic embedding only).
   const _resultSha = crypto.createHash('sha256').update(resultText, 'utf8').digest('hex')
 
-  // Parse + schema-validate.
   let parsed
   try {
     parsed = safeJsonParse(resultText)
   } catch (e) {
-    // Schema-violation failure episode.
     try {
       writeBp1Episode({
         projectRoot, runId: args.runId, runKey32B: key32B,
@@ -1388,7 +1521,7 @@ function recordClassification(args) {
         body: `# bp1-classifier-schema-violation\n\nJSON parse failed: \`${e.message}\`\n`,
         filenameSuffix: 'schema-violation',
       })
-    } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+    } catch (e2) { process.stderr.write(`debug: failure-ep emit threw: ${e2.message}\n`) }
     process.stderr.write(`error: classifier output JSON parse failed: ${e.message}\n`)
     return 5
   }
@@ -1418,68 +1551,323 @@ function recordClassification(args) {
   const decidedClass = parsed.class
   const confidenceStr = String(parsed.confidence)
 
-  // Emit bp1-classified state-transition (parent: pre_episode_id).
-  const classifiedEp = writeBp1Episode({
-    projectRoot, runId: args.runId, runKey32B: key32B,
-    type: 'state-transition', state: 'classified',
-    summary: `BP-1 classified ${decidedClass} (conf=${confidenceStr}): ${args.runId}`,
-    parentEpisode: args.preEpisodeId, expectedPostEpisodeId: null,
-    customFm: {
-      decided_class: decidedClass,
-      classifier_confidence: confidenceStr,   // pre-stringified per writer contract
-    },
-    tags: ['bp1-classified'],
-    body: `# bp1-classified — ${args.runId}\n\nclass: \`${decidedClass}\`\nconfidence: \`${confidenceStr}\`\n`,
-    filenameSuffix: 'classified',
-  })
-  const updClass = updateRunState(projectRoot, args.runId, {
-    state: 'classified', decided_class: decidedClass,
-  })
-  if (updClass.error) {
-    process.stderr.write(`error: updateRunState (classified) failed: ${updClass.error}\n`)
-    return 5
-  }
+  // Cluster #288 fix: split classified-emit and route-emit into two durable
+  // phases. Crash between phases leaves a recoverable state; retry from
+  // 'classified' attaches the existing classified episode + runs Phase B.
+  // codex round-5 ACCEPT 20260516-102831.
 
-  // Route: trivial → planning; else → needs-human.
-  let nextState, routeEpisode
-  if (decidedClass === 'trivial') {
-    routeEpisode = writeBp1Episode({
-      projectRoot, runId: args.runId, runKey32B: key32B,
-      type: 'state-transition', state: 'planning',
-      summary: `BP-1 planning (source: trivial): ${args.runId}`,
-      parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
-      customFm: { source_class: 'trivial' },
-      tags: ['bp1-planning'],
-      body: `# bp1-planning — ${args.runId}\n\nsource_class: \`trivial\`\n`,
-      filenameSuffix: 'planning',
-    })
-    nextState = 'planning'
-  } else {
-    routeEpisode = writeBp1Episode({
-      projectRoot, runId: args.runId, runKey32B: key32B,
-      type: 'state-transition', state: 'needs-human',
-      summary: `BP-1 needs-human (risky-class ${decidedClass}): ${args.runId}`,
-      parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
-      customFm: { reason: 'risky-class', decided_class: decidedClass },
-      tags: ['bp1-needs-human'],
-      body: `# bp1-needs-human — ${args.runId}\n\nreason: \`risky-class\`\ndecided_class: \`${decidedClass}\`\n`,
-      filenameSuffix: 'needs-human',
-    })
-    nextState = 'needs-human'
+  // ---------------------------------------------------------------------
+  // Phase A: emit classified + persist state/decided_class/classified_episode_id
+  // ---------------------------------------------------------------------
+  let classifiedEpisodeId = null
+  let phaseAExit = 0
+  const classifiedFields = {
+    parent_episode: args.preEpisodeId,
+    decided_class: decidedClass,
+    classifier_confidence: confidenceStr,
   }
-  const updRoute = updateRunState(projectRoot, args.runId, { state: nextState })
-  if (updRoute.error) {
-    process.stderr.write(`error: updateRunState (${nextState}) failed: ${updRoute.error}\n`)
-    return 5
+  try {
+    withLockedRun(projectRoot, args.runId, ({ run }) => {
+      if (!run) {
+        process.stderr.write(`error: run ${args.runId} not found\n`)
+        phaseAExit = 5
+        return
+      }
+
+      // Resume / backfill: state at 'classified' or past it. In all
+      // past-Phase-A states, Phase A's job is to verify (or backfill) the
+      // classified_episode_id pointer; the route transition is Phase B's
+      // concern. Includes 'planning' and 'needs-human' for idempotent retry
+      // and pre-bump backfill via signed episode on disk.
+      if (run.state === 'classified' || run.state === 'planning' || run.state === 'needs-human') {
+        if (run.classified_episode_id) {
+          // Verify the stored pointer satisfies CURRENT args.
+          const verify = findSignedStateEpisode(
+            projectRoot, args.runId, 'classified', key32B, classifiedFields,
+          )
+          if (verify.status !== 'match' || verify.episodeId !== run.classified_episode_id) {
+            process.stderr.write(
+              `error: recoverable-canonical-drift: state=${run.state} ` +
+              `classified_episode_id=${run.classified_episode_id} does not match args ` +
+              `(verify.status=${verify.status})\n`,
+            )
+            phaseAExit = 5
+            return
+          }
+          classifiedEpisodeId = run.classified_episode_id
+          return
+        }
+        // Backfill: pre-bump run with no pointer.
+        const backfill = findSignedStateEpisode(
+          projectRoot, args.runId, 'classified', key32B, classifiedFields,
+        )
+        if (backfill.status === 'match') {
+          run.classified_episode_id = backfill.episodeId
+          classifiedEpisodeId = backfill.episodeId
+          return
+        }
+        if (backfill.status === 'field-mismatch') {
+          const ids = backfill.candidates.map(c => c.episodeId).join(', ')
+          process.stderr.write(
+            `error: recoverable-canonical-drift: state=${run.state} but classified_episode_id null; ` +
+            `${backfill.candidates.length} signed candidate(s) [${ids}] do not match current args\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        process.stderr.write(
+          `error: recoverable-no-parent: state=${run.state} but classified_episode_id null AND no signed classified episode on disk\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      if (run.state !== 'classifier-dispatch-pending') {
+        process.stderr.write(
+          `error: state-violation: run.state=${JSON.stringify(run.state)} expected=classifier-dispatch-pending\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      // C2 equality gate: --pre-episode-id === run.pre_episode_id.
+      if (args.preEpisodeId !== run.pre_episode_id) {
+        process.stderr.write(
+          `error: state-violation: --pre-episode-id ${args.preEpisodeId} != run.pre_episode_id ${run.pre_episode_id}\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      // CR2-2: verify parent pre-episode on disk (inside lock).
+      const verifyParent = verifyEpisodeOnDisk({
+        projectRoot, episodeId: args.preEpisodeId, runKey32B: key32B,
+        expectedType: 'state-transition', expectedState: 'classifier-dispatch-pending',
+        expectedRunId: args.runId,
+      })
+      if (!verifyParent.ok) {
+        try {
+          writeBp1Episode({
+            projectRoot, runId: args.runId, runKey32B: key32B,
+            type: 'failure', state: null,
+            summary: `BP-1 classifier parent-tamper at record-classification: ${args.runId}`,
+            parentEpisode: null, expectedPostEpisodeId: null,
+            customFm: {
+              failure_kind: 'classifier-parent-tamper',
+              field_name: 'pre_episode_id',
+              observed_value: safeTruncate(JSON.stringify(args.preEpisodeId), 66),
+              violation_reason: verifyParent.errors.join('; '),
+            },
+            tags: ['bp1-classifier-parent-tamper'],
+            body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verifyParent.errors.map(e => `- \`${e}\``).join('\n')}\n`,
+            filenameSuffix: 'parent-tamper',
+          })
+        } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+        process.stderr.write(`error: parent-tamper: ${verifyParent.errors.join('; ')}\n`)
+        phaseAExit = 5
+        return
+      }
+
+      // Orphan-attach: crash-after-classified-emit-before-writeIndex window.
+      const orphan = findSignedStateEpisode(
+        projectRoot, args.runId, 'classified', key32B, classifiedFields,
+      )
+      if (orphan.status === 'match') {
+        run.state = 'classified'
+        run.decided_class = decidedClass
+        run.classified_episode_id = orphan.episodeId
+        classifiedEpisodeId = orphan.episodeId
+        return
+      }
+      if (orphan.status === 'field-mismatch') {
+        const ids = orphan.candidates.map(c => c.episodeId).join(', ')
+        process.stderr.write(
+          `error: recoverable-canonical-drift: ${orphan.candidates.length} signed classified ` +
+          `episode(s) [${ids}] do not match args (parent_episode/decided_class/confidence)\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+      // orphan.status === 'none' → fresh emit.
+      const written = writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'state-transition', state: 'classified',
+        summary: `BP-1 classified ${decidedClass} (conf=${confidenceStr}): ${args.runId}`,
+        parentEpisode: args.preEpisodeId, expectedPostEpisodeId: null,
+        customFm: {
+          decided_class: decidedClass,
+          classifier_confidence: confidenceStr,
+        },
+        tags: ['bp1-classified'],
+        body: `# bp1-classified — ${args.runId}\n\nclass: \`${decidedClass}\`\nconfidence: \`${confidenceStr}\`\n`,
+        filenameSuffix: 'classified',
+      })
+      run.state = 'classified'
+      run.decided_class = decidedClass
+      run.classified_episode_id = written.episodeId
+      classifiedEpisodeId = written.episodeId
+    })
+  } catch (e) {
+    if (e.code === 'multiple-signed-match') {
+      process.stderr.write(`error: integrity-anomaly multiple-signed-match (Phase A): ${e.message}\n`)
+      return 5
+    }
+    throw e
   }
+  if (phaseAExit !== 0) return phaseAExit
+  if (!classifiedEpisodeId) return 5
+
+  // ---------------------------------------------------------------------
+  // Phase B: emit route (planning|needs-human) + persist state/route_episode_id
+  // ---------------------------------------------------------------------
+  // Single source-of-truth for the route episode: customFm IS the predicate.
+  // Closes F1 (orphan-attach predicate-completeness) and F2 (state-vs-
+  // targetState consistency) — both Phase B parallel branches now inherit
+  // Phase A's invariant-discipline.
+  const routeSpec = deriveRouteSpec(decidedClass, args.runId)
+  let nextState = null
+  let routeEpisodeId = null
+  let phaseBExit = 0
+  try {
+    withLockedRun(projectRoot, args.runId, ({ run }) => {
+      if (!run) {
+        process.stderr.write(`error: run ${args.runId} missing in Phase B\n`)
+        phaseBExit = 5
+        return
+      }
+
+      const targetState = routeSpec.targetState
+      // routeFields predicate = parent + customFm. Identical to what
+      // fresh-emit writes, so orphan-attach can never silently accept a
+      // stale signed route episode with mismatched contents.
+      const routeFields = { parent_episode: run.classified_episode_id, ...routeSpec.customFm }
+
+      // F2: state-vs-targetState consistency. If a past run advanced state
+      // to the *wrong* route relative to current decided_class (which
+      // shouldn't happen under any legal trajectory, but is detectable),
+      // refuse rather than silently re-route.
+      if ((run.state === 'planning' || run.state === 'needs-human')
+          && run.state !== targetState) {
+        process.stderr.write(
+          `error: state-violation (Phase B): run.state=${run.state} but ` +
+          `decided_class=${run.decided_class} implies targetState=${targetState}. ` +
+          `Manual recovery: inspect run row + signed episodes; either reset run.state ` +
+          `to 'classified' (if route was emitted in error) or correct decided_class.\n`,
+        )
+        phaseBExit = 5
+        return
+      }
+
+      // Idempotent past-Phase-B no-op: state advanced + route_episode_id set.
+      if (run.state === targetState && run.route_episode_id) {
+        const verify = findSignedStateEpisode(
+          projectRoot, args.runId, targetState, key32B, routeFields,
+        )
+        if (verify.status !== 'match' || verify.episodeId !== run.route_episode_id) {
+          const ids = verify.status === 'field-mismatch'
+            ? ` [${verify.candidates.map(c => c.episodeId).join(', ')}]` : ''
+          process.stderr.write(
+            `error: recoverable-canonical-drift: state=${targetState} ` +
+            `route_episode_id=${run.route_episode_id} does not match args ` +
+            `(verify.status=${verify.status})${ids}\n`,
+          )
+          phaseBExit = 5
+          return
+        }
+        nextState = targetState
+        routeEpisodeId = run.route_episode_id
+        return
+      }
+
+      // Backfill: state advanced but route_episode_id null.
+      if (run.state === targetState) {
+        const backfill = findSignedStateEpisode(
+          projectRoot, args.runId, targetState, key32B, routeFields,
+        )
+        if (backfill.status === 'match') {
+          run.route_episode_id = backfill.episodeId
+          nextState = targetState
+          routeEpisodeId = backfill.episodeId
+          return
+        }
+        if (backfill.status === 'field-mismatch') {
+          const ids = backfill.candidates.map(c => c.episodeId).join(', ')
+          process.stderr.write(
+            `error: recoverable-canonical-drift: state=${targetState} but route_episode_id null; ` +
+            `${backfill.candidates.length} signed candidate(s) [${ids}] do not match args\n`,
+          )
+          phaseBExit = 5
+          return
+        }
+        process.stderr.write(
+          `error: recoverable-no-parent: state=${targetState} but route_episode_id null AND no signed route episode on disk\n`,
+        )
+        phaseBExit = 5
+        return
+      }
+
+      if (run.state !== 'classified') {
+        process.stderr.write(
+          `error: state-violation (Phase B): run.state=${JSON.stringify(run.state)} expected=classified\n`,
+        )
+        phaseBExit = 5
+        return
+      }
+
+      // Orphan-attach: crash-after-route-emit-before-writeIndex.
+      const orphan = findSignedStateEpisode(
+        projectRoot, args.runId, targetState, key32B, routeFields,
+      )
+      if (orphan.status === 'match') {
+        run.state = targetState
+        run.route_episode_id = orphan.episodeId
+        nextState = targetState
+        routeEpisodeId = orphan.episodeId
+        return
+      }
+      if (orphan.status === 'field-mismatch') {
+        const ids = orphan.candidates.map(c => c.episodeId).join(', ')
+        process.stderr.write(
+          `error: recoverable-canonical-drift: ${orphan.candidates.length} signed ${targetState} ` +
+          `episode(s) [${ids}] do not match args ` +
+          `(parent_episode=${run.classified_episode_id} + ${JSON.stringify(routeSpec.customFm)})\n`,
+        )
+        phaseBExit = 5
+        return
+      }
+      // Fresh emit route. customFm/tags/summary/body all derive from routeSpec
+      // so predicate above and write here cannot drift.
+      const routeEp = writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'state-transition', state: targetState,
+        summary: routeSpec.summary,
+        parentEpisode: run.classified_episode_id, expectedPostEpisodeId: null,
+        customFm: routeSpec.customFm,
+        tags: routeSpec.tags,
+        body: routeSpec.body,
+        filenameSuffix: routeSpec.filenameSuffix,
+      })
+      run.state = targetState
+      run.route_episode_id = routeEp.episodeId
+      nextState = targetState
+      routeEpisodeId = routeEp.episodeId
+    })
+  } catch (e) {
+    if (e.code === 'multiple-signed-match') {
+      process.stderr.write(`error: integrity-anomaly multiple-signed-match (Phase B): ${e.message}\n`)
+      return 5
+    }
+    throw e
+  }
+  if (phaseBExit !== 0) return phaseBExit
 
   process.stdout.write(JSON.stringify({
     status: 'ok',
     state: nextState,
     run_id: args.runId,
     decided_class: decidedClass,
-    classified_episode_id: classifiedEp.episodeId,
-    route_episode_id: routeEpisode.episodeId,
+    classified_episode_id: classifiedEpisodeId,
+    route_episode_id: routeEpisodeId,
   }) + '\n')
   return 0
 }
