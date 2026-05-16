@@ -75,6 +75,46 @@ export const TYPE_SPECIFIC_CANONICAL_FIELDS = Object.freeze({
     'native_probe_performed',
     't2_fallback',
   ]),
+  // Slice 2c — orchestrator state-machine dispatch site.
+  'state-transition:rfc-detected': Object.freeze([
+    'state',
+    'rfc_id',
+    'frontmatter_sha256',
+  ]),
+  'state-transition:classifier-dispatch-pending': Object.freeze([
+    'state',
+    'input_sha256',
+  ]),
+  'state-transition:classified': Object.freeze([
+    'state',
+    'decided_class',
+    'classifier_confidence',
+  ]),
+  'state-transition:planning': Object.freeze([
+    'state',
+    'source_class',
+  ]),
+  'state-transition:needs-human': Object.freeze([
+    'state',
+    'reason',
+    'decided_class',
+  ]),
+  // Slice 2c — failure subtypes. failure_kind is the subtype-derivation field;
+  // it IS canonicalized here so post-emit tampering of failure_kind invalidates
+  // the HMAC. Both kinds share the same canonical-field shape but are kept as
+  // separate registry entries so the validator + RFC docs enumerate each.
+  'failure:classifier-schema-violation': Object.freeze([
+    'failure_kind',
+    'field_name',
+    'observed_value',
+    'violation_reason',
+  ]),
+  'failure:classifier-parent-tamper': Object.freeze([
+    'failure_kind',
+    'field_name',
+    'observed_value',
+    'violation_reason',
+  ]),
   'evidence:bp1-codex-request-sent': Object.freeze([
     'requested_at',
     'review_request_ref',
@@ -110,6 +150,11 @@ export function subtypeKey(frontmatter) {
         if (TYPE_SPECIFIC_CANONICAL_FIELDS[key]) return key
       }
     }
+  }
+  // Slice 2c — failure type uses failure_kind as the subtype-derivation field.
+  // Plan v4 §"Episode types + canonical fields" / CR2-fix C4 + doc fix.
+  if (type === 'failure') {
+    return `failure:${frontmatter.failure_kind ?? null}`
   }
   return null
 }
@@ -164,6 +209,16 @@ export function canonicalize(frontmatter, bodyBytes) {
   const subKey = subtypeKey(frontmatter)
   if (subKey) {
     const fields = TYPE_SPECIFIC_CANONICAL_FIELDS[subKey]
+    if (!fields) {
+      // Fail loud: every subtype the caller emits MUST be registered here so
+      // the type-specific canonical fields are signed. A typo or missing
+      // registration would otherwise sign GENERIC fields only and leave
+      // type-specific fields unsigned (security regression).
+      throw new Error(
+        `canonicalize: subtype "${subKey}" is not registered in TYPE_SPECIFIC_CANONICAL_FIELDS — ` +
+        `add it to scripts/lib/bp1-canonicalize.mjs and the contract.json mirror`,
+      )
+    }
     for (const field of fields) {
       if (Object.prototype.hasOwnProperty.call(frontmatter, field)) {
         payload[field] = frontmatter[field]

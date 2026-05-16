@@ -1,22 +1,43 @@
 /**
  * bp1-run-state.mjs — Per-project run-state index helpers (RFC-004 §800,
- * Resolution 2).
+ * Resolution 2; slice 2c v2 schema + API split).
  *
  * Source-of-truth file: `<projectRoot>/.episodic-memory/runs/_index.json`
  *
  * ```
  * {
- *   "schema_version": 1,
+ *   "schema_version": 2,
  *   "runs": {
  *     "<run_id>": {
  *       "project_root": "<canonicalized realpath>",
- *       "state": "active|complete|aborted|abandoned|archived",
+ *       "state": "active|rfc-detected|classifier-dispatch-pending|classified|
+ *                planning|needs-human|complete|aborted|abandoned|archived",
  *       "created_at": "<ISO-8601 UTC>",
- *       "terminal_at": "<ISO-8601 UTC | null>"
+ *       "terminal_at": "<ISO-8601 UTC | null>",
+ *       "decided_class": "trivial|schema|validator|security|multi-actor|
+ *                        needs-human-input|null",
+ *       "pre_episode_id": "<id>|null",
+ *       "rfc_detected_episode_id": "<id>|null"
  *     }
  *   }
  * }
  * ```
+ *
+ * ## API split (slice 2c CR2-3)
+ *
+ * `loadIndex` used to be the only entry point. It called `withRunStateLock`
+ * internally when migration was needed. `appendRun` + `markTerminal` also
+ * acquire `withRunStateLock`, then called `loadIndex` from inside — which
+ * deadlocked when the on-disk index was v1 (loadIndex tries to re-acquire
+ * the lock). The split:
+ *
+ *   - `readIndexNoMigrate(projectRoot)` — pure read, returns raw v1 or v2.
+ *     For validators / inspection that don't need migration.
+ *   - `loadIndex(projectRoot)` — public. Acquires `withRunStateLock` if
+ *     migration is needed (v1 detected). Returns v2 every time.
+ *   - `loadIndexLocked(projectRoot)` — caller MUST already hold
+ *     `withRunStateLock`. Reads + in-memory migrates. Caller writes via
+ *     `writeIndex` before releasing the lock if migration occurred.
  *
  * ## Concurrency contract (codex round-1 RC1 + round-2 stale-lock fix)
  *
@@ -41,9 +62,13 @@
  *
  * ## Public API
  *
- *   loadIndex(projectRoot) → { schema_version: 1, runs: {...} } | throws on corrupt
+ *   readIndexNoMigrate(projectRoot) → { schema_version: 1|2, runs: {...} } | throws on corrupt
+ *   loadIndex(projectRoot) → { schema_version: 2, runs: {...} } | throws on corrupt
+ *   loadIndexLocked(projectRoot) → { schema_version: 2, runs: {...} } (caller holds lock)
+ *   writeIndex(projectRoot, idx) — atomic write (caller holds lock)
  *   appendRun(projectRoot, runId, projectRootCanonical) → { ok: true } | { error }
  *   markTerminal(projectRoot, runId, terminalState) → { ok: true } | { error }
+ *   updateRunState(projectRoot, runId, patch) → { ok: true } | { error }
  *   getRunState(projectRoot, runId) → { ... } | null  (read-only, NO lock)
  *   indexPath(projectRoot) → string
  *
@@ -54,8 +79,42 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 
-const SCHEMA_VERSION = 1
+import { migrateV1ToV2, V1_SCHEMA, V2_SCHEMA } from './bp1-run-state-migrate.mjs'
+
+export const SCHEMA_VERSION = V2_SCHEMA
 const VALID_TERMINAL_STATES = Object.freeze(['complete', 'aborted', 'abandoned', 'archived'])
+
+// v2 expands the state vocabulary. Slice 2c orchestrator subcommands assert
+// against this enum via updateRunState. Validator (validate-rfc-contract-mirror)
+// diffs this against contract.json `run_state_schemas.v2.states`.
+export const VALID_V2_STATES = Object.freeze([
+  'active',
+  'rfc-detected',
+  'classifier-dispatch-pending',
+  'classified',
+  'planning',
+  'needs-human',
+  'complete',
+  'aborted',
+  'abandoned',
+  'archived',
+])
+
+// Patchable transition fields per v2 schema. updateRunState() refuses
+// unknown keys to keep the on-disk shape locked.
+const VALID_V2_PATCH_FIELDS = Object.freeze([
+  'state',
+  'decided_class',
+  'pre_episode_id',
+  'rfc_detected_episode_id',
+])
+
+// Valid classifier output classes (mirrors classifier_output_schema in
+// docs/rfcs/RFC-004-bp1-auto-pilot.contract.json). updateRunState validates
+// decided_class against this list when present.
+const VALID_DECIDED_CLASSES = Object.freeze([
+  'trivial', 'schema', 'validator', 'security', 'multi-actor', 'needs-human-input',
+])
 
 const LOCK_DIR_NAME = '_index.lock'
 const STALE_LOCK_MS = 30_000        // 30s — covers I/O + child-process latency
@@ -204,13 +263,16 @@ function sleep(ms) {
 // ---------------------------------------------------------------------------
 
 /**
- * Read + parse `_index.json`. Returns empty default when file is missing.
+ * Read + parse `_index.json` WITHOUT migration. Returns the raw shape (v1 or
+ * v2) for validators / inspection that need to see the on-disk schema_version
+ * verbatim. Returns an empty v2 default when the file is missing.
+ *
  * Throws on corrupt JSON (RC3 — never silently reset).
  *
  * @param {string} projectRoot
- * @returns {{ schema_version: 1, runs: Record<string, object> }}
+ * @returns {{ schema_version: 1|2, runs: Record<string, object> }}
  */
-export function loadIndex(projectRoot) {
+export function readIndexNoMigrate(projectRoot) {
   const p = indexPath(projectRoot)
   let text
   try {
@@ -228,8 +290,13 @@ export function loadIndex(projectRoot) {
     err.detail = e.message
     throw err
   }
-  if (!parsed || typeof parsed !== 'object' || parsed.schema_version !== SCHEMA_VERSION) {
-    const err = new Error(`run-state index missing/wrong schema_version (expected ${SCHEMA_VERSION})`)
+  if (!parsed || typeof parsed !== 'object') {
+    const err = new Error('run-state index is not an object')
+    err.code = 'corrupt'
+    throw err
+  }
+  if (parsed.schema_version !== V1_SCHEMA && parsed.schema_version !== V2_SCHEMA) {
+    const err = new Error(`run-state index has unsupported schema_version ${JSON.stringify(parsed.schema_version)}`)
     err.code = 'corrupt'
     throw err
   }
@@ -240,18 +307,77 @@ export function loadIndex(projectRoot) {
 }
 
 /**
+ * In-lock variant: caller MUST already hold `withRunStateLock`. Reads the
+ * on-disk index and migrates v1→v2 in memory; does NOT write. Caller is
+ * responsible for `writeIndex(projectRoot, idx)` before releasing the lock if
+ * mutation occurred.
+ *
+ * Used by appendRun + markTerminal + updateRunState, which all hold the lock
+ * for the read-modify-write cycle.
+ *
+ * @param {string} projectRoot
+ * @returns {{ schema_version: 2, runs: Record<string, object> }}
+ */
+export function loadIndexLocked(projectRoot) {
+  const raw = readIndexNoMigrate(projectRoot)
+  return migrateV1ToV2(raw)
+}
+
+/**
+ * Public entry point. Reads + migrates the index for callers NOT already
+ * holding the lock. If migration was needed, persists the v2 form on disk
+ * inside `withRunStateLock` (RC2 atomic-write). Always returns v2.
+ *
+ * @param {string} projectRoot
+ * @returns {{ schema_version: 2, runs: Record<string, object> }}
+ */
+export function loadIndex(projectRoot) {
+  const raw = readIndexNoMigrate(projectRoot)
+  if (raw.schema_version === V2_SCHEMA) {
+    return migrateV1ToV2(raw)   // defensive copy
+  }
+  // v1 detected — persist migration under lock.
+  return withRunStateLock(projectRoot, () => {
+    // Re-read inside the lock in case another writer already migrated.
+    const reReadRaw = readIndexNoMigrate(projectRoot)
+    const migrated = migrateV1ToV2(reReadRaw)
+    if (reReadRaw.schema_version === V1_SCHEMA) {
+      writeIndex(projectRoot, migrated)
+    }
+    return migrated
+  })
+}
+
+/**
  * Atomic-write the index file. Per-process unique temp filename
  * (codex round-1 RC2 fix); orphan cleanup happens only inside the lock.
+ *
+ * EXPORTED for in-lock callers (orchestrator subcommands that perform their
+ * own read-modify-write inside `withRunStateLock` via `loadIndexLocked`).
  *
  * @param {string} projectRoot
  * @param {object} idx
  */
-function writeIndex(projectRoot, idx) {
+export function writeIndex(projectRoot, idx) {
   const target = indexPath(projectRoot)
   fs.mkdirSync(path.dirname(target), { recursive: true })
   const tmpPath = `${target}.tmp.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}`
   fs.writeFileSync(tmpPath, JSON.stringify(idx, null, 2) + '\n')
   fs.renameSync(tmpPath, target)
+}
+
+/**
+ * Acquire the run-state lock and call fn(). Exported so orchestrator
+ * subcommands can compose multi-step transitions atomically. Re-uses the
+ * file-local lockdir helper.
+ *
+ * @template T
+ * @param {string} projectRoot
+ * @param {() => T} fn
+ * @returns {T}
+ */
+export function withRunStateLockExclusive(projectRoot, fn) {
+  return withRunStateLock(projectRoot, fn)
 }
 
 /**
@@ -297,7 +423,11 @@ export function appendRun(projectRoot, runId, projectRootCanonical) {
   try {
     return withRunStateLock(projectRoot, () => {
       cleanupOrphanTmps(projectRoot)
-      const idx = loadIndex(projectRoot)
+      // loadIndexLocked: caller holds the lock; v1→v2 migration happens
+      // in-memory + is persisted by writeIndex below. Slice 2c CR2-3 fix
+      // (previously called loadIndex inside the lock → self-deadlock on v1
+      // upgrade path).
+      const idx = loadIndexLocked(projectRoot)
       if (idx.runs[runId]) {
         return { error: 'collision' }
       }
@@ -306,6 +436,9 @@ export function appendRun(projectRoot, runId, projectRootCanonical) {
         state: 'active',
         created_at: new Date().toISOString(),
         terminal_at: null,
+        decided_class: null,
+        pre_episode_id: null,
+        rfc_detected_episode_id: null,
       }
       idx.runs[runId] = run
       writeIndex(projectRoot, idx)
@@ -333,12 +466,69 @@ export function markTerminal(projectRoot, runId, terminalState) {
   try {
     return withRunStateLock(projectRoot, () => {
       cleanupOrphanTmps(projectRoot)
-      const idx = loadIndex(projectRoot)
+      // loadIndexLocked: caller holds the lock (CR2-3 fix). Run may be in any
+      // v2 non-terminal state — we don't gate on `state === 'active'` anymore
+      // because slice 2c added rfc-detected / classified / planning /
+      // needs-human as non-terminal intermediate states. Treat "already
+      // terminal" as the failure mode; any non-terminal state is finalize-able.
+      const idx = loadIndexLocked(projectRoot)
       const run = idx.runs[runId]
       if (!run) return { error: 'missing' }
-      if (run.state !== 'active') return { error: 'already-terminal' }
+      if (VALID_TERMINAL_STATES.includes(run.state)) return { error: 'already-terminal' }
       run.state = terminalState
       run.terminal_at = new Date().toISOString()
+      writeIndex(projectRoot, idx)
+      return { ok: true }
+    })
+  } catch (e) {
+    if (e && e.code === 'lock-timeout') return { error: 'lock-timeout' }
+    throw e
+  }
+}
+
+/**
+ * Apply a partial update to a run's state-transition fields. Used by
+ * orchestrator subcommands (record-classifier-dispatch-pre,
+ * record-classification) to transition state + persist
+ * pre_episode_id / rfc_detected_episode_id / decided_class atomically.
+ *
+ * Refuses unknown fields, invalid state values, and invalid decided_class
+ * values. Refuses transitions on already-terminal runs.
+ *
+ * @param {string} projectRoot
+ * @param {string} runId
+ * @param {object} patch — fields from VALID_V2_PATCH_FIELDS
+ * @returns {{ ok: true } | { error: string }}
+ */
+export function updateRunState(projectRoot, runId, patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    return { error: 'invalid-patch' }
+  }
+  for (const k of Object.keys(patch)) {
+    if (!VALID_V2_PATCH_FIELDS.includes(k)) {
+      return { error: `unknown-patch-field:${k}` }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'state')) {
+    if (!VALID_V2_STATES.includes(patch.state)) {
+      return { error: 'invalid-state' }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'decided_class')
+      && patch.decided_class !== null
+      && !VALID_DECIDED_CLASSES.includes(patch.decided_class)) {
+    return { error: 'invalid-decided-class' }
+  }
+  try {
+    return withRunStateLock(projectRoot, () => {
+      cleanupOrphanTmps(projectRoot)
+      const idx = loadIndexLocked(projectRoot)
+      const run = idx.runs[runId]
+      if (!run) return { error: 'missing' }
+      if (VALID_TERMINAL_STATES.includes(run.state)) return { error: 'already-terminal' }
+      for (const [k, v] of Object.entries(patch)) {
+        run[k] = v
+      }
       writeIndex(projectRoot, idx)
       return { ok: true }
     })
@@ -358,11 +548,20 @@ export function markTerminal(projectRoot, runId, terminalState) {
  * @returns {object | null}
  */
 export function getRunState(projectRoot, runId) {
-  let idx
+  let raw
   try {
-    idx = loadIndex(projectRoot)
+    raw = readIndexNoMigrate(projectRoot)
   } catch (_e) {
     return null
   }
-  return idx.runs[runId] || null
+  // Diagnostic-only: migrate in-memory for v2-shaped return without acquiring
+  // the lock or persisting. Callers that need a guaranteed-on-disk v2 use
+  // loadIndex (acquires lock + persists if v1 detected).
+  let migrated
+  try {
+    migrated = migrateV1ToV2(raw)
+  } catch (_e) {
+    return null
+  }
+  return migrated.runs[runId] || null
 }

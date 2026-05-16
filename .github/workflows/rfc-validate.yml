@@ -10,6 +10,7 @@ on:
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/validate-rfc-canonical-fields.mjs'
+      - 'scripts/validate-rfc-contract-mirror.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
@@ -18,6 +19,9 @@ on:
       - 'scripts/lib/bp1-keys.mjs'
       - 'scripts/lib/bp1-canonicalize.mjs'
       - 'scripts/lib/bp1-run-state.mjs'
+      - 'scripts/lib/bp1-run-state-migrate.mjs'
+      - 'scripts/lib/bp1-episode-writer.mjs'
+      - 'scripts/lib/bp1-episode-verify.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
       - 'scripts/bp1-deadline-sweep.mjs'
@@ -26,6 +30,7 @@ on:
       - 'tests/test-em-rfc-validate.mjs'
       - 'tests/test-validate-rfc-failure-table.mjs'
       - 'tests/test-validate-rfc-artifact-manifest.mjs'
+      - 'tests/test-validate-rfc-contract-mirror.mjs'
       - 'tests/test-bp1-flag-check.mjs'
       - 'tests/test-bp1-build-artifact-manifest.mjs'
       - 'tests/test-bp1-deadline-sweep.mjs'
@@ -34,7 +39,12 @@ on:
       - 'tests/test-bp1-hmac-live.mjs'
       - 'tests/test-bp1-canonicalize.mjs'
       - 'tests/test-bp1-run-state.mjs'
+      - 'tests/test-bp1-run-state-migrate.mjs'
+      - 'tests/test-bp1-episode-writer.mjs'
+      - 'tests/test-bp1-episode-verify.mjs'
       - 'tests/test-bp1-orchestrator-init-run.mjs'
+      - 'tests/test-bp1-orchestrator-detect-rfcs.mjs'
+      - 'tests/test-bp1-orchestrator-classifier-fence.mjs'
       - 'tests/test-install-bp1.sh'
       - 'tests/test-install-bp1-wiring.mjs'
       - 'tests/test-install-bp1-runkey-gitignore.mjs'
@@ -49,6 +59,7 @@ on:
       - 'scripts/validate-rfc-failure-table.mjs'
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/validate-rfc-canonical-fields.mjs'
+      - 'scripts/validate-rfc-contract-mirror.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
@@ -57,6 +68,9 @@ on:
       - 'scripts/lib/bp1-keys.mjs'
       - 'scripts/lib/bp1-canonicalize.mjs'
       - 'scripts/lib/bp1-run-state.mjs'
+      - 'scripts/lib/bp1-run-state-migrate.mjs'
+      - 'scripts/lib/bp1-episode-writer.mjs'
+      - 'scripts/lib/bp1-episode-verify.mjs'
       - 'scripts/bp1-build-artifact-manifest.mjs'
       - 'scripts/bp1-flag-check.mjs'
       - 'scripts/bp1-deadline-sweep.mjs'
@@ -65,6 +79,7 @@ on:
       - 'tests/test-em-rfc-validate.mjs'
       - 'tests/test-validate-rfc-failure-table.mjs'
       - 'tests/test-validate-rfc-artifact-manifest.mjs'
+      - 'tests/test-validate-rfc-contract-mirror.mjs'
       - 'tests/test-bp1-flag-check.mjs'
       - 'tests/test-bp1-build-artifact-manifest.mjs'
       - 'tests/test-bp1-deadline-sweep.mjs'
@@ -73,7 +88,12 @@ on:
       - 'tests/test-bp1-hmac-live.mjs'
       - 'tests/test-bp1-canonicalize.mjs'
       - 'tests/test-bp1-run-state.mjs'
+      - 'tests/test-bp1-run-state-migrate.mjs'
+      - 'tests/test-bp1-episode-writer.mjs'
+      - 'tests/test-bp1-episode-verify.mjs'
       - 'tests/test-bp1-orchestrator-init-run.mjs'
+      - 'tests/test-bp1-orchestrator-detect-rfcs.mjs'
+      - 'tests/test-bp1-orchestrator-classifier-fence.mjs'
       - 'tests/test-install-bp1.sh'
       - 'tests/test-install-bp1-wiring.mjs'
       - 'tests/test-install-bp1-runkey-gitignore.mjs'
@@ -130,17 +150,38 @@ jobs:
       - name: Validate RFC canonical-fields spec block
         run: node scripts/validate-rfc-canonical-fields.mjs
 
+      - name: Validate RFC contract.json mirror (slice 2c)
+        run: node scripts/validate-rfc-contract-mirror.mjs
+
+      - name: Run RFC contract-mirror validator self-tests
+        run: node tests/test-validate-rfc-contract-mirror.mjs
+
       - name: Run bp1-hmac live tests (H1-H7 + I3a/b + TB1/TB2)
         run: node tests/test-bp1-hmac-live.mjs
 
       - name: Run bp1-canonicalize tests (H21-H26 + Issue #185 + AC1)
         run: node tests/test-bp1-canonicalize.mjs
 
-      - name: Run bp1-run-state tests (lockdir mutex + RC-LOCK1-4b)
+      - name: Run bp1-run-state tests (lockdir mutex + RC-LOCK1-4b + US1-6 + slice 2c)
         run: node tests/test-bp1-run-state.mjs
+
+      - name: Run bp1-run-state-migrate tests (slice 2c CR2-3)
+        run: node tests/test-bp1-run-state-migrate.mjs
+
+      - name: Run bp1-episode-writer tests (slice 2c)
+        run: node tests/test-bp1-episode-writer.mjs
+
+      - name: Run bp1-episode-verify tests (slice 2c CR2-2)
+        run: node tests/test-bp1-episode-verify.mjs
 
       - name: Run bp1-orchestrator init-run E2E tests
         run: node tests/test-bp1-orchestrator-init-run.mjs
+
+      - name: Run bp1-orchestrator detect-rfcs E2E tests (slice 2c)
+        run: node tests/test-bp1-orchestrator-detect-rfcs.mjs
+
+      - name: Run bp1-orchestrator classifier-fence E2E tests (slice 2c)
+        run: node tests/test-bp1-orchestrator-classifier-fence.mjs
 
       - name: Run install.mjs BP-1 run.key gitignore tests
         run: node tests/test-install-bp1-runkey-gitignore.mjs

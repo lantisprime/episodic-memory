@@ -31,7 +31,7 @@ import { spawn } from 'node:child_process'
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 
 const rs = await import(new URL('../scripts/lib/bp1-run-state.mjs', import.meta.url).href)
-const { indexPath, loadIndex, appendRun, markTerminal, getRunState } = rs
+const { indexPath, loadIndex, appendRun, markTerminal, getRunState, updateRunState } = rs
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -113,15 +113,69 @@ tap('RS-collision appendRun for existing run_id → error collision; lockdir rel
 // =============================================================================
 // RS4 — loadIndex on missing file
 // =============================================================================
-tap('RS4 loadIndex on missing file → empty default', () => {
+tap('RS4 loadIndex on missing file → empty default (v2 schema)', () => {
   const proj = makeProjectRoot()
   const idx = loadIndex(proj)
-  assert.deepEqual(idx, { schema_version: 1, runs: {} })
+  assert.deepEqual(idx, { schema_version: 2, runs: {} })
 })
 
 // =============================================================================
 // RC3 — corrupt JSON in _index.json → loadIndex throws
 // =============================================================================
+// =============================================================================
+// US1 — updateRunState happy path + invalid-state rejection (slice 2c CR2-3)
+// =============================================================================
+tap('US1 updateRunState transitions active→rfc-detected + sets rfc_detected_episode_id', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us1-aabb', proj)
+  const r = updateRunState(proj, 'bp1-run-us1-aabb', {
+    state: 'rfc-detected',
+    rfc_detected_episode_id: 'bp1-run-us1-aabb-rfc-detected-1234',
+  })
+  assert.ok(r.ok)
+  const run = loadIndex(proj).runs['bp1-run-us1-aabb']
+  assert.equal(run.state, 'rfc-detected')
+  assert.equal(run.rfc_detected_episode_id, 'bp1-run-us1-aabb-rfc-detected-1234')
+})
+
+tap('US2 updateRunState rejects invalid state value', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us2-aabb', proj)
+  const r = updateRunState(proj, 'bp1-run-us2-aabb', { state: 'not-a-state' })
+  assert.equal(r.error, 'invalid-state')
+})
+
+tap('US3 updateRunState rejects unknown patch field', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us3-aabb', proj)
+  const r = updateRunState(proj, 'bp1-run-us3-aabb', { weird_field: 'nope' })
+  assert.equal(r.error, 'unknown-patch-field:weird_field')
+})
+
+tap('US4 updateRunState rejects invalid decided_class', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us4-aabb', proj)
+  const r = updateRunState(proj, 'bp1-run-us4-aabb', { decided_class: 'not-a-class' })
+  assert.equal(r.error, 'invalid-decided-class')
+})
+
+tap('US5 updateRunState refuses already-terminal run', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us5-aabb', proj)
+  markTerminal(proj, 'bp1-run-us5-aabb', 'complete')
+  const r = updateRunState(proj, 'bp1-run-us5-aabb', { state: 'rfc-detected' })
+  assert.equal(r.error, 'already-terminal')
+})
+
+tap('US6 markTerminal accepts non-active non-terminal v2 states (e.g. rfc-detected)', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-us6-aabb', proj)
+  updateRunState(proj, 'bp1-run-us6-aabb', { state: 'rfc-detected' })
+  const r = markTerminal(proj, 'bp1-run-us6-aabb', 'aborted')
+  assert.ok(r.ok)
+  assert.equal(loadIndex(proj).runs['bp1-run-us6-aabb'].state, 'aborted')
+})
+
 tap('RC3 corrupt JSON in _index.json → loadIndex throws (does not silently reset)', () => {
   const proj = makeProjectRoot()
   // Pre-create runs dir + write garbage.
