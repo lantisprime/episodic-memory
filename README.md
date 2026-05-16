@@ -93,7 +93,7 @@ The installer:
 |------|-----------------|------------------|
 | Claude Code | `SKILL.md` | `.claude/skills/episodic-memory/SKILL.md` |
 | Cursor | `cursor.mdc` | `.cursor/rules/episodic-memory.mdc` |
-| Codex | `codex-skill.md` | `.agents/skills/episodic-memory/` |
+| Codex | `SKILL.md` | `.agents/skills/episodic-memory/SKILL.md` |
 | Windsurf | `windsurf.md` | `.windsurfrules` (appended if exists) |
 
 ## Episode Categories

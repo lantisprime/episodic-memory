@@ -638,14 +638,16 @@ for (const t of tools) {
       break
     }
     case 'codex': {
-      // Install as a Codex skill in .agents/skills/
+      // Install as a Codex skill in .agents/skills/. Codex discovers skills
+      // by SKILL.md inside the skill directory; arbitrary markdown filenames
+      // in that directory are inert.
       const skillDir = path.join(projectDir, '.agents', 'skills', 'episodic-memory')
       fs.mkdirSync(skillDir, { recursive: true })
       fs.copyFileSync(
-        path.join(REPO_INSTRUCTIONS, 'codex-skill.md'),
-        path.join(skillDir, 'episodic-memory.md')
+        path.join(REPO_INSTRUCTIONS, 'SKILL.md'),
+        path.join(skillDir, 'SKILL.md')
       )
-      console.log(`Installed Codex skill to ${skillDir}/episodic-memory.md`)
+      console.log(`Installed Codex skill to ${skillDir}/SKILL.md`)
       break
     }
     case 'windsurf': {
