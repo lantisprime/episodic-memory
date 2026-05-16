@@ -36,6 +36,7 @@ stage_repo() {
   mkdir -p "$target/bundles"
   mkdir -p "$target/scripts/lib"
   mkdir -p "$target/hooks/lib"
+  mkdir -p "$target/.episodic-memory/memory"
   cp "$REPO_ROOT/scripts/preflight-marker-write.mjs" "$target/scripts/"
   cp "$REPO_ROOT/scripts/lib/preflight-prompt-canon.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" "$target/scripts/lib/"
@@ -47,6 +48,21 @@ stage_repo() {
   cp "$REPO_ROOT/hooks/lib/marker-paths.sh" "$target/hooks/lib/"
   cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$target/hooks/lib/"
   cp "$REPO_ROOT/bundles/codex-review-channel-current.md" "$target/bundles/"
+  # Stage the 7 review-channel components at the local memory_root +
+  # a config.json that points the hook there. Stub content per file —
+  # the gate validates loaded sha against disk, not against bundle-recorded.
+  for f in \
+    reference_codex_review_flow.md \
+    feedback_codex_cli_episode_messaging.md \
+    feedback_subagent_cli_episode_messaging.md \
+    feedback_canonical_agent_dispatch_trigger.md \
+    feedback_codex_review_request_preamble.md \
+    feedback_second_opinion_harness_runbook.md \
+    reference_second_opinion_harness.md
+  do
+    printf 'stub content for %s\n' "$f" > "$target/.episodic-memory/memory/$f"
+  done
+  jq -nc --arg p "$target/.episodic-memory/memory" '{claude_memory_root: $p}' > "$target/.episodic-memory/config.json"
   # Make it git-detectable so resolve_repo_root returns this dir, not /.
   ( cd "$target" && git init -q && git config user.email t@t && git config user.name t )
 }
@@ -63,10 +79,10 @@ run_hook() {
 }
 
 run_gate() {
-  local repo="$1" sid="$2"
+  local repo="$1" sid="$2" cmd="${3:-codex exec foo}"
   local payload
-  payload="$(jq -nc --arg c "$repo" --arg s "$sid" \
-    '{tool_name:"Bash", tool_input:{command:"codex exec foo"}, cwd:$c, session_id:$s, transcript_path:"/tmp/transcript.jsonl"}')"
+  payload="$(jq -nc --arg c "$repo" --arg s "$sid" --arg cmd "$cmd" \
+    '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$c, session_id:$s, transcript_path:"/tmp/transcript.jsonl"}')"
   ( cd "$repo" && printf '%s' "$payload" | bash "$repo/hooks/preflight-gate.sh" )
 }
 
@@ -156,12 +172,51 @@ else
   failed=$((failed+1))
 fi
 
+# I2-A (codex round-1 finding #1): marker must list all 7 components + the
+# bundle in required_files, and loaded_files must have a matching entry per
+# required_files entry with sha256 that matches disk.
+REQ_COUNT="$(jq -r '.required_files // [] | length' "$TF/.checkpoints/.preflight-done.${SID}")"
+LOADED_COUNT="$(jq -r '.loaded_files // [] | length' "$TF/.checkpoints/.preflight-done.${SID}")"
+if [ "$REQ_COUNT" = "8" ] && [ "$LOADED_COUNT" = "8" ]; then
+  echo "  ✓ I2 marker has 8 required_files + 8 loaded_files (bundle + 7 components)"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 marker has req=$REQ_COUNT loaded=$LOADED_COUNT (expected 8/8)"
+  failed=$((failed+1))
+fi
+
+# Cross-check: every loaded_files[i].sha256 matches disk shasum at .path
+SHA_DRIFT="$(jq -r '.loaded_files // [] | map([.path, .sha256] | @tsv) | .[]' "$TF/.checkpoints/.preflight-done.${SID}" | while IFS=$'\t' read -r p s; do
+  actual="$(shasum -a 256 "$p" 2>/dev/null | awk '{print $1}')"
+  if [ "$actual" != "$s" ]; then printf '%s ' "$p"; fi
+done)"
+if [ -z "$SHA_DRIFT" ]; then
+  echo "  ✓ I2 every loaded_files[i].sha256 matches disk"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 sha drift on: $SHA_DRIFT"
+  failed=$((failed+1))
+fi
+
 GATE_OUT="$(run_gate "$TF" "$SID" 2>&1 || true)"
 if [ -z "$GATE_OUT" ]; then
   echo "  ✓ I2 hook-owned marker lets preflight-gate allow codex handoff"
   passed=$((passed+1))
 else
   echo "  ✗ I2 gate denied after hook-owned marker: $GATE_OUT"
+  failed=$((failed+1))
+fi
+
+# I2-B (codex round-1 finding #2): gate must ACCEPT the actual harness
+# command shape `node scripts/second-opinion.mjs request --provider codex
+# --dispatch ...` once the hook-owned marker is in place.
+HARNESS_CMD="node $TF/scripts/second-opinion.mjs request --provider codex --dispatch --summary 'test' --body 'test'"
+GATE_OUT="$(run_gate "$TF" "$SID" "$HARNESS_CMD" 2>&1 || true)"
+if [ -z "$GATE_OUT" ]; then
+  echo "  ✓ I2 gate accepts actual second-opinion.mjs --provider codex --dispatch shape"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 gate denied harness command: $GATE_OUT"
   failed=$((failed+1))
 fi
 
