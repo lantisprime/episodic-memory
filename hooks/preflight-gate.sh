@@ -195,9 +195,23 @@ case "$TOOL_NAME" in
 esac
 
 # ---------------------------------------------------------------------------
-# Helper-invocation enforcement (FU-3): Bash invoking the helper without
-# explicit --root is denied at gate layer (defense in depth even when the
-# settings.json allowlist permits).
+# Helper-invocation enforcement (FU-3 + #279 Stream 2): Bash invoking the
+# helper must satisfy the v7 structural command-form grammar:
+#   <command> := <env-prefix>* <executable> <helper-script-path> <helper-flags>*
+# where:
+#   <env-prefix> name ∈ _ROUTINE_ENV_ALLOWLIST (NODE_ENV, DEBUG, CI, ...)
+#   <executable> basename ∈ _NODE_BINARY_BASENAME_ALLOWLIST (node)
+#
+# Replaces the prior regex-based detection of env wrappers / sudo wrappers /
+# path-spelled variants with two structural whitelists. Catches the entire
+# wrapper class (env, sudo, npx, nohup, time, bash, python, ...) via the
+# single executable-basename check.
+#
+# Defense layers BEYOND this gate:
+#   - Bash allowlist (settings.json) — first line of defense
+#   - command-classifier.sh wrapper_utility list — classify_command rejects
+#   - file-system permissions on /usr/bin/env etc.
+# This gate is one of many; not the only defense.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ]; then
   CMD="$(printf '%s' "$TOOL_INPUT_JSON" | jq -r '.command // ""')"
@@ -210,21 +224,47 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # preceded by start-of-string, space, or slash (i.e. it IS the basename
     # of a path or a bare invocation), AND followed by space or end. The
     # previous regex used `\b...\b` which matched ANY word-boundary,
-    # producing false-positives on `test-preflight-marker-write.mjs`
-    # (the `-` in `test-` is a non-word char, so `\b` triggered against
-    # the following `p`). Plan-v2 C5: tighten the boundary.
+    # producing false-positives on `test-preflight-marker-write.mjs`.
     HELPER_BASENAME_RE='(^|[ /])preflight-marker-write\.mjs( |$)'
     if printf '%s' "$NORMALIZED_CMD" | grep -qE "$HELPER_BASENAME_RE"; then
+      # #279 Stream 2: structural command-form check.
+      # _check_helper_invocation_grammar is sourced from command-classifier.sh.
+      GRAMMAR_RESULT="$(_check_helper_invocation_grammar "$CMD")"
+      GRAMMAR_VERDICT="${GRAMMAR_RESULT%%	*}"
+      if [ "$GRAMMAR_VERDICT" = "DENY" ]; then
+        GRAMMAR_REST="${GRAMMAR_RESULT#*	}"
+        GRAMMAR_KIND="${GRAMMAR_REST%%	*}"
+        GRAMMAR_DETAIL="${GRAMMAR_REST#*	}"
+        case "$GRAMMAR_KIND" in
+          env-prefix)
+            _emit_deny "Helper invocation env-prefix wrapper ($GRAMMAR_DETAIL=...) not in routine allowlist. Only routine framework env vars permitted before helper: NODE_ENV, DEBUG, CI, PYTHONPATH, LOG_LEVEL. Per env-prefix-discipline-v1.md. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          env-prefix-invalid)
+            _emit_deny "Helper invocation env-prefix token has invalid POSIX-name shape: $GRAMMAR_DETAIL. Names must match [A-Za-z_][A-Za-z0-9_]*. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          wrapper)
+            _emit_deny "Helper must be invoked via a token whose basename is 'node'. Got basename '$GRAMMAR_DETAIL'. Wrappers (env, sudo, npx, nohup, time, exec, bash, python, etc.) not permitted at executable position. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          tokenize)
+            _emit_deny "Helper invocation could not be safely tokenized ($GRAMMAR_DETAIL). Use a simple form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          no-exec)
+            _emit_deny "Helper invocation has no executable token after env-prefix walk. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          *)
+            _emit_deny "Helper invocation grammar denied ($GRAMMAR_KIND): $GRAMMAR_DETAIL"
+            ;;
+        esac
+      fi
+      # Grammar passed (T[idx]=node). Still enforce existing --root and
+      # --target last-prompt rules on the helper flags.
       if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
         _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED)."
       fi
-      # I7 (plan-v2 audit F2): the UserPromptSubmit hook is the ONLY
-      # sanctioned writer of `.last-user-prompt.<sid>.json`. The hook
-      # runs OUTSIDE the PreToolUse path (UserPromptSubmit event), so
-      # any PreToolUse-time invocation of the helper with `--target
-      # last-prompt` is an agent attempt to spoof the prompt-binding.
-      # Deny regardless of --root presence (the agent could supply
-      # --root correctly while still forging the sha).
+      # I7 (plan-v2 audit F2): UserPromptSubmit hook is the ONLY sanctioned
+      # writer of `.last-user-prompt.<sid>.json`. PreToolUse-time invocation
+      # of the helper with `--target last-prompt` is an agent attempt to
+      # spoof the prompt-binding.
       if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
         _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
       fi

@@ -423,6 +423,128 @@ _tokenize() {
 }
 
 # ---------------------------------------------------------------------------
+# #279 Stream 2: env-prefix wrapper defense — structural grammar for
+# preflight-marker-write.mjs helper invocations.
+#
+# Replaces regex-based helper-invocation detection (preflight-gate.sh) with
+# two whitelists that collectively eliminate the entire env-wrapper,
+# sudo-wrapper, npx-wrapper, path-spelled-anything class.
+#
+# _ROUTINE_ENV_ALLOWLIST — env-prefix names permitted before the helper.
+#   Sourced from env-prefix-discipline-v1.md "What's NOT this rule" section
+#   (routine framework / runtime env vars on their normal commands).
+#   Drift-validated by validate-plan-marker-sites.mjs.
+#
+# _NODE_BINARY_BASENAME_ALLOWLIST — token basenames permitted at the
+#   executable position. The gate enforces TOKEN-FORM identity (basename
+#   match), not RUNTIME identity. A binary literally named `node` that is
+#   actually a shell wrapper WILL pass this check — that class is out of
+#   scope for this gate (mitigated by file-system permissions + the Bash
+#   allowlist, not by this hook). Same-command shell shadowing (function
+#   defs, aliases, source, eval) is also out of scope (deep shell-injection;
+#   honest-agent threat model PR #271).
+# ---------------------------------------------------------------------------
+
+readonly _ROUTINE_ENV_ALLOWLIST="NODE_ENV DEBUG CI PYTHONPATH LOG_LEVEL"
+readonly _NODE_BINARY_BASENAME_ALLOWLIST="node"
+
+# _is_in_space_list <needle> <space-separated-list>
+# True iff <needle> appears as a whole token in <space-separated-list>.
+_is_in_space_list() {
+  local needle="$1" list="$2" t
+  for t in $list; do
+    [ "$t" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# _check_helper_invocation_grammar <cmd>
+#
+# Walks the tokenized command checking the v7 plan command-form grammar:
+#   <command> := <env-prefix>* <executable> <helper-script-path> <helper-flags>*
+#
+# Echoes one of:
+#   OK\t<idx>\t<basename>             — grammar satisfied; idx is the index
+#                                       of the executable token in TOKS
+#   DENY\tenv-prefix\t<name>          — non-allowlist env-prefix at position
+#   DENY\twrapper\t<basename>         — non-node basename at exec position
+#   DENY\tenv-prefix-invalid\t<tok>   — token shape rejected (POSIX-name re)
+#   DENY\ttokenize\t<reason>          — tokenizer emitted E
+#   DENY\tno-exec\t                   — no executable token after env-prefix
+#                                       walk (env-only command)
+#
+# Caller (preflight-gate.sh) parses the result, formats user-facing reason.
+# Returns 0 always; failure expressed in echoed verdict.
+_check_helper_invocation_grammar() {
+  local cmd="$1"
+  local -a TOKS=()
+  local line tok_text
+  while IFS= read -r line; do
+    case "$line" in
+      "T "*)
+        TOKS+=("${line:2}")
+        ;;
+      "E "*)
+        printf 'DENY\ttokenize\t%s\n' "${line:2}"
+        return 0
+        ;;
+      "O "*)
+        # Control operator at top level — multi-command segment, not a
+        # simple helper invocation. Fail-closed deny: structural rule
+        # requires single-segment command.
+        printf 'DENY\ttokenize\t%s\n' "control_operator_${line:2}"
+        return 0
+        ;;
+      *) ;;
+    esac
+  done < <(_tokenize "$cmd")
+
+  local idx=0
+  # Step 2: walk env-prefix tokens
+  while [ $idx -lt ${#TOKS[@]} ]; do
+    local t="${TOKS[$idx]}"
+    case "$t" in
+      [A-Za-z_]*=*)
+        # POSIX env-prefix shape. Extract name (before first =) and validate.
+        local ename="${t%%=*}"
+        case "$ename" in
+          *[!A-Za-z0-9_]*)
+            # Should not happen (case-glob requires [A-Za-z_] prefix),
+            # but be defensive.
+            printf 'DENY\tenv-prefix-invalid\t%s\n' "$t"
+            return 0
+            ;;
+        esac
+        if ! _is_in_space_list "$ename" "$_ROUTINE_ENV_ALLOWLIST"; then
+          printf 'DENY\tenv-prefix\t%s\n' "$ename"
+          return 0
+        fi
+        idx=$((idx+1))
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [ $idx -ge ${#TOKS[@]} ]; then
+    printf 'DENY\tno-exec\t\n'
+    return 0
+  fi
+
+  # Step 3: executable token basename whitelist
+  local exec_tok="${TOKS[$idx]}"
+  local exec_base="${exec_tok##*/}"
+  if ! _is_in_space_list "$exec_base" "$_NODE_BINARY_BASENAME_ALLOWLIST"; then
+    printf 'DENY\twrapper\t%s\n' "$exec_base"
+    return 0
+  fi
+
+  printf 'OK\t%d\t%s\n' "$idx" "$exec_base"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Per-segment classifier
 # ---------------------------------------------------------------------------
 # Reads tokens (T-records and redirect O-records) from stdin for ONE segment,
