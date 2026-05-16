@@ -1,14 +1,15 @@
 {
   "schema_version": 1,
   "default_per_provider": {
-    "codex": ["review-ladder-v9.4"],
-    "claude-subagent": ["claude-subagent-loader-ref"],
-    "gemini": ["gemini-ladder-v1"],
+    "codex": ["review-ladder-v9.4", "env-prefix-discipline-v1"],
+    "claude-subagent": ["claude-subagent-loader-ref", "env-prefix-discipline-v1"],
+    "gemini": ["gemini-ladder-v1", "env-prefix-discipline-v1"],
     "stub": ["review-ladder-v9.4"]
   },
   "fragments": [
     {"id": "review-ladder-v9.4", "path": "fragments/review-ladder-v9.4.md"},
     {"id": "claude-subagent-loader-ref", "path": "fragments/claude-subagent-loader-ref.md"},
-    {"id": "gemini-ladder-v1", "path": "fragments/gemini-ladder-v1.md"}
+    {"id": "gemini-ladder-v1", "path": "fragments/gemini-ladder-v1.md"},
+    {"id": "env-prefix-discipline-v1", "path": "fragments/env-prefix-discipline-v1.md"}
   ]
 }

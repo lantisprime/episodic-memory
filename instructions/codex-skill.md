@@ -54,3 +54,9 @@ Review session for 0-3 significant events, store them, then proceed with normal 
 ## Maintenance
 
 Rebuild index if corrupted: `node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all`
+
+## Command Invocation Hygiene
+
+**Env-prefix wrapper escape** (specific instance of safety-check bypass). Don't invoke commands with leading environment-variable assignments where the var name hints at gate-bypass intent — names containing `BYPASS_*`, `SKIP_*`, `DISABLE_*`, `ALLOW_*`, `OVERRIDE_*`, `UNSAFE_*`, or known internal gate prefixes. The wrapping invocation looks innocuous to a permission check while the env var carries the bypass payload (documented cross-session attack class; tracked in episodes tagged `pr-271`). Reject the entire form; don't tokenize allowed vs. disallowed vars.
+
+Does NOT cover routine framework / runtime env vars on their normal commands — `NODE_ENV=production npm start`, `DEBUG=1 ./run.sh`, `CI=true pytest`, `PYTHONPATH=. python script.py`, `LOG_LEVEL=debug ./service` are fine.

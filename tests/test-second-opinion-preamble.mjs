@@ -100,30 +100,33 @@ console.log('# test-second-opinion-preamble')
 // I-24: default preamble lands verbatim
 // ---------------------------------------------------------------------------
 console.log('\n## I-24 default preamble lands verbatim')
-test('default preamble for codex matches review-ladder-v9.4 fragment', () => {
+test('default preamble for codex includes review-ladder + env-prefix-discipline', () => {
   const tmp = makeTmpProject()
   const result = compose({ provider: 'codex', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['review-ladder-v9.4'])
+  assert.deepStrictEqual(result.fragmentIds, ['review-ladder-v9.4', 'env-prefix-discipline-v1'])
 
   const reg = loadRegistry()
-  const expectedFragment = readFragment(reg.fragments.find((f) => f.id === 'review-ladder-v9.4'))
-  assert.strictEqual(result.preambleBody, expectedFragment,
-    'composed body must equal fragment file content byte-for-byte')
+  const ladder = readFragment(reg.fragments.find((f) => f.id === 'review-ladder-v9.4'))
+  const envPrefix = readFragment(reg.fragments.find((f) => f.id === 'env-prefix-discipline-v1'))
+  assert.ok(result.preambleBody.includes(ladder),
+    'composed body must include review-ladder fragment content')
+  assert.ok(result.preambleBody.includes(envPrefix),
+    'composed body must include env-prefix-discipline fragment content')
 })
 
-test('default preamble for claude-subagent matches claude-subagent-loader-ref', () => {
+test('default preamble for claude-subagent includes loader-ref + env-prefix-discipline', () => {
   const tmp = makeTmpProject()
   const result = compose({ provider: 'claude-subagent', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['claude-subagent-loader-ref'])
+  assert.deepStrictEqual(result.fragmentIds, ['claude-subagent-loader-ref', 'env-prefix-discipline-v1'])
 })
 
-test('default preamble for gemini matches gemini-ladder-v1', () => {
+test('default preamble for gemini includes ladder-v1 + env-prefix-discipline', () => {
   const tmp = makeTmpProject()
   const result = compose({ provider: 'gemini', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['gemini-ladder-v1'])
+  assert.deepStrictEqual(result.fragmentIds, ['gemini-ladder-v1', 'env-prefix-discipline-v1'])
 })
 
 test('unknown provider with no default → no-default-preamble-for-provider', () => {

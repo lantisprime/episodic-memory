@@ -1,0 +1,34 @@
+name: autoMode drift check
+
+# Lightweight gate against the merge-vs-replace gotcha — see
+# memory/feedback_automode_replace_not_merge.md + lesson
+# 20260516-000611-custom-automode-rules-in-claude-code-set-7e62.
+#
+# The check authority is the developer's local `claude` CLI, not CI.
+# In CI, the claude CLI is typically absent — the validator exits 0
+# with "skip: claude CLI not available", which documents the check
+# without false-failing the workflow. Local developers should run
+# `node scripts/check-automode-defaults.mjs` before committing
+# settings.json edits.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/check-automode-defaults.mjs'
+      - '.github/workflows/automode-drift.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/check-automode-defaults.mjs'
+      - '.github/workflows/automode-drift.yml'
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run autoMode drift check (skips if claude CLI absent)
+        run: node scripts/check-automode-defaults.mjs
