@@ -362,10 +362,17 @@ echo "--- F3-series: helper invocation enforcement ---"
 TF="$(mktmp)"; stage_fixture "$TF"
 # F3-gate: Bash invoking helper without --root → DENY at gate
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --target preflight\"}" "deny" "ROOT_REQUIRED|--root" "F3-gate helper sans --root → DENY"
-# F3-gate (PR #291 codex r2 P1): Bash invoking helper WITH --root --target
-# preflight → still DENY. The agent has no sanctioned path; preflight marker
-# writes are reserved for the UserPromptSubmit hook.
-run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" "deny" "target preflight is reserved for the UserPromptSubmit hook" "F3-gate helper --target preflight → DENY (PR #291)"
+# F3-gate (PR #291 codex r3 P1): Bash invoking helper WITH --root and any
+# --target (or none) → DENY class-wide. The agent has no sanctioned path;
+# helper is reserved for the UserPromptSubmit hook subprocess (which does
+# not fire PreToolUse).
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate helper --root --target preflight → DENY (codex r3 class-wide)"
+# F3-gate codex r3 regressions: quoted and escaped --target values used to
+# bypass the prior NORMALIZED_CMD greps. The class-wide deny closes them.
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target \\\"preflight\\\"\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 quoted --target \"preflight\" → DENY"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target pre\\\\flight\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 escaped --target pre\\flight → DENY"
+# F3-gate codex r3: helper with --root and NO --target → still DENY (class-wide).
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 helper --root only (no --target) → DENY"
 # A1: bare/npx/script-shebang invocation also denied without --root
 run_gate "$TF" "Bash" '{"command":"./scripts/preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1a bare script invocation sans --root → DENY"
 run_gate "$TF" "Bash" '{"command":"npx preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1b npx invocation sans --root → DENY"
@@ -697,18 +704,32 @@ cat > "$TF/.checkpoints/.last-user-prompt.${SESSION_ID}.json" <<EOF
 EOF
 run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "non-numeric wrote_at_ms" "I8e empty wrote_at_ms → deny"
 
-# I7a: Bash invocation with --target last-prompt → DENY (agent spoof attempt)
+# I7a: Bash invocation with --target last-prompt → DENY (codex r3 class-wide
+# deny — was per-flag in r2; flipped to class-wide because quoted/escaped
+# target values bypassed the regex while runtime tokenizer normalized them).
 TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target last-prompt --session-id agent-spoof\"}" \
-  "deny" "reserved for the UserPromptSubmit hook" "I7a agent --target last-prompt → deny"
+  "deny" "reserved for the UserPromptSubmit hook" "I7a agent --target last-prompt → deny (codex r3 class-wide)"
 
-# I7b (PR #291 codex r2 P1): Bash invocation with --target preflight → DENY.
-# UserPromptSubmit hook is now the sole writer of the preflight marker too;
-# agent invocation would let a forged marker pass the gate using the current
-# .last-user-prompt.<sid>.json sha + disk-hashed components.
+# I7b (PR #291 codex r3 P1): Bash invocation with --target preflight → DENY
+# via class-wide unconditional deny (no longer a --target preflight regex).
 TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight --session-id agent-forge\"}" \
-  "deny" "target preflight is reserved for the UserPromptSubmit hook" "I7b agent --target preflight → deny (PR #291)"
+  "deny" "reserved for the UserPromptSubmit hook" "I7b agent --target preflight → deny (codex r3 class-wide)"
+
+# I7c codex r3: equivalent Bash forms that bypassed the r2 NORMALIZED_CMD
+# regex (--target "preflight" quoted; --target pre\flight escaped) all tokenize
+# to target=preflight at helper runtime. Class-wide deny closes them.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target \\\"preflight\\\" --session-id agent-forge\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7c-quoted agent --target \"preflight\" → deny (codex r3)"
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target pre\\\\flight --session-id agent-forge\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7c-escaped agent --target pre\\flight → deny (codex r3)"
+# And the same bypass shape for last-prompt.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target \\\"last-prompt\\\" --session-id agent-spoof\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "I7c-quoted agent --target \"last-prompt\" → deny (codex r3)"
 
 # Regex tightening: `test-preflight-marker-write.mjs` in argv should NOT
 # trigger the helper-invocation deny. (Before C5 it did — false-positive

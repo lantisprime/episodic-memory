@@ -262,27 +262,28 @@ if [ "$TOOL_NAME" = "Bash" ]; then
             ;;
         esac
       fi
-      # Grammar passed (T[idx]=node). Still enforce existing --root and
-      # --target last-prompt rules on the helper flags.
+      # Grammar passed (T[idx]=node). Diagnostic: surface the more specific
+      # "missing --root" error first when applicable, so a benign caller
+      # missing the flag gets actionable text instead of the class-wide deny.
       if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
-        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED)."
+        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form (hook-only): node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED). NOTE: agent-side invocation is forbidden regardless of --root — see class-wide deny below."
       fi
-      # I7 (plan-v2 audit F2): UserPromptSubmit hook is the ONLY sanctioned
-      # writer of `.last-user-prompt.<sid>.json`. PreToolUse-time invocation
-      # of the helper with `--target last-prompt` is an agent attempt to
-      # spoof the prompt-binding.
-      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
-        _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
-      fi
-      # PR #291 codex r2 P1: --target preflight is now also reserved for the
-      # UserPromptSubmit hook. Otherwise an agent can forge the preflight
-      # marker by re-using the current .last-user-prompt.<sid>.json sha plus
-      # disk-hashed components, defeating the hook-owned design from #285.
-      # The hook's own subprocess call doesn't fire PreToolUse — only agent
-      # Bash tool calls hit this gate.
-      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+preflight([[:space:]]|$)'; then
-        _emit_deny "preflight-marker-write.mjs --target preflight is reserved for the UserPromptSubmit hook (PR #291 / #285). Agent invocation at PreToolUse is forbidden — the hook writes the preflight marker on every real user prompt with the bundle + 7 components hashed. If the marker is missing or stale, the install may be incomplete: re-run install.mjs --install-hooks."
-      fi
+      # PR #291 codex r3 P1: deny ALL agent-side preflight-marker-write.mjs
+      # invocations unconditionally. Replaces the prior per-target regex
+      # checks (--target last-prompt, --target preflight) on NORMALIZED_CMD,
+      # which only inspected raw shell text. Quoted (--target "preflight")
+      # and escaped (--target pre\flight) variants slipped past the regex
+      # while the helper's _tokenize normalized them to `target=preflight`
+      # at runtime, leaving the agent-owned marker-forge path open.
+      #
+      # Class-fix rationale: the helper only writes protected marker files
+      # (.preflight-done.<sid> and .last-user-prompt.<sid>.json). The sole
+      # sanctioned caller is the UserPromptSubmit hook subprocess, which
+      # does NOT fire PreToolUse. Therefore the agent has no legitimate
+      # need to invoke this helper, and denying the whole invocation class
+      # at the agent boundary closes every (--target, quote-form) variant
+      # at once.
+      _emit_deny "preflight-marker-write.mjs is reserved for the UserPromptSubmit hook (PR #291 / #285 / codex r3). Agent invocation at PreToolUse is forbidden — the hook writes both .preflight-done.<sid> and .last-user-prompt.<sid>.json automatically with prompt-bound shas + bundle component hashes. If the marker is missing or stale, the install may be incomplete: re-run install.mjs --install-hooks. (Class-wide deny replaces per-flag regex: quoted/escaped --target values bypassed the prior NORMALIZED_CMD greps because _tokenize normalized them only at helper runtime.)"
     fi
   fi
 fi
