@@ -29,3 +29,12 @@ node_modules/
 
 # BP-1 per-run HMAC key (RFC-004)
 **/.episodic-memory/runs/*/run.key
+
+# Per-session scratch / analysis (mining staging, plan drafts, codex requests)
+scratch/
+analysis/
+
+# Codex CLI runtime tooling (per-session, never committed)
+.codex/
+.agents/
+AGENTS.md
