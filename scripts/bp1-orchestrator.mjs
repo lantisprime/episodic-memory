@@ -54,7 +54,9 @@ import {
   runKeyPath,
   loadVerifyKey,
 } from './lib/bp1-keys.mjs'
-import { appendRun, markTerminal, getRunState } from './lib/bp1-run-state.mjs'
+import {
+  appendRun, markTerminal, getRunState, loadIndex, updateRunState,
+} from './lib/bp1-run-state.mjs'
 import { probeScheduledTasksCapability } from './lib/bp1-probe.mjs'
 import {
   collectEpisodeRecords,
@@ -65,9 +67,17 @@ import {
   assertRunIdShape,
 } from './lib/bp1-manifest.mjs'
 import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
+import { writeBp1Episode } from './lib/bp1-episode-writer.mjs'
+import { verifyEpisodeOnDisk } from './lib/bp1-episode-verify.mjs'
 
 const REPO_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const FLAG_CHECK = path.join(REPO_DIR, 'scripts', 'bp1-flag-check.mjs')
+const RFC_SCAN = path.join(REPO_DIR, 'scripts', 'bp1-rfc-scan.mjs')
+const EM_STORE = path.join(REPO_DIR, 'scripts', 'em-store.mjs')
+
+const INPUT_SHA256_RE = /^[a-f0-9]{64}$/
+const EPISODE_ID_RE = /^[a-z0-9-]+$/
+const VALID_DECIDED_CLASSES = ['trivial', 'schema', 'validator', 'security', 'multi-actor', 'needs-human-input']
 
 // ---------------------------------------------------------------------------
 // CLI parsing
@@ -78,12 +88,18 @@ function usage() {
     'Usage:\n' +
     '  bp1-orchestrator init-run --project <projectRoot> --rfc-id <rfcId>\n' +
     '  bp1-orchestrator finalize-run --project <projectRoot> --run-id <runId>\n' +
-    '  bp1-orchestrator finalize-recover --project <projectRoot> --run-id <runId>\n',
+    '  bp1-orchestrator finalize-recover --project <projectRoot> --run-id <runId>\n' +
+    '  bp1-orchestrator detect-rfcs --project <projectRoot>\n' +
+    '  bp1-orchestrator record-classifier-dispatch-pre --project <projectRoot> --run-id <runId> --input-sha256 <64-hex>\n' +
+    '  bp1-orchestrator record-classification --project <projectRoot> --run-id <runId> --pre-episode-id <id> --result-file <abs-path>\n',
   )
 }
 
 function parseArgs(argv) {
-  const out = { subcommand: null, project: null, rfcId: null, runId: null }
+  const out = {
+    subcommand: null, project: null, rfcId: null, runId: null,
+    inputSha256: null, preEpisodeId: null, resultFile: null,
+  }
   if (argv.length === 0) return out
   out.subcommand = argv[0]
   for (let i = 1; i < argv.length; i++) {
@@ -91,6 +107,9 @@ function parseArgs(argv) {
     if (arg === '--project') out.project = argv[++i]
     else if (arg === '--rfc-id') out.rfcId = argv[++i]
     else if (arg === '--run-id') out.runId = argv[++i]
+    else if (arg === '--input-sha256') out.inputSha256 = argv[++i]
+    else if (arg === '--pre-episode-id') out.preEpisodeId = argv[++i]
+    else if (arg === '--result-file') out.resultFile = argv[++i]
     else if (arg === '--help' || arg === '-h') {
       usage()
       process.exit(0)
@@ -880,6 +899,591 @@ function finalizeRecover(args) {
   return 0
 }
 
+// ===========================================================================
+// Slice 2c — orchestrator state-machine dispatch site
+// ===========================================================================
+//
+// Three new subcommands wire the BP-1 orchestrator to the classifier dispatch
+// site (RFC-004 §668, §722, M2). All emit HMAC-signed state-transition or
+// failure episodes via the generic writer in lib/bp1-episode-writer.mjs.
+// Parents are HMAC-verified via lib/bp1-episode-verify.mjs before children
+// are signed (CR2-2). Run-state transitions use updateRunState (CR2-3).
+
+function emitForensicViaEmStore(projectRoot, summary, body, tags) {
+  // CR2-1 fix: --category is `workflow.lifecycle` (NOT `failure` — that's
+  // not a valid em-store category). --project is path.basename(projectRoot)
+  // (em-store --project is project NAME for store-routing). Spawn cwd is
+  // projectRoot so the local-scope episode lands under projectRoot's
+  // .episodic-memory/.
+  if (!fs.existsSync(EM_STORE)) return
+  try {
+    spawnSync('node', [
+      EM_STORE,
+      '--project', path.basename(projectRoot),
+      '--category', 'workflow.lifecycle',
+      '--tags', tags.join(','),
+      '--scope', 'local',
+      '--summary', summary,
+      '--body', body,
+    ], {
+      cwd: projectRoot,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 5000,
+    })
+  } catch (_e) {
+    // forensic best-effort
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: detect-rfcs
+// ---------------------------------------------------------------------------
+
+function detectRfcs(args) {
+  if (!args.project) { usage(); return 2 }
+  let projectRoot
+  try {
+    projectRoot = fs.realpathSync(args.project)
+  } catch (_e) {
+    process.stderr.write(`error: --project does not exist: ${args.project}\n`)
+    return 2
+  }
+  if (!fs.existsSync(path.join(projectRoot, '.git'))) {
+    process.stderr.write(`error: --project is not a git repository: ${projectRoot}\n`)
+    return 2
+  }
+  const homeDir = os.homedir()
+
+  // Step 1: flag-check gate (--no-emit). Inert → exit 0.
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: homeDir },
+  })
+  if (flagCheck.error || flagCheck.status !== 0) {
+    let reason = `flag-check-exit-${flagCheck.status}`
+    try {
+      const j = JSON.parse(flagCheck.stdout || '{}')
+      if (j && j.reason) reason = j.reason
+    } catch (_e) { /* tolerated */ }
+    process.stderr.write(`bp1 inert for project ${projectRoot}: ${reason}\n`)
+    process.stdout.write(JSON.stringify({ status: 'inert', reason }) + '\n')
+    return 0
+  }
+
+  // Step 2: spawn bp1-rfc-scan (cwd: projectRoot).
+  const scan = spawnSync('node', [RFC_SCAN, '--project', projectRoot], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: homeDir },
+    timeout: 30000,
+  })
+  if (scan.error || scan.status !== 0) {
+    // Step 3: forensic + exit 3.
+    const summary = `bp1-rfc-scan-failure: exit ${scan.status} for ${projectRoot}`
+    const body = '# bp1-rfc-scan-failure\n\n' +
+      `Exit: \`${scan.status}\`\n\nProject: \`${projectRoot}\`\n\n` +
+      '```\n' + (scan.stderr || '<no stderr>') + '\n```\n'
+    emitForensicViaEmStore(projectRoot, summary, body, ['bp1-rfc-scan-failure', 'forensic'])
+    process.stderr.write(`bp1-orchestrator detect-rfcs: rfc-scan exited ${scan.status}\n`)
+    return 3
+  }
+  let scanOut
+  try {
+    scanOut = JSON.parse(scan.stdout)
+  } catch (e) {
+    process.stderr.write(`bp1-orchestrator detect-rfcs: rfc-scan stdout JSON-invalid: ${e.message}\n`)
+    return 3
+  }
+  if (scanOut.status !== 'ok') {
+    // rfc-scan returned inert / error structure — no RFCs to detect.
+    process.stdout.write(JSON.stringify({ status: 'ok', detected: [], inert: scanOut.status === 'inert', reason: scanOut.reason || null }) + '\n')
+    return 0
+  }
+  const rfcs = Array.isArray(scanOut.rfcs) ? scanOut.rfcs : []
+
+  // Step 4: per-RFC processing.
+  const detected = []
+  for (const entry of rfcs) {
+    if (!entry || typeof entry.path !== 'string' || typeof entry.frontmatter_sha256 !== 'string') {
+      continue
+    }
+    // Re-flag-check (HOLD D) — operator may have flipped activation between
+    // initial gate + per-RFC iteration.
+    const recheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+      cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: homeDir },
+    })
+    if (recheck.status !== 0) {
+      process.stderr.write(`bp1-orchestrator detect-rfcs: re-flag-check failed mid-iteration; halting at ${entry.path}\n`)
+      break
+    }
+    const rfcId = path.basename(entry.path, '.md')
+    const runId = mintRunId(rfcId)
+
+    // Generate run.key + persist.
+    let keyResult
+    try {
+      keyResult = generateRunKey(projectRoot, runId)
+    } catch (e) {
+      process.stderr.write(`error: generateRunKey failed for ${runId}: ${e.message}\n`)
+      return 3
+    }
+    const { key32B } = keyResult
+
+    // Append run-state row (uses loadIndexLocked internally — CR2-3).
+    const append = appendRun(projectRoot, runId, projectRoot)
+    if (append.error) {
+      process.stderr.write(`error: appendRun failed for ${runId}: ${append.error}\n`)
+      return 3
+    }
+
+    // Emit bp1-rfc-detected state-transition via internal writer.
+    const written = writeBp1Episode({
+      projectRoot, runId, runKey32B: key32B,
+      type: 'state-transition', state: 'rfc-detected',
+      summary: `BP-1 rfc-detected: ${rfcId}`,
+      parentEpisode: null, expectedPostEpisodeId: null,
+      customFm: { rfc_id: rfcId, frontmatter_sha256: entry.frontmatter_sha256 },
+      tags: ['bp1-rfc-detected'],
+      body: `# bp1-rfc-detected — ${runId}\n\nRFC \`${rfcId}\` detected at ${new Date().toISOString()} for project \`${projectRoot}\`.\n`,
+      filenameSuffix: 'rfc-detected',
+    })
+    // Persist rfc_detected_episode_id + state transition.
+    const upd = updateRunState(projectRoot, runId, {
+      state: 'rfc-detected',
+      rfc_detected_episode_id: written.episodeId,
+    })
+    if (upd.error) {
+      process.stderr.write(`error: updateRunState failed for ${runId}: ${upd.error}\n`)
+      return 3
+    }
+    detected.push({ rfc_id: rfcId, run_id: runId, rfc_detected_episode_id: written.episodeId })
+  }
+
+  process.stdout.write(JSON.stringify({ status: 'ok', detected, inert: false }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: record-classifier-dispatch-pre
+// ---------------------------------------------------------------------------
+
+function recordClassifierDispatchPre(args) {
+  if (!args.project) { usage(); return 2 }
+  if (!args.runId) {
+    process.stderr.write('error: --run-id is required\n')
+    return 2
+  }
+  if (!args.inputSha256 || !INPUT_SHA256_RE.test(args.inputSha256)) {
+    process.stderr.write('error: --input-sha256 must be 64 lowercase hex chars\n')
+    return 2
+  }
+  try {
+    assertRunIdShape(args.runId)
+  } catch (e) {
+    process.stderr.write(`error: --run-id has invalid shape: ${e.message}\n`)
+    return 2
+  }
+  let projectRoot
+  try {
+    projectRoot = fs.realpathSync(args.project)
+  } catch (_e) {
+    process.stderr.write(`error: --project does not exist: ${args.project}\n`)
+    return 2
+  }
+  if (!fs.existsSync(path.join(projectRoot, '.git'))) {
+    process.stderr.write(`error: --project is not a git repository: ${projectRoot}\n`)
+    return 2
+  }
+
+  // Flag-check gate.
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() },
+  })
+  if (flagCheck.status !== 0) {
+    process.stderr.write(`bp1 inert for project ${projectRoot}\n`)
+    return 1
+  }
+
+  // Load run.key.
+  const keyResult = loadRunKey(projectRoot, args.runId)
+  if (keyResult.error) {
+    process.stderr.write(`error: run.key ${keyResult.error} for ${args.runId}\n`)
+    return 5
+  }
+  const { key32B } = keyResult
+
+  // Load run-state (unlocked loadIndex; this is an inspection).
+  const idx = loadIndex(projectRoot)
+  const run = idx.runs[args.runId]
+  if (!run) {
+    process.stderr.write(`error: run ${args.runId} not found in run-state\n`)
+    return 5
+  }
+  if (run.state !== 'rfc-detected') {
+    process.stderr.write(`error: state-violation: run.state=${JSON.stringify(run.state)} expected=rfc-detected\n`)
+    return 5
+  }
+  if (!run.rfc_detected_episode_id) {
+    // CR2-fix C1: must have rfc_detected_episode_id pointer to verify.
+    process.stderr.write('error: run.rfc_detected_episode_id is null; cannot verify parent\n')
+    return 5
+  }
+
+  // CR2-2: verify parent rfc-detected episode on disk.
+  const verify = verifyEpisodeOnDisk({
+    projectRoot, episodeId: run.rfc_detected_episode_id, runKey32B: key32B,
+    expectedType: 'state-transition', expectedState: 'rfc-detected',
+    expectedRunId: args.runId,
+  })
+  if (!verify.ok) {
+    // Emit bp1-classifier-parent-tamper failure episode (signed with run.key).
+    try {
+      writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'failure', state: null,
+        summary: `BP-1 classifier parent-tamper at dispatch-pre: ${args.runId}`,
+        parentEpisode: null, expectedPostEpisodeId: null,
+        customFm: {
+          failure_kind: 'classifier-parent-tamper',
+          field_name: 'rfc_detected_episode_id',
+          observed_value: safeTruncate(JSON.stringify(run.rfc_detected_episode_id), 66),
+          violation_reason: verify.errors.join('; '),
+        },
+        tags: ['bp1-classifier-parent-tamper'],
+        body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verify.errors.map(e => `- \`${e}\``).join('\n')}\n`,
+        filenameSuffix: 'parent-tamper',
+      })
+    } catch (_e) { /* best-effort forensic */ }
+    process.stderr.write(`error: parent-tamper: ${verify.errors.join('; ')}\n`)
+    return 5
+  }
+
+  // Emit bp1-classifier-dispatch-pre state-transition.
+  const written = writeBp1Episode({
+    projectRoot, runId: args.runId, runKey32B: key32B,
+    type: 'state-transition', state: 'classifier-dispatch-pending',
+    summary: `BP-1 classifier-dispatch-pre: ${args.runId}`,
+    parentEpisode: run.rfc_detected_episode_id,
+    expectedPostEpisodeId: null,
+    customFm: { input_sha256: args.inputSha256 },
+    tags: ['bp1-classifier-dispatch-pre'],
+    body: `# bp1-classifier-dispatch-pre — ${args.runId}\n\ninput_sha256: \`${args.inputSha256}\`\n`,
+    filenameSuffix: 'pre',
+  })
+
+  // Persist state + pre_episode_id.
+  const upd = updateRunState(projectRoot, args.runId, {
+    state: 'classifier-dispatch-pending',
+    pre_episode_id: written.episodeId,
+  })
+  if (upd.error) {
+    process.stderr.write(`error: updateRunState failed: ${upd.error}\n`)
+    return 5
+  }
+
+  process.stdout.write(JSON.stringify({
+    status: 'ok', pre_episode_id: written.episodeId, run_id: args.runId,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: record-classification
+// ---------------------------------------------------------------------------
+
+// Truncate a string to at most `maxBytes` UTF-8 bytes WITHOUT splitting a
+// multi-byte sequence. The slice(0, N) form on JS strings counts UTF-16
+// code units, which can land mid-surrogate-pair, producing invalid UTF-8
+// after Buffer.from(). Used for `observed_value` (66-char cap per
+// describeStatus policy in RFC §510-547).
+function safeTruncate(s, maxBytes) {
+  if (typeof s !== 'string') return ''
+  const buf = Buffer.from(s, 'utf8')
+  if (buf.length <= maxBytes) return s
+  // Walk back from maxBytes until we land on a UTF-8 start byte
+  // (top bits 0xxxxxxx or 11xxxxxx, NOT a continuation byte 10xxxxxx).
+  let end = maxBytes
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--
+  return buf.subarray(0, end).toString('utf8')
+}
+
+function safeJsonParse(text) {
+  // Reviver rejects __proto__ / constructor / prototype keys (HOLD T22b).
+  return JSON.parse(text, (key, value) => {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new Error(`prototype-pollution key rejected: ${key}`)
+    }
+    return value
+  })
+}
+
+function validateClassifierOutput(obj) {
+  // Strict validation per classifier_output_schema (contract.json mirror).
+  // Returns { ok: true } | { ok: false, field_name, observed_value, violation_reason }.
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { ok: false, field_name: '<root>', observed_value: safeTruncate(JSON.stringify(obj), 66), violation_reason: 'must be an object' }
+  }
+  const required = ['class', 'confidence', 'rationale', 'classified_fields']
+  for (const k of required) {
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) {
+      return { ok: false, field_name: k, observed_value: 'undefined', violation_reason: `required field missing` }
+    }
+  }
+  // additionalProperties: false
+  for (const k of Object.keys(obj)) {
+    if (!required.includes(k)) {
+      return { ok: false, field_name: k, observed_value: safeTruncate(JSON.stringify(obj[k]), 66), violation_reason: `unknown field (additionalProperties: false)` }
+    }
+  }
+  if (!VALID_DECIDED_CLASSES.includes(obj.class)) {
+    return { ok: false, field_name: 'class', observed_value: safeTruncate(JSON.stringify(obj.class), 66), violation_reason: `not in enum` }
+  }
+  if (typeof obj.confidence !== 'number' || !Number.isFinite(obj.confidence) || obj.confidence < 0 || obj.confidence > 1) {
+    return { ok: false, field_name: 'confidence', observed_value: safeTruncate(JSON.stringify(obj.confidence), 66), violation_reason: `must be number in [0, 1]` }
+  }
+  if (typeof obj.rationale !== 'string') {
+    return { ok: false, field_name: 'rationale', observed_value: safeTruncate(JSON.stringify(obj.rationale), 66), violation_reason: `must be string` }
+  }
+  const wordCount = obj.rationale.trim().split(/\s+/).filter(Boolean).length
+  if (wordCount < 1 || wordCount > 300) {
+    return { ok: false, field_name: 'rationale', observed_value: `wordCount=${wordCount}`, violation_reason: `wordCount must be in [1, 300]` }
+  }
+  if (!Array.isArray(obj.classified_fields) || obj.classified_fields.length < 1) {
+    return { ok: false, field_name: 'classified_fields', observed_value: safeTruncate(JSON.stringify(obj.classified_fields), 66), violation_reason: `must be array with at least 1 element` }
+  }
+  for (const el of obj.classified_fields) {
+    if (typeof el !== 'string' || el.length === 0) {
+      return { ok: false, field_name: 'classified_fields', observed_value: safeTruncate(JSON.stringify(el), 66), violation_reason: `array element must be non-empty string` }
+    }
+  }
+  return { ok: true }
+}
+
+function recordClassification(args) {
+  if (!args.project) { usage(); return 2 }
+  if (!args.runId) {
+    process.stderr.write('error: --run-id is required\n')
+    return 2
+  }
+  if (!args.preEpisodeId || !EPISODE_ID_RE.test(args.preEpisodeId)) {
+    process.stderr.write('error: --pre-episode-id required and must match episode-id shape\n')
+    return 2
+  }
+  if (!args.resultFile) {
+    process.stderr.write('error: --result-file is required\n')
+    return 2
+  }
+  // CR2-fix C7: --result-file MUST be absolute.
+  if (!path.isAbsolute(args.resultFile)) {
+    process.stderr.write(`error: --result-file must be absolute path; got ${args.resultFile}\n`)
+    return 2
+  }
+  try {
+    assertRunIdShape(args.runId)
+  } catch (e) {
+    process.stderr.write(`error: --run-id has invalid shape: ${e.message}\n`)
+    return 2
+  }
+  let projectRoot
+  try {
+    projectRoot = fs.realpathSync(args.project)
+  } catch (_e) {
+    process.stderr.write(`error: --project does not exist: ${args.project}\n`)
+    return 2
+  }
+  if (!fs.existsSync(path.join(projectRoot, '.git'))) {
+    process.stderr.write(`error: --project is not a git repository: ${projectRoot}\n`)
+    return 2
+  }
+
+  // Flag-check gate.
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() },
+  })
+  if (flagCheck.status !== 0) {
+    process.stderr.write(`bp1 inert for project ${projectRoot}\n`)
+    return 1
+  }
+
+  // Load run.key.
+  const keyResult = loadRunKey(projectRoot, args.runId)
+  if (keyResult.error) {
+    process.stderr.write(`error: run.key ${keyResult.error} for ${args.runId}\n`)
+    return 5
+  }
+  const { key32B } = keyResult
+
+  // Load run-state.
+  const idx = loadIndex(projectRoot)
+  const run = idx.runs[args.runId]
+  if (!run) {
+    process.stderr.write(`error: run ${args.runId} not found\n`)
+    return 5
+  }
+  if (run.state !== 'classifier-dispatch-pending') {
+    process.stderr.write(`error: state-violation: run.state=${JSON.stringify(run.state)} expected=classifier-dispatch-pending\n`)
+    return 5
+  }
+  // Equality gate (C2): --pre-episode-id === runState.pre_episode_id.
+  if (args.preEpisodeId !== run.pre_episode_id) {
+    process.stderr.write(`error: state-violation: --pre-episode-id ${args.preEpisodeId} != run.pre_episode_id ${run.pre_episode_id}\n`)
+    return 5
+  }
+
+  // CR2-2: verify parent pre on disk.
+  const verify = verifyEpisodeOnDisk({
+    projectRoot, episodeId: args.preEpisodeId, runKey32B: key32B,
+    expectedType: 'state-transition', expectedState: 'classifier-dispatch-pending',
+    expectedRunId: args.runId,
+  })
+  if (!verify.ok) {
+    try {
+      writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'failure', state: null,
+        summary: `BP-1 classifier parent-tamper at record-classification: ${args.runId}`,
+        parentEpisode: null, expectedPostEpisodeId: null,
+        customFm: {
+          failure_kind: 'classifier-parent-tamper',
+          field_name: 'pre_episode_id',
+          observed_value: safeTruncate(JSON.stringify(args.preEpisodeId), 66),
+          violation_reason: verify.errors.join('; '),
+        },
+        tags: ['bp1-classifier-parent-tamper'],
+        body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verify.errors.map(e => `- \`${e}\``).join('\n')}\n`,
+        filenameSuffix: 'parent-tamper',
+      })
+    } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+    process.stderr.write(`error: parent-tamper: ${verify.errors.join('; ')}\n`)
+    return 5
+  }
+
+  // Single read (HOLD C): read result-file ONCE.
+  let resultText
+  try {
+    resultText = fs.readFileSync(args.resultFile, 'utf8')
+  } catch (e) {
+    process.stderr.write(`error: --result-file unreadable: ${e.message}\n`)
+    return 5
+  }
+  // Compute sha256 from the in-memory bytes (used for forensic embedding only).
+  const _resultSha = crypto.createHash('sha256').update(resultText, 'utf8').digest('hex')
+
+  // Parse + schema-validate.
+  let parsed
+  try {
+    parsed = safeJsonParse(resultText)
+  } catch (e) {
+    // Schema-violation failure episode.
+    try {
+      writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'failure', state: null,
+        summary: `BP-1 classifier schema-violation: ${args.runId}`,
+        parentEpisode: args.preEpisodeId, expectedPostEpisodeId: null,
+        customFm: {
+          failure_kind: 'classifier-schema-violation',
+          field_name: '<json-parse>',
+          observed_value: safeTruncate(JSON.stringify(e.message), 66),
+          violation_reason: 'JSON parse failed',
+        },
+        tags: ['bp1-classifier-schema-violation'],
+        body: `# bp1-classifier-schema-violation\n\nJSON parse failed: \`${e.message}\`\n`,
+        filenameSuffix: 'schema-violation',
+      })
+    } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+    process.stderr.write(`error: classifier output JSON parse failed: ${e.message}\n`)
+    return 5
+  }
+  const v = validateClassifierOutput(parsed)
+  if (!v.ok) {
+    try {
+      writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'failure', state: null,
+        summary: `BP-1 classifier schema-violation (${v.field_name}): ${args.runId}`,
+        parentEpisode: args.preEpisodeId, expectedPostEpisodeId: null,
+        customFm: {
+          failure_kind: 'classifier-schema-violation',
+          field_name: v.field_name,
+          observed_value: v.observed_value,
+          violation_reason: v.violation_reason,
+        },
+        tags: ['bp1-classifier-schema-violation'],
+        body: `# bp1-classifier-schema-violation\n\nField: \`${v.field_name}\`\nObserved: \`${v.observed_value}\`\nReason: \`${v.violation_reason}\`\n`,
+        filenameSuffix: 'schema-violation',
+      })
+    } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+    process.stderr.write(`error: classifier output schema-violation: field=${v.field_name} reason=${v.violation_reason}\n`)
+    return 5
+  }
+
+  const decidedClass = parsed.class
+  const confidenceStr = String(parsed.confidence)
+
+  // Emit bp1-classified state-transition (parent: pre_episode_id).
+  const classifiedEp = writeBp1Episode({
+    projectRoot, runId: args.runId, runKey32B: key32B,
+    type: 'state-transition', state: 'classified',
+    summary: `BP-1 classified ${decidedClass} (conf=${confidenceStr}): ${args.runId}`,
+    parentEpisode: args.preEpisodeId, expectedPostEpisodeId: null,
+    customFm: {
+      decided_class: decidedClass,
+      classifier_confidence: confidenceStr,   // pre-stringified per writer contract
+    },
+    tags: ['bp1-classified'],
+    body: `# bp1-classified — ${args.runId}\n\nclass: \`${decidedClass}\`\nconfidence: \`${confidenceStr}\`\n`,
+    filenameSuffix: 'classified',
+  })
+  const updClass = updateRunState(projectRoot, args.runId, {
+    state: 'classified', decided_class: decidedClass,
+  })
+  if (updClass.error) {
+    process.stderr.write(`error: updateRunState (classified) failed: ${updClass.error}\n`)
+    return 5
+  }
+
+  // Route: trivial → planning; else → needs-human.
+  let nextState, routeEpisode
+  if (decidedClass === 'trivial') {
+    routeEpisode = writeBp1Episode({
+      projectRoot, runId: args.runId, runKey32B: key32B,
+      type: 'state-transition', state: 'planning',
+      summary: `BP-1 planning (source: trivial): ${args.runId}`,
+      parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
+      customFm: { source_class: 'trivial' },
+      tags: ['bp1-planning'],
+      body: `# bp1-planning — ${args.runId}\n\nsource_class: \`trivial\`\n`,
+      filenameSuffix: 'planning',
+    })
+    nextState = 'planning'
+  } else {
+    routeEpisode = writeBp1Episode({
+      projectRoot, runId: args.runId, runKey32B: key32B,
+      type: 'state-transition', state: 'needs-human',
+      summary: `BP-1 needs-human (risky-class ${decidedClass}): ${args.runId}`,
+      parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
+      customFm: { reason: 'risky-class', decided_class: decidedClass },
+      tags: ['bp1-needs-human'],
+      body: `# bp1-needs-human — ${args.runId}\n\nreason: \`risky-class\`\ndecided_class: \`${decidedClass}\`\n`,
+      filenameSuffix: 'needs-human',
+    })
+    nextState = 'needs-human'
+  }
+  const updRoute = updateRunState(projectRoot, args.runId, { state: nextState })
+  if (updRoute.error) {
+    process.stderr.write(`error: updateRunState (${nextState}) failed: ${updRoute.error}\n`)
+    return 5
+  }
+
+  process.stdout.write(JSON.stringify({
+    status: 'ok',
+    state: nextState,
+    run_id: args.runId,
+    decided_class: decidedClass,
+    classified_episode_id: classifiedEp.episodeId,
+    route_episode_id: routeEpisode.episodeId,
+  }) + '\n')
+  return 0
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -895,6 +1499,15 @@ switch (args.subcommand) {
     break
   case 'finalize-recover':
     exitCode = finalizeRecover(args)
+    break
+  case 'detect-rfcs':
+    exitCode = detectRfcs(args)
+    break
+  case 'record-classifier-dispatch-pre':
+    exitCode = recordClassifierDispatchPre(args)
+    break
+  case 'record-classification':
+    exitCode = recordClassification(args)
     break
   case null:
   case undefined:

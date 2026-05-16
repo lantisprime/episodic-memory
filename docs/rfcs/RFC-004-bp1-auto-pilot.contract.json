@@ -1,0 +1,94 @@
+{
+  "version": "v3.14",
+  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts (slice 2c). Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14).",
+  "episode_canonical_fields": {
+    "state-transition:rfc-detected": ["state", "rfc_id", "frontmatter_sha256"],
+    "state-transition:classifier-dispatch-pending": ["state", "input_sha256"],
+    "state-transition:classified": ["state", "decided_class", "classifier_confidence"],
+    "state-transition:planning": ["state", "source_class"],
+    "state-transition:needs-human": ["state", "reason", "decided_class"],
+    "failure:classifier-schema-violation": ["failure_kind", "field_name", "observed_value", "violation_reason"],
+    "failure:classifier-parent-tamper": ["failure_kind", "field_name", "observed_value", "violation_reason"]
+  },
+  "classifier_output_schema": {
+    "type": "object",
+    "required": ["class", "confidence", "rationale", "classified_fields"],
+    "additionalProperties": false,
+    "properties": {
+      "class": {
+        "enum": ["trivial", "schema", "validator", "security", "multi-actor", "needs-human-input"]
+      },
+      "confidence": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "rationale": {
+        "type": "string",
+        "minWordCount": 1,
+        "maxWordCount": 300
+      },
+      "classified_fields": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1
+      }
+    }
+  },
+  "run_state_schemas": {
+    "v1": {
+      "states": ["active", "complete", "aborted", "abandoned", "archived"],
+      "fields": ["project_root", "state", "created_at", "terminal_at"]
+    },
+    "v2": {
+      "states": [
+        "active",
+        "rfc-detected",
+        "classifier-dispatch-pending",
+        "classified",
+        "planning",
+        "needs-human",
+        "complete",
+        "aborted",
+        "abandoned",
+        "archived"
+      ],
+      "fields": [
+        "project_root",
+        "state",
+        "created_at",
+        "terminal_at",
+        "decided_class",
+        "pre_episode_id",
+        "rfc_detected_episode_id"
+      ]
+    }
+  },
+  "subcommand_contracts": {
+    "detect-rfcs": {
+      "required_args": ["--project"],
+      "exit_codes": {
+        "0": "ok|inert",
+        "2": "argv|not-git-repo",
+        "3": "rfc-scan-failed|internal",
+        "5": "n/a"
+      }
+    },
+    "record-classifier-dispatch-pre": {
+      "required_args": ["--project", "--run-id", "--input-sha256"],
+      "exit_codes": {
+        "0": "ok",
+        "2": "argv",
+        "5": "state|schema|parent-tamper"
+      }
+    },
+    "record-classification": {
+      "required_args": ["--project", "--run-id", "--pre-episode-id", "--result-file"],
+      "exit_codes": {
+        "0": "ok",
+        "2": "argv|relative-result-file",
+        "5": "state|schema|parent-tamper"
+      }
+    }
+  }
+}

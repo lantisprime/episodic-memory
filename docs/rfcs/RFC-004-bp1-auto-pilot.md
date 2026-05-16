@@ -723,6 +723,44 @@ payload = {
   native_probe_performed,          // boolean
   t2_fallback,                     // boolean (always false per §573-575)
 
+  // Slice 2c — orchestrator state-machine dispatch site (NEW v3.14, M2). The
+  // orchestrator's three new subcommands (detect-rfcs,
+  // record-classifier-dispatch-pre, record-classification) emit the following
+  // state-transition + failure subtypes. All sign with the per-run HMAC key.
+  // Mirrored in `docs/rfcs/RFC-004-bp1-auto-pilot.contract.json` and enforced
+  // by `scripts/validate-rfc-contract-mirror.mjs` (CI gate).
+  //
+  // For type == "state-transition" with state == "rfc-detected":
+  //   state,                          // "rfc-detected"
+  //   rfc_id,                         // basename of detected RFC file
+  //   frontmatter_sha256,             // 64-hex sha256 of canonical frontmatter
+  //
+  // For type == "state-transition" with state == "classifier-dispatch-pending":
+  //   state,                          // "classifier-dispatch-pending"
+  //   input_sha256,                   // 64-hex sha256 of classifier input
+  //
+  // For type == "state-transition" with state == "classified":
+  //   state,                          // "classified"
+  //   decided_class,                  // one of trivial|schema|validator|security|multi-actor|needs-human-input
+  //   classifier_confidence,          // string repr of number in [0,1] — pre-stringified
+  //                                   // for canonicalize-stable round-trip
+  //
+  // For type == "state-transition" with state == "planning":
+  //   state,                          // "planning"
+  //   source_class,                   // class that routed here (always "trivial" at this slice)
+  //
+  // For type == "state-transition" with state == "needs-human":
+  //   state,                          // "needs-human"
+  //   reason,                         // routing reason (e.g. "risky-class")
+  //   decided_class,                  // mirror of classified episode's decided_class
+  //
+  // For type == "failure" with failure_kind in {classifier-schema-violation,
+  //                                              classifier-parent-tamper}:
+  //   failure_kind,                   // subtype-derivation field (canonicalized)
+  //   field_name,                     // offending field name (66-ch cap)
+  //   observed_value,                 // observed JSON repr (66-ch cap per describeStatus policy)
+  //   violation_reason,               // human-readable failure-mode label
+
   // Future-extensibility: any episode-type-specific authorization-bearing field
   // MUST be added here at the time the field is introduced. Two CI gates enforce:
   //   - validate-rfc-failure-table.mjs (v3.7) — failure-row evidence-tag drift.
