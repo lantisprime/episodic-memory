@@ -4,6 +4,7 @@
 #
 # Plan-v2 §I1, I3, I5, I6 coverage:
 #   I1  Hook writes .last-user-prompt.<sid>.json atomically with canonical sha
+#   I2  Hook writes .preflight-done.<sid> for the same prompt/session
 #   I3  Fail-safe: any internal error → exit 0 + stderr log; never block
 #   I5  Idempotent for same prompt+session: byte-identical file content
 #   I6  External-contract documentation — UserPromptSubmit ordering verified
@@ -32,6 +33,7 @@ stage_repo() {
   # in-repo scripts/lib path resolves.
   local target="$1"
   mkdir -p "$target/.checkpoints"
+  mkdir -p "$target/bundles"
   mkdir -p "$target/scripts/lib"
   mkdir -p "$target/hooks/lib"
   cp "$REPO_ROOT/scripts/preflight-marker-write.mjs" "$target/scripts/"
@@ -40,7 +42,11 @@ stage_repo() {
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$target/scripts/lib/"
+  cp "$REPO_ROOT/hooks/preflight-gate.sh" "$target/hooks/"
+  cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/hooks/lib/marker-paths.sh" "$target/hooks/lib/"
   cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/bundles/codex-review-channel-current.md" "$target/bundles/"
   # Make it git-detectable so resolve_repo_root returns this dir, not /.
   ( cd "$target" && git init -q && git config user.email t@t && git config user.name t )
 }
@@ -54,6 +60,14 @@ run_hook() {
   # The hook resolves repo from cwd via git -C; we cd into the repo so the
   # resolution matches the cwd field exactly.
   ( cd "$repo" && printf '%s' "$input" | bash "$HOOK" )
+}
+
+run_gate() {
+  local repo="$1" sid="$2"
+  local payload
+  payload="$(jq -nc --arg c "$repo" --arg s "$sid" \
+    '{tool_name:"Bash", tool_input:{command:"codex exec foo"}, cwd:$c, session_id:$s, transcript_path:"/tmp/transcript.jsonl"}')"
+  ( cd "$repo" && printf '%s' "$payload" | bash "$repo/hooks/preflight-gate.sh" )
 }
 
 # ---------- I1: hook writes namespaced file with correct sha ----------
@@ -95,6 +109,59 @@ if jq -e '.session_id and .transcript_path and .cwd and .repo_root and .wrote_at
   passed=$((passed+1))
 else
   echo "  ✗ I1 file missing required fields"
+  failed=$((failed+1))
+fi
+
+rm -rf "$TF"
+
+# ---------- I2: hook writes prompt-bound preflight marker ----------
+
+echo "--- I2: hook writes namespaced preflight marker ---"
+
+TF="$(mktmp)"; stage_repo "$TF"
+SID="i2-test-session"
+PROMPT="review handoff prompt"
+run_hook "$TF" "$PROMPT" "$SID" 2>/dev/null
+EC=$?
+
+if [ $EC -ne 0 ]; then
+  echo "  ✗ I2 hook exit $EC (expected 0)"
+  failed=$((failed+1))
+elif [ ! -f "$TF/.checkpoints/.preflight-done.${SID}" ]; then
+  echo "  ✗ I2 preflight marker not written"
+  failed=$((failed+1))
+else
+  echo "  ✓ I2 hook wrote namespaced preflight marker"
+  passed=$((passed+1))
+fi
+
+LAST_SHA="$(jq -r '.prompt_sha256' "$TF/.checkpoints/.last-user-prompt.${SID}.json")"
+PREFLIGHT_SHA="$(jq -r '.prompt_sha256' "$TF/.checkpoints/.preflight-done.${SID}")"
+PREFLIGHT_CLAIM="$(jq -r '.claim_class' "$TF/.checkpoints/.preflight-done.${SID}")"
+if [ "$LAST_SHA" = "$PREFLIGHT_SHA" ] && [ "$PREFLIGHT_CLAIM" = "codex-review-handoff" ]; then
+  echo "  ✓ I2 preflight marker is bound to same prompt and claim class"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 marker mismatch: last_sha=$LAST_SHA preflight_sha=$PREFLIGHT_SHA claim=$PREFLIGHT_CLAIM"
+  failed=$((failed+1))
+fi
+
+if jq -e --arg b "$TF/bundles/codex-review-channel-current.md" \
+    '(.required_files // []) | index($b) != null' \
+    "$TF/.checkpoints/.preflight-done.${SID}" >/dev/null; then
+  echo "  ✓ I2 preflight marker lists canonical bundle"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 preflight marker missing canonical bundle"
+  failed=$((failed+1))
+fi
+
+GATE_OUT="$(run_gate "$TF" "$SID" 2>&1 || true)"
+if [ -z "$GATE_OUT" ]; then
+  echo "  ✓ I2 hook-owned marker lets preflight-gate allow codex handoff"
+  passed=$((passed+1))
+else
+  echo "  ✗ I2 gate denied after hook-owned marker: $GATE_OUT"
   failed=$((failed+1))
 fi
 

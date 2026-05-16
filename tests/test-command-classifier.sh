@@ -457,8 +457,10 @@ assert_preflight_cmd "Q19 ls" 'ls -la' "none"
 assert_preflight_cmd "Q20 git status" 'git status' "none"
 assert_preflight_cmd "Q21 npx em-store w/codex tag" \
   'npx em-store --tag codex-review --body x' "codex-review-handoff"
-assert_preflight_cmd "Q22 absolute path em-store" \
-  'node /abs/repo/scripts/em-store.mjs --summary "codex review request"' "codex-review-handoff"
+assert_preflight_cmd "Q22 absolute path em-store free-text summary no-fp (#285)" \
+  'node /abs/repo/scripts/em-store.mjs --summary "codex review request"' "none"
+assert_preflight_cmd "Q22a absolute path em-store explicit review tag" \
+  'node /abs/repo/scripts/em-store.mjs --tags codex-review --summary "codex review request"' "codex-review-handoff"
 assert_preflight_cmd "Q23 unsafe + codex literal" \
   'eval $(cat /etc/x); codex exec foo' "codex-review-handoff"
 assert_preflight_cmd "Q24 unsafe no codex literal" \

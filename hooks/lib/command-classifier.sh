@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# episodic-memory-hook-version: 2026-05-08.1
+# episodic-memory-hook-version: 2026-05-16.1
 # command-classifier.sh — Quote/heredoc-aware Bash command classifier.
 #
 # Closes #86 PR-B + #89 + #101 via a shared helper. Replaces ad-hoc regex
@@ -1648,8 +1648,8 @@ _PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|i
 #   nix develop -c CMD | nix shell -c CMD
 _PREFLIGHT_RUNNERS_RE='^(uv|poetry|pixi|direnv|nix)$'
 
-# Tag-name fragments that, when found in --tag/--tags/--summary args, mark
-# an em-* invocation as a codex-review handoff.
+# Tag-name fragments that, when found in --tag/--tags args, mark an em-*
+# invocation as a codex-review handoff.
 _PREFLIGHT_REVIEW_TAG_RE='codex|review|second-opinion|plan-review|code-review|cross-tool-review|meta-review'
 
 # em-* CLI verbs that route review traffic. Bare names AND `node */<name>.mjs`
@@ -1820,7 +1820,11 @@ _preflight_unwrap_index() {
 }
 
 # _preflight_scan_em_args — return 0 if em-* invocation has review-handoff
-# signals in --tag/--tags/--summary args; 1 otherwise.
+# signals in explicit routing tags; 1 otherwise.
+#
+# #285: do not inspect free-text fields such as --summary or --body. Those
+# fields often describe review/preflight concepts as lesson content, which is
+# not the same intent as routing a review handoff.
 # Args: $1 = start_index; $2..$N = tokens.
 _preflight_scan_em_args() {
   local i=$1
@@ -1830,14 +1834,14 @@ _preflight_scan_em_args() {
   while [ $i -lt $n ]; do
     local t="${T[$i]}"
     case "$t" in
-      --tag|--tags|--summary)
+      --tag|--tags)
         local v="${T[$((i+1))]:-}"
         if [[ "$v" =~ $_PREFLIGHT_REVIEW_TAG_RE ]]; then
           return 0
         fi
         i=$((i+2))
         ;;
-      --tag=*|--tags=*|--summary=*)
+      --tag=*|--tags=*)
         local v="${t#*=}"
         if [[ "$v" =~ $_PREFLIGHT_REVIEW_TAG_RE ]]; then
           return 0

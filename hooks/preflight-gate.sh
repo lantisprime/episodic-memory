@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-05-12.1
+# episodic-memory-hook-version: 2026-05-16.1
 # preflight-gate.sh — Layer D narrow PreToolUse gate.
 #
 # Closes the bp-010 cluster: codex/Agent/em-store review handoffs (and
@@ -307,9 +307,9 @@ fi
 # Marker existence — name both candidate paths so callers know where to write.
 if [ -z "$PREFLIGHT_MARKER_RESOLVED" ]; then
   if [ -n "$PREFLIGHT_MARKER_SID" ]; then
-    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_SID via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id $SESSION_ID. Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+    _emit_deny "Pre-flight marker required for codex-review-handoff at $PREFLIGHT_MARKER_SID. The UserPromptSubmit hook should write this prompt-bound marker automatically for session $SESSION_ID. If it is missing, send a new prompt once; if it stays missing, re-run install.mjs --install-hooks so preflight-prompt-helper.sh is wired. Required marker fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
   else
-    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_LEGACY via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id <sid>. (stdin missing session_id — gate cannot derive per-session path; legacy path used.) Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+    _emit_deny "Pre-flight marker required for codex-review-handoff, but stdin missing session_id so the gate cannot derive the per-session path. The UserPromptSubmit hook should write .preflight-done.<sid> automatically; re-run install.mjs --install-hooks if hook stdin omits session_id. Legacy fallback path checked: $PREFLIGHT_MARKER_LEGACY. Required marker fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
   fi
 fi
 
@@ -338,7 +338,7 @@ if [ "$M_REPO_ROOT" != "$REPO_ROOT" ]; then
   _emit_deny "Pre-flight marker repo_root is '$M_REPO_ROOT'; gate-resolved repo_root is '$REPO_ROOT'. Re-write with the correct repo_root."
 fi
 if [ -n "$SESSION_ID" ] && [ "$M_SESSION" != "$SESSION_ID" ]; then
-  _emit_deny "Pre-flight marker session_id '$M_SESSION' does not match current session '$SESSION_ID'. Stale-session marker; re-write."
+  _emit_deny "Pre-flight marker session_id '$M_SESSION' does not match current session '$SESSION_ID'. Stale-session marker; the UserPromptSubmit hook should replace it on the next prompt. If it persists, re-run install.mjs --install-hooks."
 fi
 if [ -z "$M_PROMPT_SHA" ]; then
   _emit_deny "Pre-flight marker missing prompt_sha256. Re-write with the current user prompt's sha256."

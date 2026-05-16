@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# episodic-memory-hook-version: 2026-05-12.2
+# episodic-memory-hook-version: 2026-05-16.1
 # preflight-prompt-helper.sh — UserPromptSubmit hook for true prompt-binding.
 #
-# Maintains `<repo>/.checkpoints/.last-user-prompt.<session_id>.json` with the
-# canonical sha256 of the current real user prompt. The preflight-gate
-# (hooks/preflight-gate.sh) cross-checks that file's `prompt_sha256` against
-# any codex-review-handoff pre-flight marker — closing the trust-based hole
-# left open by PR #240 (which took the FALLBACK path of trusting agent-supplied
-# sha values without comparison to ground truth).
+# Maintains prompt-bound preflight state for the current session:
+#   - `<repo>/.checkpoints/.last-user-prompt.<session_id>.json`
+#   - `<repo>/.checkpoints/.preflight-done.<session_id>`
+#
+# The preflight-gate (hooks/preflight-gate.sh) cross-checks the latter marker's
+# `prompt_sha256` against the former. Keeping both writes in UserPromptSubmit
+# means marker ownership follows the hook that actually sees the prompt; the
+# agent no longer has to bootstrap prompt-bound gate state mid-session.
 #
 # Plan provenance: scratch/238-plan-v2.md C3 (workplan v49 rank 0). Closes
 # #238 PR1 FU-C2. Audit findings folded in: F3 (pin canonicalization),
@@ -23,6 +25,8 @@
 #   4) Compose marker JSON (sha + session_id + transcript_path + cwd + wrote_at_ms).
 #   5) Pipe to scripts/preflight-marker-write.mjs --target last-prompt
 #      --session-id <sid>, which atomically temp+renames the file into place.
+#   6) Compose + atomically write a codex-review-handoff preflight marker for
+#      the same sid/prompt hash. This is intentionally hook-owned (#285).
 #
 # Fail-safe (audit F3 I3): on ANY internal error (malformed stdin, helper
 # missing, session_id invalid, jq failure, repo-root unresolvable), exit 0
@@ -147,6 +151,60 @@ HELPER_OUT="$(printf '%s' "$MARKER_JSON" | node "$HELPER" --root "$REPO_ROOT" --
 HELPER_EC=$?
 if [ $HELPER_EC -ne 0 ]; then
   _log_and_exit_safe "marker-write helper exit $HELPER_EC: $HELPER_OUT"
+fi
+
+# ---------------------------------------------------------------------------
+# Compose the hook-owned preflight marker (#285)
+# ---------------------------------------------------------------------------
+# The gate currently requires the canonical bundle itself in required_files and
+# validates all required_files against loaded_files. Keep this marker small and
+# deterministic: it proves hook ownership + prompt binding, while avoiding a
+# brittle duplicate parser for the bundle's prose manifest.
+BUNDLE_PATH="$REPO_ROOT/bundles/codex-review-channel-current.md"
+if [ ! -f "$BUNDLE_PATH" ]; then
+  _log_and_exit_safe "codex review bundle missing at $BUNDLE_PATH; last-prompt marker written, preflight marker skipped"
+fi
+
+BUNDLE_SHA="$(shasum -a 256 "$BUNDLE_PATH" 2>/dev/null | awk '{print $1}')"
+BUNDLE_MTIME="$(node -e "process.stdout.write(String(require('fs').statSync(process.argv[1]).mtimeMs))" "$BUNDLE_PATH" 2>/dev/null || true)"
+if [ -z "$BUNDLE_SHA" ] || [ -z "$BUNDLE_MTIME" ]; then
+  _log_and_exit_safe "could not stat/hash codex review bundle; last-prompt marker written, preflight marker skipped"
+fi
+
+PREFLIGHT_JSON="$(jq -nc \
+  --arg sid "$SESSION_ID" \
+  --arg tp "$TRANSCRIPT_PATH" \
+  --arg sha "$PROMPT_SHA" \
+  --arg cwd "$CWD" \
+  --arg root "$REPO_ROOT" \
+  --arg memory_root "$REPO_ROOT/.episodic-memory" \
+  --arg bundle "$BUNDLE_PATH" \
+  --arg bundle_sha "$BUNDLE_SHA" \
+  --argjson bundle_mtime "$BUNDLE_MTIME" \
+  --argjson ms "$WROTE_AT_MS" \
+  '{
+    session_id: $sid,
+    transcript_path: $tp,
+    prompt_sha256: $sha,
+    prompt_index: 0,
+    cwd: $cwd,
+    repo_root: $root,
+    memory_root: $memory_root,
+    claim_class: "codex-review-handoff",
+    matched_triggers: {hook: ["UserPromptSubmit:codex-review-handoff"]},
+    required_files: [$bundle],
+    loaded_files: [{path: $bundle, mtime_ms: $bundle_mtime, sha256: $bundle_sha}],
+    artifact_steps_done: ["user-prompt-submit-hook", "codex-review-bundle-hash"],
+    created_at_ms: $ms
+  }')"
+if [ -z "$PREFLIGHT_JSON" ]; then
+  _log_and_exit_safe "jq composition of preflight marker JSON failed; last-prompt marker written, preflight marker skipped"
+fi
+
+PREFLIGHT_OUT="$(printf '%s' "$PREFLIGHT_JSON" | node "$HELPER" --root "$REPO_ROOT" --target preflight --session-id "$SESSION_ID" 2>&1)"
+PREFLIGHT_EC=$?
+if [ $PREFLIGHT_EC -ne 0 ]; then
+  _log_and_exit_safe "preflight marker-write helper exit $PREFLIGHT_EC: $PREFLIGHT_OUT"
 fi
 
 # Success — exit 0 with no stdout. Claude Code's hooks framework treats
