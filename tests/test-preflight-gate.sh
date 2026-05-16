@@ -373,11 +373,78 @@ run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mj
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target pre\\\\flight\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 escaped --target pre\\flight → DENY"
 # F3-gate codex r3: helper with --root and NO --target → still DENY (class-wide).
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF\"}" "deny" "reserved for the UserPromptSubmit hook" "F3-gate codex r3 helper --root only (no --target) → DENY"
-# A1: bare/npx/script-shebang invocation also denied without --root
-run_gate "$TF" "Bash" '{"command":"./scripts/preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1a bare script invocation sans --root → DENY"
-run_gate "$TF" "Bash" '{"command":"npx preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1b npx invocation sans --root → DENY"
-# A3: tab/multi-space variants
+# A1: bare/npx invocation denied. Codex r4: tokenized detection emits
+# specific deny reasons (bare-helper / wrapper). The --root diagnostic
+# only fires for the canonical `node <helper>` path where T[1]=helper.
+run_gate "$TF" "Bash" '{"command":"./scripts/preflight-marker-write.mjs --target preflight"}' "deny" "Bare invocation" "A1a bare script invocation → DENY (bare-helper)"
+run_gate "$TF" "Bash" '{"command":"npx preflight-marker-write.mjs --target preflight"}' "deny" "wrapper basename 'npx'" "A1b npx invocation → DENY (wrapper)"
+# A3: tab/multi-space variants — node + helper, missing --root → ROOT_REQUIRED first.
 run_gate "$TF" "Bash" "{\"command\":\"node\\tscripts/preflight-marker-write.mjs   --target preflight\"}" "deny" "ROOT_REQUIRED|--root" "A3 tab+multi-space sans --root → DENY"
+
+# ---------------------------------------------------------------------------
+# R4-series (codex PR #291 r4): tokenized helper-invocation detection
+# ---------------------------------------------------------------------------
+# Bypass cases — quoted/escaped helper PATHS (not just --target values)
+# that defeated the r3 raw-text regex prefilter. _tokenize normalizes
+# them to scripts/preflight-marker-write.mjs at helper runtime, so the
+# tokenized detector must catch them too.
+
+TF="$(mktmp)"; stage_fixture "$TF"
+# R4-B1: quoted helper path
+run_gate "$TF" "Bash" "{\"command\":\"node \\\"$TF/scripts/preflight-marker-write.mjs\\\" --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R4-B1 quoted helper path → DENY (tokenized)"
+# R4-B2: escaped dot in helper path
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write\\\\.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R4-B2 escaped helper path → DENY (tokenized)"
+# R4-B3: ./relative form
+TF="$(mktmp)"; stage_fixture "$TF"
+payload="$(printf "$GATE_INPUT_TMPL" "Bash" '{"command":"node ./scripts/preflight-marker-write.mjs --root '"$TF"' --target preflight"}' "$TF" "$SESSION_ID")"
+out="$(printf '%s' "$payload" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
+decision="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // ""' 2>/dev/null || echo "")"
+reason="$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')"
+if [ "$decision" = "deny" ] && printf '%s' "$reason" | grep -q "reserved for the UserPromptSubmit hook"; then
+  echo "  ✓ R4-B3 ./relative helper path → DENY (tokenized)"
+  passed=$((passed+1))
+else echo "  ✗ R4-B3 — out: $out"; failed=$((failed+1)); fi
+
+# R4-B4: absolute path via ENV-prefix wrapper (NODE_ENV allowed → OK
+# class-wide deny). Tests that env-prefix walk doesn't lose the helper.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"NODE_ENV=test node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R4-B4 NODE_ENV prefix + helper → DENY (tokenized)"
+
+# R4-B5: disallowed env-prefix + helper → DENY env-prefix
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"WEIRD_VAR=1 node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" \
+  "deny" "env-prefix wrapper.*WEIRD_VAR" "R4-B5 disallowed env-prefix + helper → DENY (env-prefix)"
+
+# False-positive controls (per codex r4 handoff). MUST NOT deny.
+
+# R4-FP1: node --test pointed at a DIFFERENT basename (test-preflight-marker-write.mjs).
+# Substring prefilter matches but tokenized detector returns NO_MATCH
+# because T[idx+1] basename ('--test') and T[idx+2] basename
+# (test-preflight-marker-write.mjs) don't equal preflight-marker-write.mjs.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"node --test tests/test-preflight-marker-write.mjs"}' "allow" "" "R4-FP1 node --test test-preflight-marker-write.mjs → ALLOW"
+
+# R4-FP2: printf with helper basename as data argument. exec=printf (not
+# in real-wrapper list) so tokenized detector returns NO_MATCH.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" $'{"command":"printf \'preflight-marker-write.mjs\\\\n\'"}' "allow" "" "R4-FP2 printf 'preflight-marker-write.mjs' → ALLOW"
+
+# R4-FP3: node + OTHER script + helper basename as data arg. T[idx+1]
+# is other-script.mjs (NOT helper) → wrong-helper → NO_MATCH.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"node some-other-script.mjs preflight-marker-write.mjs"}' "allow" "" "R4-FP3 node other.mjs + helper as data → ALLOW"
+
+# R4-FP4: grep with helper basename as pattern → NO_MATCH (grep not a wrapper).
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"grep -r preflight-marker-write.mjs scripts/"}' "allow" "" "R4-FP4 grep preflight-marker-write.mjs → ALLOW"
+
+# R4-FP5: command string contains the stem but no helper invocation
+# (e.g. echo a note about it).
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" $'{"command":"echo \'see preflight-marker-write helper notes\'"}' "allow" "" "R4-FP5 echo mentioning helper stem → ALLOW"
 
 # F3a: helper directly (out of gate) without --root → exit 4
 set +e

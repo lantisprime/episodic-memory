@@ -448,6 +448,14 @@ _tokenize() {
 readonly _ROUTINE_ENV_ALLOWLIST="NODE_ENV DEBUG CI PYTHONPATH LOG_LEVEL"
 readonly _NODE_BINARY_BASENAME_ALLOWLIST="node"
 
+# Helper basename for tokenized invocation detection (codex PR #291 r4).
+readonly _HELPER_BASENAME="preflight-marker-write.mjs"
+
+# Real wrappers: target executable is the first non-flag positional arg.
+# Distinct from data-taking commands (printf/echo/grep/cat) where a
+# token like the helper basename is data, not exec position.
+_HELPER_REAL_WRAPPER_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec|systemd-run|flatpak-spawn|uv|poetry|pixi|direnv|nix|npx|bash|sh|zsh|dash|ksh|fish|python|python3|ruby|perl|time|xargs)$'
+
 # _is_in_space_list <needle> <space-separated-list>
 # True iff <needle> appears as a whole token in <space-separated-list>.
 _is_in_space_list() {
@@ -567,6 +575,150 @@ _check_helper_invocation_grammar() {
 
   printf 'OK\t%d\t%s\n' "$idx" "$exec_base"
   return 0
+}
+
+# _detect_tokens_contain_helper <cmd>
+# Returns 0 iff any tokenized T-record has basename == _HELPER_BASENAME.
+# Used by _detect_helper_invocation to distinguish helper-invocation
+# attempts (with disallowed shape) from false-positives where the
+# basename appears only as a data argument.
+_detect_tokens_contain_helper() {
+  local cmd="$1"
+  local line tok_text base
+  while IFS= read -r line; do
+    case "$line" in
+      "T "*)
+        tok_text="${line:2}"
+        base="${tok_text##*/}"
+        if [ "$base" = "$_HELPER_BASENAME" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  done < <(_tokenize "$cmd")
+  return 1
+}
+
+# _detect_helper_invocation <cmd>
+#
+# Tokenized helper-invocation detector (codex PR #291 r4 P1). Replaces
+# the prior HELPER_BASENAME_RE/NORMALIZED_CMD raw-text prefilter in the
+# gate, which was bypassed by quoted/escaped helper paths
+# (`node "scripts/preflight-marker-write.mjs" ...`, `node
+# scripts/preflight-marker-write\.mjs ...`) because _tokenize normalized
+# both to `scripts/preflight-marker-write.mjs` at helper runtime while
+# the regex saw raw shell text.
+#
+# Returns exactly one of (printed to stdout):
+#   NO_MATCH
+#       This command is not a helper invocation attempt. Allow to fall
+#       through to the rest of the gate.
+#   OK\t<idx>\t<exec_basename>
+#       Clean agent-side `node <path>/preflight-marker-write.mjs`.
+#       Caller (gate) should emit class-wide deny (with --root diagnostic
+#       if missing).
+#   DENY\t<kind>\t<detail>
+#       Helper invocation attempt with disallowed shape. Kinds:
+#         env-prefix         non-allowlist env-prefix wraps helper call
+#         env-prefix-invalid env-prefix token has invalid POSIX shape
+#         wrapper            non-node exec wrapper (npx/sudo/env/...)
+#                            with helper basename in argv
+#         bare-helper        ./preflight-marker-write.mjs (helper as exec)
+#         tokenize           compound/unsafe command containing helper
+#
+# Always returns 0; verdict expressed in echoed string.
+#
+# Algorithm:
+#   1. Run _check_helper_invocation_grammar (env-prefix walk + exec
+#      basename check + T[idx+1] helper basename check).
+#   2. Re-categorize the grammar verdict:
+#      - OK preserved as-is.
+#      - DENY wrong-helper/no-helper/no-exec → NO_MATCH (T[idx+1] isn't
+#        the helper, or there's no exec — false-positive class includes
+#        `node --test tests/test-preflight-marker-write.mjs` (different
+#        basename) and `node some-other.mjs preflight-marker-write.mjs`
+#        (basename as data arg to another script). Codex r4 handoff
+#        flagged both as required false-positive controls.
+#      - DENY tokenize → scan tokens; if helper basename present, DENY
+#        (defense-in-depth against `... ; node helper ...` smuggling),
+#        else NO_MATCH.
+#      - DENY env-prefix / env-prefix-invalid → scan tokens; if helper
+#        basename present, DENY env-prefix, else NO_MATCH (env-only
+#        command on unrelated target).
+#      - DENY wrapper <exec_base>:
+#          * exec_base == helper basename → DENY bare-helper
+#          * exec_base in real-wrapper list AND helper basename in tokens
+#            → DENY wrapper
+#          * otherwise → NO_MATCH (random data-cmd like printf/grep with
+#            helper basename as a data argument — false-positive class).
+_detect_helper_invocation() {
+  local cmd="$1"
+  local result
+  result="$(_check_helper_invocation_grammar "$cmd")"
+  local verdict="${result%%	*}"
+
+  case "$verdict" in
+    OK)
+      printf '%s\n' "$result"
+      return 0
+      ;;
+    DENY)
+      local rest="${result#*	}"
+      local kind="${rest%%	*}"
+      local detail="${rest#*	}"
+
+      case "$kind" in
+        wrong-helper|no-helper|no-exec)
+          # Grammar: exec=node but next token isn't helper, or no exec at
+          # all. Per codex r4 handoff, these are false-positive controls
+          # (`node --test test-preflight-marker-write.mjs`, `node
+          # other.mjs preflight-marker-write.mjs`, `node` alone).
+          echo "NO_MATCH"
+          return 0
+          ;;
+        tokenize)
+          if _detect_tokens_contain_helper "$cmd"; then
+            printf 'DENY\ttokenize\t%s\n' "$detail"
+          else
+            echo "NO_MATCH"
+          fi
+          return 0
+          ;;
+        env-prefix|env-prefix-invalid)
+          if _detect_tokens_contain_helper "$cmd"; then
+            printf 'DENY\t%s\t%s\n' "$kind" "$detail"
+          else
+            echo "NO_MATCH"
+          fi
+          return 0
+          ;;
+        wrapper)
+          if [ "$detail" = "$_HELPER_BASENAME" ]; then
+            printf 'DENY\tbare-helper\t%s\n' "$detail"
+            return 0
+          fi
+          if [[ "$detail" =~ $_HELPER_REAL_WRAPPER_RE ]]; then
+            if _detect_tokens_contain_helper "$cmd"; then
+              printf 'DENY\twrapper\t%s\n' "$detail"
+              return 0
+            fi
+          fi
+          echo "NO_MATCH"
+          return 0
+          ;;
+        *)
+          # Unknown DENY kind: pass through unchanged. Should not occur.
+          printf '%s\n' "$result"
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      # Shouldn't reach. Conservative NO_MATCH.
+      echo "NO_MATCH"
+      return 0
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
