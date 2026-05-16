@@ -1,8 +1,8 @@
 # episodic-memory
 
-A **shared memory layer for AI coding agents**. Different agentic AI platforms — Claude Code, Cursor, Codex, Windsurf — read and write to the *same* episodic store, so decisions, discoveries, and behavioral patterns persist across sessions *and* across tools.
+A **shared memory layer for AI coding agents**. Different agentic AI platforms — Claude Code, Cursor, Codex, OpenCode, Pi Agent, Windsurf — read and write to the *same* episodic store, so decisions, discoveries, and behavioral patterns persist across sessions *and* across tools.
 
-Works with: **Claude Code**, **Cursor**, **Codex (OpenAI)**, **Windsurf / Continue**
+Works with: **Claude Code**, **Cursor**, **Codex (OpenAI)**, **OpenCode**, **Pi Agent**, **Windsurf / Continue**
 
 The design principles guiding the system are documented in [PRINCIPLES.md](PRINCIPLES.md).
 
@@ -76,7 +76,7 @@ cd episodic-memory
 # Install for a specific tool in a target project
 node install.mjs --tool cursor --project /path/to/my-project
 
-# Install for all supported tools
+# Install for all bundled targets except OpenCode
 node install.mjs --tool all --project /path/to/my-project
 ```
 
@@ -94,7 +94,25 @@ The installer:
 | Claude Code | `SKILL.md` | `.claude/skills/episodic-memory/SKILL.md` |
 | Cursor | `cursor.mdc` | `.cursor/rules/episodic-memory.mdc` |
 | Codex | `SKILL.md` | `.agents/skills/episodic-memory/SKILL.md` |
+| OpenCode | `SKILL.md` | `.opencode/skills/episodic-memory/SKILL.md` |
+| Pi Agent | `SKILL.md` | `.agents/skills/episodic-memory/SKILL.md` |
 | Windsurf | `windsurf.md` | `.windsurfrules` (appended if exists) |
+
+OpenCode is explicit-only: run `node install.mjs --tool opencode --project <path>`. It is intentionally excluded from `--tool all` because current OpenCode discovery loads `.opencode/skills`, `.claude/skills`, and `.agents/skills`; a broad all-tools install can otherwise expose duplicate `episodic-memory` skills. This path contract is pinned to the current official OpenCode skill docs observed 2026-05-16: <https://opencode.ai/docs/skills>.
+
+Pi Agent shares the `.agents/skills/episodic-memory/SKILL.md` destination with Codex. `--tool all` includes Pi Agent by reusing that shared destination.
+
+Instruction-only support is deliberately modest for OpenCode and Pi Agent:
+
+| Capability | OpenCode | Pi Agent |
+|------------|----------|----------|
+| Manual recall/search/store/revise via scripts | MEDIUM when shell/script execution is available; otherwise WEAK/manual | MEDIUM when shell/script execution is available; otherwise WEAK/manual |
+| Proactive session-start recall | WEAK; depends on the agent loading/following the skill | WEAK; depends on the agent loading/following the skill |
+| Enforcement/hooks | Unsupported in this installer slice | Unsupported in this installer slice |
+| Live MCP tools | Deferred | Deferred |
+| Cross-tool typed requests | Deferred except manual existing-script use | Deferred except manual existing-script use |
+
+Future MCP support should be a thin wrapper around existing scripts (`recall`, `search`, `store`, `revise`) with no second store, no daemon, no polling, explicit activation, and reversible uninstall.
 
 ## Episode Categories
 

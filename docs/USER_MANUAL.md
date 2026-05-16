@@ -44,10 +44,16 @@ node ~/episodic-memory/install.mjs --tool claude-code --install-hooks --project 
 # For Codex
 node ~/episodic-memory/install.mjs --tool codex --project /path/to/my-project
 
+# For OpenCode (explicit-only; not included in --tool all)
+node ~/episodic-memory/install.mjs --tool opencode --project /path/to/my-project
+
+# For Pi Agent
+node ~/episodic-memory/install.mjs --tool pi-agent --project /path/to/my-project
+
 # For Windsurf
 node ~/episodic-memory/install.mjs --tool windsurf --project /path/to/my-project
 
-# For all tools at once
+# For all bundled targets except OpenCode
 node ~/episodic-memory/install.mjs --tool all --project /path/to/my-project
 ```
 
@@ -60,6 +66,57 @@ That's the only manual step. After this, your AI assistant reads the instruction
 3. Adds the right instruction file for your tool
 4. Updates `.gitignore` to exclude memory data
 5. With `--install-hooks` (Claude Code only): registers PreToolUse (checkpoint-gate, plan-gate, stop-gate), SessionStart (recall + BP-1 fallback sweep), and SessionEnd hooks. Re-running the installer warns when any installed hook has drifted from the source-of-truth copy.
+
+### Instruction-only skill adapters
+
+OpenCode and Pi Agent support is instruction-only in this installer slice. The installer writes skill files that tell the agent how to call the existing `~/.episodic-memory/scripts/*.mjs` commands; it does not install hooks, MCP servers, live dispatch, proactive session-start automation, or global tool config for these tools.
+
+OpenCode is explicit-only:
+
+```bash
+node ~/episodic-memory/install.mjs --tool opencode --project /path/to/my-project
+```
+
+It writes:
+
+```text
+<project>/.opencode/skills/episodic-memory/SKILL.md
+```
+
+OpenCode is intentionally excluded from `--tool all`. Current official OpenCode discovery loads all of these same-name skill locations, so a broad all-tools install can expose duplicate `episodic-memory` skills:
+
+| OpenCode discovery location | Scope |
+|-----------------------------|-------|
+| `.opencode/skills/<name>/SKILL.md` | project |
+| `~/.config/opencode/skills/<name>/SKILL.md` | global |
+| `.claude/skills/<name>/SKILL.md` | project Claude-compatible |
+| `~/.claude/skills/<name>/SKILL.md` | global Claude-compatible |
+| `.agents/skills/<name>/SKILL.md` | project agent-compatible |
+| `~/.agents/skills/<name>/SKILL.md` | global agent-compatible |
+
+Source pin: OpenCode skill discovery is based on the current official docs at <https://opencode.ai/docs/skills>, observed 2026-05-16; the page was last updated 2026-05-15. If OpenCode changes these paths, update this table, the installer scan, and tests together.
+
+Before writing the native OpenCode skill, the installer scans visible project ancestors through the actual git worktree root, global OpenCode/Claude/agent skill locations, and non-git ancestors through filesystem root. If another visible `episodic-memory` skill already exists, the OpenCode install warns and skips instead of knowingly creating a duplicate. This guard applies only when running `--tool opencode`; later `--tool codex`, `--tool pi-agent`, `--tool claude-code`, or `--tool all` runs can still create OpenCode-visible duplicates until a broader conflict resolver exists.
+
+Pi Agent uses the shared agent-compatible skill path:
+
+```text
+<project>/.agents/skills/episodic-memory/SKILL.md
+```
+
+This is the same destination Codex uses. `--tool all` includes Pi Agent by de-duplicating that shared `.agents` destination. Pi Agent same-name shadowing across other Pi-native, package, global, or settings-defined skill locations is not guarded in this installer slice.
+
+Capability tiers for these instruction-only adapters:
+
+| Capability | OpenCode | Pi Agent |
+|------------|----------|----------|
+| Manual recall/search/store/revise via scripts | MEDIUM when shell/script execution is available and allowed; otherwise WEAK/manual | MEDIUM when shell/script execution is available and allowed; otherwise WEAK/manual |
+| Proactive session-start recall | WEAK; depends on the agent loading/following the skill | WEAK; depends on the agent loading/following the skill |
+| Enforcement/hooks | Unsupported | Unsupported |
+| Live MCP tools | Deferred | Deferred |
+| Cross-tool typed requests | Deferred except manual existing-script use | Deferred except manual existing-script use |
+
+Future MCP support should be a follow-up RFC: thin wrappers around existing scripts (`recall`, `search`, `store`, `revise`) with no second store, no daemon, no polling, explicit activation, and reversible uninstall.
 
 ---
 

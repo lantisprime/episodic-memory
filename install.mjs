@@ -18,6 +18,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
+import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -98,14 +99,16 @@ if (bootstrapLastPrompt) {
 }
 
 if (!tool) {
-  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|windsurf|all> [--project <path>] [--install-hooks] [--install-hooks-force]
+  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-hooks-force]
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
   cursor       Install .cursor/rules/episodic-memory.mdc
   codex        Install skill to .agents/skills/episodic-memory/
+  opencode     Install skill to .opencode/skills/episodic-memory/ (explicit-only; excluded from all)
+  pi-agent     Install skill to .agents/skills/episodic-memory/ (shared with Codex)
   windsurf     Install .windsurfrules (or append to existing)
-  all          Install for all supported tools
+  all          Install for all supported tools except opencode (avoids duplicate OpenCode-visible skills)
 
 Hook flags (claude-code / Phase 3b):
   --install-hooks         Copy hooks/*.sh into ~/.claude/hooks/ and register
@@ -140,9 +143,9 @@ Pre-flight prompt-binding bootstrap:
   process.exit(1)
 }
 
-const VALID_TOOLS = ['claude-code', 'cursor', 'codex', 'windsurf', 'all']
+const VALID_TOOLS = ['claude-code', 'cursor', 'codex', 'opencode', 'pi-agent', 'windsurf', 'all']
 if (!VALID_TOOLS.includes(tool)) {
-  console.log(`Invalid tool "${tool}". Must be one of: ${VALID_TOOLS.join(', ')}`)
+  console.log(`Invalid tool "${tool}". Must be one of: ${VALID_TOOLS.join(', ')}. Note: opencode is explicit-only and is not included in all.`)
   process.exit(1)
 }
 
@@ -612,7 +615,91 @@ if (tool === 'claude-code' || tool === 'all') {
 // ---------------------------------------------------------------------------
 // 3. Install tool-specific instructions
 // ---------------------------------------------------------------------------
-const tools = tool === 'all' ? ['claude-code', 'cursor', 'codex', 'windsurf'] : [tool]
+const projectAbs = path.resolve(projectDir)
+const skillSource = path.join(REPO_INSTRUCTIONS, 'SKILL.md')
+
+function installOwnedFile({ src, dst, label }) {
+  const source = fs.readFileSync(src, 'utf8')
+  if (fs.existsSync(dst)) {
+    const existing = fs.readFileSync(dst, 'utf8')
+    if (existing === source) {
+      console.log(`${label} already current at ${dst}`)
+      return { status: 'current' }
+    }
+    console.log(`Skipped ${label} at ${dst}: existing file differs from repo source; leaving it untouched.`)
+    return { status: 'skipped-divergent' }
+  }
+
+  fs.mkdirSync(path.dirname(dst), { recursive: true })
+  fs.writeFileSync(dst, source)
+  console.log(`Installed ${label} to ${dst}`)
+  return { status: 'installed' }
+}
+
+function gitWorktreeRoot(cwd) {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+function ancestorChain(start, stop) {
+  const chain = []
+  let cur = path.resolve(start)
+  const stopResolved = stop ? path.resolve(stop) : null
+  while (true) {
+    chain.push(cur)
+    if (stopResolved && cur === stopResolved) break
+    const parent = path.dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+  return chain
+}
+
+function opencodeVisibleSkillPaths(projectRoot) {
+  const root = gitWorktreeRoot(projectRoot)
+  const dirs = ancestorChain(projectRoot, root)
+  const projectLocations = dirs.flatMap((dir) => [
+    path.join(dir, '.opencode', 'skills', 'episodic-memory', 'SKILL.md'),
+    path.join(dir, '.claude', 'skills', 'episodic-memory', 'SKILL.md'),
+    path.join(dir, '.agents', 'skills', 'episodic-memory', 'SKILL.md'),
+  ])
+  const home = os.homedir()
+  return [
+    ...projectLocations,
+    path.join(home, '.config', 'opencode', 'skills', 'episodic-memory', 'SKILL.md'),
+    path.join(home, '.claude', 'skills', 'episodic-memory', 'SKILL.md'),
+    path.join(home, '.agents', 'skills', 'episodic-memory', 'SKILL.md'),
+  ]
+}
+
+function installOpenCodeSkill(projectRoot) {
+  const dst = path.join(projectRoot, '.opencode', 'skills', 'episodic-memory', 'SKILL.md')
+  const intended = path.resolve(dst)
+  const duplicates = opencodeVisibleSkillPaths(projectRoot)
+    .map((p) => path.resolve(p))
+    .filter((p, idx, arr) => arr.indexOf(p) === idx)
+    .filter((p) => p !== intended && fs.existsSync(p))
+
+  if (duplicates.length > 0) {
+    console.log(`Skipped OpenCode skill install: existing OpenCode-visible episodic-memory skill found at ${duplicates.join(', ')}. Run a future conflict-resolution flow before installing the native .opencode skill.`)
+    return { status: 'skipped-duplicate' }
+  }
+
+  return installOwnedFile({
+    src: skillSource,
+    dst,
+    label: 'OpenCode skill'
+  })
+}
+
+const tools = tool === 'all' ? ['claude-code', 'cursor', 'codex', 'pi-agent', 'windsurf'] : [tool]
 
 for (const t of tools) {
   switch (t) {
@@ -641,13 +728,23 @@ for (const t of tools) {
       // Install as a Codex skill in .agents/skills/. Codex discovers skills
       // by SKILL.md inside the skill directory; arbitrary markdown filenames
       // in that directory are inert.
-      const skillDir = path.join(projectDir, '.agents', 'skills', 'episodic-memory')
-      fs.mkdirSync(skillDir, { recursive: true })
-      fs.copyFileSync(
-        path.join(REPO_INSTRUCTIONS, 'SKILL.md'),
-        path.join(skillDir, 'SKILL.md')
-      )
-      console.log(`Installed Codex skill to ${skillDir}/SKILL.md`)
+      installOwnedFile({
+        src: skillSource,
+        dst: path.join(projectDir, '.agents', 'skills', 'episodic-memory', 'SKILL.md'),
+        label: 'Codex skill'
+      })
+      break
+    }
+    case 'opencode': {
+      installOpenCodeSkill(projectAbs)
+      break
+    }
+    case 'pi-agent': {
+      installOwnedFile({
+        src: skillSource,
+        dst: path.join(projectDir, '.agents', 'skills', 'episodic-memory', 'SKILL.md'),
+        label: 'Pi Agent skill'
+      })
       break
     }
     case 'windsurf': {
