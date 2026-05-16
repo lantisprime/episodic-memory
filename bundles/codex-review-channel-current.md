@@ -15,7 +15,8 @@ Since #285, prompt-bound preflight marker ownership lives in the
 bootstrap step. The hook writes `.checkpoints/.preflight-done.<session_id>`
 for each real prompt, and the pre-flight gate requires that marker to:
 
-1. List THIS bundle file in `required_files`.
+1. List THIS bundle file AND each of the 7 components (per the
+   machine-readable manifest below) in `required_files`.
 2. Include every listed `required_files` entry in `loaded_files` with the
    current sha256 + mtime_ms from disk.
 3. Declare `claim_class = "codex-review-handoff"`.
@@ -102,12 +103,21 @@ current real prompt are rejected.
     "hook": ["UserPromptSubmit:codex-review-handoff"]
   },
   "required_files": [
-    "<repo>/bundles/codex-review-channel-current.md"
+    "<repo>/bundles/codex-review-channel-current.md",
+    "<memory_root>/reference_codex_review_flow.md",
+    "<memory_root>/feedback_codex_cli_episode_messaging.md",
+    "<memory_root>/feedback_subagent_cli_episode_messaging.md",
+    "<memory_root>/feedback_canonical_agent_dispatch_trigger.md",
+    "<memory_root>/feedback_codex_review_request_preamble.md",
+    "<memory_root>/feedback_second_opinion_harness_runbook.md",
+    "<memory_root>/reference_second_opinion_harness.md"
   ],
   "loaded_files": [
-    {"path": "<abs-path>", "mtime_ms": 1746735000000, "sha256": "..."}
+    {"path": "<repo>/bundles/codex-review-channel-current.md", "mtime_ms": 1746735000000, "sha256": "..."},
+    {"path": "<memory_root>/reference_codex_review_flow.md", "mtime_ms": 1746735000000, "sha256": "..."}
+    // ...one entry per required_files path, sha256 must match disk
   ],
-  "artifact_steps_done": ["user-prompt-submit-hook", "codex-review-bundle-hash"],
+  "artifact_steps_done": ["user-prompt-submit-hook", "codex-review-bundle-hash", "codex-review-components-hash"],
   "created_at_ms": 1746735000000
 }
 ```

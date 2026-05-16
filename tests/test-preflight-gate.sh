@@ -362,8 +362,10 @@ echo "--- F3-series: helper invocation enforcement ---"
 TF="$(mktmp)"; stage_fixture "$TF"
 # F3-gate: Bash invoking helper without --root → DENY at gate
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --target preflight\"}" "deny" "ROOT_REQUIRED|--root" "F3-gate helper sans --root → DENY"
-# F3-gate: Bash invoking helper WITH --root → not blocked by gate (helper itself runs)
-run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" "allow" "" "F3-gate helper with --root → allowed by gate"
+# F3-gate (PR #291 codex r2 P1): Bash invoking helper WITH --root --target
+# preflight → still DENY. The agent has no sanctioned path; preflight marker
+# writes are reserved for the UserPromptSubmit hook.
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight\"}" "deny" "target preflight is reserved for the UserPromptSubmit hook" "F3-gate helper --target preflight → DENY (PR #291)"
 # A1: bare/npx/script-shebang invocation also denied without --root
 run_gate "$TF" "Bash" '{"command":"./scripts/preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1a bare script invocation sans --root → DENY"
 run_gate "$TF" "Bash" '{"command":"npx preflight-marker-write.mjs --target preflight"}' "deny" "ROOT_REQUIRED|--root" "A1b npx invocation sans --root → DENY"
@@ -700,18 +702,13 @@ TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target last-prompt --session-id agent-spoof\"}" \
   "deny" "reserved for the UserPromptSubmit hook" "I7a agent --target last-prompt → deny"
 
-# I7b: Bash invocation with --target preflight (legitimate) → no I7 deny
-# (other gate checks still apply: the marker write itself proceeds).
+# I7b (PR #291 codex r2 P1): Bash invocation with --target preflight → DENY.
+# UserPromptSubmit hook is now the sole writer of the preflight marker too;
+# agent invocation would let a forged marker pass the gate using the current
+# .last-user-prompt.<sid>.json sha + disk-hashed components.
 TF="$(mktmp)"; stage_fixture "$TF"
-out="$(printf '{"tool_name":"Bash","tool_input":{"command":"node %s/scripts/preflight-marker-write.mjs --root %s --target preflight"},"cwd":"%s","session_id":"%s"}' \
-  "$TF" "$TF" "$TF" "$SESSION_ID" | bash "$TF/hooks/preflight-gate.sh" 2>&1 || true)"
-if [ -z "$out" ] || ! printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("reserved for the UserPromptSubmit hook")' >/dev/null 2>&1; then
-  echo "  ✓ I7b --target preflight not blocked by I7 deny"
-  passed=$((passed+1))
-else
-  echo "  ✗ I7b --target preflight false-blocked: $out"
-  failed=$((failed+1))
-fi
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-write.mjs --root $TF --target preflight --session-id agent-forge\"}" \
+  "deny" "target preflight is reserved for the UserPromptSubmit hook" "I7b agent --target preflight → deny (PR #291)"
 
 # Regex tightening: `test-preflight-marker-write.mjs` in argv should NOT
 # trigger the helper-invocation deny. (Before C5 it did — false-positive

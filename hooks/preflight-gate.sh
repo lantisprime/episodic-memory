@@ -274,6 +274,15 @@ if [ "$TOOL_NAME" = "Bash" ]; then
       if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
         _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
       fi
+      # PR #291 codex r2 P1: --target preflight is now also reserved for the
+      # UserPromptSubmit hook. Otherwise an agent can forge the preflight
+      # marker by re-using the current .last-user-prompt.<sid>.json sha plus
+      # disk-hashed components, defeating the hook-owned design from #285.
+      # The hook's own subprocess call doesn't fire PreToolUse — only agent
+      # Bash tool calls hit this gate.
+      if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+preflight([[:space:]]|$)'; then
+        _emit_deny "preflight-marker-write.mjs --target preflight is reserved for the UserPromptSubmit hook (PR #291 / #285). Agent invocation at PreToolUse is forbidden — the hook writes the preflight marker on every real user prompt with the bundle + 7 components hashed. If the marker is missing or stale, the install may be incomplete: re-run install.mjs --install-hooks."
+      fi
     fi
   fi
 fi
