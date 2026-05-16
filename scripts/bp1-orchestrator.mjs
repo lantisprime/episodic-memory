@@ -1066,16 +1066,17 @@ function detectRfcs(args) {
       }
       detected.push({ rfc_id: rfcId, run_id: runId, rfc_detected_episode_id: written.episodeId })
     } catch (e) {
-      // Cluster #287 fix: compensating rollback. Each step wrapped so a
-      // mid-rollback throw is observable (not silently swallowed).
+      // Cluster #287 fix: compensating rollback. Reverse-symmetric to the
+      // forward order (generateRunKey → appendRun → writeBp1Episode):
+      // unwind episode → index row → key. If shred-then-index were the
+      // order, a mid-rollback failure could leave the index pointing to a
+      // run with no key (verifier would fail "fingerprint mismatch"
+      // forever). Index-removal-before-shred is the recoverable direction.
+      // codex r1 C2 fix.
       const rollbackErrors = []
       if (episodePath) {
         try { fs.unlinkSync(episodePath) }
         catch (re) { rollbackErrors.push(`unlink-episode: ${re.message}`) }
-      }
-      if (keyGenerated) {
-        try { shredRunKey(projectRoot, runId) }
-        catch (re) { rollbackErrors.push(`shred-key: ${re.message}`) }
       }
       if (appendDone) {
         try {
@@ -1087,6 +1088,13 @@ function detectRfcs(args) {
             }
           })
         } catch (re) { rollbackErrors.push(`remove-run: ${re.message}`) }
+      }
+      if (keyGenerated) {
+        // shredRunKey reports failure via return value, not throw. codex r1
+        // C1 fix: check the result and surface; without this, key shred
+        // failures were silently lost from rollbackErrors AND the sentinel.
+        const sr = shredRunKey(projectRoot, runId)
+        if (sr && sr.error) rollbackErrors.push(`shred-key: ${sr.error}`)
       }
       if (rollbackErrors.length > 0) {
         // Last-resort observability: write sentinel + stderr-log; never swallow.

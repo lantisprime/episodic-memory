@@ -90,8 +90,10 @@ function setupActiveProject({ rfcs = ['RFC-A'] } = {}) {
 
 // ===========================================================================
 // 287-1 — atomic-rename injection: writer's rename throws → rollback unwinds
+//   key + index row + episode .md AND no .md.tmp.* leak. codex r1 C3 fix:
+//   prior version filtered out .tmp.* files which masked tmp leak class.
 // ===========================================================================
-tap('287-1 emit throws (atomic-rename injected fail) → key + index row + tmp unwound', () => {
+tap('287-1 emit throws (atomic-rename injected fail) → key + index + episode .md + tmp all unwound', () => {
   const { project, home } = setupActiveProject({ rfcs: ['RFC-A'] })
   const r = spawnSync('node', ['--import', INJECT_RENAME, ORCHESTRATOR, 'detect-rfcs', '--project', project], {
     cwd: project,
@@ -114,52 +116,70 @@ tap('287-1 emit throws (atomic-rename injected fail) → key + index row + tmp u
         `run.key should have been shredded for ${e}; got ${subEntries.join(', ')}`)
     }
   }
-  // No FINAL episode files (the failed rename means the .tmp file was created
-  // but rename to final never happened).
+  // No FINAL episode files AND no .md.tmp.* leftovers. The writer's atomic-
+  // rename path failed, so it should have cleaned up its tmp; if not, the
+  // disk accumulates orphan tmps across crash-retry. codex r1 C3.
   const episodesDir = path.join(project, '.episodic-memory', 'episodes')
   if (fs.existsSync(episodesDir)) {
-    const finals = fs.readdirSync(episodesDir).filter(n => n.endsWith('.md') && !n.includes('.tmp.'))
+    const all = fs.readdirSync(episodesDir)
+    const finals = all.filter(n => n.endsWith('.md') && !n.includes('.tmp.'))
+    const tmps = all.filter(n => n.includes('.md.tmp.') || (n.startsWith('.') && n.includes('tmp')))
     assert.equal(finals.length, 0, `no final episode files; got ${finals.join(', ')}`)
+    assert.equal(tmps.length, 0, `no .md.tmp.* leak; got ${tmps.join(', ')}`)
   }
 })
 
 // ===========================================================================
-// 287-2 — sentinel: rollback step itself fails → .rollback-failed.json written
+// 287-2 — rollback step itself fails: episode-rename injection THEN shred-key
+//   injection forces a real rollback failure. Verify (a) .rollback-failed.json
+//   sentinel on disk, (b) stderr contains "rollback-failed: sentinel at ...",
+//   (c) sentinel JSON contains the original error + the shred-key failure
+//   in the rollback_errors array. codex r1 C3 fix: prior smoke test asserted
+//   assert.ok(true), never forced a rollback failure.
 // ===========================================================================
-// We engineer this by injecting a renameSync failure AND by making the
-// run.key directory unwritable so shredRunKey fails. But making it
-// unwritable on macOS requires chmod and is fiddly; a simpler approach is
-// to assert that the orchestrator emits the rollback-failed line when
-// shredRunKey rejects (e.g., file gone). For now, we test the basic
-// observability path: rollback runs to completion in 287-1, so we just
-// verify the sentinel mechanism by simulating a partial rollback state
-// directly. This test is a smoke-test of the sentinel-write path.
-
-tap('287-2 sentinel-write path is reachable (smoke): rollback errors stringify into stderr', () => {
-  // The injected rename in 287-1 should produce a clean rollback (no
-  // sentinel). Verify stderr does NOT contain "rollback-failed:" but DOES
-  // contain the iteration-failure error.
+tap('287-2 forced rollback failure → .rollback-failed.json sentinel + stderr line', () => {
   const { project, home } = setupActiveProject({ rfcs: ['RFC-A'] })
   const r = spawnSync('node', ['--import', INJECT_RENAME, ORCHESTRATOR, 'detect-rfcs', '--project', project], {
     cwd: project,
     encoding: 'utf8',
-    env: { ...process.env, HOME: home, FAIL_EPISODE_RENAME: '1' },
+    env: {
+      ...process.env, HOME: home,
+      FAIL_EPISODE_RENAME: '1',
+      FAIL_SHRED_KEY: '1',
+    },
   })
-  assert.equal(r.status, 3)
+  assert.equal(r.status, 3, `expected exit 3; got ${r.status}; stderr=${r.stderr}`)
   assert.match(r.stderr, /detect-rfcs iteration failed/,
     `expected iteration-failure stderr; got: ${r.stderr}`)
-  // Clean rollback in this scenario — no sentinel expected.
+  assert.match(r.stderr, /rollback-failed: sentinel at /,
+    `expected sentinel-write stderr line; got: ${r.stderr}`)
+
+  // Find the sentinel on disk and verify its contents.
   const runsDir = path.join(project, '.episodic-memory', 'runs')
-  if (fs.existsSync(runsDir)) {
-    const sentinels = fs.readdirSync(runsDir).flatMap(e => {
-      const sub = path.join(runsDir, e)
-      try { return fs.statSync(sub).isDirectory() ? fs.readdirSync(sub).filter(f => f === '.rollback-failed.json') : [] }
-      catch { return [] }
-    })
-    // Sentinel is allowed but not required for the clean-rollback case.
-    // Either way the iteration-failure stderr line is present.
-    assert.ok(true, `sentinels found: ${sentinels.length}`)
+  assert.ok(fs.existsSync(runsDir), 'runs/ should exist')
+  let sentinelPath = null
+  let sentinelContent = null
+  for (const entry of fs.readdirSync(runsDir)) {
+    const sub = path.join(runsDir, entry)
+    if (!fs.statSync(sub).isDirectory()) continue
+    const candidate = path.join(sub, '.rollback-failed.json')
+    if (fs.existsSync(candidate)) {
+      sentinelPath = candidate
+      sentinelContent = JSON.parse(fs.readFileSync(candidate, 'utf8'))
+      break
+    }
   }
+  assert.ok(sentinelPath, `expected .rollback-failed.json on disk; runs/ entries: ${fs.readdirSync(runsDir).join(', ')}`)
+  assert.ok(Array.isArray(sentinelContent.rollback_errors),
+    `sentinel.rollback_errors must be array; got: ${JSON.stringify(sentinelContent)}`)
+  assert.ok(
+    sentinelContent.rollback_errors.some(e => /^shred-key: /.test(e)),
+    `sentinel must record shred-key failure; got: ${JSON.stringify(sentinelContent.rollback_errors)}`,
+  )
+  assert.match(sentinelContent.original_error, /injected episode renameSync failure/,
+    `sentinel.original_error must reference the writer failure; got: ${sentinelContent.original_error}`)
+  assert.ok(sentinelContent.run_id, 'sentinel must include run_id')
+  assert.ok(sentinelContent.at, 'sentinel must include timestamp')
 })
 
 if (fail > 0) {

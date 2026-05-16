@@ -243,6 +243,13 @@ export function writeBp1Episode(opts) {
   // Atomic write: tmp + fsync + rename. Crash between fsync and rename
   // leaves a recoverable tmp; crash before rename leaves no observable
   // final path (cluster #286/#287/#288 — codex round-5 ACCEPT).
+  //
+  // rename-failure cleanup: if the rename itself throws (injected failure
+  // OR real I/O error like ENOSPC), unlink the tmp before rethrowing.
+  // Without this, repeated crash-retry accumulates orphan tmp files in
+  // episodes/. The unlink is best-effort: on unlink failure rethrow the
+  // ORIGINAL error (rename) since that's the actionable one for callers.
+  // codex PR-r1 C3 fix.
   const tmpPath = `${episodePath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
   const fd = fs.openSync(tmpPath, 'wx', 0o600)
   try {
@@ -251,7 +258,12 @@ export function writeBp1Episode(opts) {
   } finally {
     fs.closeSync(fd)
   }
-  fs.renameSync(tmpPath, episodePath)
+  try {
+    fs.renameSync(tmpPath, episodePath)
+  } catch (renameErr) {
+    try { fs.unlinkSync(tmpPath) } catch (_e) { /* best-effort tmp cleanup */ }
+    throw renameErr
+  }
 
   return { episodeId, episodePath, hmacHex }
 }

@@ -79,24 +79,30 @@ tap('A1 atomic writer: emits final episode atomically; no tmp leak on success', 
   }
 })
 
-tap('A2 atomic writer: crash mid-rename → no final path; tmp present', () => {
+tap('A2 atomic writer: rename failure → no final path AND no tmp leak (writer cleans up)', () => {
+  // Contract revised per codex PR-r1 C3: writer is responsible for its own
+  // tmp cleanup on rename failure. The prior contract ("tmp present,
+  // cleanable by orphan sweep") was aspirational — no orphan sweep ever
+  // shipped, so leaked tmps accumulated forever under crash-retry. The
+  // writer now unlinks the tmp before rethrowing the rename error.
   const projectRoot = mkTmpProject()
   const original = fs.renameSync
   let tmpSeen = null
   fs.renameSync = (src, _dst) => { tmpSeen = src; throw new Error('simulated power loss between fsync and rename') }
   try {
     let threw = false
-    try { emitPre(projectRoot, RUN_ID, KEY) } catch (_e) { threw = true }
+    let caughtErr = null
+    try { emitPre(projectRoot, RUN_ID, KEY) } catch (e) { threw = true; caughtErr = e }
     assert.ok(threw, 'writer should propagate rename failure')
+    assert.match(caughtErr.message, /simulated power loss/,
+      'writer rethrows the ORIGINAL rename error (not the tmp-cleanup error)')
     assert.ok(tmpSeen != null, 'rename stub should have been called with tmp path')
-    // No final episode file should exist.
     const epDir = path.join(projectRoot, '.episodic-memory', 'episodes')
     const entries = fs.readdirSync(epDir)
     const finals = entries.filter(e => !e.includes('.tmp.'))
     assert.equal(finals.length, 0, `unexpected final files: ${finals.join(', ')}`)
-    // The tmp file should be present (cleanable by orphan sweep).
     const tmps = entries.filter(e => e.includes('.tmp.'))
-    assert.equal(tmps.length, 1, `expected 1 tmp file; got ${tmps.length}`)
+    assert.equal(tmps.length, 0, `tmp should be cleaned up on rename failure; got: ${tmps.join(', ')}`)
   } finally {
     fs.renameSync = original
   }
