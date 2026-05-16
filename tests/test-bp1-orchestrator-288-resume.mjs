@@ -30,6 +30,8 @@ const rsmod = await import(new URL('../scripts/lib/bp1-run-state.mjs', import.me
 const { loadIndex, withRunStateLockExclusive, loadIndexLocked, writeIndex } = rsmod
 const writerMod = await import(new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href)
 const { writeBp1Episode } = writerMod
+const fmMod = await import(new URL('../scripts/lib/bp1-frontmatter.mjs', import.meta.url).href)
+const { parseBp1Frontmatter } = fmMod
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -485,7 +487,7 @@ tap('288-11 F2: run.state=needs-human but decided_class=trivial (targetState mis
 // 288-12 — happy path PARALLEL: non-trivial → needs-human (sibling of 288-7).
 // Closes the "test trivial only" coverage gap the reviewer flagged.
 // ===========================================================================
-tap('288-12 needs-human happy path: classified + route ids persisted in idx', () => {
+tap('288-12 needs-human happy path: classified + route ids persisted in idx + customFm round-trips', () => {
   const ctx = setupPreDispatched()
   const resultFile = writeResultFile(ctx.project, { class: 'security', confidence: 0.92, rationale: 'r', classified_fields: ['x'] })
   const r = runRecordClassification(ctx, resultFile)
@@ -498,6 +500,15 @@ tap('288-12 needs-human happy path: classified + route ids persisted in idx', ()
   assert.equal(run.state, 'needs-human')
   assert.equal(run.classified_episode_id, out.classified_episode_id)
   assert.equal(run.route_episode_id, out.route_episode_id)
+  // N3: verify route episode frontmatter actually contains the customFm the
+  // helper produces. Defense-in-depth: catches writer regression silently
+  // dropping customFm fields. Writer's own unit tests check reserved-key
+  // enforcement; this checks predicate↔persist round-trip end-to-end.
+  const routeEpPath = path.join(ctx.project, '.episodic-memory', 'episodes', `${out.route_episode_id}.md`)
+  const fm = parseBp1Frontmatter(fs.readFileSync(routeEpPath)).frontmatter
+  assert.equal(fm.reason, 'risky-class', `route customFm.reason missing/wrong: ${JSON.stringify(fm.reason)}`)
+  assert.equal(fm.decided_class, 'security', `route customFm.decided_class missing/wrong: ${JSON.stringify(fm.decided_class)}`)
+  assert.equal(fm.parent_episode, out.classified_episode_id, 'route parent_episode = classified id')
 })
 
 // ===========================================================================

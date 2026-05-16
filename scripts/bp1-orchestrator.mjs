@@ -1742,7 +1742,9 @@ function recordClassification(args) {
           && run.state !== targetState) {
         process.stderr.write(
           `error: state-violation (Phase B): run.state=${run.state} but ` +
-          `decided_class=${run.decided_class} implies targetState=${targetState}\n`,
+          `decided_class=${run.decided_class} implies targetState=${targetState}. ` +
+          `Manual recovery: inspect run row + signed episodes; either reset run.state ` +
+          `to 'classified' (if route was emitted in error) or correct decided_class.\n`,
         )
         phaseBExit = 5
         return

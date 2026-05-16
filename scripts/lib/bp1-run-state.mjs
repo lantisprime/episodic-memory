@@ -375,12 +375,14 @@ export function writeIndex(projectRoot, idx) {
   const target = indexPath(projectRoot)
   fs.mkdirSync(path.dirname(target), { recursive: true })
   const tmpPath = `${target}.tmp.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}`
-  // Durability ordering: episode writes (bp1-episode-writer.mjs) fsync before
-  // rename; index writes do NOT fsync. A crash between durable episode-on-disk
-  // and rename-of-index leaves a signed episode the orchestrator's orphan-
-  // attach path will find on retry (`findSignedStateEpisode` + state-resume).
-  // Reversing the order (index first, episode second) would create the bad
-  // failure mode: index claims episode exists but no signed episode on disk.
+  // Durability ordering: callers MUST sequence episode-emit (atomic
+  // tmp+fsync+rename via bp1-episode-writer.mjs) BEFORE this writeIndex.
+  // Both endpoints fsync now (cluster-#286/#287/#288 round-2 N1 fix). The
+  // invariant is the ORDER, not the per-step durability: if a crash occurs
+  // between episode-rename and index-rename, the signed episode is on disk
+  // and the orchestrator's orphan-attach path finds it via
+  // `findSignedStateEpisode` on retry. Reversing the order (index first)
+  // would create the bad failure mode: index pointer to no-such-episode.
   const fd = fs.openSync(tmpPath, 'wx', 0o600)
   try {
     fs.writeFileSync(fd, JSON.stringify(idx, null, 2) + '\n')
