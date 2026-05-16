@@ -492,7 +492,14 @@ _is_in_space_list() {
 _check_helper_invocation_grammar() {
   local cmd="$1"
   local -a TOKS=()
-  local line tok_text
+  local line tok_text stream
+  # Capture _tokenize output BEFORE iterating, so an early `return` inside
+  # the loop does not close the pipe while _tokenize is still writing — on
+  # Linux that triggers SIGPIPE and emits `printf: write error: Broken
+  # pipe` to stderr, which pollutes the gate's JSON output. macOS hides
+  # SIGPIPE by default; CI Linux does not. (Same idiom used at lines ~1654
+  # and ~2015.)
+  stream="$(_tokenize "$cmd")"
   while IFS= read -r line; do
     case "$line" in
       "T "*)
@@ -511,7 +518,7 @@ _check_helper_invocation_grammar() {
         ;;
       *) ;;
     esac
-  done < <(_tokenize "$cmd")
+  done <<< "$stream"
 
   local idx=0
   # Step 2: walk env-prefix tokens
@@ -584,7 +591,13 @@ _check_helper_invocation_grammar() {
 # basename appears only as a data argument.
 _detect_tokens_contain_helper() {
   local cmd="$1"
-  local line tok_text base
+  local line tok_text base stream
+  # Same SIGPIPE-avoidance as _check_helper_invocation_grammar: capture
+  # _tokenize output first, then iterate via here-string. The early
+  # `return 0` below would otherwise close the pipe mid-write on Linux
+  # CI, leaking `printf: write error: Broken pipe` to stderr and breaking
+  # the gate's JSON output parse in tests A1b / R4-B5.
+  stream="$(_tokenize "$cmd")"
   while IFS= read -r line; do
     case "$line" in
       "T "*)
@@ -595,7 +608,7 @@ _detect_tokens_contain_helper() {
         fi
         ;;
     esac
-  done < <(_tokenize "$cmd")
+  done <<< "$stream"
   return 1
 }
 
