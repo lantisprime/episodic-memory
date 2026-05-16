@@ -13,8 +13,8 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 ## Data locations
 - Global: `~/.episodic-memory/` (scripts, episodes, index)
 - Per-project: `.episodic-memory/` (local episodes + index)
-- `docs/rfcs/` — contains the RFC to be used in implementation when the status is ACCEPTED
-- `PRINCIPLES.md` — when planning, designing, and implementing requirements, Claude Code must read this and follow
+- `docs/rfcs/` — RFC specs; implement from those with status `ACCEPTED`. Index: `docs/rfcs/README.md` + `_index.json`.
+- `PRINCIPLES.md` — governing principles (memory-as-substrate, JSON-defs/`.mjs`-adapters, explicit activation, etc.). Read before planning/designing/implementing; new features that violate a principle either revise it or get rejected.
 
 ## Development conventions
 - Scripts are `.mjs` (ESM) with zero external dependencies
@@ -22,51 +22,32 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - Scripts handle missing data directories gracefully (create on first use)
 - Episode IDs are immutable; decisions are corrected via revision chains, not edits
 - Use atomic write (temp + rename) for index rebuilds
-- You must not do mental tracing always use the actual files or data
-- You must do code review and use the actual files
+- No mental tracing — use the actual files/data, and read them for code review
 
 ## Second-opinion review harness
 Pluggable cross-tool review at `scripts/second-opinion.mjs`. Replaces the
 manual 5-step `em-store + codex exec + episode-reply` recipe with a callable
-harness that handles preamble composition, provider dispatch, and
-consensus-loop iteration in one invocation.
+harness handling preamble composition, provider dispatch, and consensus loop.
 
 ```bash
-# Single-shot: write request → dispatch → write reply (synchronous).
+# Single-shot: write request → dispatch → write reply.
 node scripts/second-opinion.mjs request \
   --provider codex --project . --storage files \
   --body "review this diff..." --summary "diff review" --dispatch
-
-# Consensus loop: dispatch → parse verdict → rebuttal-cb → next round.
-node scripts/second-opinion.mjs request \
-  --provider codex --project . --storage files \
-  --body-file plan.md --summary "plan review" \
-  --consensus --max-rounds 5 --rebuttal-cb scripts/my-rebuttal.mjs
 ```
 
-Providers: `codex`, `claude-subagent`, `gemini`, `stub` (testing).
-Storage backends: `files` (`.review-store/`) or `episodic` (uses em-store).
-Preambles: per-provider defaults at `scripts/second-opinion/preambles/`,
-overridable via `--preamble <id>` CLI flag or
-`<project>/.review-store/preambles/<provider>.md` file.
+Consensus-loop variant: pass `--consensus --max-rounds N --rebuttal-cb <script>`. See `scripts/second-opinion.mjs --help`.
 
-Run `node install.mjs --tool claude-code --install-second-opinion` to
-write the install snapshot at `~/.claude/hooks/second-opinion-providers.json`
-(required for harness I-27a registry-stale-at-gate + composer I-27b
-preamble-tamper-at-composer + Claude Code PreToolUse hook gating).
+Providers: `codex`, `claude-subagent`, `gemini`, `stub`. Storage: `files` (`.review-store/`) or `episodic`. Preambles default to `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
 
-The Claude Code PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks
-direct provider invocations (Bash + Agent variants) so reviews route
-through the harness. Hook is fail-closed on missing/malformed snapshot.
+Run `node install.mjs --tool claude-code --install-second-opinion` to write the registry snapshot at `~/.claude/hooks/second-opinion-providers.json`. The PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks direct Bash + Agent provider invocations so all reviews route through the harness; fail-closed on missing/malformed snapshot.
 
 ## Discovering active priorities (read on session start)
 Before recommending or starting work, fetch the latest workplan:
 ```bash
 node scripts/em-search.mjs --tag workplan --category decision --limit 1 --scope all --full --no-score --no-track
 ```
-Workplans are stored as `category: decision` with tag `workplan`. The terminal revision in the supersedes chain is the current one. The active queue table holds priority/status/session/tokens/depends-on per item. (Tier-2 of MEMORY.md "Current workplan" pointer; tool-agnostic for Cursor/Codex/Windsurf.)
-
-Notes on the flags: `--tag` (singular — em-search silently ignores `--tags` per #123), `--category decision` (filters out evidence/lesson siblings that share the `workplan` tag), `--no-score` (recency sort; remove when #123 ships `--sort recency`), `--full` (returns body so the table renders), `--no-track` (avoids access-counter pollution from session-start polling).
+Workplans are `category: decision` + tag `workplan`. The terminal revision in the supersedes chain is current. The active queue table holds priority/status/session/tokens/depends-on per item. Flag rationale: see `scripts/em-search.mjs --help`.
 
 ## Testing
 ```bash
