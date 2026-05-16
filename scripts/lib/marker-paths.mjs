@@ -189,12 +189,16 @@ export function planMarkerBasenameForSession(sid) {
 //
 // Sibling of PLAN_MARKER_* (#268 / PR #271). Both forms accepted by
 // readers/gates during burn-in. Helper writes only the suffixed form when
-// --session-id is provided to --target preflight. SessionStart orphan-sweep
-// clears both. SessionEnd own-session-only deletes the suffixed form for
-// the ending session.
+// --session-id is provided to --target preflight.
 //
-// Shell parity: hooks/lib/marker-paths.sh PREFLIGHT_MARKER_*. Drift caught
-// by scripts/validate-plan-marker-sites.mjs (Direction 0, registry-driven).
+// SessionStart orphan-sweep / SessionEnd own-session-only cleanup of the
+// per-session form are FU — see issue #283 (`any_preflight_marker_exists`
+// is defined for future wiring; not yet called by lifecycle hooks).
+//
+// Shell parity: hooks/lib/marker-paths.sh PREFLIGHT_MARKER_*. Drift
+// detection extension to validate-plan-marker-sites.mjs for PREFLIGHT_*
+// constants is FU — see issue #283 (validator currently covers
+// PLAN_MARKER_* only).
 // ---------------------------------------------------------------------------
 
 export const PREFLIGHT_MARKER_LEGACY_BASENAME = '.preflight-done'

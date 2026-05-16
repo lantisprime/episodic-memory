@@ -214,8 +214,9 @@ any_plan_marker_exists() {
 # #279 fix — per-session .preflight-done marker contract.
 #
 # Shell parity for scripts/lib/marker-paths.mjs PREFLIGHT_MARKER_*. Sibling
-# of PLAN_MARKER_* (#268 / PR #271). Drift caught by
-# scripts/validate-plan-marker-sites.mjs.
+# of PLAN_MARKER_* (#268 / PR #271). Drift detection extension to
+# scripts/validate-plan-marker-sites.mjs for PREFLIGHT_* constants is FU —
+# see issue #283 (validator currently covers PLAN_MARKER_* only).
 # ---------------------------------------------------------------------------
 
 readonly PREFLIGHT_MARKER_LEGACY_BASENAME='.preflight-done'
