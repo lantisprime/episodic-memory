@@ -446,6 +446,40 @@ run_gate "$TF" "Bash" '{"command":"grep -r preflight-marker-write.mjs scripts/"}
 TF="$(mktmp)"; stage_fixture "$TF"
 run_gate "$TF" "Bash" $'{"command":"echo \'see preflight-marker-write helper notes\'"}' "allow" "" "R4-FP5 echo mentioning helper stem → ALLOW"
 
+# ---------------------------------------------------------------------------
+# R5-series (codex PR #291 r5): unconditional tokenized detection
+# ---------------------------------------------------------------------------
+# Bypass cases — basename spellings broken by shell escapes/quotes that
+# defeated the r4 raw-substring prefilter (`grep -qF preflight-marker-write`).
+# Bash collapses these to the canonical basename at runtime; _tokenize
+# normalizes the same way. r5 removed the raw prefilter so every Bash
+# command flows through _detect_helper_invocation directly.
+TF="$(mktmp)"; stage_fixture "$TF"
+# R5-B1: backslash-escaped char inside the basename — Bash collapses
+# `preflight-marker-wri\te.mjs` → `preflight-marker-write.mjs`.
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-wri\\\\te.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R5-B1 escaped-basename helper → DENY (tokenized)"
+
+# R5-B2: double-quote concatenation inside the basename — Bash collapses
+# `preflight-marker-"write".mjs` → `preflight-marker-write.mjs`.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-\\\"write\\\".mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R5-B2 quote-concat basename helper → DENY (tokenized)"
+
+# R5-B3: single-quote concatenation inside the basename.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" "{\"command\":\"node $TF/scripts/preflight-marker-'write'.mjs --root $TF --target preflight\"}" \
+  "deny" "reserved for the UserPromptSubmit hook" "R5-B3 single-quote-concat basename helper → DENY (tokenized)"
+
+# False-positive controls — benign Bash commands without the helper
+# substring at all. Previously short-circuited on the raw prefilter; now
+# flow through _detect_helper_invocation which returns NO_MATCH. Locks in
+# the unconditional-call contract from codex r5.
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"ls -la"}' "allow" "" "R5-FP1 ls -la (no helper substring) → ALLOW"
+TF="$(mktmp)"; stage_fixture "$TF"
+run_gate "$TF" "Bash" '{"command":"git status --porcelain"}' "allow" "" "R5-FP2 git status (no helper substring) → ALLOW"
+
 # F3a: helper directly (out of gate) without --root → exit 4
 set +e
 out="$(echo '{}' | node "$TF/scripts/preflight-marker-write.mjs" --target preflight 2>&1)"
