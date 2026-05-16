@@ -60,7 +60,11 @@ source "$LIB_DIR/marker-paths.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
-PREFLIGHT_MARKER="$PRIMARY_DIR/.preflight-done"
+# #279 fix: prefer per-session marker, fall back to legacy during burn-in.
+# Resolution happens AFTER SESSION_ID is validated (below); the actual marker
+# path used by claim-class validation is set as PREFLIGHT_MARKER_RESOLVED.
+PREFLIGHT_MARKER_LEGACY="$PRIMARY_DIR/.preflight-done"
+PREFLIGHT_MARKER_SID=""   # set after SESSION_ID validation if present
 LAST_PROMPT_MARKER="$PRIMARY_DIR/.last-user-prompt.json"
 HELPER_PATH="$REPO_ROOT/scripts/preflight-marker-write.mjs"
 CANON_LIB="$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs"
@@ -102,6 +106,8 @@ if [ -n "$SESSION_ID" ]; then
   if [ ${#SESSION_ID} -gt 128 ]; then
     _emit_deny "preflight-gate.sh: session_id from stdin exceeds 128 chars; cannot evaluate prompt-binding."
   fi
+  # #279 fix: SESSION_ID has been validated, safe to interpolate into path.
+  PREFLIGHT_MARKER_SID="$PRIMARY_DIR/.preflight-done.${SESSION_ID}"
 fi
 
 # _canonicalize_one <input-path> <hook-cwd>
@@ -136,7 +142,7 @@ case "$TOOL_NAME" in
       set +e
       CANON_TOOL="$(_canonicalize_one "$TOOL_PATH" "$CWD")"
       ec_tool=$?
-      CANON_PREFLIGHT="$(_canonicalize_one "$PREFLIGHT_MARKER" "$REPO_ROOT")"
+      CANON_PREFLIGHT="$(_canonicalize_one "$PREFLIGHT_MARKER_LEGACY" "$REPO_ROOT")"
       ec_pf=$?
       CANON_LAST_PROMPT="$(_canonicalize_one "$LAST_PROMPT_MARKER" "$REPO_ROOT")"
       ec_lp=$?
@@ -159,25 +165,53 @@ case "$TOOL_NAME" in
       # .last-user-prompt.<sid>.json under .checkpoints/ (the session-
       # namespaced files written by the helper via the UserPromptSubmit
       # hook — agents must never write these directly).
+      # #279 fix: also deny .preflight-done.<sid> (the new per-session
+      # marker form) regardless of which session — helper-only contract.
       _tool_basename="$(basename "$CANON_TOOL")"
       _tool_parent="$(dirname "$CANON_TOOL")"
       _last_prompt_namespaced=0
+      _preflight_namespaced=0
       if [ "$_tool_parent" = "$CANON_PRIMARY_DIR" ]; then
         case "$_tool_basename" in
           .last-user-prompt.*.json) _last_prompt_namespaced=1 ;;
+          .preflight-done.*)
+            # Validate suffix shape ([A-Za-z0-9_-]{1,128}) so .preflight-done.bak
+            # / .preflight-done. / .preflight-done./traversal don't slip.
+            _suffix="${_tool_basename#.preflight-done.}"
+            if [ -n "$_suffix" ] && [ ${#_suffix} -le 128 ]; then
+              case "$_suffix" in
+                *[!A-Za-z0-9_-]*) : ;;
+                *) _preflight_namespaced=1 ;;
+              esac
+            fi
+            ;;
         esac
       fi
-      if [ "$CANON_TOOL" = "$CANON_PREFLIGHT" ] || [ "$CANON_TOOL" = "$CANON_LAST_PROMPT" ] || [ $_last_prompt_namespaced -eq 1 ]; then
-        _emit_deny "Direct $TOOL_NAME to preflight marker is forbidden. Use the atomic helper: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight (or --target last-prompt). Resolved tool path: $CANON_TOOL."
+      if [ "$CANON_TOOL" = "$CANON_PREFLIGHT" ] || [ "$CANON_TOOL" = "$CANON_LAST_PROMPT" ] || [ $_last_prompt_namespaced -eq 1 ] || [ $_preflight_namespaced -eq 1 ]; then
+        _emit_deny "Direct $TOOL_NAME to preflight marker is forbidden. Use the atomic helper: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id $SESSION_ID (or --target last-prompt). Resolved tool path: $CANON_TOOL."
       fi
     fi
     ;;
 esac
 
 # ---------------------------------------------------------------------------
-# Helper-invocation enforcement (FU-3): Bash invoking the helper without
-# explicit --root is denied at gate layer (defense in depth even when the
-# settings.json allowlist permits).
+# Helper-invocation enforcement (FU-3 + #279 Stream 2): Bash invoking the
+# helper must satisfy the v7 structural command-form grammar:
+#   <command> := <env-prefix>* <executable> <helper-script-path> <helper-flags>*
+# where:
+#   <env-prefix> name ∈ _ROUTINE_ENV_ALLOWLIST (NODE_ENV, DEBUG, CI, ...)
+#   <executable> basename ∈ _NODE_BINARY_BASENAME_ALLOWLIST (node)
+#
+# Replaces the prior regex-based detection of env wrappers / sudo wrappers /
+# path-spelled variants with two structural whitelists. Catches the entire
+# wrapper class (env, sudo, npx, nohup, time, bash, python, ...) via the
+# single executable-basename check.
+#
+# Defense layers BEYOND this gate:
+#   - Bash allowlist (settings.json) — first line of defense
+#   - command-classifier.sh wrapper_utility list — classify_command rejects
+#   - file-system permissions on /usr/bin/env etc.
+# This gate is one of many; not the only defense.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ]; then
   CMD="$(printf '%s' "$TOOL_INPUT_JSON" | jq -r '.command // ""')"
@@ -190,21 +224,53 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # preceded by start-of-string, space, or slash (i.e. it IS the basename
     # of a path or a bare invocation), AND followed by space or end. The
     # previous regex used `\b...\b` which matched ANY word-boundary,
-    # producing false-positives on `test-preflight-marker-write.mjs`
-    # (the `-` in `test-` is a non-word char, so `\b` triggered against
-    # the following `p`). Plan-v2 C5: tighten the boundary.
+    # producing false-positives on `test-preflight-marker-write.mjs`.
     HELPER_BASENAME_RE='(^|[ /])preflight-marker-write\.mjs( |$)'
     if printf '%s' "$NORMALIZED_CMD" | grep -qE "$HELPER_BASENAME_RE"; then
-      if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
-        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt>. No cwd fallback (ROOT_REQUIRED)."
+      # #279 Stream 2: structural command-form check.
+      # _check_helper_invocation_grammar is sourced from command-classifier.sh.
+      GRAMMAR_RESULT="$(_check_helper_invocation_grammar "$CMD")"
+      GRAMMAR_VERDICT="${GRAMMAR_RESULT%%	*}"
+      if [ "$GRAMMAR_VERDICT" = "DENY" ]; then
+        GRAMMAR_REST="${GRAMMAR_RESULT#*	}"
+        GRAMMAR_KIND="${GRAMMAR_REST%%	*}"
+        GRAMMAR_DETAIL="${GRAMMAR_REST#*	}"
+        case "$GRAMMAR_KIND" in
+          env-prefix)
+            _emit_deny "Helper invocation env-prefix wrapper ($GRAMMAR_DETAIL=...) not in routine allowlist. Only routine framework env vars permitted before helper: NODE_ENV, DEBUG, CI, PYTHONPATH, LOG_LEVEL. Per env-prefix-discipline-v1.md. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          env-prefix-invalid)
+            _emit_deny "Helper invocation env-prefix token has invalid POSIX-name shape: $GRAMMAR_DETAIL. Names must match [A-Za-z_][A-Za-z0-9_]*. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          wrapper)
+            _emit_deny "Helper must be invoked via a token whose basename is 'node'. Got basename '$GRAMMAR_DETAIL'. Wrappers (env, sudo, npx, nohup, time, exec, bash, python, etc.) not permitted at executable position. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          tokenize)
+            _emit_deny "Helper invocation could not be safely tokenized ($GRAMMAR_DETAIL). Use a simple form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          no-exec)
+            _emit_deny "Helper invocation has no executable token after env-prefix walk. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          no-helper)
+            _emit_deny "Helper invocation: executable token (node) present but no helper-script-path token follows. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          wrong-helper)
+            _emit_deny "Helper invocation: token after 'node' has basename '$GRAMMAR_DETAIL'; expected 'preflight-marker-write.mjs'. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>."
+            ;;
+          *)
+            _emit_deny "Helper invocation grammar denied ($GRAMMAR_KIND): $GRAMMAR_DETAIL"
+            ;;
+        esac
       fi
-      # I7 (plan-v2 audit F2): the UserPromptSubmit hook is the ONLY
-      # sanctioned writer of `.last-user-prompt.<sid>.json`. The hook
-      # runs OUTSIDE the PreToolUse path (UserPromptSubmit event), so
-      # any PreToolUse-time invocation of the helper with `--target
-      # last-prompt` is an agent attempt to spoof the prompt-binding.
-      # Deny regardless of --root presence (the agent could supply
-      # --root correctly while still forging the sha).
+      # Grammar passed (T[idx]=node). Still enforce existing --root and
+      # --target last-prompt rules on the helper flags.
+      if ! printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-root[[:space:]]+[^[:space:]]'; then
+        _emit_deny "preflight-marker-write.mjs invoked without explicit --root. Required form: node $HELPER_PATH --root $REPO_ROOT --target <preflight|last-prompt> --session-id <sid>. No cwd fallback (ROOT_REQUIRED)."
+      fi
+      # I7 (plan-v2 audit F2): UserPromptSubmit hook is the ONLY sanctioned
+      # writer of `.last-user-prompt.<sid>.json`. PreToolUse-time invocation
+      # of the helper with `--target last-prompt` is an agent attempt to
+      # spoof the prompt-binding.
       if printf '%s' "$NORMALIZED_CMD" | grep -qE '\-\-target[[:space:]]+last-prompt([[:space:]]|$)'; then
         _emit_deny "preflight-marker-write.mjs --target last-prompt is reserved for the UserPromptSubmit hook. Agent invocation at PreToolUse is forbidden — the hook writes this file on every real user prompt automatically. If the file is missing, the install may be incomplete: re-run install.mjs --install-hooks."
       fi
@@ -226,18 +292,34 @@ if [ "$CLAIM_CLASS" != "codex-review-handoff" ]; then
   exit 0
 fi
 
-# Marker existence
-if [ ! -f "$PREFLIGHT_MARKER" ]; then
-  _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight. Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+# #279 fix: prefer per-session marker `.preflight-done.<SESSION_ID>`, fall
+# back to legacy `.preflight-done` during burn-in. Resolution is purely a
+# local file existence check; the cross-session-stomp bug occurs only on
+# the legacy filename, so reading the suffixed form deterministically
+# returns THIS session's marker even when sibling sessions ran.
+PREFLIGHT_MARKER_RESOLVED=""
+if [ -n "$PREFLIGHT_MARKER_SID" ] && [ -f "$PREFLIGHT_MARKER_SID" ]; then
+  PREFLIGHT_MARKER_RESOLVED="$PREFLIGHT_MARKER_SID"
+elif [ -f "$PREFLIGHT_MARKER_LEGACY" ]; then
+  PREFLIGHT_MARKER_RESOLVED="$PREFLIGHT_MARKER_LEGACY"
+fi
+
+# Marker existence — name both candidate paths so callers know where to write.
+if [ -z "$PREFLIGHT_MARKER_RESOLVED" ]; then
+  if [ -n "$PREFLIGHT_MARKER_SID" ]; then
+    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_SID via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id $SESSION_ID. Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+  else
+    _emit_deny "Pre-flight marker required for codex-review-handoff. Write to $PREFLIGHT_MARKER_LEGACY via: echo '<JSON>' | node $HELPER_PATH --root $REPO_ROOT --target preflight --session-id <sid>. (stdin missing session_id — gate cannot derive per-session path; legacy path used.) Required JSON fields: session_id, transcript_path, prompt_sha256, prompt_index, cwd, repo_root, memory_root, claim_class=\"codex-review-handoff\", matched_triggers, required_files (must include $BUNDLE_PATH), loaded_files (with sha256+mtime_ms per file), artifact_steps_done. Bundle: $BUNDLE_PATH."
+  fi
 fi
 
 # JSON parse
-MARKER_JSON="$(cat "$PREFLIGHT_MARKER" 2>/dev/null || true)"
+MARKER_JSON="$(cat "$PREFLIGHT_MARKER_RESOLVED" 2>/dev/null || true)"
 if [ -z "$MARKER_JSON" ]; then
-  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER is empty. Write a valid JSON marker via the helper. May indicate a write-in-progress race; retry."
+  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER_RESOLVED is empty. Write a valid JSON marker via the helper. May indicate a write-in-progress race; retry."
 fi
 if ! printf '%s' "$MARKER_JSON" | jq empty 2>/dev/null; then
-  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER is not valid JSON. Re-write via $HELPER_PATH (which validates JSON.parse before writing)."
+  _emit_deny "Pre-flight marker $PREFLIGHT_MARKER_RESOLVED is not valid JSON. Re-write via $HELPER_PATH (which validates JSON.parse before writing)."
 fi
 
 # Field-by-field validation

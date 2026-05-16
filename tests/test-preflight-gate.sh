@@ -765,6 +765,120 @@ ln -s "$TF/.checkpoints/non-existent-target.json" "$TF/.checkpoints/.last-user-p
 run_gate "$TF" "Bash" '{"command":"codex exec foo"}' "deny" "does not exist|cannot.*canonicalize|cannot.*verify" "I9 dangling symlink for ground-truth → deny"
 
 # ---------------------------------------------------------------------------
+# N-series: #279 per-session preflight marker (cross-session stomp fix)
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- N-series: per-session .preflight-done.<sid> (#279) ---"
+
+# Helper: write a valid marker at the per-session path for $TMP.
+write_valid_marker_for_session() {
+  local tmp="$1" sid="$2"
+  local bundle="$tmp/bundles/codex-review-channel-current.md"
+  local bundle_sha
+  bundle_sha="$(shasum -a 256 "$bundle" | awk '{print $1}')"
+  local bundle_mtime
+  bundle_mtime="$(node -e "process.stdout.write(String(require('fs').statSync(process.argv[1]).mtimeMs))" "$bundle")"
+  cat > "$tmp/.checkpoints/.preflight-done.${sid}" <<EOF
+{
+  "session_id": "$sid",
+  "transcript_path": "/tmp/x",
+  "prompt_sha256": "abc123",
+  "prompt_index": 1,
+  "cwd": "$tmp",
+  "repo_root": "$tmp",
+  "memory_root": "$tmp/memory",
+  "claim_class": "codex-review-handoff",
+  "matched_triggers": {"tool_target": ["Bash:codex exec"]},
+  "required_files": ["$bundle"],
+  "loaded_files": [{"path": "$bundle", "mtime_ms": $bundle_mtime, "sha256": "$bundle_sha"}],
+  "artifact_steps_done": ["memory-pre-pass"],
+  "created_at_ms": 1747022400000
+}
+EOF
+}
+
+# N1: gate reads `.preflight-done.<sid>` when present (no legacy fallback needed)
+TFN1="$(mktmp)"; stage_fixture "$TFN1"
+write_valid_marker_for_session "$TFN1" "$SESSION_ID"
+write_ground_truth_last_prompt "$TFN1"
+run_gate "$TFN1" "Bash" '{"command":"codex exec foo"}' "allow" "" "N1 session-keyed marker → allow codex"
+
+# N2: gate PREFERS session-keyed over legacy when both exist
+TFN2="$(mktmp)"; stage_fixture "$TFN2"
+write_valid_marker "$TFN2"                    # legacy .preflight-done
+write_valid_marker_for_session "$TFN2" "$SESSION_ID"  # session-keyed
+write_ground_truth_last_prompt "$TFN2"
+# Mutate legacy to have wrong claim_class — if gate reads legacy, this denies;
+# if gate reads session-keyed (correct), allow.
+sed -i.bak 's/"codex-review-handoff"/"plan-time-matrix"/' "$TFN2/.checkpoints/.preflight-done"
+rm "$TFN2/.checkpoints/.preflight-done.bak"
+run_gate "$TFN2" "Bash" '{"command":"codex exec foo"}' "allow" "" "N2 session-keyed PREFERRED over legacy"
+
+# N3: gate falls back to legacy when session-keyed missing (burn-in)
+TFN3="$(mktmp)"; stage_fixture "$TFN3"
+write_valid_marker "$TFN3"                    # legacy only
+write_ground_truth_last_prompt "$TFN3"
+run_gate "$TFN3" "Bash" '{"command":"codex exec foo"}' "allow" "" "N3 legacy fallback when session-keyed absent"
+
+# N4: direct Write to .preflight-done.<sid> denied (helper-only contract)
+TFN4="$(mktmp)"; stage_fixture "$TFN4"
+run_gate "$TFN4" "Write" "{\"file_path\":\"$TFN4/.checkpoints/.preflight-done.${SESSION_ID}\",\"content\":\"x\"}" \
+  "deny" "forbidden|helper" "N4 direct Write to .preflight-done.<sid> → DENY"
+
+# N5: cross-session stomp protection — markers for two sessions, gate reads OWN
+# This IS the #279 bug fix. Pre-#279: both sessions stomped legacy .preflight-done.
+# Post-#279: each session has its own .preflight-done.<sid>; gate reads stdin sid.
+TFN5="$(mktmp)"; stage_fixture "$TFN5"
+OTHER_SID="other-session-$$"
+write_valid_marker_for_session "$TFN5" "$SESSION_ID"
+write_valid_marker_for_session "$TFN5" "$OTHER_SID"
+write_ground_truth_last_prompt "$TFN5"
+# Gate runs with $SESSION_ID; should pick up THIS session's marker, not other.
+run_gate "$TFN5" "Bash" '{"command":"codex exec foo"}' "allow" "" "N5 cross-session: gate reads OWN session marker (#279 fix)"
+
+# N6: helper writes to session-keyed path when --session-id given
+TFN6="$(mktmp)"; stage_fixture "$TFN6"
+set +e
+out="$(echo '{"v":1}' | node "$TFN6/scripts/preflight-marker-write.mjs" --root "$TFN6" --target preflight --session-id "$SESSION_ID" 2>&1)"
+ec=$?
+set -e
+if [ "$ec" = "0" ] && [ -f "$TFN6/.checkpoints/.preflight-done.${SESSION_ID}" ] && [ ! -f "$TFN6/.checkpoints/.preflight-done" ]; then
+  echo "  ✓ N6 helper --session-id writes .preflight-done.<sid>, not legacy"
+  passed=$((passed+1))
+else
+  echo "  ✗ N6 — exit $ec, session-keyed exists: $([ -f "$TFN6/.checkpoints/.preflight-done.${SESSION_ID}" ] && echo yes || echo no), legacy exists: $([ -f "$TFN6/.checkpoints/.preflight-done" ] && echo yes || echo no), output: $out"
+  failed=$((failed+1))
+fi
+
+# N7: helper without --session-id writes legacy filename (burn-in compat)
+TFN7="$(mktmp)"; stage_fixture "$TFN7"
+set +e
+out="$(echo '{"v":1}' | node "$TFN7/scripts/preflight-marker-write.mjs" --root "$TFN7" --target preflight 2>&1)"
+ec=$?
+set -e
+if [ "$ec" = "0" ] && [ -f "$TFN7/.checkpoints/.preflight-done" ]; then
+  echo "  ✓ N7 helper without --session-id writes legacy .preflight-done (burn-in)"
+  passed=$((passed+1))
+else
+  echo "  ✗ N7 — exit $ec, output: $out"
+  failed=$((failed+1))
+fi
+
+# N8: helper with invalid --session-id (path traversal) rejected
+TFN8="$(mktmp)"; stage_fixture "$TFN8"
+set +e
+out="$(echo '{"v":1}' | node "$TFN8/scripts/preflight-marker-write.mjs" --root "$TFN8" --target preflight --session-id "../etc/passwd" 2>&1)"
+ec=$?
+set -e
+if [ "$ec" = "8" ] && printf '%s' "$out" | grep -qE "SESSION_ID_INVALID"; then
+  echo "  ✓ N8 helper rejects invalid --session-id (path traversal) → exit 8"
+  passed=$((passed+1))
+else
+  echo "  ✗ N8 — exit $ec, output: $out"
+  failed=$((failed+1))
+fi
+
+# ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
 echo ""
