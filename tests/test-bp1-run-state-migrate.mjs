@@ -61,9 +61,9 @@ tap('M2 single v1 active run gets 3 new null fields', () => {
 })
 
 // =============================================================================
-// M3: v2 input → defensive copy (idempotence)
+// M3: v2 input → defensive copy + cluster #286/#287/#288 field normalization
 // =============================================================================
-tap('M3 v2 input → defensive copy (idempotence + no mutation)', () => {
+tap('M3 v2 input → defensive copy + normalize missing cluster fields to null', () => {
   const v2 = {
     schema_version: V2_SCHEMA,
     runs: {
@@ -80,7 +80,15 @@ tap('M3 v2 input → defensive copy (idempotence + no mutation)', () => {
   }
   const result = migrateV1ToV2(v2)
   assert.equal(result.schema_version, V2_SCHEMA)
-  assert.deepEqual(result, v2)
+  // Pre-existing v2 entry missing cluster #286/#287/#288 fields is normalized
+  // to null defaults (soft schema addition; no schema_version bump).
+  assert.equal(result.runs['bp1-run-2-bar-ddee'].classified_episode_id, null)
+  assert.equal(result.runs['bp1-run-2-bar-ddee'].route_episode_id, null)
+  // All other fields preserved verbatim.
+  assert.equal(result.runs['bp1-run-2-bar-ddee'].state, 'classified')
+  assert.equal(result.runs['bp1-run-2-bar-ddee'].decided_class, 'trivial')
+  assert.equal(result.runs['bp1-run-2-bar-ddee'].pre_episode_id, 'bp1-run-2-bar-ddee-pre-1234')
+  assert.equal(result.runs['bp1-run-2-bar-ddee'].rfc_detected_episode_id, 'bp1-run-2-bar-ddee-rfc-detected-5678')
   // Defensive copy: mutating result doesn't affect v2.
   result.runs['bp1-run-2-bar-ddee'].state = 'aborted'
   assert.equal(v2.runs['bp1-run-2-bar-ddee'].state, 'classified')
@@ -190,6 +198,71 @@ tap('M9 CR2-3 regression — appendRun on v1 index migrates without lock-timeout
   assert.equal(idx.runs['bp1-run-pre-existing-aabb'].rfc_detected_episode_id, null)
   // New run also has the v2 fields populated.
   assert.equal(idx.runs['bp1-run-new-after-migrate-ccdd'].decided_class, null)
+})
+
+// =============================================================================
+// Cluster #286/#287/#288 — soft schema addition (classified_episode_id,
+// route_episode_id). codex round-5 ACCEPT 20260516-102831.
+// =============================================================================
+
+tap('M10 v1 row → v2 with cluster fields nulled', () => {
+  const v1 = {
+    schema_version: V1_SCHEMA,
+    runs: {
+      'bp1-run-cluster-aaaa': {
+        project_root: '/p',
+        state: 'active',
+        created_at: '2026-05-15T10:00:00Z',
+        terminal_at: null,
+      },
+    },
+  }
+  const result = migrateV1ToV2(v1)
+  const r = result.runs['bp1-run-cluster-aaaa']
+  assert.equal(r.classified_episode_id, null)
+  assert.equal(r.route_episode_id, null)
+})
+
+tap('M11 v2 row with cluster fields already set → preserved (not nulled)', () => {
+  const v2 = {
+    schema_version: V2_SCHEMA,
+    runs: {
+      'bp1-run-cluster-bbbb': {
+        project_root: '/p',
+        state: 'planning',
+        created_at: '2026-05-15T10:00:00Z',
+        terminal_at: null,
+        decided_class: 'trivial',
+        pre_episode_id: 'bp1-run-cluster-bbbb-pre-1234',
+        rfc_detected_episode_id: 'bp1-run-cluster-bbbb-rfc-detected-5678',
+        classified_episode_id: 'bp1-run-cluster-bbbb-classified-9999',
+        route_episode_id: 'bp1-run-cluster-bbbb-planning-aaaa',
+      },
+    },
+  }
+  const result = migrateV1ToV2(v2)
+  const r = result.runs['bp1-run-cluster-bbbb']
+  assert.equal(r.classified_episode_id, 'bp1-run-cluster-bbbb-classified-9999')
+  assert.equal(r.route_episode_id, 'bp1-run-cluster-bbbb-planning-aaaa')
+})
+
+tap('M12 migrateV1ToV2 idempotence on cluster fields', () => {
+  const v1 = {
+    schema_version: V1_SCHEMA,
+    runs: { 'bp1-run-idem-cccc': { project_root: '/p', state: 'active', created_at: 't', terminal_at: null } },
+  }
+  const once = migrateV1ToV2(v1)
+  const twice = migrateV1ToV2(once)
+  assert.deepEqual(twice, once)
+})
+
+tap('M13 appendRun initializes new runs with cluster fields nulled', () => {
+  const proj = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp1-cluster-init-')))
+  const r = appendRun(proj, 'bp1-run-cluster-init-dddd', proj)
+  assert.ok(r.ok)
+  const idx = loadIndex(proj)
+  assert.equal(idx.runs['bp1-run-cluster-init-dddd'].classified_episode_id, null)
+  assert.equal(idx.runs['bp1-run-cluster-init-dddd'].route_episode_id, null)
 })
 
 console.log(`\n# ${pass} passed, ${fail} failed`)

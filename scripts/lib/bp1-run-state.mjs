@@ -17,11 +17,21 @@
  *       "decided_class": "trivial|schema|validator|security|multi-actor|
  *                        needs-human-input|null",
  *       "pre_episode_id": "<id>|null",
- *       "rfc_detected_episode_id": "<id>|null"
+ *       "rfc_detected_episode_id": "<id>|null",
+ *       "classified_episode_id": "<id>|null",
+ *       "route_episode_id": "<id>|null"
  *     }
  *   }
  * }
  * ```
+ *
+ * `classified_episode_id` / `route_episode_id` (cluster #286/#287/#288): the
+ * signed state-transition episodes emitted at the `classified` and
+ * `planning|needs-human` transitions. Phase A/B split in `record-classification`
+ * persists these mid-flight so resume after a crash can chain off the correct
+ * parent episode. Both default to null; soft schema addition (no
+ * schema_version bump) — existing v2 rows are normalized to null on read via
+ * `migrateV1ToV2`'s v2 branch.
  *
  * ## API split (slice 2c CR2-3)
  *
@@ -101,12 +111,15 @@ export const VALID_V2_STATES = Object.freeze([
 ])
 
 // Patchable transition fields per v2 schema. updateRunState() refuses
-// unknown keys to keep the on-disk shape locked.
+// unknown keys to keep the on-disk shape locked. `classified_episode_id` /
+// `route_episode_id` added (cluster #286/#287/#288 Phase A/B persistence).
 const VALID_V2_PATCH_FIELDS = Object.freeze([
   'state',
   'decided_class',
   'pre_episode_id',
   'rfc_detected_episode_id',
+  'classified_episode_id',
+  'route_episode_id',
 ])
 
 // Valid classifier output classes (mirrors classifier_output_schema in
@@ -439,6 +452,8 @@ export function appendRun(projectRoot, runId, projectRootCanonical) {
         decided_class: null,
         pre_episode_id: null,
         rfc_detected_episode_id: null,
+        classified_episode_id: null,
+        route_episode_id: null,
       }
       idx.runs[runId] = run
       writeIndex(projectRoot, idx)

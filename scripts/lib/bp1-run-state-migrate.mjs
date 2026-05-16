@@ -4,15 +4,23 @@
  *
  * The v1→v2 migration is additive:
  *   - Bump schema_version: 1 → 2.
- *   - For every existing entry in `runs`, default 3 new optional fields to null:
+ *   - For every existing entry in `runs`, default 5 new optional fields to null:
  *       - decided_class
  *       - pre_episode_id
  *       - rfc_detected_episode_id
+ *       - classified_episode_id    (cluster #286/#287/#288)
+ *       - route_episode_id         (cluster #286/#287/#288)
  *   - v1 fields (`project_root`, `state`, `created_at`, `terminal_at`) preserved
  *     as-is.
  *   - v2 expands the `state` value vocabulary (rfc-detected,
  *     classifier-dispatch-pending, classified, planning, needs-human) but does
  *     NOT rewrite existing state values: a v1 `state: 'active'` stays `active`.
+ *
+ * The v2 branch (input already v2) ALSO normalizes pre-existing rows to
+ * default `classified_episode_id` and `route_episode_id` to null when missing
+ * (soft schema addition without bumping schema_version). This is the
+ * primary recovery path for runs that were persisted before the cluster
+ * #286/#287/#288 schema additions landed.
  *
  * This module exports a **pure function** — no IO, no lock acquisition. Used
  * inside `bp1-run-state.mjs`'s `loadIndex` (unlocked entry point) and
@@ -49,10 +57,17 @@ export function migrateV1ToV2(idx) {
     throw new TypeError('migrateV1ToV2: runs must be an object')
   }
   if (idx.schema_version === V2_SCHEMA) {
-    // Defensive copy so callers cannot tamper our return.
+    // Defensive copy so callers cannot tamper our return. Also normalize
+    // pre-existing rows to default cluster #286/#287/#288 fields to null —
+    // this is a soft schema addition without schema_version bump, and the
+    // normalization here is the single read-side reconciliation point.
     const copy = { schema_version: V2_SCHEMA, runs: {} }
     for (const [runId, run] of Object.entries(idx.runs || {})) {
-      copy.runs[runId] = { ...run }
+      copy.runs[runId] = {
+        ...run,
+        classified_episode_id: run.classified_episode_id ?? null,
+        route_episode_id: run.route_episode_id ?? null,
+      }
     }
     return copy
   }
@@ -71,6 +86,8 @@ export function migrateV1ToV2(idx) {
       decided_class: v1Run.decided_class ?? null,
       pre_episode_id: v1Run.pre_episode_id ?? null,
       rfc_detected_episode_id: v1Run.rfc_detected_episode_id ?? null,
+      classified_episode_id: v1Run.classified_episode_id ?? null,
+      route_episode_id: v1Run.route_episode_id ?? null,
     }
   }
   return out
