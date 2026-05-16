@@ -239,7 +239,19 @@ export function writeBp1Episode(opts) {
   lines.push('')
 
   const fileText = lines.join('\n') + bodyText
-  fs.writeFileSync(episodePath, fileText)
+
+  // Atomic write: tmp + fsync + rename. Crash between fsync and rename
+  // leaves a recoverable tmp; crash before rename leaves no observable
+  // final path (cluster #286/#287/#288 — codex round-5 ACCEPT).
+  const tmpPath = `${episodePath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
+  const fd = fs.openSync(tmpPath, 'wx', 0o600)
+  try {
+    fs.writeFileSync(fd, fileText)
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
+  fs.renameSync(tmpPath, episodePath)
 
   return { episodeId, episodePath, hmacHex }
 }
