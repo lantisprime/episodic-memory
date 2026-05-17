@@ -15,7 +15,14 @@
  *     caller has no .checkpoints/.episodic-memory pollution)
  *   - nested --project <target/subdir> resolves via git rev-parse (B3)
  *   - finalize cleanup: terminal transition removes marker (M2 cleanup wiring)
- *   - linked worktree: marker writes under main-root .checkpoints/ (codex r3 caveat)
+ *
+ * NOTE (slice 2d-R FU-1, 2026-05-17): a stale header line previously claimed a
+ * "linked worktree: marker writes under main-root .checkpoints/" case. No such
+ * test was implemented here (only RAA-15 nested-subdir), AND the claim is
+ * factually wrong per RFC §646 — `git rev-parse --show-toplevel` from a linked
+ * worktree returns the WORKTREE root, not the main-checkout root, so markers
+ * land under `<worktree_root>/.checkpoints/`. Reader/writer symmetry is
+ * exercised by `tests/test-bp1-approval-check-hook.mjs` AC-12.
  */
 
 import fs from 'node:fs'

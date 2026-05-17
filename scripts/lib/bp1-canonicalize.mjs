@@ -110,6 +110,35 @@ export const TYPE_SPECIFIC_CANONICAL_FIELDS = Object.freeze({
     'deadline_at',
     'decided_class',
   ]),
+  // Slice 2d-R — terminal exits from `awaiting_approval`.
+  //   `auto_approved` is the deadline-expired path. `deadline_at` is canonical
+  //   so the auto-approval is anti-forge-bound to a specific deadline that
+  //   matched the parent `awaiting_approval` episode's deadline. `decided_class`
+  //   carries through for audit.
+  //   `approved` is the operator-decided path (FU-2; not emitted this slice
+  //   but registered so future ops paths don't need a re-sign). `approved_at`
+  //   is the operator-decision moment.
+  'state-transition:auto_approved': Object.freeze([
+    'state',
+    'auto_approved_at',
+    'deadline_at',
+    'decided_class',
+  ]),
+  'state-transition:approved': Object.freeze([
+    'state',
+    'approved_at',
+    'decided_class',
+  ]),
+  // Slice 2d-R — marker-invalid failure kind (signed; emitted by hook helper
+  // bp1-emit-marker-invalid-evidence.mjs when the marker fails validation AND
+  // a parseable run_id + run.key are available). Unsigned + unparseable cases
+  // (B/C) write NO episode — they emit structured JSON to stderr only, and
+  // the marker file itself is the persisting forensic.
+  'failure:bp1-marker-invalid': Object.freeze([
+    'failure_kind',
+    'marker_path',
+    'reason',
+  ]),
   // Slice 2d-W — marker write/cleanup failure subtypes. failure_kind is the
   // subtype-derivation field. `marker-write-failed` is emitted by
   // `record-awaiting-approval` Phase B when atomic rename fails (per-run key

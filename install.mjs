@@ -477,23 +477,72 @@ if (tool === 'claude-code' || tool === 'all') {
       // Otherwise: silent no-op (B8 — regen warning suppressed on re-run).
     }
 
-    // §559 partial-coverage TODO:
+    // §559 H1 wiring — slice 2d-R / PR-2d-R.
     //
-    // RFC §559 (H-cfg row) v3.12 calls for install.mjs to wire BOTH H1
-    // (bp1-approval-check.sh) AND H2 (bp1-sweep-on-session.sh) into the
-    // SessionStart array. PR-1b-B (M0 part 2) ships H2 only. H1 depends on
-    // bp1-marker-validate.mjs which lands in M2 (per RFC §552 / artifact-
-    // table H1 row).
+    // Splice-before-H2 semantics (mergeSessionStartH1Hook): if H2 is present
+    // in SessionStart, insert H1 at that index (H2 shifts down). If absent,
+    // append. Preserves §559 H-cfg relative ordering (approval-check FIRST,
+    // sweep SECOND) WITHOUT reordering unrelated pre-existing entries.
     //
-    // Insertion semantics for M2: M2's install.mjs MUST find the existing H2
-    // entry's index in SessionStart and splice H1 just-before it (relative
-    // positioning). NOT unconditional SessionStart[0] — that reading would
-    // reorder unrelated pre-existing SessionStart entries (e.g. em-recall-
-    // sessionstart). The §559 ordering invariant ("approval-check FIRST,
-    // sweep SECOND") is read as relative ordering between the two BP-1
-    // hooks, not absolute index in the global SessionStart array.
-    //
-    // TODO(M2): wire H1 bp1-approval-check.sh per RFC §559 (H-cfg).
+    // Mirrors the H2 install gating above: hook source must exist; file
+    // copy + chmod 0o755; divergent target with neither --install-hooks nor
+    // --install-hooks-force → skip settings registration with operator note.
+    const { mergeSessionStartH1Hook } = await import(
+      new URL('./scripts/lib/bp1-install-helpers.mjs', import.meta.url).href
+    )
+    const repoH1HookSrc = path.join(REPO_DIR, '.claude', 'hooks', 'bp1-approval-check.sh')
+    const projH1HookDst = path.join(projHooksDir, 'bp1-approval-check.sh')
+
+    if (!fs.existsSync(repoH1HookSrc)) {
+      console.log(`Warning: BP-1 H1 hook source not found at ${repoH1HookSrc}; skipping wiring.`)
+    } else {
+      let h1HookCopied = false
+      let h1DivergentSkipped = false
+      if (!fs.existsSync(projH1HookDst)) {
+        fs.copyFileSync(repoH1HookSrc, projH1HookDst)
+        fs.chmodSync(projH1HookDst, 0o755)
+        console.log(`Installed BP-1 H1 SessionStart hook at ${projH1HookDst}`)
+        h1HookCopied = true
+      } else {
+        const a = fs.readFileSync(repoH1HookSrc)
+        const b = fs.readFileSync(projH1HookDst)
+        if (!a.equals(b)) {
+          if (installHooks && installHooksForce) {
+            fs.copyFileSync(repoH1HookSrc, projH1HookDst)
+            fs.chmodSync(projH1HookDst, 0o755)
+            console.log(`Overwrote divergent ${projH1HookDst} (--install-hooks-force).`)
+            h1HookCopied = true
+          } else {
+            console.log(`Note: ${projH1HookDst} differs from repo source; not overwriting AND withholding H1 settings registration. Re-run with --install-hooks --install-hooks-force to accept.`)
+            h1DivergentSkipped = true
+          }
+        }
+      }
+
+      // Re-read settings: the H2 merge above may have written a new file.
+      let h1Settings = {}
+      let h1ParseFailed = false
+      if (fs.existsSync(projSettingsPath)) {
+        try {
+          h1Settings = JSON.parse(fs.readFileSync(projSettingsPath, 'utf8'))
+        } catch (e) {
+          console.log(`Error: ${projSettingsPath} is not valid JSON (${e.message}); skipping H1 settings wiring.`)
+          h1ParseFailed = true
+        }
+      }
+
+      if (!h1ParseFailed && !h1DivergentSkipped) {
+        const h1Result = mergeSessionStartH1Hook(
+          h1Settings, projH1HookDst, projH2HookDst, { timeout: 30 },
+        )
+        if (h1Result.changed) {
+          writeJSONAtomic(projSettingsPath, h1Result.settings)
+          console.log(`Wired BP-1 H1 SessionStart hook into ${projSettingsPath} (${h1Result.reason})`)
+        } else if (h1HookCopied) {
+          console.log(`BP-1 H1 entry already present in ${projSettingsPath}.`)
+        }
+      }
+    }
   }
 }
 
