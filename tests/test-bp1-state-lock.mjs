@@ -381,6 +381,65 @@ tap('SL11 orphan-lockfile prevention: emit failure → lockfile unlinked + excep
 })
 
 // =============================================================================
+// SL13 (C7 round-3 P1.1): N=4 concurrent stale-breakers serialize via the
+// sentinel. Exactly ONE breaker emits stale-evidence + unlinks; the others
+// observe the sentinel-busy path. Closes codex round-2 race where two
+// breakers could both unlink (the second targeting a fresh acquirer's
+// lockfile published between the first unlink + the second).
+// =============================================================================
+await tapAsync('SL13 P1.1: N=4 concurrent stale-breakers → exactly one stale-evidence written', async () => {
+  const proj = mkTmpProject()
+  const lp = stateLockPath(proj, RUN_ID, STATE_TAG)
+  fs.mkdirSync(path.dirname(lp), { recursive: true })
+  const stale = {
+    claim_episode_id: 'sl13-stale-original',
+    claimed_at: new Date(Date.now() - (STATE_LOCK_TTL_SECONDS + 30) * 1000).toISOString(),
+    ttl_seconds: STATE_LOCK_TTL_SECONDS,
+    lock_state_tag: STATE_TAG,
+    writer_pid: 99998,
+  }
+  fs.writeFileSync(lp, JSON.stringify(stale))
+
+  const N = 4
+  const childScript = `
+    import('${new URL('../scripts/lib/bp1-state-lock.mjs', import.meta.url).href}').then(m => {
+      const r = m.acquireStateLock({
+        projectRoot: ${JSON.stringify(proj)},
+        runId: ${JSON.stringify(RUN_ID)},
+        stateTag: ${JSON.stringify(STATE_TAG)},
+        runKey32B: Buffer.from(${JSON.stringify(KEY.toString('hex'))}, 'hex'),
+      })
+      process.stdout.write(JSON.stringify({
+        acquired: r.acquired,
+        staleEpisodeId: r.staleEpisodeId ?? null,
+        claimEpisodeId: r.claimEpisodeId ?? null,
+      }))
+    })
+  `
+  const launches = []
+  for (let i = 0; i < N; i++) {
+    launches.push(new Promise((resolve) => {
+      const p = spawn(process.execPath, ['--input-type=module', '-e', childScript], { stdio: ['ignore', 'pipe', 'inherit'] })
+      let buf = ''
+      p.stdout.on('data', d => { buf += d })
+      p.on('close', () => resolve(JSON.parse(buf)))
+    }))
+  }
+  const results = await Promise.all(launches)
+  // Critical invariant: exactly ONE bp1-state-lock-stale episode on disk.
+  // Sentinel serializes the breakers; only the winner emits + unlinks.
+  const epDir = path.join(proj, '.episodic-memory', 'episodes')
+  const staleEpisodes = fs.readdirSync(epDir).filter(f => /state-lock-stale/.test(f))
+  assert.equal(staleEpisodes.length, 1,
+    `exactly one bp1-state-lock-stale episode expected; got ${staleEpisodes.length}: ${staleEpisodes.join(',')}`)
+  // Exactly one acquirer wins after the break completes.
+  const winners = results.filter(r => r.acquired)
+  assert.equal(winners.length, 1, `exactly one winner; got ${winners.length}`)
+  // Sentinel file cleaned up after stale-break.
+  assert.equal(fs.existsSync(lp + '.breaking'), false, 'sentinel released after stale-break')
+})
+
+// =============================================================================
 // SL12 TOCTOU-safe stale break: between detecting staleness + emitting
 // stale-evidence + unlinking the lockfile, a concurrent writer could acquire
 // the lock. The stale-breaker MUST re-read the lockfile and only unlink if

@@ -155,54 +155,127 @@ function tryPublishLockfile(lockPath, content) {
   }
 }
 
+// C7 round-3 P1.1: stale-break sentinel suffix. Two concurrent stale-breakers
+// must serialize via O_EXCL link on `<lockPath>.breaking` so that:
+//   1. Only one stale-breaker can run its compare-and-unlink at a time.
+//   2. The re-read + unlink sequence is protected from another stale-breaker
+//      racing to unlink + a fresh writer racing to publish in between.
+// Acquirers don't take this sentinel; their O_EXCL `lockPath` link naturally
+// fails while the stale lock still exists (i.e. until the breaker unlinks it).
+const STALE_BREAK_SENTINEL_SUFFIX = '.breaking'
+
+/**
+ * Attempt to take the stale-break sentinel via O_EXCL link. Returns true if
+ * acquired; false if another stale-breaker already holds it. Caller MUST call
+ * releaseStaleBreakSentinel in a finally if true was returned.
+ */
+function tryAcquireStaleBreakSentinel(lockPath) {
+  const breakingPath = lockPath + STALE_BREAK_SENTINEL_SUFFIX
+  const tmp = `${breakingPath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true })
+  const fd = fs.openSync(tmp, 'wx', 0o600)
+  try {
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
+  try {
+    fs.linkSync(tmp, breakingPath)
+    return true
+  } catch (e) {
+    if (e.code === 'EEXIST') return false
+    throw e
+  } finally {
+    try { fs.unlinkSync(tmp) } catch (_e) { /* best-effort */ }
+  }
+}
+
+function releaseStaleBreakSentinel(lockPath) {
+  try { fs.unlinkSync(lockPath + STALE_BREAK_SENTINEL_SUFFIX) } catch (_e) { /* benign */ }
+}
+
 /**
  * Emit a signed bp1-state-lock-stale evidence episode for an observed
  * stale claim, then remove the lockfile. Caller is expected to retry
  * lockfile creation once after this.
+ *
+ * Returns null if another stale-breaker is concurrently active (the
+ * sentinel is held). The caller treats that case as "still busy"; the
+ * other breaker will perform the unlink + emit on its own behalf.
  */
 function emitStaleAndUnlink({
   projectRoot, runId, runKey32B, stateTag, lockPath, existingClaim, ageSeconds,
 }) {
-  const episodeId = staleEpisodeIdFor(runId)
-  writeBp1Episode({
-    projectRoot,
-    runId,
-    runKey32B,
-    type: 'evidence',
-    state: null,
-    summary: `state-lock stale-break ${stateTag} (age ${ageSeconds}s)`,
-    parentEpisode: existingClaim?.claim_episode_id ?? null,
-    expectedPostEpisodeId: null,
-    customFm: {
-      lock_state_tag: stateTag,
-      claim_age_seconds: String(ageSeconds),
-    },
-    tags: ['bp1-state-lock-stale'],
-    body:
-      `Stale state-lock broken on (${runId}, ${stateTag}).\n` +
-      `Observed age: ${ageSeconds}s; TTL: ${STATE_LOCK_TTL_SECONDS}s.\n` +
-      `Prior claim: ${existingClaim?.claim_episode_id ?? 'unknown'}.\n`,
-    filenameSuffix: 'state-lock-stale',
-    episodeId,
-  })
-  // C7 round-2 P1.1: TOCTOU-safe unlink. Between detecting staleness and
-  // emitting evidence, the stale holder could release + another writer
-  // could acquire. Re-read the lockfile and only unlink if it still
-  // matches the (claim_episode_id, claimed_at) we observed as stale.
-  try {
-    const currentRaw = fs.readFileSync(lockPath, 'utf8')
-    const current = JSON.parse(currentRaw)
-    if (
-      current.claim_episode_id === existingClaim?.claim_episode_id &&
-      current.claimed_at === existingClaim?.claimed_at
-    ) {
-      fs.unlinkSync(lockPath)
-    }
-    // else: another writer acquired between detect and break — leave it alone.
-  } catch (_e) {
-    // Already gone or unreadable; benign.
+  // C7 round-3 P1.1: serialize stale-breakers via sentinel file. Without
+  // this, two breakers can both see the same stale state, both decide to
+  // unlink, and the second unlink can target a fresh acquirer's lockfile
+  // that arrived between the first breaker's unlink and the second's
+  // unlinkSync call.
+  if (!tryAcquireStaleBreakSentinel(lockPath)) {
+    return null
   }
-  return episodeId
+
+  try {
+    const episodeId = staleEpisodeIdFor(runId)
+    // Re-read main lockfile UNDER sentinel protection before emitting
+    // evidence. If the lockfile's (claim_episode_id, claimed_at) tuple no
+    // longer matches what we observed as stale, another acquirer has
+    // already published a fresh lock — bail without emitting OR unlinking.
+    let currentMatchesStale = false
+    try {
+      const currentRaw = fs.readFileSync(lockPath, 'utf8')
+      const current = JSON.parse(currentRaw)
+      currentMatchesStale = (
+        current.claim_episode_id === existingClaim?.claim_episode_id &&
+        current.claimed_at === existingClaim?.claimed_at
+      )
+    } catch (_e) {
+      // Lockfile already gone (another breaker raced + finished). Treat
+      // as already-broken: no evidence to emit, no unlink to do.
+      currentMatchesStale = false
+    }
+    if (!currentMatchesStale) {
+      return null
+    }
+
+    writeBp1Episode({
+      projectRoot,
+      runId,
+      runKey32B,
+      type: 'evidence',
+      state: null,
+      summary: `state-lock stale-break ${stateTag} (age ${ageSeconds}s)`,
+      parentEpisode: existingClaim?.claim_episode_id ?? null,
+      expectedPostEpisodeId: null,
+      customFm: {
+        lock_state_tag: stateTag,
+        claim_age_seconds: String(ageSeconds),
+      },
+      tags: ['bp1-state-lock-stale'],
+      body:
+        `Stale state-lock broken on (${runId}, ${stateTag}).\n` +
+        `Observed age: ${ageSeconds}s; TTL: ${STATE_LOCK_TTL_SECONDS}s.\n` +
+        `Prior claim: ${existingClaim?.claim_episode_id ?? 'unknown'}.\n`,
+      filenameSuffix: 'state-lock-stale',
+      episodeId,
+    })
+
+    // Under the sentinel, unlink the main lock. Concurrent acquirers cannot
+    // publish a fresh lock at lockPath until the stale lock is removed —
+    // their O_EXCL link fails until we unlink. Once we unlink + release the
+    // sentinel, the next acquirer's link succeeds atomically.
+    try {
+      fs.unlinkSync(lockPath)
+    } catch (_e) {
+      // Vanished between re-read and unlink (extremely narrow window —
+      // would require external process unlinking from outside the lock
+      // protocol). Benign.
+    }
+    return episodeId
+  } finally {
+    releaseStaleBreakSentinel(lockPath)
+  }
 }
 
 /**
