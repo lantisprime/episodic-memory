@@ -940,6 +940,42 @@ payload = {
   //   marker_path,                    // absolute path to approval marker file
   //   reason,                         // human-readable failure-mode label (66-ch cap)
 
+  // Slice 2e C4 (NEW v3.17, M2 part — check-deadlines subcommand + forward-ready
+  // state-lock primitive). Mirrored in scripts/lib/bp1-canonicalize.mjs;
+  // validate-rfc-canonical-fields.mjs CI gate enforces drift detection.
+  //
+  // For tag == "bp1-state-lock-release" evidence (RFC §1212 counterpart to
+  // bp1-state-lock-claim — released by emitting this episode):
+  //   lock_state_tag,                  // e.g., "codex_review" (anti-forge bound
+  //                                    // to the specific lock state released)
+  //
+  // For tag == "bp1-state-lock-stale" evidence (RFC §1212 TTL stale-break —
+  // emitted when a claim's age exceeds TTL without a matching release):
+  //   lock_state_tag,                  // which lock-state was stale
+  //   claim_age_seconds,               // pre-stringified observed age at break
+  //
+  // For type == "state-transition" with state == "deadline-fired" (per-fire
+  // child of a bp1-deadline-tick parent; canonicalize subtype-key label only,
+  // NOT a v2 run-state lifecycle state; bound to the affected run's per-run
+  // HMAC key):
+  //   state,                          // "deadline-fired"
+  //   deadline_type,                  // "A1" | "A2"
+  //   fire_action,                    // e.g. "auto-approved" | "advance-attempt"
+  //                                   //      | "needs-human" | "skipped"
+  //
+  // For type == "failure" with failure_kind == "deadline-tick-failed" (A2 path
+  // confirm-approval subprocess exited non-zero, or other per-fire failure):
+  //   failure_kind,                   // "deadline-tick-failed" (subtype-derivation)
+  //   subtype,                        // e.g. "a2-confirm-approval-failed"
+  //   exit_code,                      // pre-stringified subprocess exit code
+  //
+  // For type == "failure" with failure_kind == "deadline-state-mismatch" (A2
+  // fire observed run-state not matching expectation — raced with another
+  // mutator):
+  //   failure_kind,                   // "deadline-state-mismatch" (subtype-derivation)
+  //   observed_state,                 // run-state observed at fire time
+  //   expected_state,                 // run-state expected (e.g. awaiting_approval)
+
   // Future-extensibility: any episode-type-specific authorization-bearing field
   // MUST be added here at the time the field is introduced. Two CI gates enforce:
   //   - validate-rfc-failure-table.mjs (v3.7) — failure-row evidence-tag drift.

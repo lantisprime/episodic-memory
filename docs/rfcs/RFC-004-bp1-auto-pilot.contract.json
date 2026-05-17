@@ -1,6 +1,6 @@
 {
-  "version": "v3.16",
-  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts (slice 2d-R). Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14).",
+  "version": "v3.17",
+  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts. Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14). v3.17 (slice 2e C4) adds deadline-tick failure subtypes (deadline-tick-failed, deadline-state-mismatch) — canonical-fields registry in scripts/lib/bp1-canonicalize.mjs also gains state-transition:deadline-fired + evidence:bp1-state-lock-release/stale (state-transitions/evidence not mirrored here since they're not v2 valid-state-gated; bidirectional drift caught by validate-rfc-canonical-fields.mjs against the RFC payload block).",
   "episode_canonical_fields": {
     "state-transition:rfc-detected": ["state", "rfc_id", "frontmatter_sha256"],
     "state-transition:classifier-dispatch-pending": ["state", "input_sha256"],
@@ -14,7 +14,9 @@
     "failure:classifier-parent-tamper": ["failure_kind", "field_name", "observed_value", "violation_reason"],
     "failure:marker-write-failed": ["failure_kind", "marker_path", "reason"],
     "failure:marker-cleanup-failed": ["failure_kind", "marker_path", "reason"],
-    "failure:bp1-marker-invalid": ["failure_kind", "marker_path", "reason"]
+    "failure:bp1-marker-invalid": ["failure_kind", "marker_path", "reason"],
+    "failure:deadline-tick-failed": ["failure_kind", "subtype", "exit_code"],
+    "failure:deadline-state-mismatch": ["failure_kind", "observed_state", "expected_state"]
   },
   "classifier_output_schema": {
     "type": "object",
