@@ -37,6 +37,7 @@ import path from 'node:path'
 
 import { getRunState } from './lib/bp1-run-state.mjs'
 import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
+import { canonicalProjectRoot } from './lib/bp1-manifest.mjs'
 
 // Plan v2 §1 — five-min naked-entry threshold for codex_review entries.
 export const PATH_B_AGE_THRESHOLD_MS = 5 * 60 * 1000
@@ -567,7 +568,12 @@ async function main() {
     process.stderr.write('argv error: --project and --run-id are required\n')
     process.exit(2)
   }
-  const projectRoot = path.resolve(argv.project)
+  // C7 round-2 P1.2: bind to canonical project root (RFC §104 —
+  // `git rev-parse --show-toplevel` + realpath), matching the resolver
+  // pattern in check-deadlines/init-run/confirm-approval. path.resolve
+  // alone leaves the read scope at the caller's --project arg, which
+  // misses the parent git repo's run-state when --project is a subdir.
+  const projectRoot = canonicalProjectRoot(path.resolve(argv.project)) || path.resolve(argv.project)
   const runId = argv.runId
   const nowMs = argv.now ? Date.parse(argv.now) : Date.now()
   if (Number.isNaN(nowMs)) {

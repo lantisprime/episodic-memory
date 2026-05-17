@@ -2813,6 +2813,30 @@ function writeUnsignedLockBusyEvidence({ projectRoot, parentTickId, holderPid, a
   })
 }
 
+// C7 round-2 P2.2: no-key A2 fire emits an unsigned-but-durable audit child
+// so the on-disk evidence-stream reflects what the stdout JSON reports.
+// Previously the no-key path returned `{status:"no-key"}` before any per-run
+// child was emitted — stdout claimed a child existed but only the parent
+// tick was on disk. Unsigned because run.key is what's missing; the tick
+// writer has no authority to sign per-run children.
+function writeUnsignedA2NoKeyFailure({ projectRoot, runId, parentTickId, error }) {
+  const episodeId = `bp1-a2-no-key-${parentTickId}-${runId}`
+  return writeUnsignedDeadlineTick({
+    projectRoot, tickId: episodeId,
+    body:
+      `A2 fire skipped for ${runId}: run.key unavailable.\n` +
+      `error: ${error}\n` +
+      `parent_tick: ${parentTickId}\n` +
+      `Operators: inspect <projectRoot>/.episodic-memory/runs/${runId}/run.key.\n`,
+    frontmatterFields: {
+      tick_parent: parentTickId,
+      run_id: runId,
+      failure_kind: 'a2-no-run-key',
+      signed: false,
+    },
+  })
+}
+
 function emitDeadlineFiredChild({ projectRoot, runId, runKey32B, parentTickId, deadlineType, fireAction, deadlineAt }) {
   return writeBp1Episode({
     projectRoot, runId, runKey32B,
@@ -2852,7 +2876,22 @@ function fireA2({ projectRoot, runId, deadlineAt, parentTickId }) {
   const keyResult = loadRunKey(projectRoot, runId)
   if (keyResult.error) {
     process.stderr.write(`error: a2-fire run.key ${keyResult.error} for ${runId}\n`)
-    return { run_id: runId, type: 'A2', status: 'no-key', error: keyResult.error }
+    // C7 round-2 P2.2: emit durable audit artifact (unsigned — we have no
+    // per-run key by definition here) so on-disk evidence matches what
+    // stdout reports. Without this the parent tick would be the only
+    // surface, breaking sweep-time audit reconstruction.
+    let auditEpisodePath = null
+    try {
+      auditEpisodePath = writeUnsignedA2NoKeyFailure({
+        projectRoot, runId, parentTickId, error: keyResult.error,
+      })
+    } catch (e) {
+      process.stderr.write(`warn: unsigned-no-key-audit emit failed for ${runId}: ${e.message}\n`)
+    }
+    return {
+      run_id: runId, type: 'A2', status: 'no-key', error: keyResult.error,
+      audit_episode_path: auditEpisodePath,
+    }
   }
   const runKey32B = keyResult.key32B
 

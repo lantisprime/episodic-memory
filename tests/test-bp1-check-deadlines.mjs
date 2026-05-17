@@ -312,6 +312,45 @@ tap('CD10 RFC §104: --project <subdir-of-git> → tick lands at git toplevel (N
     `tick MUST NOT land at subdir: ${subEpisode} (would violate RFC §104 single-safety-envelope)`)
 })
 
+// =============================================================================
+// CD11 C7 round-2 P2.2: A2 no-key path MUST emit a durable on-disk audit
+// artifact, not just a stdout JSON record. Without this the parent tick is
+// the only on-disk surface; sweep-time audit reconstruction misses the
+// per-run failure entirely.
+// =============================================================================
+tap('CD11 P2.2: no-key A2 fire emits unsigned on-disk audit child', () => {
+  const { project, home } = activateProject()
+  const runId = 'bp1-run-cd11-rfc-cd-aabbcc'
+  const ar = appendRun(project, runId, project)
+  if (ar.error) throw new Error(`appendRun: ${ar.error}`)
+  const upd = updateRunState(project, runId, {
+    state: 'awaiting_approval',
+    awaiting_approval_at: new Date(Date.now() - 7_200_000).toISOString(),
+    deadline_at: new Date(Date.now() - 60_000).toISOString(),
+    decided_class: 'trivial',
+    classified_episode_id: 'fake-classified',
+    route_episode_id: 'fake-route',
+  })
+  if (upd.error) throw new Error(`updateRunState: ${upd.error}`)
+
+  const r = runOrch(['check-deadlines', '--project', project], { HOME: home }, project)
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.children.length, 1)
+  assert.equal(out.children[0].status, 'no-key')
+
+  // Critical: audit_episode_path surfaced AND file on disk.
+  const auditPath = out.children[0].audit_episode_path
+  assert.ok(auditPath, 'audit_episode_path MUST be populated for no-key fires')
+  assert.ok(fs.existsSync(auditPath), `audit episode MUST exist on disk: ${auditPath}`)
+
+  const auditRaw = fs.readFileSync(auditPath, 'utf8')
+  assert.match(auditRaw, /failure_kind: "a2-no-run-key"/, 'audit frontmatter MUST tag failure_kind')
+  assert.match(auditRaw, new RegExp(`run_id: "${runId}"`), 'audit MUST cite run_id')
+  assert.match(auditRaw, /signed: false/, 'audit MUST mark itself unsigned')
+  assert.match(auditRaw, new RegExp(`tick_parent: "${out.tick_id}"`), 'audit MUST link to parent tick')
+})
+
 console.log(`# tests ${pass + fail}`)
 console.log(`# pass  ${pass}`)
 console.log(`# fail  ${fail}`)

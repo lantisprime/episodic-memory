@@ -10,11 +10,17 @@
  */
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 const mod = await import(
   new URL('../scripts/bp1-crash-classify.mjs', import.meta.url).href
 )
 const { classifyRunCrash, PATH_B_AGE_THRESHOLD_MS } = mod
+
+const CLI = new URL('../scripts/bp1-crash-classify.mjs', import.meta.url).pathname
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -388,6 +394,51 @@ tap('CC-ambiguous codex_review with non-parseable created_at → unparseable', (
 // ============================================================================
 // Ambiguous edge: codex_review state but no codex_review entry → inconsistent
 // ============================================================================
+// =============================================================================
+// CC-canonical-root (C7 round-2 P1.2): CLI MUST bind to canonical project
+// root (git toplevel + realpath), matching check-deadlines / init-run /
+// confirm-approval. --project pointing at a non-git subdir of a parent git
+// repo must read from the parent's run-state index, not from the subdir.
+// =============================================================================
+tap('CC-canonical-root P1.2: --project <subdir-of-git> reads from git toplevel run-state', () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp1-cc-canon-')))
+  // Init a git repo at tmp/proj.
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj, { recursive: true })
+  const gitInit = spawnSync('git', ['init', '-q'], { cwd: proj, encoding: 'utf8' })
+  assert.equal(gitInit.status, 0, `git init: ${gitInit.stderr}`)
+
+  // Plant run-state index at PROJECT-ROOT (not at subdir).
+  const runId = 'bp1-run-cc-canon-rfc-x-aabbcc'
+  const indexDir = path.join(proj, '.episodic-memory', 'runs')
+  fs.mkdirSync(indexDir, { recursive: true })
+  fs.writeFileSync(path.join(indexDir, '_index.json'),
+    JSON.stringify({
+      schema_version: 2,
+      runs: {
+        [runId]: {
+          run_id: runId, state: 'complete',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      },
+    }, null, 2))
+
+  // Create a non-git subdir.
+  const subdir = path.join(proj, 'feature-x')
+  fs.mkdirSync(subdir, { recursive: true })
+
+  // Call CLI with --project <subdir>; the resolver must canonicalize UP to
+  // git toplevel and find the run.
+  const r = spawnSync('node', [CLI, '--project', subdir, '--run-id', runId], {
+    encoding: 'utf8', cwd: tmp,  // caller cwd intentionally outside both
+  })
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}: stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.run_id, runId)
+  assert.equal(out.state, 'complete')
+})
+
 tap('CC-ambiguous codex_review state with no entry episodes → inconsistent', () => {
   const r = classifyRunCrash({
     runState: { state: 'codex_review' },

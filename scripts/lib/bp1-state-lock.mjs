@@ -185,10 +185,22 @@ function emitStaleAndUnlink({
     filenameSuffix: 'state-lock-stale',
     episodeId,
   })
+  // C7 round-2 P1.1: TOCTOU-safe unlink. Between detecting staleness and
+  // emitting evidence, the stale holder could release + another writer
+  // could acquire. Re-read the lockfile and only unlink if it still
+  // matches the (claim_episode_id, claimed_at) we observed as stale.
   try {
-    fs.unlinkSync(lockPath)
+    const currentRaw = fs.readFileSync(lockPath, 'utf8')
+    const current = JSON.parse(currentRaw)
+    if (
+      current.claim_episode_id === existingClaim?.claim_episode_id &&
+      current.claimed_at === existingClaim?.claimed_at
+    ) {
+      fs.unlinkSync(lockPath)
+    }
+    // else: another writer acquired between detect and break — leave it alone.
   } catch (_e) {
-    // May have vanished concurrently; benign.
+    // Already gone or unreadable; benign.
   }
   return episodeId
 }
