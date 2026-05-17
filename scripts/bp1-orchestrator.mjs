@@ -2510,6 +2510,22 @@ function confirmApproval(args) {
       deadlineAt = run.deadline_at
       decidedClass = run.decided_class
 
+      // PR-level audit F2 closure 2026-05-17: enforce signed-parent contract at
+      // the terminal-transition boundary. auto_approved is the trivial-only
+      // outcome per RFC §178; reject anything else even though the classifier
+      // never emits awaiting_approval for non-trivial today. Defense-in-depth
+      // against stale markers surviving manual reclassification or future
+      // classifier drift.
+      if (outcomeState === 'auto_approved' && decidedClass !== 'trivial') {
+        process.stderr.write(
+          `error: state-violation: auto_approved requires run.decided_class="trivial" ` +
+          `but got ${JSON.stringify(decidedClass)} (slice 2d-R; non-trivial classes ` +
+          `must transition via operator CLI reserved for FU-2)\n`,
+        )
+        lockExit = 5
+        return
+      }
+
       // Deadline check (auto_approved only). Hook is contracted to verify
       // expiry before invoking; this is defense-in-depth (race against clock
       // drift / hook bug).
@@ -2527,9 +2543,27 @@ function confirmApproval(args) {
       }
 
       // Locate parent awaiting_approval episode for parent_episode linkage.
+      // PR-level audit F2 closure 2026-05-17: pass expectedFields from
+      // run-state so a stale on-disk episode (different decided_class, drifted
+      // deadline) cannot be silently adopted. Field-mismatch → recoverable
+      // canonical-drift signal; the operator must reconcile manually.
       const parentLookup = findSignedStateEpisode(
         projectRoot, args.runId, 'awaiting_approval', key32B,
+        {
+          awaiting_approval_at: run.awaiting_approval_at,
+          deadline_at: run.deadline_at,
+          decided_class: decidedClass,
+        },
       )
+      if (parentLookup.status === 'field-mismatch') {
+        process.stderr.write(
+          `error: recoverable-canonical-drift: signed awaiting_approval episode field-mismatch ` +
+          `for ${args.runId} (run-state vs episode frontmatter diverged on ` +
+          `awaiting_approval_at | deadline_at | decided_class)\n`,
+        )
+        lockExit = 5
+        return
+      }
       if (parentLookup.status !== 'match') {
         process.stderr.write(
           `error: state-violation: signed awaiting_approval episode not found on disk for ${args.runId} ` +
@@ -2542,29 +2576,29 @@ function confirmApproval(args) {
 
       // Resume support: if a prior crashed invocation already emitted a signed
       // auto_approved episode (orphan), adopt its auto_approved_at + episode_id
-      // rather than minting fresh wall-clock. Mirrors recordAwaitingApproval
-      // orphan-attach pattern (L2242).
+      // rather than minting fresh wall-clock. PR-level audit F2 closure
+      // 2026-05-17: predicate-driven lookup with expectedFields replaces the
+      // post-match defensive validation block; field-mismatch is loudly named
+      // `recoverable-canonical-drift` rather than `not-found`.
       const orphan = findSignedStateEpisode(
         projectRoot, args.runId, outcomeState, key32B,
+        {
+          parent_episode: awaitingApprovalEpisodeId,
+          deadline_at: deadlineAt,
+          decided_class: decidedClass,
+        },
       )
+      if (orphan.status === 'field-mismatch') {
+        process.stderr.write(
+          `error: recoverable-canonical-drift: orphan ${outcomeState} episode field-mismatch ` +
+          `for ${args.runId} (parent_episode | deadline_at | decided_class diverged from ` +
+          `expected ${awaitingApprovalEpisodeId} / ${deadlineAt} / ${decidedClass})\n`,
+        )
+        lockExit = 5
+        return
+      }
       if (orphan.status === 'match') {
         const fm = orphan.frontmatter
-        if (fm.parent_episode !== awaitingApprovalEpisodeId) {
-          process.stderr.write(
-            `error: recoverable-canonical-drift: orphan ${outcomeState} parent_episode=` +
-            `${fm.parent_episode} != awaiting_approval episode ${awaitingApprovalEpisodeId}\n`,
-          )
-          lockExit = 5
-          return
-        }
-        if (fm.decided_class !== decidedClass) {
-          process.stderr.write(
-            `error: recoverable-canonical-drift: orphan ${outcomeState} decided_class=` +
-            `${fm.decided_class} != run.decided_class ${decidedClass}\n`,
-          )
-          lockExit = 5
-          return
-        }
         autoApprovedAt = fm.auto_approved_at
         autoApprovedEpisodeId = orphan.episodeId
       } else {

@@ -181,33 +181,90 @@ function runHook({ cwd, home }) {
   })
 }
 
+// PR-level audit F2 closure 2026-05-17: expireDeadline must keep ALL THREE
+// canonical surfaces in sync: run-state, signed awaiting_approval episode, and
+// marker. The F2 fix (expectedFields on parent-episode lookup) makes any drift
+// between these surfaces a recoverable-canonical-drift exit, so the test
+// scaffold must mirror what production state would look like with time
+// fast-forwarded — not backdoor only one of the three.
 function expireDeadline(project, runId, msAgo = 1) {
   const expired = new Date(Date.now() - msAgo).toISOString()
-  // Update run-state's deadline_at so the orchestrator's defense-in-depth
-  // deadline check passes.
+  // 1. Update run-state's deadline_at.
   const r = updateRunState(project, runId, { deadline_at: expired })
   if (r.error) throw new Error(`updateRunState: ${r.error}`)
-  // The marker file on disk has the ORIGINAL deadline_at from record-awaiting-
-  // approval (now+1hr). The validator reads from the marker, not run-state.
-  // Re-write the marker with the expired deadline using the run's key so HMAC
-  // verifies. createdAt = now so the mtime-vs-baseline check passes
-  // (±10s tolerance).
+  // 2. Rewrite the signed awaiting_approval episode with backdated deadline_at.
+  //    Find the existing episode (so we adopt its decided_class +
+  //    awaiting_approval_at + parent_episode chain), then delete it and re-emit
+  //    with the new deadline_at. F2 expectedFields requires the parent episode
+  //    to match run-state's deadline_at.
   const keyResult = loadRunKey(project, runId)
   if (keyResult.error) throw new Error(`loadRunKey: ${keyResult.error}`)
-  // Read existing marker to get decided_class.
+  const episodesDir = path.join(project, '.episodic-memory/episodes')
+  const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md'))
+  let parentEpisode = null
+  let decidedClass = null
+  let awaitingApprovalAt = null
+  let priorParent = null
+  // Frontmatter strings are JSON-quoted via serializeFmValue; bare-token fields
+  // (state, parent_episode-null) are unquoted. Match both shapes.
+  const stripQuotes = s => s.replace(/^"|"$/g, '').replace(/\\"/g, '"')
+  for (const f of files) {
+    const txt = fs.readFileSync(path.join(episodesDir, f), 'utf8')
+    if (!txt.includes(`run_id: ${JSON.stringify(runId)}`)) continue
+    if (!txt.includes('state: awaiting_approval')) continue
+    parentEpisode = path.join(episodesDir, f)
+    const mAwaiting = txt.match(/^awaiting_approval_at: (.+)$/m)
+    const mClass = txt.match(/^decided_class: (.+)$/m)
+    const mParent = txt.match(/^parent_episode: (.+)$/m)
+    if (mAwaiting) awaitingApprovalAt = stripQuotes(mAwaiting[1].trim())
+    if (mClass) decidedClass = stripQuotes(mClass[1].trim())
+    if (mParent) priorParent = stripQuotes(mParent[1].trim())
+    break
+  }
+  if (!parentEpisode) throw new Error(`expireDeadline: no awaiting_approval episode found for ${runId}`)
+  fs.unlinkSync(parentEpisode)
+  // Re-emit with backdated deadline_at. parentEpisode chain preserved.
+  const writerMod = sync_import_writer()
+  writerMod.writeBp1Episode({
+    projectRoot: project, runId, runKey32B: keyResult.key32B,
+    type: 'state-transition', state: 'awaiting_approval',
+    summary: `BP-1 awaiting_approval (deadline ${expired}): ${runId}`,
+    parentEpisode: priorParent, expectedPostEpisodeId: null,
+    customFm: {
+      awaiting_approval_at: awaitingApprovalAt,
+      deadline_at: expired,
+      decided_class: decidedClass,
+    },
+    tags: ['bp1-awaiting-approval'],
+    body: `# bp1-awaiting-approval — ${runId}\n\nawaiting_approval_at: \`${awaitingApprovalAt}\`\ndeadline_at: \`${expired}\`\ndecided_class: \`${decidedClass}\`\n(time fast-forwarded by test fixture; see expireDeadline)\n`,
+    filenameSuffix: 'awaiting-approval',
+  })
+  // 3. Rewrite the marker with the backdated deadline using the run's key so
+  //    HMAC verifies. createdAt = now so the mtime-vs-baseline check passes
+  //    (±10s tolerance).
   const existing = JSON.parse(fs.readFileSync(markerPath(project, runId), 'utf8'))
   const now = new Date().toISOString()
-  // Remove existing marker so writeMarker doesn't see `alreadyPresent`.
   fs.unlinkSync(markerPath(project, runId))
   const w = writeMarker({
-    projectRoot: project,
-    runId,
+    projectRoot: project, runId,
     decidedClass: existing.decided_class,
     createdAt: now,
     deadlineAt: expired,
     runKey32B: keyResult.key32B,
   })
   if (w.status !== 'ok') throw new Error(`writeMarker (rewrite): ${w.code} ${w.message}`)
+}
+
+// Top-level await for the writer module so expireDeadline can use it
+// synchronously. Wrapped in a function-returning-cached-instance pattern so
+// the static-import happens once at file-load.
+let _writerModCache = null
+const _writerModPromise = import(new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href)
+  .then(m => { _writerModCache = m })
+await _writerModPromise
+function sync_import_writer() {
+  if (!_writerModCache) throw new Error('writer module not loaded — top-level await did not resolve')
+  return _writerModCache
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +699,77 @@ tap('AC-13 linked worktree (git worktree add) → writer + reader land on worktr
       // ignore — main is a tmpdir, will be pruned regardless
     }
   }
+})
+
+// ---------------------------------------------------------------------------
+// AC-14 — malformed validator stdout → Case C (malformed-validator) + exit 0
+// ---------------------------------------------------------------------------
+//
+// PR-level audit F1 closure 2026-05-17. Codex reproduced: with validator stdout
+// `not-json`, the hook's `STATUS="$(echo $VALIDATE_OUT | jq -r '.status')"`
+// pipeline exit propagates through `set -e` and the hook exits 5 — violating
+// §178 always-exit-0. Fix: gate STATUS extraction on `jq -e empty`; on
+// malformed validator output, emit Case C (kind: malformed-validator) to
+// stderr and continue.
+//
+// Test shape: replace the installed validator in HOME-scoped scripts with a
+// stub that prints `not-json` and exits 0. Hook must exit 0 with the
+// malformed-validator JSON line on stderr.
+// ---------------------------------------------------------------------------
+
+tap('AC-14 malformed validator stdout → Case C + hook exits 0', () => {
+  const ctx = setupAwaitingApproval()
+  // Backdate deadline so the hook would otherwise proceed past validation.
+  expireDeadline(ctx.project, ctx.runId)
+  // Replace the validator in HOME's installed scripts with a non-JSON stub.
+  const stubPath = path.join(ctx.home, '.episodic-memory/scripts/bp1-marker-validate.mjs')
+  fs.writeFileSync(stubPath, '#!/usr/bin/env node\nprocess.stdout.write("not-json\\n")\nprocess.exit(0)\n', { mode: 0o755 })
+  const r = runHook({ cwd: ctx.project, home: ctx.home })
+  assert.equal(r.status, 0, `hook MUST exit 0 on malformed validator stdout (got ${r.status}); stderr=${r.stderr}`)
+  // Stderr must contain the Case C malformed-validator JSON line.
+  const lines = r.stderr.split(/\r?\n/).filter(Boolean)
+  const matched = lines.find(L => {
+    try {
+      const parsed = JSON.parse(L)
+      return parsed.kind === 'failure:bp1-marker-invalid-malformed-validator' && parsed.case === 'C'
+    } catch { return false }
+  })
+  assert.ok(matched, `expected JSON-parseable Case C malformed-validator line on stderr; got:\n${r.stderr}`)
+  const parsed = JSON.parse(matched)
+  assert.equal(parsed.hook, 'bp1-approval-check.sh')
+  assert.equal(parsed.validate_stdout.trim(), 'not-json')
+  // State must NOT have transitioned (hook bailed before confirm-approval).
+  const idx = loadIndex(ctx.project)
+  assert.equal(idx.runs[ctx.runId].state, 'awaiting_approval',
+    'state must remain awaiting_approval — hook bailed on malformed validator output')
+})
+
+// ---------------------------------------------------------------------------
+// AC-15 — malformed SessionStart stdin → soft-fail to pwd, hook exits 0
+// ---------------------------------------------------------------------------
+//
+// PR-level audit F1 closure 2026-05-17. Same vulnerability class as AC-14 but
+// at the stdin .cwd parse (line 60). Malformed JSON on stdin would otherwise
+// trip set -e in the `CWD="$(echo $INPUT | jq -r '.cwd')"` assignment. Fix:
+// gate the .cwd parse on `jq -e empty`; on failure, leave CWD empty so the
+// `[ -z "$CWD" ] && CWD="$(pwd)"` fallback kicks in.
+// ---------------------------------------------------------------------------
+
+tap('AC-15 malformed stdin JSON → soft-fall-through to pwd; hook exits 0', () => {
+  const ctx = setupAwaitingApproval()
+  // Run hook with non-JSON stdin from inside the project dir; pwd fallback
+  // should resolve to ctx.project, the marker is found, no expiry yet (state
+  // stays awaiting_approval), hook exits 0.
+  const r = spawnSync('bash', [HOOK], {
+    input: 'this is not json',
+    cwd: ctx.project,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: ctx.home },
+  })
+  assert.equal(r.status, 0, `hook MUST exit 0 on malformed stdin (got ${r.status}); stderr=${r.stderr}`)
+  // Marker still present (no expiry); state still awaiting_approval.
+  const idx = loadIndex(ctx.project)
+  assert.equal(idx.runs[ctx.runId].state, 'awaiting_approval')
 })
 
 console.log(`# tests ${pass + fail}`)

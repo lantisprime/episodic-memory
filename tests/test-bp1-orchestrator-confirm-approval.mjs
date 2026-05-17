@@ -35,9 +35,13 @@ const { verifyKeyFingerprint } = hmacMod
 const rsmod = await import(new URL('../scripts/lib/bp1-run-state.mjs', import.meta.url).href)
 const { loadIndex, updateRunState } = rsmod
 const markerMod = await import(new URL('../scripts/lib/bp1-marker.mjs', import.meta.url).href)
-const { markerPath } = markerMod
+const { markerPath, writeMarker } = markerMod
 const fmMod = await import(new URL('../scripts/lib/bp1-frontmatter.mjs', import.meta.url).href)
 const { parseBp1Frontmatter } = fmMod
+const keysMod = await import(new URL('../scripts/lib/bp1-keys.mjs', import.meta.url).href)
+const { loadRunKey } = keysMod
+const writerMod = await import(new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href)
+const { writeBp1Episode } = writerMod
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -142,11 +146,78 @@ function setupAwaitingApproval() {
   }
 }
 
-/** Backdate deadline_at to make the run eligible for auto_approved. */
+/**
+ * Backdate deadline_at to make the run eligible for auto_approved.
+ *
+ * PR-level audit F2 closure 2026-05-17: confirm-approval now enforces that
+ * run-state's awaiting_approval_at + deadline_at + decided_class match the
+ * signed awaiting_approval episode's fields. The fixture must keep all three
+ * (run-state, signed episode, marker) in sync — backdating run-state in
+ * isolation would trip the new recoverable-canonical-drift exit.
+ */
 function expireDeadline(ctx, msAgo = 1) {
   const expired = new Date(Date.now() - msAgo).toISOString()
+  // 1. Update run-state.
   const r = updateRunState(ctx.project, ctx.runId, { deadline_at: expired })
   if (r.error) throw new Error(`updateRunState failed: ${r.error}`)
+  // 2. Rewrite the signed awaiting_approval episode with backdated deadline_at.
+  const keyResult = loadRunKey(ctx.project, ctx.runId)
+  if (keyResult.error) throw new Error(`loadRunKey: ${keyResult.error}`)
+  const episodesDir = path.join(ctx.project, '.episodic-memory/episodes')
+  const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md'))
+  let parentEpisodeFile = null
+  let priorParent = null
+  let decidedClass = null
+  let awaitingApprovalAt = null
+  // Frontmatter strings are JSON-quoted via serializeFmValue; state and null
+  // parent_episode are unquoted bare tokens.
+  const stripQuotes = s => s.replace(/^"|"$/g, '').replace(/\\"/g, '"')
+  for (const f of files) {
+    const txt = fs.readFileSync(path.join(episodesDir, f), 'utf8')
+    if (!txt.includes(`run_id: ${JSON.stringify(ctx.runId)}`)) continue
+    if (!txt.includes('state: awaiting_approval')) continue
+    parentEpisodeFile = path.join(episodesDir, f)
+    const mAwaiting = txt.match(/^awaiting_approval_at: (.+)$/m)
+    const mClass = txt.match(/^decided_class: (.+)$/m)
+    const mParent = txt.match(/^parent_episode: (.+)$/m)
+    if (mAwaiting) awaitingApprovalAt = stripQuotes(mAwaiting[1].trim())
+    if (mClass) decidedClass = stripQuotes(mClass[1].trim())
+    if (mParent) priorParent = stripQuotes(mParent[1].trim())
+    break
+  }
+  if (!parentEpisodeFile) throw new Error(`no awaiting_approval episode found for ${ctx.runId}`)
+  fs.unlinkSync(parentEpisodeFile)
+  const newParent = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: keyResult.key32B,
+    type: 'state-transition', state: 'awaiting_approval',
+    summary: `BP-1 awaiting_approval (deadline ${expired}): ${ctx.runId}`,
+    parentEpisode: priorParent, expectedPostEpisodeId: null,
+    customFm: {
+      awaiting_approval_at: awaitingApprovalAt,
+      deadline_at: expired,
+      decided_class: decidedClass,
+    },
+    tags: ['bp1-awaiting-approval'],
+    body: `# bp1-awaiting-approval — ${ctx.runId}\n\n(time fast-forwarded by test fixture)\n`,
+    filenameSuffix: 'awaiting-approval',
+  })
+  // Re-emission changes the parent episode id; expose it so tests asserting
+  // parent_episode linkage compare against the surviving (re-emitted) parent.
+  ctx.awaitingApprovalEpisodeId = newParent.episodeId
+  // 3. Rewrite the marker with backdated deadline_at.
+  const existing = JSON.parse(fs.readFileSync(markerPath(ctx.project, ctx.runId), 'utf8'))
+  const now = new Date().toISOString()
+  fs.unlinkSync(markerPath(ctx.project, ctx.runId))
+  const w = writeMarker({
+    projectRoot: ctx.project, runId: ctx.runId,
+    decidedClass: existing.decided_class,
+    createdAt: now,
+    deadlineAt: expired,
+    runKey32B: keyResult.key32B,
+  })
+  if (w.status !== 'ok') throw new Error(`writeMarker (rewrite): ${w.code} ${w.message}`)
+  // Mutate ctx so callers that captured the original deadline see the update.
+  ctx.deadlineAt = expired
   return expired
 }
 
@@ -335,6 +406,106 @@ tap('CA-10 signed episode has canonical fields + parent_episode = awaiting_appro
     'parent_episode == awaiting_approval episode id')
   // HMAC signature present
   assert.ok(frontmatter.hmac_signature, 'episode HMAC-signed')
+})
+
+// ---------------------------------------------------------------------------
+// CA-11 — non-trivial run.decided_class rejected at confirm boundary
+// ---------------------------------------------------------------------------
+//
+// PR-level audit F2 closure 2026-05-17. The classifier never emits
+// awaiting_approval for non-trivial today, but the confirm-approval boundary
+// must independently enforce `decided_class === "trivial"`. Catches the case
+// where a future classifier regression (or a manual run-state edit) attempts
+// to drive auto_approved on a non-trivial run.
+// ---------------------------------------------------------------------------
+
+tap('CA-11 non-trivial run.decided_class → state-violation exit 5', () => {
+  const ctx = setupAwaitingApproval()
+  // Forcibly rewrite run.decided_class to a non-trivial value (synthetic
+  // attack — the classifier would never emit this combination).
+  const r0 = updateRunState(ctx.project, ctx.runId, { decided_class: 'schema' })
+  assert.equal(r0.ok, true)
+  expireDeadline(ctx)
+  const r = runConfirm(ctx)
+  assert.equal(r.status, 5, `expected exit 5; stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes('state-violation'), `stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes('decided_class'), `stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes('trivial'), `stderr=${r.stderr}`)
+  // State must NOT have transitioned.
+  const idx = loadIndex(ctx.project)
+  assert.equal(idx.runs[ctx.runId].state, 'awaiting_approval')
+})
+
+// ---------------------------------------------------------------------------
+// CA-12 — run-state vs parent-episode decided_class drift → canonical-drift
+// ---------------------------------------------------------------------------
+//
+// PR-level audit F2 closure 2026-05-17. Stale-marker-after-reclassification
+// shape: the signed awaiting_approval episode on disk has decided_class="X"
+// but run-state has been edited to decided_class="trivial". confirm-approval
+// must NOT silently bind the terminal transition to a parent whose canonical
+// fields disagree with run-state. expectedFields predicate drives the
+// field-mismatch result.
+// ---------------------------------------------------------------------------
+
+tap('CA-12 parent episode decided_class drift → recoverable-canonical-drift exit 5', () => {
+  const ctx = setupAwaitingApproval()
+  // The signed awaiting_approval episode was written with decided_class=trivial.
+  // Drift run-state's decided_class while leaving the on-disk episode intact.
+  // (Synthetic — real cause would be a separate writer / index corruption.)
+  // We can't rewrite to a non-trivial class without tripping CA-11; instead
+  // drift the awaiting_approval_at field which is also a predicate.
+  const driftedAt = new Date(Date.parse(ctx.awaitingApprovalAt) + 60000).toISOString()
+  const r0 = updateRunState(ctx.project, ctx.runId, { awaiting_approval_at: driftedAt })
+  assert.equal(r0.ok, true)
+  expireDeadline(ctx)
+  const r = runConfirm(ctx)
+  assert.equal(r.status, 5, `expected exit 5; stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes('recoverable-canonical-drift'),
+    `expected recoverable-canonical-drift; stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes('awaiting_approval'), `stderr=${r.stderr}`)
+})
+
+// ---------------------------------------------------------------------------
+// CA-13 — orphan auto_approved with mismatched parent_episode → canonical-drift
+// ---------------------------------------------------------------------------
+//
+// PR-level audit F2 closure 2026-05-17. A crashed prior invocation emitted a
+// signed auto_approved episode pointing at a DIFFERENT parent_episode
+// (manual splice / cross-context attachment). The orphan-adopt path must
+// reject with recoverable-canonical-drift, not silently adopt the foreign
+// timestamps. expectedFields={parent_episode, deadline_at, decided_class}
+// drives the field-mismatch result.
+// ---------------------------------------------------------------------------
+
+tap('CA-13 orphan auto_approved with foreign parent_episode → canonical-drift exit 5', () => {
+  const ctx = setupAwaitingApproval()
+  expireDeadline(ctx)
+  // Synthesize a signed auto_approved orphan with a DIFFERENT parent_episode.
+  // Imports are at top-level (line ~40) so this runs synchronously.
+  const keyResult = loadRunKey(ctx.project, ctx.runId)
+  if (keyResult.error) throw new Error(`loadRunKey: ${keyResult.error}`)
+  const at = new Date(Date.now() - 1000).toISOString()
+  writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: keyResult.key32B,
+    type: 'state-transition', state: 'auto_approved',
+    summary: `synthetic orphan with foreign parent: ${ctx.runId}`,
+    parentEpisode: 'foreign-parent-episode-id-not-the-real-one',
+    expectedPostEpisodeId: null,
+    customFm: {
+      auto_approved_at: at,
+      deadline_at: ctx.deadlineAt,
+      decided_class: 'trivial',
+    },
+    tags: ['bp1-auto-approved'],
+    body: `# synthetic orphan\n`,
+    filenameSuffix: 'auto-approved-synth',
+  })
+  const r = runConfirm(ctx)
+  assert.equal(r.status, 5, `expected exit 5; stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes('recoverable-canonical-drift'),
+    `expected recoverable-canonical-drift; stderr=${r.stderr}`)
+  assert.ok(r.stderr.includes(`orphan auto_approved`), `stderr=${r.stderr}`)
 })
 
 console.log(`# tests ${pass + fail}`)

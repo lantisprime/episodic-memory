@@ -282,6 +282,44 @@ tap('MV18 directory at marker path (not a file) → invalid:not-a-file', () => {
   assert.equal(r.parsed.reason, 'not-a-file')
 })
 
+// ---------------------------------------------------------------------------
+// MV19 — strict key set: extra unsigned field → invalid:unknown-fields
+// ---------------------------------------------------------------------------
+//
+// PR-level audit F3 closure 2026-05-17. Codex reproduced: a valid-HMAC marker
+// with an additional unsigned field (`future_unsigned`) was validating `ok`.
+// The extra field is not in canonical_bytes, so HMAC verifies — but the
+// authorization-bearing artifact accepts arbitrary unsigned data, creating
+// forward-version + forensic drift. Fix rejects any key outside the canonical
+// 6-field set.
+// ---------------------------------------------------------------------------
+
+tap('MV19 marker with extra unsigned field → invalid:unknown-fields:<name>', () => {
+  const proj = tmpProj()
+  const { markerPath: mp } = setupValidMarker(proj, RUN_ID)
+  // Tamper: append an unsigned field to the on-disk marker JSON.
+  const raw = JSON.parse(fs.readFileSync(mp, 'utf8'))
+  raw.future_unsigned = 'attacker-controlled-value'
+  fs.writeFileSync(mp, JSON.stringify(raw))
+  const r = runValidator(proj, RUN_ID, ['--skip-mtime-check'])
+  assert.equal(r.parsed.status, 'invalid')
+  assert.equal(r.parsed.reason, 'unknown-fields:future_unsigned',
+    `expected unknown-fields:future_unsigned reason; got ${r.parsed.reason}`)
+})
+
+tap('MV20 marker with multiple extra fields → invalid:unknown-fields lists sorted', () => {
+  const proj = tmpProj()
+  const { markerPath: mp } = setupValidMarker(proj, RUN_ID)
+  const raw = JSON.parse(fs.readFileSync(mp, 'utf8'))
+  raw.zeta_extra = 'z'
+  raw.alpha_extra = 'a'
+  fs.writeFileSync(mp, JSON.stringify(raw))
+  const r = runValidator(proj, RUN_ID, ['--skip-mtime-check'])
+  assert.equal(r.parsed.status, 'invalid')
+  assert.equal(r.parsed.reason, 'unknown-fields:alpha_extra,zeta_extra',
+    `expected sorted unknown-fields list; got ${r.parsed.reason}`)
+})
+
 console.log(`# tests ${pass + fail}`)
 console.log(`# pass  ${pass}`)
 console.log(`# fail  ${fail}`)

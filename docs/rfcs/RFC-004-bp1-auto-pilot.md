@@ -7,7 +7,7 @@ champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-17
 accepted: 2026-05-06
-version: 3.16
+version: 3.17
 supersedes: ~
 superseded_by: ~
 ---
@@ -689,9 +689,11 @@ Both SessionStart hooks (H1 `bp1-approval-check.sh` and H2 `bp1-sweep-on-session
 | 4 | Marker invalid + per-run key still on disk (validate `status: invalid`) | Case A: emit signed `failure:bp1-marker-invalid` episode via `bp1-emit-marker-invalid-evidence.mjs`. Marker stays on disk (operator forensic trail). | 0 |
 | 5 | Marker invalid + per-run key shredded (post-finalize) | Case B: `bp1-emit-marker-invalid-evidence.mjs` falls back to stderr-only JSON record (`{kind: "failure:bp1-marker-invalid", case: "B", ...}`). Marker stays on disk. | 0 |
 | 6 | Marker filename unparseable (doesn't match `bp1-approval-<run_id>.json` with `run_id =~ /^bp1-run-[a-z0-9-]+$/`) | Case C: hook stderr-logs JSON directly (no helper invocation — helper requires a valid run_id argv); marker stays on disk. | 0 |
+| 6b | Marker validator stdout malformed (e.g. validator binary regressed and emits non-JSON, or pipeline truncation) | Case C variant: hook stderr-logs `{kind:"failure:bp1-marker-invalid-malformed-validator",case:"C",...}` and skips the marker; loop continues. Added v3.17 (PR-level audit F1 closure 2026-05-17 — codex reproduced hook exit 5 with validator stdout `not-json` because `STATUS="$(... jq ...)"` under `set -e` propagates jq's parse-error exit; fix uses `|| STATUS=""` fallback). Marker stays on disk. | 0 |
+| 6c | SessionStart stdin malformed (non-JSON on stdin to the hook) | Hook falls back to `pwd` for cwd resolution (same as `INPUT` empty path); same protective fallback shape as mode 6b but applied to the `.cwd` parse at hook entry. | 0 |
 | 7 | Marker valid + deadline not yet expired (validate `status: ok, expired: false`) | Silent no-op (per-marker; loop continues to next marker) | 0 |
 | 8 | Marker valid + deadline expired (validate `status: ok, expired: true`) | Call `bp1-orchestrator.mjs confirm-approval --outcome auto_approved`. Orchestrator is idempotent (state-already-terminal returns ok). Marker cleaned up by orchestrator's `cleanupApprovalMarker` on success. | 0 |
-| 9 | `confirm-approval` transient failure (exit 3 marker-cleanup, exit 5 race, exit 2 argv corruption) | Hook ignores subprocess exit code (`|| true`). Marker remains on disk for next session retry. `markTerminal` is idempotent so re-run is safe. | 0 |
+| 9 | `confirm-approval` transient failure (exit 3 marker-cleanup, exit 5 race, exit 2 argv corruption, exit 5 recoverable-canonical-drift on stale-parent mismatch) | Hook ignores subprocess exit code (`|| true`). Marker remains on disk for next session retry. `markTerminal` is idempotent so re-run is safe. Recoverable-canonical-drift requires operator reconciliation (a stale awaiting_approval episode whose `awaiting_approval_at` / `deadline_at` / `decided_class` no longer match run-state). Added v3.17 (PR-level audit F2 closure 2026-05-17). | 0 |
 
 **Three-case evidence-emission contract (modes 4/5/6):** Cases A/B are emitted by `bp1-emit-marker-invalid-evidence.mjs` (the helper auto-detects key presence). Case C is emitted by the hook directly because the helper requires a valid `--run-id` argv and Case C is the "I can't even derive a run_id" failure mode.
 

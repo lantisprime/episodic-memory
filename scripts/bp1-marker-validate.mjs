@@ -198,6 +198,21 @@ function main() {
     }
   }
 
+  // Step 6b: strict key set (PR-level audit F3 closure 2026-05-17).
+  // Authorization-bearing markers must carry exactly the canonical 6-field
+  // set. Extra fields are NOT in body_sha256 / HMAC canonical bytes, so an
+  // attacker (or a future-version writer) can append unsigned fields without
+  // failing HMAC verification — creating forward-version drift and forensic
+  // ambiguity. Reject any extra keys explicitly. A versioned-extension
+  // envelope policy (if ever needed) requires an RFC amendment + canonicalize
+  // schema bump.
+  const ALLOWED_KEYS = new Set(REQUIRED)
+  const extraKeys = Object.keys(parsed).filter(k => !ALLOWED_KEYS.has(k))
+  if (extraKeys.length > 0) {
+    emitInvalid(`unknown-fields:${extraKeys.sort().join(',')}`, args.runId, target, parsed)
+    return
+  }
+
   // Step 7: in-marker run_id must match --run-id (anti-splice).
   if (parsed.run_id !== args.runId) {
     emitInvalid('run-id-mismatch', args.runId, target, parsed)

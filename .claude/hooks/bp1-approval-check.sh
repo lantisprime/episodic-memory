@@ -24,14 +24,17 @@ set -e
 #       structured JSON from this hook directly (no helper invocation).
 #
 # §178 four-mode silent-exit contract (always exit 0):
-#   - bp1 inert (flag-check refuses)         → silent no-op
-#   - marker missing (race vs concurrent rm) → silent no-op
-#   - marker invalid Case A                   → signed episode + exit 0
-#   - marker invalid Case B                   → stderr-only + exit 0
-#   - marker invalid Case C                   → hook-stderr + exit 0
-#   - marker valid + not expired              → silent no-op
-#   - marker valid + expired                  → confirm-approval + exit 0
-#   - confirm-approval transient failure      → stderr-log + exit 0 (next
+#   - bp1 inert (flag-check refuses)          → silent no-op
+#   - marker missing (race vs concurrent rm)  → silent no-op
+#   - marker invalid Case A                    → signed episode + exit 0
+#   - marker invalid Case B                    → stderr-only + exit 0
+#   - marker invalid Case C unparseable name   → hook-stderr + exit 0
+#   - marker invalid Case C unknown status     → hook-stderr + exit 0
+#   - marker invalid Case C malformed validator→ hook-stderr + exit 0 (added
+#     PR-level audit r1 P1 closure 2026-05-17)
+#   - marker valid + not expired               → silent no-op
+#   - marker valid + expired                   → confirm-approval + exit 0
+#   - confirm-approval transient failure       → stderr-log + exit 0 (next
 #     session retries; markTerminal is idempotent)
 #
 # Hook NEVER fails the Claude session. Even bp1-side bugs exit 0.
@@ -57,7 +60,14 @@ set -e
 #   See bp1-sweep-on-session.sh:23-30 for rationale.
 
 INPUT="$(cat)"
-CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
+# Guard stdin .cwd parse: malformed SessionStart JSON would otherwise propagate
+# jq's exit code through the assignment statement (under `set -e`, the
+# assignment's exit status IS the pipeline's last-command status). The
+# `|| CWD=""` fallback makes the whole compound statement succeed under set -e
+# regardless of jq's exit, and the empty-string fallback below kicks in.
+# PR-level audit P1 closure 2026-05-17: codex reproduced hook exit 5 by feeding
+# `not-json` to validator stdout; same vulnerability shape exists for stdin parse.
+CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // ""' 2>/dev/null)" || CWD=""
 [ -z "$CWD" ] && CWD="$(pwd)"
 
 # Soft-fail on cd failure (mirrors em-recall-sessionstart.sh:51).
@@ -153,14 +163,32 @@ while IFS= read -r MARKER_PATH; do
   if [ -z "$VALIDATE_OUT" ]; then
     continue
   fi
-  STATUS="$(echo "$VALIDATE_OUT" | jq -r '.status // ""')"
+  # Guard STATUS parse against malformed validator stdout. Under `set -e`, the
+  # assignment `var="$(... | jq ...)"` propagates jq's exit code; with no
+  # fallback, malformed validator output crashes the hook (PR-level audit P1,
+  # codex reproduced exit 5 with stdout "not-json"). The `|| STATUS=""`
+  # fallback makes the compound statement succeed regardless of jq's exit, then
+  # the empty-string check below emits Case C malformed-validator and
+  # continues. Note: jq's `// ""` default fires on `null`/missing-key but NOT
+  # on parse failure — the `|| STATUS=""` handles parse failure separately.
+  STATUS="$(printf '%s' "$VALIDATE_OUT" | jq -r '.status // ""' 2>/dev/null)" || STATUS=""
+  if [ -z "$STATUS" ]; then
+    EMITTED_AT="$(date -u +%FT%TZ)"
+    jq -nc \
+      --arg marker_path "$MARKER_PATH" \
+      --arg validate_stdout "$VALIDATE_OUT" \
+      --arg emitted_at "$EMITTED_AT" \
+      '{kind:"failure:bp1-marker-invalid-malformed-validator",case:"C",marker_path:$marker_path,validate_stdout:$validate_stdout,hook:"bp1-approval-check.sh",emitted_at:$emitted_at}' \
+      1>&2
+    continue
+  fi
   case "$STATUS" in
     missing)
       # Race with concurrent unlink. Silent no-op.
       continue
       ;;
     invalid)
-      REASON="$(echo "$VALIDATE_OUT" | jq -r '.reason // "unknown"')"
+      REASON="$(printf '%s' "$VALIDATE_OUT" | jq -r '.reason // "unknown"' 2>/dev/null)" || REASON="unknown"
       # Emit signed (Case A) or unsigned-stderr (Case B) evidence.
       # CRITICAL: do NOT `2>&1` here. Case B's only evidence channel is the
       # helper's stderr JSON (key shredded post-finalize → no signing key,
@@ -177,7 +205,7 @@ while IFS= read -r MARKER_PATH; do
       continue
       ;;
     ok)
-      EXPIRED="$(echo "$VALIDATE_OUT" | jq -r '.expired // false')"
+      EXPIRED="$(printf '%s' "$VALIDATE_OUT" | jq -r '.expired // false' 2>/dev/null)" || EXPIRED="false"
       if [ "$EXPIRED" = "true" ]; then
         # Transition to auto_approved. Confirm-approval is idempotent; on
         # transient failure (exit 3 marker-cleanup, exit 5 race), the marker
