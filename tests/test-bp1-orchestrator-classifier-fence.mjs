@@ -260,21 +260,28 @@ function validClassifierOutput(klass = 'trivial', overrides = {}) {
   }
 }
 
-tap('T-class-happy-trivial trivial → state=planning, bp1-planning episode emitted', () => {
+tap('T-class-happy-trivial trivial → state=classified (stable), NO bp1-planning episode (slice 2d-W Option A)', () => {
+  // Slice 2d-W (Option A, codex r3 episode 20260517-021728-...-fd95):
+  // trivial-class runs stop at stable `classified` state. record-classification
+  // Phase B is a no-op for trivial; the safety-envelope transition into
+  // `awaiting_approval` is the responsibility of `record-awaiting-approval`.
   const ctx = setupRfcDetected()
   const { r: pr } = preDispatch(ctx)
   const preId = JSON.parse(pr.stdout).pre_episode_id
   const r = recordClassification(ctx, validClassifierOutput('trivial'), preId)
   assert.equal(r.status, 0, `stderr=${r.stderr}`)
   const out = JSON.parse(r.stdout)
-  assert.equal(out.state, 'planning')
+  assert.equal(out.state, 'classified')
   assert.equal(out.decided_class, 'trivial')
+  assert.equal(out.route_episode_id, null, 'route_episode_id stays null for trivial')
   const idx = loadIndex(ctx.project)
-  assert.equal(idx.runs[ctx.runId].state, 'planning')
+  assert.equal(idx.runs[ctx.runId].state, 'classified')
   assert.equal(idx.runs[ctx.runId].decided_class, 'trivial')
-  // bp1-planning episode exists.
+  assert.equal(idx.runs[ctx.runId].route_episode_id, null)
+  // classified episode exists; bp1-planning episode does NOT.
   const eps = fs.readdirSync(path.join(ctx.project, '.episodic-memory/episodes'))
-  assert.ok(eps.some(f => f.includes('-planning-')), 'bp1-planning episode written')
+  assert.ok(eps.some(f => f.includes('-classified-')), 'classified episode written')
+  assert.ok(!eps.some(f => f.includes('-planning-')), 'NO bp1-planning episode emitted for trivial (Option A)')
 })
 
 tap('T-class-happy-risky schema → state=needs-human, bp1-needs-human episode emitted', () => {
@@ -460,11 +467,14 @@ tap('T-class-classified-fields-empty minItems:1 catches empty → schema-violati
   assert.equal(r.status, 5)
 })
 
-tap('T-class-route-eps classified + route episodes verify HMAC', () => {
+tap('T-class-route-eps classified + needs-human route episodes verify HMAC (risky route)', () => {
+  // Slice 2d-W (Option A): trivial no longer emits a route episode. Switch
+  // this test to use a risky-class input so it still exercises the
+  // classified + route HMAC verification path.
   const ctx = setupRfcDetected()
   const { r: pr } = preDispatch(ctx)
   const preId = JSON.parse(pr.stdout).pre_episode_id
-  const r = recordClassification(ctx, validClassifierOutput('trivial'), preId)
+  const r = recordClassification(ctx, validClassifierOutput('schema'), preId)
   assert.equal(r.status, 0)
   const out = JSON.parse(r.stdout)
   // Verify classified episode HMAC.
@@ -478,7 +488,7 @@ tap('T-class-route-eps classified + route episodes verify HMAC', () => {
   const v2 = verifyEpisodeOnDisk({
     projectRoot: ctx.project, episodeId: out.route_episode_id,
     runKey32B: ctx.runKey, expectedType: 'state-transition',
-    expectedState: 'planning', expectedRunId: ctx.runId,
+    expectedState: 'needs-human', expectedRunId: ctx.runId,
   })
   assert.deepEqual(v2, { ok: true })
 })
@@ -496,12 +506,15 @@ tap('T-fail-5 parent pre tampered at record-classification → exit 5 + parent-t
   assert.ok(eps.some(f => f.includes('parent-tamper')))
 })
 
-tap('T-class-trivial-route-state planning state in run-state', () => {
+tap('T-class-trivial-route-state classified state in run-state (slice 2d-W Option A)', () => {
+  // Trivial-class stays at stable `classified` state per slice 2d-W Option A.
+  // `awaiting_approval` is reached via the separate record-awaiting-approval
+  // subcommand (1hr safety-envelope window).
   const ctx = setupRfcDetected()
   const { r: pr } = preDispatch(ctx)
   const preId = JSON.parse(pr.stdout).pre_episode_id
   recordClassification(ctx, validClassifierOutput('trivial'), preId)
-  assert.equal(loadIndex(ctx.project).runs[ctx.runId].state, 'planning')
+  assert.equal(loadIndex(ctx.project).runs[ctx.runId].state, 'classified')
 })
 
 tap('T-class-validator-route-state needs-human state in run-state', () => {

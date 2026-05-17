@@ -139,19 +139,19 @@ function runRecordClassification(ctx, resultFile, opts = {}) {
 // ===========================================================================
 // 288-1 — crash between Phase A and Phase B → retry emits route
 // ===========================================================================
-tap('288-1 crash between Phase A and Phase B → retry emits route from classified', () => {
+tap('288-1 crash between Phase A and Phase B → retry emits route from classified (risky)', () => {
+  // Slice 2d-W Option A: trivial no longer emits a route episode in Phase B.
+  // Re-shape this crash-retry test around the risky path (schema → needs-human)
+  // which still exercises the Phase-A-success / Phase-B-pending recovery.
   const ctx = setupPreDispatched()
-  const resultFile = writeResultFile(ctx.project)
+  const resultFile = writeResultFile(ctx.project, { class: 'schema', confidence: 0.85, rationale: 'r', classified_fields: ['x'] })
 
-  // Simulate the post-Phase-A pre-Phase-B state directly: emit a signed
-  // classified episode, then manually set idx { state: 'classified',
-  // classified_episode_id, decided_class }. Do NOT emit a route episode.
   const classifiedEp = writeBp1Episode({
     projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
     type: 'state-transition', state: 'classified',
     summary: `test-induced classified`,
     parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
-    customFm: { decided_class: 'trivial', classifier_confidence: '0.85' },
+    customFm: { decided_class: 'schema', classifier_confidence: '0.85' },
     tags: ['bp1-classified'],
     body: '# classified\n',
     filenameSuffix: 'classified',
@@ -159,21 +159,20 @@ tap('288-1 crash between Phase A and Phase B → retry emits route from classifi
   withRunStateLockExclusive(ctx.project, () => {
     const idx = loadIndexLocked(ctx.project)
     idx.runs[ctx.runId].state = 'classified'
-    idx.runs[ctx.runId].decided_class = 'trivial'
+    idx.runs[ctx.runId].decided_class = 'schema'
     idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
     writeIndex(ctx.project, idx)
   })
 
-  // Retry with same args → Phase A no-op verify-only, Phase B emits route.
   const r = runRecordClassification(ctx, resultFile)
   assert.equal(r.status, 0, `stderr=${r.stderr}`)
   const out = JSON.parse(r.stdout)
-  assert.equal(out.state, 'planning', `expected planning; got ${out.state}`)
+  assert.equal(out.state, 'needs-human', `expected needs-human; got ${out.state}`)
   assert.equal(out.classified_episode_id, classifiedEp.episodeId, 'must reuse existing classified ep')
   assert.ok(out.route_episode_id, 'route episode id present')
   const idx = loadIndex(ctx.project)
   const run = idx.runs[ctx.runId]
-  assert.equal(run.state, 'planning')
+  assert.equal(run.state, 'needs-human')
   assert.equal(run.classified_episode_id, classifiedEp.episodeId)
   assert.equal(run.route_episode_id, out.route_episode_id)
 })
@@ -274,38 +273,36 @@ tap('288-4 drift: stored classified_episode_id with mismatched decided_class →
 // ===========================================================================
 // 288-5 — parent-drift: signed orphan route with wrong parent_episode → exit 5
 // ===========================================================================
-tap('288-5 Phase B orphan route with wrong parent_episode → exit 5', () => {
+tap('288-5 Phase B orphan route with wrong parent_episode → exit 5 (risky)', () => {
+  // Slice 2d-W Option A: trivial skips Phase B; re-shape this orphan-with-
+  // wrong-parent invariant test around the risky path (schema → needs-human).
   const ctx = setupPreDispatched()
-  const resultFile = writeResultFile(ctx.project, { class: 'trivial', confidence: 0.85, rationale: 'r', classified_fields: ['x'] })
+  const resultFile = writeResultFile(ctx.project, { class: 'schema', confidence: 0.85, rationale: 'r', classified_fields: ['x'] })
 
-  // Emit a valid classified.
   const classifiedEp = writeBp1Episode({
     projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
     type: 'state-transition', state: 'classified',
     summary: 'classified', parentEpisode: ctx.preEpisodeId, expectedPostEpisodeId: null,
-    customFm: { decided_class: 'trivial', classifier_confidence: '0.85' },
+    customFm: { decided_class: 'schema', classifier_confidence: '0.85' },
     tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
   })
-  // Emit a planning route with WRONG parent (points to some unrelated id).
+  // Emit a needs-human route with WRONG parent (points to some unrelated id).
   const fakeParent = `${ctx.runId}-fake-9999`
   writeBp1Episode({
     projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
-    type: 'state-transition', state: 'planning',
-    summary: 'wrong-parent planning', parentEpisode: fakeParent, expectedPostEpisodeId: null,
-    customFm: { source_class: 'trivial' },
-    tags: ['bp1-planning'], body: '# p\n', filenameSuffix: 'planning',
+    type: 'state-transition', state: 'needs-human',
+    summary: 'wrong-parent needs-human', parentEpisode: fakeParent, expectedPostEpisodeId: null,
+    customFm: { reason: 'risky-class', decided_class: 'schema' },
+    tags: ['bp1-needs-human'], body: '# nh\n', filenameSuffix: 'needs-human',
   })
-  // Idx: state=classified + classified_episode_id set, route null.
   withRunStateLockExclusive(ctx.project, () => {
     const idx = loadIndexLocked(ctx.project)
     idx.runs[ctx.runId].state = 'classified'
-    idx.runs[ctx.runId].decided_class = 'trivial'
+    idx.runs[ctx.runId].decided_class = 'schema'
     idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
     writeIndex(ctx.project, idx)
   })
 
-  // Phase B orphan-scan finds the planning episode but parent_episode
-  // mismatches classified_episode_id → field-mismatch → drift.
   const r = runRecordClassification(ctx, resultFile)
   assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
   assert.match(r.stderr, /recoverable-canonical-drift/)
@@ -336,25 +333,30 @@ tap('288-6 state=classified + null classified_episode_id + no signed → recover
 // ===========================================================================
 // 288-7 — happy path: trivial → planning; classified + route pointers in idx
 // ===========================================================================
-tap('288-7 trivial happy path: classified_episode_id + route_episode_id persisted in idx', () => {
+tap('288-7 trivial happy path: classified_episode_id persisted; route_episode_id stays null (slice 2d-W Option A)', () => {
+  // Slice 2d-W Option A: trivial stops at stable `classified` state; no route
+  // episode is emitted. Slice 2e/2f follow-up `record-awaiting-approval`
+  // performs the safety-envelope transition into awaiting_approval.
   const ctx = setupPreDispatched()
   const resultFile = writeResultFile(ctx.project)
   const r = runRecordClassification(ctx, resultFile)
   assert.equal(r.status, 0, `stderr=${r.stderr}`)
   const out = JSON.parse(r.stdout)
-  assert.equal(out.state, 'planning')
+  assert.equal(out.state, 'classified')
+  assert.equal(out.route_episode_id, null, 'route_episode_id stays null for trivial')
   const idx = loadIndex(ctx.project)
   const run = idx.runs[ctx.runId]
-  assert.equal(run.state, 'planning')
+  assert.equal(run.state, 'classified')
   assert.equal(run.classified_episode_id, out.classified_episode_id, 'idx must persist classified_episode_id')
-  assert.equal(run.route_episode_id, out.route_episode_id, 'idx must persist route_episode_id')
+  assert.equal(run.route_episode_id, null, 'idx route_episode_id stays null')
 })
 
 // ===========================================================================
-// 288-8 — F1 planning: signed orphan planning with mismatched source_class
-// must be rejected as field-mismatch (NOT silently attached).
+// 288-8 — Slice 2d-W Option A: trivial stays at classified; verify Phase B
+// trivial-skip rejects when run.state was advanced to planning by slice-2c-era
+// code (state-violation reject, preserves F2 invariant for trivial).
 // ===========================================================================
-tap('288-8 F1: Phase B planning orphan with mismatched source_class → field-mismatch exit 5', () => {
+tap('288-8 trivial-skip Phase B rejects when run.state=planning (slice-2c-era artifact) → state-violation exit 5', () => {
   const ctx = setupPreDispatched()
   const resultFile = writeResultFile(ctx.project, { class: 'trivial', confidence: 0.85, rationale: 'r', classified_fields: ['x'] })
 
@@ -366,26 +368,21 @@ tap('288-8 F1: Phase B planning orphan with mismatched source_class → field-mi
     customFm: { decided_class: 'trivial', classifier_confidence: '0.85' },
     tags: ['bp1-classified'], body: '# c\n', filenameSuffix: 'classified',
   })
-  // Signed planning episode with RIGHT parent but WRONG source_class.
-  writeBp1Episode({
-    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
-    type: 'state-transition', state: 'planning',
-    summary: 'tampered planning', parentEpisode: classifiedEp.episodeId, expectedPostEpisodeId: null,
-    customFm: { source_class: 'tampered' },   // ≠ 'trivial'
-    tags: ['bp1-planning'], body: '# p\n', filenameSuffix: 'planning',
-  })
+  // Simulate slice-2c-era leftover state: run advanced to planning under
+  // decided_class=trivial. With Option A this is now illegitimate; Phase B
+  // trivial-skip must reject rather than silently report state=classified.
   withRunStateLockExclusive(ctx.project, () => {
     const idx = loadIndexLocked(ctx.project)
-    idx.runs[ctx.runId].state = 'classified'
+    idx.runs[ctx.runId].state = 'planning'
     idx.runs[ctx.runId].decided_class = 'trivial'
     idx.runs[ctx.runId].classified_episode_id = classifiedEp.episodeId
     writeIndex(ctx.project, idx)
   })
 
-  // Phase B orphan-scan: parent matches but source_class doesn't → field-mismatch.
   const r = runRecordClassification(ctx, resultFile)
   assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
-  assert.match(r.stderr, /recoverable-canonical-drift/)
+  assert.match(r.stderr, /state-violation \(Phase B\)/)
+  assert.match(r.stderr, /no route emission|decided_class=trivial/)
 })
 
 // ===========================================================================
@@ -480,7 +477,9 @@ tap('288-11 F2: run.state=needs-human but decided_class=trivial (targetState mis
   const r = runRecordClassification(ctx, resultFile)
   assert.equal(r.status, 5, `expected exit 5; got ${r.status}; stderr=${r.stderr}`)
   assert.match(r.stderr, /state-violation \(Phase B\)/)
-  assert.match(r.stderr, /targetState=planning/)
+  // Slice 2d-W Option A: trivial decided_class no longer emits a route episode;
+  // F2 reject for past-advanced state under trivial reports "no route emission".
+  assert.match(r.stderr, /no route emission|decided_class=trivial/)
 })
 
 // ===========================================================================

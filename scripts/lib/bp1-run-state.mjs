@@ -104,6 +104,7 @@ export const VALID_V2_STATES = Object.freeze([
   'classified',
   'planning',
   'needs-human',
+  'awaiting_approval',
   'complete',
   'aborted',
   'abandoned',
@@ -113,6 +114,9 @@ export const VALID_V2_STATES = Object.freeze([
 // Patchable transition fields per v2 schema. updateRunState() refuses
 // unknown keys to keep the on-disk shape locked. `classified_episode_id` /
 // `route_episode_id` added (cluster #286/#287/#288 Phase A/B persistence).
+// `awaiting_approval_at` + `deadline_at` added (slice 2d-W); Phase A persists
+// both so Phase B retry after crash produces byte-identical marker bytes
+// (codex r1 M1 — never wall-clock).
 const VALID_V2_PATCH_FIELDS = Object.freeze([
   'state',
   'decided_class',
@@ -120,6 +124,8 @@ const VALID_V2_PATCH_FIELDS = Object.freeze([
   'rfc_detected_episode_id',
   'classified_episode_id',
   'route_episode_id',
+  'awaiting_approval_at',
+  'deadline_at',
 ])
 
 // Valid classifier output classes (mirrors classifier_output_schema in
@@ -468,6 +474,8 @@ export function appendRun(projectRoot, runId, projectRootCanonical) {
         rfc_detected_episode_id: null,
         classified_episode_id: null,
         route_episode_id: null,
+        awaiting_approval_at: null,
+        deadline_at: null,
       }
       idx.runs[runId] = run
       writeIndex(projectRoot, idx)

@@ -5,9 +5,9 @@ title: "BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow"
 status: accepted
 champion: Charlton Ho
 created: 2026-05-06
-last_modified: 2026-05-13
+last_modified: 2026-05-17
 accepted: 2026-05-06
-version: 3.13
+version: 3.15
 supersedes: ~
 superseded_by: ~
 ---
@@ -314,22 +314,23 @@ flowchart TB
 stateDiagram-v2
     [*] --> rfc_detected
     rfc_detected --> classified: classifier agent
-    classified --> planning: trivial / risky
+    classified --> awaiting_approval: trivial (record-awaiting-approval)
+    classified --> needs_human: risky class
+    awaiting_approval --> approved: human y
+    awaiting_approval --> auto_approved: 1hr timeout
+    awaiting_approval --> aborted: human n
+    approved --> planning
+    auto_approved --> planning
     planning --> adversarial_reviewed: planner
     adversarial_reviewed --> codex_review: em-review-request
     codex_review --> codex_complete: reply
     codex_review --> codex_review: 30min timeout, retry < 2
     codex_review --> needs_human: timeout retry ≥ 2 (all classes)
-    codex_complete --> awaiting_approval: trivial
-    codex_complete --> needs_human: risky class
-    awaiting_approval --> approved: human y
-    awaiting_approval --> auto_approved: 1hr timeout
-    awaiting_approval --> aborted: human n
-    approved --> implementing
-    auto_approved --> implementing
+    codex_complete --> implementing: all classes
     needs_human --> resolved: override episode
     needs_human --> abandoned: 7 days no override
-    resolved --> implementing
+    resolved --> planning: source=classify-risky
+    resolved --> implementing: source=codex-timeout | fix-loop-same-sig
     implementing --> reviewing: code-reviewer ∥ test-runner ∥ security-reviewer
     reviewing --> fix_loop: any blocker
     reviewing --> auditing: all clean
@@ -544,6 +545,56 @@ All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_cano
 | 12 (NEW v3.8) | `scripts/bp1-canonicalize.mjs` | Per-episode canonical-bytes builder; projects frontmatter to canonical payload spec (generic + episode-type-specific fields) and emits sha256. Called by HMAC-signing path. | ✅ pure deterministic |
 | 13 (NEW v3.8) | `scripts/bp1-naked-entry-sweep.mjs` | Path B sweep: scans active runs for naked `codex_review` entries (no `bp1-codex-request-sent` evidence) older than 5min. Called by T1b scheduled task. Emits `bp1-naked-sweep-tick` per fire. | ✅ deterministic data walk |
 | 14 (NEW v3.10) | `scripts/bp1-deadline-sweep.mjs` | Unified fallback for T1 + T1b when `mcp__scheduled-tasks` unavailable. Invocable manually (`--once`) and auto-wired as a SessionStart hook (see hook H2 below). Activation-gated (no-op if project's flag-check fails). Emits `bp1-sweep-tick` per invocation. | ✅ deterministic; activation-gated |
+| 15 (NEW v3.15) | `scripts/lib/bp1-marker.mjs` | Approval-marker write/cleanup helpers. Exports `markerPath`, `canonicalizeMarkerPayload`, `writeMarker` (atomic + idempotent), `cleanupApprovalMarker`. Pure file I/O + canonicalization — does NOT emit evidence (caller-side per §595 ownership split). Called by `record-awaiting-approval` (write) and finalize-* paths (cleanup). | ✅ deterministic; idempotent byte-equal rewrite |
+
+### `record-awaiting-approval` subcommand (NEW v3.15, slice 2d-W)
+
+This subcommand replaces the pre-2d-W direct `classified → planning` transition for trivial-class RFCs (was a stub pending the safety envelope per F6). Splits the awaiting-approval transition into two phases so marker write-failure leaves the state at `awaiting_approval` for retry, rather than rolling back the state transition.
+
+**Argv (mirrors `RFC-004-bp1-auto-pilot.contract.json` v3.15 `subcommand_invariants.record-awaiting-approval`):**
+
+```
+bp1-orchestrator record-awaiting-approval \
+  --project <projectRoot> \
+  --run-id <runId> \
+  --classified-episode-id <classifiedEpisodeId>
+```
+
+Required: all three flags. `--project` is canonicalized via `git rev-parse --show-toplevel` with `cwd: projectRoot` then realpath (codex r3 authority-root closure). `--classified-episode-id` MUST point to an extant signed `state-transition:classified` episode with `decided_class === 'trivial'`; risky classes never reach this subcommand (`deriveRouteSpec` routes them to `needs-human` from `record-classification`).
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | ok — state transitioned to `awaiting_approval`; marker on disk; stdout JSON emitted |
+| 2 | argv invalid / project-root resolution failed |
+| 3 | marker-write-failed — Phase B `writeMarker` returned error after Phase A succeeded; signed `failure:marker-write-failed` evidence emitted; state remains `awaiting_approval` (retry idempotent) |
+| 5 | state / parent-tamper — Phase A precondition violated (state ≠ `classified`, decided_class ≠ `trivial`, classified-episode signature invalid, or canonical-field drift on resume) |
+
+**Two-phase contract:**
+
+- **Phase A (in-lock via `withLockedRun`).** Read run-state under the per-run lock. Three branches:
+  1. **Fresh emit** (state == `classified`): assert `decided_class === 'trivial'` from the classified episode (HMAC-verified parent). Mint `awaiting_approval_at = nowIso()` ONCE; compute `deadline_at = awaiting_approval_at + 1hr`. Emit signed `state-transition:awaiting_approval` episode with `{state, awaiting_approval_at, deadline_at, decided_class}` canonical fields. Persist `run.state = 'awaiting_approval'`, `run.awaiting_approval_at`, `run.deadline_at`.
+  2. **Resume / backfill** (state == `awaiting_approval`): re-check `decided_class === 'trivial'` per codex r3 P1 closure (catches the F2 case where a non-trivial class somehow reached `awaiting_approval`); read persisted `awaiting_approval_at` / `deadline_at` from run-state (NEVER fresh wall-clock); orphan-attach to existing signed episode, rejecting field-mismatch as canonical drift per codex r3 P2 closure (rather than adopting stale signed fields).
+  3. **State violation** (anything else): exit 5 with stderr error.
+- **Phase B (out-of-lock).** Call `writeMarker(...)` with values captured from Phase A (`awaitingApprovalAt`, `deadlineAt`, `decidedClass`, per-run key). Determinism + idempotent rewrite (per `### Approval-marker file contract` above) is the F2 mitigation in lieu of a second locked re-check: byte-identical payload from persisted run-state means concurrent or post-crash retries produce the same marker file; `bp1-marker.mjs` no-ops on byte-equal existing marker. On rename failure: emit signed `failure:marker-write-failed` evidence (run.key still live); stderr-log; exit 3. State stays at `awaiting_approval` for retry.
+
+**Crash gap.** Between Phase A success and Phase B success: state == `awaiting_approval` with no marker on disk. Recovery: re-run `record-awaiting-approval` with the same `--run-id`; Phase A takes the resume branch (no fresh wall-clock); Phase B writes the byte-identical marker. Path-A check-deadlines (slice 2e+) also detects this on next tick.
+
+**Stdout (success):**
+
+```json
+{
+  "status": "ok",
+  "state": "awaiting_approval",
+  "run_id": "<runId>",
+  "awaiting_approval_episode_id": "<episodeId>",
+  "awaiting_approval_at": "<ISO-8601>",
+  "deadline_at": "<ISO-8601>",
+  "marker_path": "<absolute>",
+  "marker_already_present": <bool>
+}
+```
 
 ### Hooks, scheduled tasks, and manifest
 
@@ -589,6 +640,42 @@ Per Rule 4 (confirm spec exists + probe endpoint; offer mock if unreachable — 
 - Does NOT replicate T2 (weekly meta-audit) — that degrades to a manual `node scripts/bp1-security-audit.mjs --once`, surfaced in the operator runbook.
 
 **Why best-effort is acceptable for the fallback:** the activation flag (above) is `false` until M5 dry-run, which itself probes for native scheduled-tasks; if absent, M5 dry-run can still pass via the sweep fallback, and the operator is explicitly informed of the degraded mode in the activation episode body.
+
+### Approval-marker file contract (NEW v3.15, slice 2d-W)
+
+The approval marker is the on-disk forensic + hook-input artifact for trivial-class RFCs in the `awaiting_approval` state. Writer is `record-awaiting-approval` (this slice); reader is `bp1-approval-check.sh` hook H1 (slice 2d-R) and the future `bp1-check-deadlines` path (slice 2e). Library: `scripts/lib/bp1-marker.mjs` (zero deps, Node stdlib only).
+
+**Path:** `<canonical_project_root>/.checkpoints/bp1-approval-<run_id>.json`
+
+Per-`run_id` filename eliminates concurrent-marker ambiguity (codex r1 B3 closure — multiple non-terminal trivial runs in the same project can each own a distinct marker without name collision). `canonical_project_root` is the realpath of `git rev-parse --show-toplevel` resolved with `cwd: projectRoot`; the writer asserts absolute-path shape before any disk access. The `.checkpoints/` parent dir is the same dir the user's Rule-8 plan-approval marker lives in, escaping Claude Code's built-in sensitive-file guard (see MEMORY.md "Marker location" note).
+
+**Payload (6-field JSON, keys sorted alphabetically for determinism):**
+
+| Field | Type | Source | Authorization-bearing |
+|---|---|---|---|
+| `body_sha256` | 64-hex string | sha256 of canonicalized `{created_at, deadline_at, decided_class, run_id}` | derived |
+| `created_at` | ISO-8601 UTC string | equals run-state `awaiting_approval_at` | ✓ canonical |
+| `deadline_at` | ISO-8601 UTC string | equals run-state `deadline_at` (= `created_at + 1hr` for trivial) | ✓ canonical |
+| `decided_class` | string ∈ `{trivial, schema, validator, security, multi-actor, needs-human-input}` | mirror of classified episode | ✓ canonical |
+| `hmac` | 64-hex string | HMAC-SHA256 over the canonical bytes, signed by the per-run HMAC key | derived |
+| `run_id` | shape `[a-z0-9-]+` | minted at run pickup | ✓ canonical |
+
+The 4 canonical fields are projected (sorted-keys + utf8 + JSON.stringify) into the authorization-bearing payload; `body_sha256` and `hmac` are pure functions of that payload + the runKey. The final marker on disk has all 6 fields with keys re-sorted alphabetically.
+
+**Determinism contract (codex r1 M1 closure):**
+Phase-B retries after a crash MUST produce byte-identical markers. `created_at` and `deadline_at` come from persisted run-state (`awaiting_approval_at` / `deadline_at` fields on the run record), NEVER wall-clock — wall-clock is consulted exactly once, at fresh emit in Phase A, then persisted for all subsequent reads. `body_sha256` and `hmac` are pure functions of `(canonical bytes, runKey32B)`, so the same inputs always produce the same outputs.
+
+**Atomicity:** tmp file in same dir (`.checkpoints/`) → `fs.writeFileSync` + `fs.fsyncSync` + `fs.renameSync` to final path. Crash before rename leaves no observable final path (tmp is best-effort unlinked on error). Crash after rename leaves the marker — replay-safe.
+
+**Idempotent rewrite:** before opening the tmp file, the writer reads any existing marker at the final path. If existing bytes equal the new bytes, the writer returns `{status: 'ok', alreadyPresent: true}` without re-renaming — this is the F2 mitigation in lieu of a Phase-B second lock (see `record-awaiting-approval` two-phase contract below). Two concurrent Phase-B writers feed byte-identical inputs (from persisted run-state) → produce byte-identical files → last-rename-wins is benign.
+
+**Ownership split (codex r2 FU1 closure):**
+`scripts/lib/bp1-marker.mjs` ONLY canonicalizes payload bytes, writes/unlinks atomically, and returns status objects (`{status: 'ok' | 'error', code?, message?, markerPath, ...}`). Evidence-episode emission is owned by callers. Two emission contexts:
+
+- **Key-live cleanup callers** (e.g. `record-awaiting-approval` Phase B write-failure path): the per-run HMAC key is still on disk and available for signing. Caller emits signed `failure:marker-write-failed` (or, for future cleanup-while-key-live callers, `failure:marker-cleanup-failed`). Both subtypes are registered in `bp1-canonicalize.mjs`.
+- **Key-shred cleanup callers** (e.g. finalize-* cleanup sites in `bp1-orchestrator.mjs`): the per-run HMAC key was shredded at finalize step 6, before reaching marker cleanup at step 7+. HMAC-signed emission is no longer available. Caller stderr-logs the failure and leaves the marker on disk — the persisting marker file IS the forensic evidence (an operator can lstat + verify hmac against the long-lived verify-key flow if needed).
+
+This split is what allows the slice 2d-W finalize cleanup helper (`cleanupApprovalMarker`) to be a pure unlink-and-return helper without the orchestrator needing two code paths for "did I write or did finalize unlink."
 
 ---
 
@@ -760,6 +847,32 @@ payload = {
   //   field_name,                     // offending field name (66-ch cap)
   //   observed_value,                 // observed JSON repr (66-ch cap per describeStatus policy)
   //   violation_reason,               // human-readable failure-mode label
+
+  // Slice 2d-W — awaiting-approval gate placement (NEW v3.15, M2).
+  // `record-awaiting-approval` emits TWO of the subtypes below
+  // (`state-transition:awaiting_approval` + `failure:marker-write-failed`).
+  // `failure:marker-cleanup-failed` is REGISTERED here as a reserved canonical
+  // subtype for future callers that retain the per-run HMAC key when invoking
+  // `cleanupApprovalMarker`. The current finalize-* cleanup callsites in
+  // `bp1-orchestrator.mjs` stderr-log instead — the per-run key has been
+  // shredded by the time finalize reaches marker cleanup, so HMAC-signed
+  // emission is no longer available; the persisting marker file IS the
+  // forensic evidence. Mirrored in
+  // `docs/rfcs/RFC-004-bp1-auto-pilot.contract.json` and enforced by
+  // `scripts/validate-rfc-contract-mirror.mjs` (CI gate).
+  //
+  // For type == "state-transition" with state == "awaiting_approval":
+  //   state,                          // "awaiting_approval"
+  //   awaiting_approval_at,           // ISO-8601 UTC; fresh-emit wall-clock now;
+  //                                   // resume reads persisted value, never wall-clock
+  //   deadline_at,                    // ISO-8601 UTC; = awaiting_approval_at + 1hr (trivial)
+  //   decided_class,                  // mirror of classified episode's decided_class
+  //
+  // For type == "failure" with failure_kind in {marker-write-failed,
+  //                                              marker-cleanup-failed}:
+  //   failure_kind,                   // subtype-derivation field (canonicalized)
+  //   marker_path,                    // absolute path to approval marker file
+  //   reason,                         // human-readable failure-mode label (66-ch cap)
 
   // Future-extensibility: any episode-type-specific authorization-bearing field
   // MUST be added here at the time the field is introduced. Two CI gates enforce:
@@ -943,30 +1056,34 @@ Tests H1-H7 ship as `tests/bp1-hmac-live.test.mjs`; H8-H20 ship as `tests/bp1-hm
 | From state | Trigger | To state | Actor |
 |---|---|---|---|
 | `rfc_detected` | classifier returns | `classified` | bp1-rfc-classifier |
-| `classified` | trivial | `planning` | orchestrator |
-| `classified` | risky | `needs_human` | orchestrator |
+| `classified` | trivial | `awaiting_approval` | record-awaiting-approval (NEW v3.15, slice 2d-W) |
+| `classified` | risky class | `needs_human` (reason=risky-class) | orchestrator (record-classification) |
+| `awaiting_approval` | 1hr timeout | `auto_approved` | bp1-approval-check.sh |
+| `awaiting_approval` | human y | `approved` | hook prompt |
+| `awaiting_approval` | human n | `aborted` | hook prompt |
+| `approved`/`auto_approved` | orchestrator advance | `planning` | orchestrator |
 | `planning` | adversarial done | `adversarial_reviewed` | negative-scenario-planner |
 | `adversarial_reviewed` | review-request sent | `codex_review` | em-review-request |
 | `codex_review` | reply | `codex_complete` | em-watch-codex |
 | `codex_review` | 30min timeout, retry < 2 | `codex_review` (self) | em-watch-codex |
-| `codex_review` | timeout retry ≥ 2 (all classes) | `needs_human` | em-watch-codex |
-| `codex_complete` | trivial class | `awaiting_approval` | orchestrator |
-| `awaiting_approval` | 1hr timeout | `auto_approved` | bp1-approval-check.sh |
-| `awaiting_approval` | human y | `approved` | hook prompt |
-| `awaiting_approval` | human n | `aborted` | hook prompt |
-| `approved`/`auto_approved` | sentinel PROCEED | `implementing` | bp1-sentinel |
+| `codex_review` | timeout retry ≥ 2 (all classes) | `needs_human` (reason=codex-timeout) | em-watch-codex |
+| `codex_complete` | sentinel PROCEED | `implementing` | bp1-sentinel |
 | `implementing` | reviewers done | `reviewing` | orchestrator |
 | `reviewing` | all clean | `auditing` | orchestrator |
 | `reviewing` | blocker | `fix_loop` | orchestrator |
 | `fix_loop` | same-sig < 2 | `implementing` | orchestrator |
-| `fix_loop` | same-sig ≥ 2 | `needs_human` | orchestrator |
+| `fix_loop` | same-sig ≥ 2 | `needs_human` (reason=fix-loop-same-sig) | orchestrator |
 | `auditing` | 9 steps green | `audit_pass` | bp1-auditor |
 | `audit_pass` | gh pr create | `pr_opened` | orchestrator |
 | `pr_opened` | review-request sent | `codex_pr_review` | em-review-request |
 | `codex_pr_review` | done | `complete` | orchestrator |
 | any state | sentinel HALT | `terminal_halt` | bp1-sentinel |
-| `needs_human` | override episode | `resolved` → resume | bp1-human-input-watcher |
+| `needs_human` (reason=risky-class) | override episode | `resolved` → `planning` | bp1-human-input-watcher (NEW v3.15 — source-aware resume) |
+| `needs_human` (reason=codex-timeout) | override episode | `resolved` → `implementing` | bp1-human-input-watcher |
+| `needs_human` (reason=fix-loop-same-sig) | override episode | `resolved` → `implementing` | bp1-human-input-watcher |
 | `needs_human` | 7 days | `abandoned` → `archived` | bp1-archive-ghosts.mjs |
+
+> **Source-aware `needs_human` resume (NEW v3.15, slice 2d-W).** Risky-class RFCs now enter `needs_human` directly after `classified` (without passing through `planning`/`adversarial_reviewed`/`codex_review`), so a human override on a risky-class entry MUST resume to `planning` — not `implementing` — or plan/adversarial/codex would be silently skipped. Codex-timeout and fix-loop entries enter `needs_human` after those stages have already run, so their resume target remains `implementing`. The `reason` frontmatter field on the `state-transition:needs-human` episode (canonical per slice 2c — see `bp1-canonicalize.mjs`) is the signed authority root for the resume routing. Resume-edge implementation owned by `bp1-human-input-watcher` (slice 2e+); the spec change here is forward-looking because Edit 1's gate-placement reshape creates the demand for it.
 
 ### Codex-timeout retry counter — separated attempt vs request-sent state (v3.5)
 
@@ -1542,6 +1659,7 @@ graph TD
 | PR-1a (M0 part 1) | `scripts/lib/bp1-manifest.mjs`, `scripts/bp1-flag-check.mjs`, `scripts/bp1-build-artifact-manifest.mjs`, `scripts/validate-rfc-failure-table.mjs`, `scripts/validate-rfc-artifact-manifest.mjs`, `install.mjs` (verify-key + config skeleton + line-anchored .gitignore), `.github/workflows/rfc-validate.yml`, `docs/bp1/config-schema.md`; this row 20 prose lesson "yes (if A)" → "conditional" (matches YAML mirror) | `tests/test-bp1-flag-check.mjs` (9), `tests/test-bp1-build-artifact-manifest.mjs` (10), `tests/test-validate-rfc-failure-table.mjs` (10), `tests/test-validate-rfc-artifact-manifest.mjs` (5), `tests/test-install-bp1.sh` (12) — 46 cases | M0 deliverables landed pre-activation; both validators green on real RFC-004; 2 deferred findings (TOCTOU [#179](https://github.com/lantisprime/episodic-memory/issues/179), em-search fallback [#180](https://github.com/lantisprime/episodic-memory/issues/180)). Codex-ACCEPT'd plan from prior session; review-pass HOLD findings folded in pre-merge. |
 | PR-1b (M0 part 2) | `scripts/bp1-deadline-sweep.mjs --once`, `.claude/hooks/bp1-sweep-on-session.sh` H2 hook, scheduled-tasks probe (artifacts present pre-slice 2a-bis; named-test gap closed by slice 2a-bis) | `tests/test-bp1-flag-check.mjs` (20), `tests/test-bp1-build-artifact-manifest.mjs` (24, +A12 + A12c-i from slice 2a-bis), `tests/test-bp1-hmac-manifest.mjs` (33) — 77 cases | _shipped_ ✓ (slice 2a-bis PR-NNN). Closes canonical-prompt drift detection: three production bugs surfaced by codex r1-r10 chain (cwd binding r2, scope HOME-pollution r3, terminal-selection field mismatch r4) + V1/V2 trust-boundary guards (validation-contract audit). Follow-up issues filed: [#259](https://github.com/lantisprime/episodic-memory/issues/259) manifest-extension, [#260](https://github.com/lantisprime/episodic-memory/issues/260) multi-loader drift, [#261](https://github.com/lantisprime/episodic-memory/issues/261) V3 multi-layer hardening. |
 | PR-2b (M2 part 1 — slice 2b) | `scripts/bp1-rfc-scan.mjs` (new, ~290 LOC), `scripts/lib/bp1-canonicalize.mjs` (+`canonicalizeFrontmatterBytes` export, ~50 LOC), `.claude/agents/bp1-rfc-classifier.md` (new loader, ~45 LOC), canonical-prompt episode `20260513-053454-...-a0c0` (global) | `tests/test-bp1-rfc-scan.mjs` (33 new), `tests/test-bp1-canonicalize.mjs` (+7 cases for canonicalizeFrontmatterBytes) — 40 cases | _shipped_ ✓ (slice 2b). Activation-gated trigger + classifier loader. Plan v3 closed planner HOLD (1 P0 + 2 P1 + 2 P2 + 2 P3) and codex plan-tier r1 HOLD (2 P1 + 1 P2) — round-2 codex verdict ACCEPT (episode `20260513-052358-...-80ad`). Subprocess spawn discipline (`cwd: projectRoot` + `bp1-flag-check --no-emit`) closes PR #262-class cwd-binding bug at slice boundary. Status routing matches strict-parser semantics; closed reason vocab = 8 entries. |
+| PR-2d-W (M2 part 2 — slice 2d-W) | `scripts/lib/bp1-marker.mjs` (NEW, 279 LOC — `markerPath`/`canonicalizeMarkerPayload`/`writeMarker`/`cleanupApprovalMarker`); `scripts/bp1-orchestrator.mjs` (`record-awaiting-approval` subcommand + `deriveRouteSpec` Option A — trivial skips routing, `record-awaiting-approval` consumes state==classified; 4 finalize cleanup callsites at L790/L854/L875/L890); `scripts/lib/bp1-canonicalize.mjs` (+`state-transition:awaiting_approval` + `failure:marker-write-failed` + reserved `failure:marker-cleanup-failed`); `scripts/lib/bp1-run-state.mjs` + migrate (+`awaiting_approval` state + `awaiting_approval_at` + `deadline_at` patch fields); `scripts/validate-rfc-contract-mirror.mjs` (reverse-set derivation refactor — codex r1 B2 cleanup); `docs/rfcs/RFC-004-bp1-auto-pilot.contract.json` v3.15 | `tests/test-bp1-marker.mjs` (NEW, 24); `tests/test-bp1-orchestrator-record-awaiting-approval.mjs` (NEW, 18); `tests/test-bp1-orchestrator-classifier-fence.mjs` + `tests/test-bp1-orchestrator-288-resume.mjs` adjusted — 42+ new cases (211+ total across 14 BP-1 test files, all green) | slice 2d-W PR — pending merge. Reshapes gate placement: trivial-class runs now hit `awaiting_approval` immediately post-classify (1hr auto-approve), not post-codex; risky-class runs route `classified → needs_human` directly. Codex plan-tier 4-round consensus ACCEPT-with-FU (r3 reply `20260517-023916-...-8e33`). RFC-update plan separately reviewed by codex r1 HOLD → r2 ACCEPT (reply `20260517-030005-...-69e3`) — closed source-aware `needs_human` resume gap (risky entries resume to `planning`, not `implementing`) + Phase B determinism-not-relock wording + `marker-cleanup-failed` reserved-only wording. 4 follow-ups deferred: linked-worktree fixture + splice-before-H2 + hook exit-0-always semantics → slice 2d-R; M5 `--disable` marker-rm → slice 2f; plan-tier live-reachability addendum → new GitHub issue post-merge. |
 
 ---
 
