@@ -35,6 +35,8 @@ const rsmod = await import(new URL('../scripts/lib/bp1-run-state.mjs', import.me
 const { loadIndex } = rsmod
 const markerMod = await import(new URL('../scripts/lib/bp1-marker.mjs', import.meta.url).href)
 const { markerPath, canonicalizeMarkerPayload } = markerMod
+const writerMod = await import(new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href)
+const { writeBp1Episode } = writerMod
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -348,6 +350,81 @@ tap('RAA-12b resume-branch --classified-episode-id mismatch → precise state-vi
   const r2 = runRecordAwaiting(ctx, { classifiedEpisodeId: bogus })
   assert.equal(r2.status, 5)
   assert.match(r2.stderr, /state-violation: --classified-episode-id .* != run\.classified_episode_id/)
+})
+
+tap('RAA-3b Phase-A orphan window: signed awaiting_approval ep + state=classified → retry adopts orphan timestamps (codex PR-#305 r1 P1)', () => {
+  // Simulate the crash-after-emit-before-writeIndex window: emit a signed
+  // awaiting_approval episode directly (bypassing the orchestrator), leave
+  // run-state at `classified`, then retry record-awaiting-approval.
+  // Pre-fix: fresh path mints a new timestamp, findSignedStateEpisode with
+  // expectedFields returns field-mismatch → recoverable-canonical-drift exit 5.
+  // Post-fix: orphan-lookup-first WITHOUT expectedFields adopts orphan's
+  // timestamps, transitions state, Phase B writes byte-identical marker.
+  const ctx = setupClassifiedTrivial()
+  const orphanAwaitingAt = '2026-01-02T03:04:05.678Z'
+  const orphanDeadlineAt = new Date(new Date(orphanAwaitingAt).getTime() + 3600 * 1000).toISOString()
+  const orphan = writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'awaiting_approval',
+    summary: `BP-1 awaiting_approval (deadline ${orphanDeadlineAt}): ${ctx.runId}`,
+    parentEpisode: ctx.classifiedEpisodeId, expectedPostEpisodeId: null,
+    customFm: {
+      awaiting_approval_at: orphanAwaitingAt,
+      deadline_at: orphanDeadlineAt,
+      decided_class: 'trivial',
+    },
+    tags: ['bp1-awaiting-approval'],
+    body: `# bp1-awaiting-approval orphan — ${ctx.runId}\n`,
+    filenameSuffix: 'awaiting-approval',
+  })
+  // Run-state still at classified (the crash window).
+  const idxBefore = loadIndex(ctx.project)
+  assert.equal(idxBefore.runs[ctx.runId].state, 'classified')
+  // awaiting_approval_at is `null` (explicit) on a v2 row before Phase A persists.
+  assert.equal(idxBefore.runs[ctx.runId].awaiting_approval_at, null)
+  // Retry record-awaiting-approval.
+  const r = runRecordAwaiting(ctx)
+  assert.equal(r.status, 0, `orphan-attach retry failed: ${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.awaiting_approval_episode_id, orphan.episodeId,
+    'retry must attach the orphan, not emit a new awaiting_approval episode')
+  assert.equal(out.awaiting_approval_at, orphanAwaitingAt,
+    'retry must adopt orphan timestamp, not mint fresh wall-clock')
+  assert.equal(out.deadline_at, orphanDeadlineAt)
+  // Confirm: still only 1 signed awaiting_approval episode on disk.
+  const epDir = path.join(ctx.project, '.episodic-memory', 'episodes')
+  const matching = fs.readdirSync(epDir).filter(n => n.startsWith(ctx.runId) && n.includes('-awaiting-approval-') && !n.includes('.tmp.'))
+  assert.equal(matching.length, 1, `expected exactly 1 signed awaiting_approval ep; got ${matching.length}: ${matching.join(',')}`)
+  // Marker on disk uses orphan's timestamps.
+  const mp = markerPath(ctx.project, ctx.runId)
+  const marker = JSON.parse(fs.readFileSync(mp, 'utf8'))
+  assert.equal(marker.created_at, orphanAwaitingAt)
+  assert.equal(marker.deadline_at, orphanDeadlineAt)
+})
+
+tap('RAA-3c Phase-A orphan window: orphan parent_episode mismatch → recoverable-canonical-drift exit 5', () => {
+  // Defense: if a signed orphan exists but its parent_episode does NOT match
+  // --classified-episode-id, the orphan belongs to a different classification
+  // context. Refuse to attach.
+  const ctx = setupClassifiedTrivial()
+  const wrongParent = `${ctx.runId}-classified-9999`
+  writeBp1Episode({
+    projectRoot: ctx.project, runId: ctx.runId, runKey32B: ctx.runKey,
+    type: 'state-transition', state: 'awaiting_approval',
+    summary: `BP-1 awaiting_approval orphan with wrong parent: ${ctx.runId}`,
+    parentEpisode: wrongParent, expectedPostEpisodeId: null,
+    customFm: {
+      awaiting_approval_at: '2026-01-02T03:04:05.678Z',
+      deadline_at: '2026-01-02T04:04:05.678Z',
+      decided_class: 'trivial',
+    },
+    tags: ['bp1-awaiting-approval'],
+    body: `# orphan wrong-parent\n`,
+    filenameSuffix: 'awaiting-approval',
+  })
+  const r = runRecordAwaiting(ctx)
+  assert.equal(r.status, 5)
+  assert.match(r.stderr, /recoverable-canonical-drift.*parent_episode.*!=.*--classified-episode-id/)
 })
 
 tap('RAA-13 parent classified episode tampered → exit 5 + parent-tamper failure ep', () => {

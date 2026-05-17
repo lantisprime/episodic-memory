@@ -2225,53 +2225,56 @@ function recordAwaitingApproval(args) {
         return
       }
 
-      // Fresh emit: compute wall-clock timestamps ONCE here.
       decidedClass = run.decided_class
-      awaitingApprovalAt = new Date().toISOString()
-      const deadlineMs = new Date(awaitingApprovalAt).getTime() + 60 * 60 * 1000  // +1hr
-      deadlineAt = new Date(deadlineMs).toISOString()
 
-      const awaitingFields = {
-        parent_episode: args.classifiedEpisodeId,
-        awaiting_approval_at: awaitingApprovalAt,
-        deadline_at: deadlineAt,
-        decided_class: decidedClass,
-      }
-
-      // Orphan-attach: crash-after-emit-before-writeIndex window.
+      // Orphan-attach FIRST without expectedFields. Per codex PR-#305 r1 P1
+      // (episode 20260517-053040-...-5a22): if a prior crashed invocation
+      // emitted a signed awaiting_approval episode before persisting
+      // run-state, the orphan's timestamps are the authoritative source.
+      // Fresh wall-clock here would mint different timestamps that NEVER
+      // match the orphan, dead-ending every retry at field-mismatch.
+      //
+      // Validate parent_episode + decided_class match args/run-state before
+      // adopting (defense against cross-context attachment). Adopt the
+      // orphan's awaiting_approval_at + deadline_at unconditionally —
+      // they're orphan-determined since run-state has no authoritative
+      // value yet (state still classified).
       const orphan = findSignedStateEpisode(
-        projectRoot, args.runId, 'awaiting_approval', key32B, awaitingFields,
+        projectRoot, args.runId, 'awaiting_approval', key32B,
       )
       if (orphan.status === 'match') {
+        const fm = orphan.frontmatter
+        if (fm.parent_episode !== args.classifiedEpisodeId) {
+          process.stderr.write(
+            `error: recoverable-canonical-drift: orphan awaiting_approval ` +
+            `parent_episode=${fm.parent_episode} != --classified-episode-id ` +
+            `${args.classifiedEpisodeId}\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        if (fm.decided_class !== decidedClass) {
+          process.stderr.write(
+            `error: recoverable-canonical-drift: orphan awaiting_approval ` +
+            `decided_class=${fm.decided_class} != run.decided_class ${decidedClass}\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        awaitingApprovalAt = fm.awaiting_approval_at
+        deadlineAt = fm.deadline_at
         run.state = 'awaiting_approval'
         run.awaiting_approval_at = awaitingApprovalAt
         run.deadline_at = deadlineAt
         awaitingEpisodeId = orphan.episodeId
         return
       }
-      if (orphan.status === 'field-mismatch') {
-        // Codex r3 P1: field-mismatch means a signed candidate exists with
-        // different values for one or more of {parent_episode, decided_class,
-        // awaiting_approval_at, deadline_at}. Adopting candidate[0]
-        // unconditionally is unsafe — could attach to a stale episode from a
-        // prior run, leaking marker contents from the wrong context. Mirror
-        // the classified Phase A pattern (L1609): reject as drift; operator
-        // must inspect signed episodes manually.
-        //
-        // Determinism (codex r1 M1) is preserved: legitimate retry from
-        // persisted run-state will land in the 'match' branch (timestamps
-        // from run-state == timestamps in the signed episode). Field-mismatch
-        // is ONLY reachable when args/run-state diverge from the disk
-        // episode, which is a real drift signal.
-        const ids = orphan.candidates.map(c => c.episodeId).join(', ')
-        process.stderr.write(
-          `error: recoverable-canonical-drift: ${orphan.candidates.length} signed ` +
-          `awaiting_approval episode(s) [${ids}] do not match args ` +
-          `(parent_episode/awaiting_approval_at/deadline_at/decided_class)\n`,
-        )
-        phaseAExit = 5
-        return
-      }
+      // orphan.status === 'none' — no prior signed episode for this
+      // (run_id, awaiting_approval). Mint fresh wall-clock timestamps ONCE.
+      awaitingApprovalAt = new Date().toISOString()
+      const deadlineMs = new Date(awaitingApprovalAt).getTime() + 60 * 60 * 1000  // +1hr
+      deadlineAt = new Date(deadlineMs).toISOString()
+
       // Fresh emit.
       const written = writeBp1Episode({
         projectRoot, runId: args.runId, runKey32B: key32B,
