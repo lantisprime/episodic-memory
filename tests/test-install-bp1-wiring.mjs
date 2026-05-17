@@ -85,11 +85,12 @@ function h2Command(projectDir) {
   return `bash ${path.join(projectDir, '.claude', 'hooks', 'bp1-sweep-on-session.sh')}`
 }
 
-function h1CommandStub(projectDir) {
-  // Synthetic H1 entry for forward-compat tests. Not a real path; we just need
-  // a distinct command string to verify ordering.
+function h1Command(projectDir) {
   return `bash ${path.join(projectDir, '.claude', 'hooks', 'bp1-approval-check.sh')}`
 }
+// Backward-compat alias: original test referred to it as a stub (synthetic
+// pre-seed for forward-compat), but as of slice 2d-R it IS the real H1 path.
+const h1CommandStub = h1Command
 
 function settingsFor(projectDir) {
   return path.join(projectDir, '.claude', 'settings.json')
@@ -142,11 +143,13 @@ tap('F1: caller cwd != --project → settings under TARGET; caller has no .claud
   assert.equal(homeHashAfter, homeHashBefore,
     'HOME settings.json must be unchanged by --tool claude-code (no --install-hooks)')
 
-  // settings.json shape includes one canonical H2 entry.
+  // settings.json shape: H1 + H2, in §559 H-cfg order (H1 FIRST, H2 SECOND).
   const s = readSettings(settingsFor(target))
-  assert.equal(s.hooks.SessionStart.length, 1, 'exactly one SessionStart entry')
-  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h2Command(target),
-    'SessionStart entry command must reference the canonical H2 path')
+  assert.equal(s.hooks.SessionStart.length, 2, 'two SessionStart entries: [H1, H2]')
+  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h1Command(target),
+    'index 0 must be H1 (approval-check)')
+  assert.equal(s.hooks.SessionStart[1].hooks[0].command, h2Command(target),
+    'index 1 must be H2 (sweep-on-session)')
 })
 
 // =============================================================================
@@ -184,16 +187,20 @@ tap('F3: caller cwd is one project, --project points at another → settings und
 // =============================================================================
 // R1 — fresh install creates settings with one canonical H2 entry
 // =============================================================================
-tap('R1: fresh install → settings.json created with one canonical H2 entry', () => {
+tap('R1: fresh install → settings.json created with [H1, H2] in §559 order', () => {
   const target = makeProjectRoot()
   const home = makeTempDir('home')
   const r = runInstall({ projectDir: target, callerCwd: target, homeDir: home })
   assert.equal(r.status, 0)
   const s = readSettings(settingsFor(target))
-  assert.equal(s.hooks.SessionStart.length, 1)
+  assert.equal(s.hooks.SessionStart.length, 2, 'two entries: [H1, H2]')
   assert.equal(s.hooks.SessionStart[0].hooks[0].type, 'command')
-  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h2Command(target))
+  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h1Command(target),
+    'index 0 is H1 (approval-check FIRST per §559 H-cfg)')
   assert.equal(typeof s.hooks.SessionStart[0].hooks[0].timeout, 'number')
+  assert.equal(s.hooks.SessionStart[1].hooks[0].type, 'command')
+  assert.equal(s.hooks.SessionStart[1].hooks[0].command, h2Command(target),
+    'index 1 is H2 (sweep-on-session SECOND per §559 H-cfg)')
 })
 
 // =============================================================================
@@ -221,7 +228,7 @@ tap('R2: re-run idempotent → H2 count stays 1; regen warning fires on FIRST in
     'settings.json must be byte-identical across re-run (idempotence)')
 
   const s = readSettings(settingsFor(target))
-  assert.equal(s.hooks.SessionStart.length, 1, 'H2 entry count must remain 1')
+  assert.equal(s.hooks.SessionStart.length, 2, '[H1, H2] entry count must remain 2 across re-run')
 })
 
 // =============================================================================
@@ -250,7 +257,7 @@ tap('R3: pre-seeded H1 entry → H2 appended; order = [H1, H2] (M2 forward-compa
   const s = readSettings(settingsFor(target))
   assert.equal(s.hooks.SessionStart.length, 2, 'H1 + H2 = 2 entries')
   assert.equal(s.hooks.SessionStart[0].hooks[0].command, h1CommandStub(target),
-    'H1 must remain at index 0 (preserves pre-existing entry)')
+    'H1 must remain at index 0 (preserves pre-existing entry; slice 2d-R H1 wiring detects already-present)')
   assert.equal(s.hooks.SessionStart[1].hooks[0].command, h2Command(target),
     'H2 must be appended at index 1')
 })
@@ -289,18 +296,21 @@ tap('R4: pre-seeded H2 in flat shape {command, timeout} → migrated to nested c
   assert.match(r.stdout, /Migrated \d+ flat-shape SessionStart entr/,
     'install must surface flat-shape migration')
 
-  // Post-state: exactly one H2 entry, in nested canonical shape.
+  // Post-state: [H1, H2] in nested canonical shape (H1 spliced before H2).
   const s = readSettings(settingsFor(target))
-  assert.equal(s.hooks.SessionStart.length, 1, 'one entry post-migration (no duplicate)')
-  const entry = s.hooks.SessionStart[0]
-  assert.ok(Array.isArray(entry.hooks),
-    `migrated entry must have nested .hooks array; got ${JSON.stringify(entry)}`)
-  assert.equal(entry.hooks.length, 1, 'nested .hooks array has one inner hook')
-  assert.equal(entry.hooks[0].type, 'command')
-  assert.equal(entry.hooks[0].command, h2Command(target))
-  // Flat top-level .command must NOT survive in nested shape.
-  assert.equal(entry.command, undefined,
-    `flat top-level .command must be removed post-migration; got ${entry.command}`)
+  assert.equal(s.hooks.SessionStart.length, 2, '[H1, H2] post-migration + H1 wiring')
+  const h1Entry = s.hooks.SessionStart[0]
+  const h2Entry = s.hooks.SessionStart[1]
+  assert.ok(Array.isArray(h2Entry.hooks),
+    `migrated H2 entry must have nested .hooks array; got ${JSON.stringify(h2Entry)}`)
+  assert.equal(h2Entry.hooks.length, 1, 'nested .hooks array has one inner hook')
+  assert.equal(h2Entry.hooks[0].type, 'command')
+  assert.equal(h2Entry.hooks[0].command, h2Command(target))
+  assert.equal(h2Entry.command, undefined,
+    `flat top-level .command must be removed post-migration; got ${h2Entry.command}`)
+  // H1 spliced before the migrated H2 entry.
+  assert.equal(h1Entry.hooks[0].command, h1Command(target),
+    'H1 must be spliced before the migrated H2 entry')
 })
 
 // =============================================================================
@@ -344,12 +354,15 @@ tap('R6: pre-seeded H2 at non-canonical path → install adds canonical + emits 
 
   const s = readSettings(settingsFor(target))
   // Helper's exact-command idempotence check (normalizeCommand-based) sees the
-  // stale path as a different command, so canonical H2 is appended.
-  assert.equal(s.hooks.SessionStart.length, 2,
-    'stale + canonical → 2 entries (operator can clean up the stale one)')
+  // stale path as a different command, so canonical H2 is appended. H1 is
+  // then spliced before the FIRST entry matching basename `bp1-sweep-on-session.sh`
+  // — that's the stale entry at index 0. Result: [H1, stale-H2, canonical-H2].
+  assert.equal(s.hooks.SessionStart.length, 3,
+    'stale + canonical-H2 + H1 → 3 entries (operator cleans the stale one)')
   const commands = s.hooks.SessionStart.flatMap(e => e.hooks.map(h => h.command))
   assert.ok(commands.includes(`bash ${stalePath}`), 'stale entry preserved (no auto-delete)')
   assert.ok(commands.includes(h2Command(target)), 'canonical H2 added')
+  assert.ok(commands.includes(h1Command(target)), 'H1 spliced into SessionStart')
   // R6 explicit warning surfaced via detectStaleCanonicalEntries.
   assert.match(r.stdout, /stale BP-1 H2 entry/,
     'install must surface a stale-canonical warning when H2 entry references a non-canonical path')
@@ -379,10 +392,15 @@ tap('B2: divergent H2 hook + no --install-hooks-force → file NOT overwritten A
   // File NOT overwritten.
   assert.equal(fs.readFileSync(projH2HookDst, 'utf8'), divergentContent,
     'divergent H2 file must NOT be overwritten without --install-hooks-force')
-  // settings.json NOT created (or, if pre-existed, no H2 entry registered).
-  // Since target has no settings.json pre-test, the file should not exist post-install.
-  assert.ok(!fs.existsSync(settingsFor(target)),
-    'settings.json must NOT be created when H2 file is divergent and no force flag')
+  // Slice 2d-R: H1 is a SEPARATE hook with independent file content. Even
+  // when H2 is divergent + skipped, H1 (matching repo source) still installs
+  // + registers. settings.json therefore contains only the H1 entry.
+  assert.ok(fs.existsSync(settingsFor(target)),
+    'settings.json created by H1 wiring (H1 is independent of H2 divergence)')
+  const s = readSettings(settingsFor(target))
+  assert.equal(s.hooks.SessionStart.length, 1, 'only H1 registered (H2 skipped)')
+  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h1Command(target),
+    'only entry is H1; divergent H2 was skipped per legacy contract')
 })
 
 tap('B2: divergent H2 hook + --install-hooks + --install-hooks-force → file overwritten AND settings registered', () => {
@@ -416,8 +434,9 @@ tap('B2: divergent H2 hook + --install-hooks + --install-hooks-force → file ov
   assert.ok(fs.existsSync(settingsFor(target)),
     'settings.json must be registered after force overwrite')
   const s = readSettings(settingsFor(target))
-  assert.equal(s.hooks.SessionStart.length, 1)
-  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h2Command(target))
+  assert.equal(s.hooks.SessionStart.length, 2, '[H1, H2] post-force-overwrite')
+  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h1Command(target))
+  assert.equal(s.hooks.SessionStart[1].hooks[0].command, h2Command(target))
 })
 
 // Codex code-review round-2 Finding 1: --install-hooks-force ALONE (without
@@ -453,9 +472,13 @@ tap('B2 force-alone (codex r2 Finding 1): --install-hooks-force without --instal
   // File NOT overwritten — force-alone is impotent.
   assert.equal(fs.readFileSync(projH2HookDst, 'utf8'), divergentContent,
     'divergent H2 must NOT be overwritten with --install-hooks-force ALONE')
-  // settings.json NOT registered.
-  assert.ok(!fs.existsSync(settingsFor(target)),
-    'settings.json must NOT be created when force is provided alone')
+  // Slice 2d-R: H1 wiring is independent — settings.json is created with H1
+  // only, but H2 stays unregistered (force-alone is impotent for H2).
+  assert.ok(fs.existsSync(settingsFor(target)),
+    'settings.json created by H1 wiring (independent of H2 force-alone path)')
+  const s = readSettings(settingsFor(target))
+  assert.equal(s.hooks.SessionStart.length, 1, 'only H1 registered')
+  assert.equal(s.hooks.SessionStart[0].hooks[0].command, h1Command(target))
 })
 
 // =============================================================================
@@ -506,6 +529,162 @@ tap('malformed-json: pre-existing invalid JSON → install surfaces error and sk
   // settings.json content unchanged (no silent overwrite).
   assert.equal(fs.readFileSync(settingsFor(target), 'utf8'), '{ this is not valid JSON',
     'install must NOT overwrite malformed settings.json silently')
+})
+
+// =============================================================================
+// Slice 2d-R H1-specific tests (PR-2d-R)
+// =============================================================================
+
+tap('H1-1: H1 hook file copied to <projectDir>/.claude/hooks/bp1-approval-check.sh', () => {
+  const target = makeProjectRoot()
+  const home = makeTempDir('home')
+  const r = runInstall({ projectDir: target, callerCwd: target, homeDir: home })
+  assert.equal(r.status, 0)
+  const dst = path.join(target, '.claude', 'hooks', 'bp1-approval-check.sh')
+  assert.ok(fs.existsSync(dst), 'H1 hook file installed under target')
+  // Byte-identical to repo source.
+  const repoSrc = fs.readFileSync(path.join(REPO, '.claude', 'hooks', 'bp1-approval-check.sh'))
+  assert.ok(repoSrc.equals(fs.readFileSync(dst)),
+    'installed H1 must be byte-identical to repo source')
+  // chmod 0o755.
+  assert.equal((fs.statSync(dst).mode & 0o777), 0o755,
+    'H1 hook must be chmod 0o755')
+})
+
+tap('H1-2: H1 idempotent re-run → H1 entry count remains 1', async () => {
+  const target = makeProjectRoot()
+  const home = makeTempDir('home')
+  const r1 = runInstall({ projectDir: target, callerCwd: target, homeDir: home })
+  assert.equal(r1.status, 0)
+  const r2 = runInstall({ projectDir: target, callerCwd: target, homeDir: home })
+  assert.equal(r2.status, 0)
+  const s = readSettings(settingsFor(target))
+  const h1Count = s.hooks.SessionStart.filter(e =>
+    e.hooks && e.hooks.some(h => h.command === h1Command(target))).length
+  assert.equal(h1Count, 1, 'H1 entry count remains 1 after re-run')
+})
+
+tap('H1-3: divergent H1 file + no force → H1 skipped, settings unchanged for H1', () => {
+  const target = makeProjectRoot()
+  const home = makeTempDir('home')
+  const projHooksDir = path.join(target, '.claude', 'hooks')
+  const projH1HookDst = path.join(projHooksDir, 'bp1-approval-check.sh')
+  fs.mkdirSync(projHooksDir, { recursive: true })
+  const divergentContent = '#!/usr/bin/env bash\n# user-edited H1\nexit 0\n'
+  fs.writeFileSync(projH1HookDst, divergentContent)
+  fs.chmodSync(projH1HookDst, 0o755)
+
+  const r = runInstall({ projectDir: target, callerCwd: target, homeDir: home })
+  assert.equal(r.status, 0)
+  assert.match(r.stdout, /bp1-approval-check\.sh differs from repo source.*withholding H1 settings registration/,
+    'install must surface divergent-H1 warning + withhold registration')
+  // H1 file NOT overwritten.
+  assert.equal(fs.readFileSync(projH1HookDst, 'utf8'), divergentContent,
+    'divergent H1 file must NOT be overwritten without --install-hooks-force')
+  // H2 still wired; H1 entry NOT registered.
+  const s = readSettings(settingsFor(target))
+  const commands = s.hooks.SessionStart.flatMap(e => e.hooks.map(h => h.command))
+  assert.ok(!commands.includes(h1Command(target)),
+    'divergent H1 must NOT be registered in settings.json')
+  assert.ok(commands.includes(h2Command(target)),
+    'H2 still registered (independent of H1 divergence)')
+})
+
+tap('H1-4: divergent H1 + --install-hooks --install-hooks-force → overwrite + register', () => {
+  const target = makeProjectRoot()
+  const home = makeTempDir('home')
+  const projHooksDir = path.join(target, '.claude', 'hooks')
+  const projH1HookDst = path.join(projHooksDir, 'bp1-approval-check.sh')
+  fs.mkdirSync(projHooksDir, { recursive: true })
+  fs.writeFileSync(projH1HookDst, '#!/usr/bin/env bash\n# user-edited H1\nexit 0\n')
+  fs.chmodSync(projH1HookDst, 0o755)
+
+  const r = spawnSync('node', [INSTALL,
+    '--tool', 'claude-code', '--project', target,
+    '--install-hooks', '--install-hooks-force',
+  ], {
+    cwd: target, encoding: 'utf8',
+    env: { ...process.env, HOME: home },
+  })
+  assert.equal(r.status, 0)
+  assert.match(r.stdout, /Overwrote divergent .*bp1-approval-check\.sh/,
+    'install must announce H1 overwrite under --install-hooks --install-hooks-force')
+  const repoH1 = fs.readFileSync(path.join(REPO, '.claude', 'hooks', 'bp1-approval-check.sh'))
+  assert.ok(repoH1.equals(fs.readFileSync(projH1HookDst)),
+    'H1 overwrite restores repo-source contents')
+  const s = readSettings(settingsFor(target))
+  const commands = s.hooks.SessionStart.flatMap(e => e.hooks.map(h => h.command))
+  assert.ok(commands.includes(h1Command(target)), 'H1 registered post-force-overwrite')
+})
+
+tap('H1-5: pre-seeded unrelated SessionStart entry → H1 spliced before H2 without reordering unrelated entries', () => {
+  const target = makeProjectRoot()
+  const home = makeTempDir('home')
+  const dotClaude = path.join(target, '.claude')
+  fs.mkdirSync(dotClaude, { recursive: true })
+  // Pre-seed an unrelated em-recall-style entry at index 0.
+  const preseedSettings = {
+    hooks: {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: 'bash /some/em-recall-sessionstart.sh', timeout: 5 }] },
+      ],
+    },
+  }
+  fs.writeFileSync(settingsFor(target), JSON.stringify(preseedSettings, null, 2))
+  const r = runInstall({ projectDir: target, callerCwd: target, homeDir: home })
+  assert.equal(r.status, 0)
+  const s = readSettings(settingsFor(target))
+  // Expected order: [unrelated, H1, H2]. The unrelated entry at index 0 is
+  // preserved; H2 is appended; H1 is then spliced before H2.
+  assert.equal(s.hooks.SessionStart.length, 3, '[unrelated, H1, H2]')
+  assert.equal(s.hooks.SessionStart[0].hooks[0].command, 'bash /some/em-recall-sessionstart.sh',
+    'unrelated entry preserved at index 0 (not reordered)')
+  assert.equal(s.hooks.SessionStart[1].hooks[0].command, h1Command(target),
+    'H1 spliced at index 1 (before H2)')
+  assert.equal(s.hooks.SessionStart[2].hooks[0].command, h2Command(target),
+    'H2 at index 2')
+})
+
+tap('H1-6 helper purity: mergeSessionStartH1Hook does NOT mutate input (I2)', async () => {
+  const { mergeSessionStartH1Hook } = await import('../scripts/lib/bp1-install-helpers.mjs')
+  const input = {
+    hooks: {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: 'bash /x/bp1-sweep-on-session.sh', timeout: 10 }] },
+      ],
+    },
+  }
+  const inputClone = JSON.parse(JSON.stringify(input))
+  const result = mergeSessionStartH1Hook(input, '/y/bp1-approval-check.sh', '/x/bp1-sweep-on-session.sh')
+  assert.deepEqual(input, inputClone, 'input must not be mutated (I2)')
+  assert.equal(result.changed, true)
+  assert.equal(result.reason, 'h1-inserted-before-h2')
+  assert.equal(result.settings.hooks.SessionStart.length, 2)
+  assert.equal(result.settings.hooks.SessionStart[0].hooks[0].command, 'bash /y/bp1-approval-check.sh',
+    'H1 spliced before H2 in result')
+})
+
+tap('H1-7 helper: no H2 present → H1 appended (no splice target)', async () => {
+  const { mergeSessionStartH1Hook } = await import('../scripts/lib/bp1-install-helpers.mjs')
+  const result = mergeSessionStartH1Hook({}, '/a/bp1-approval-check.sh', '/a/bp1-sweep-on-session.sh')
+  assert.equal(result.changed, true)
+  assert.equal(result.reason, 'h1-appended')
+  assert.equal(result.settings.hooks.SessionStart.length, 1)
+  assert.equal(result.settings.hooks.SessionStart[0].hooks[0].command, 'bash /a/bp1-approval-check.sh')
+})
+
+tap('H1-8 helper: H1 already present → no-op', async () => {
+  const { mergeSessionStartH1Hook } = await import('../scripts/lib/bp1-install-helpers.mjs')
+  const settings = {
+    hooks: {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: 'bash /a/bp1-approval-check.sh', timeout: 30 }] },
+      ],
+    },
+  }
+  const result = mergeSessionStartH1Hook(settings, '/a/bp1-approval-check.sh', '/a/bp1-sweep-on-session.sh')
+  assert.equal(result.changed, false)
+  assert.equal(result.reason, 'h1-already-present')
 })
 
 // =============================================================================

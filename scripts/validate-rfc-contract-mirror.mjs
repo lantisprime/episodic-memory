@@ -106,7 +106,7 @@ function checkCanonicalFields(contract, code) {
   }
   // Reverse direction: subtypes the code declares that the contract doesn't
   // mirror. Codex r1 B2 cleanup (slice 2d-W): derive the expected reverse-set
-  // from contract `v2.states` (minus v1-terminal states) + every `failure:*`
+  // from contract `v2.states` (minus terminal states) + every `failure:*`
   // subtype the code declares. This eliminates the hard-coded slice-2c regex
   // so future v2 state additions (awaiting_approval, future) require only one
   // touchpoint in this validator (the `v2.states` mirror), not two.
@@ -114,8 +114,15 @@ function checkCanonicalFields(contract, code) {
   // Pre-slice-2c subtypes (`state-transition:codex_review`, run-started, and
   // evidence:*) are intentionally NOT mirrored in contract.json (they live in
   // RFC §689-719 prose only); we skip them by keying off the v2 state set.
-  const v1TerminalStates = new Set(['active', 'complete', 'aborted', 'abandoned', 'archived'])
-  const v2States = (contract.run_state_schemas?.v2?.states ?? []).filter(s => !v1TerminalStates.has(s))
+  //
+  // Slice 2d-R: terminal-state set is now read from contract.run_state_schemas
+  // .v2.terminal_states (round-2 P2 AC — codex). Falls back to the v1 hardcode
+  // for backwards-compat with pre-v3.16 contracts. The `active` state is the
+  // initial state and never has a state-transition entry; it is excluded from
+  // both terminal and transition sets.
+  const terminalStates = resolveTerminalStates(contract)
+  const nonTransitionStates = new Set(['active', ...terminalStates])
+  const v2States = (contract.run_state_schemas?.v2?.states ?? []).filter(s => !nonTransitionStates.has(s))
   const reverseStateTransitionSet = new Set(v2States.map(s => `state-transition:${s}`))
   for (const subtype of Object.keys(code)) {
     const isCheckedStateTransition = reverseStateTransitionSet.has(subtype)
@@ -124,6 +131,24 @@ function checkCanonicalFields(contract, code) {
       errors.push(`canonical-fields: code declares subtype "${subtype}" but contract.json missing entry`)
     }
   }
+}
+
+/**
+ * Slice 2d-R: resolve the terminal-state set the validator uses to determine
+ * which v2.states are transitions (and thus require state-transition:<state>
+ * canonical entries) vs. terminals (which don't).
+ *
+ * Prefers contract.run_state_schemas.v2.terminal_states when present (v3.16+);
+ * falls back to the v1 hardcode for backwards compatibility. Slice 2d-R's
+ * v3.16 ships terminal_states explicitly with `approved` and `auto_approved`
+ * added, so the fallback only matters for older contract.json versions.
+ */
+function resolveTerminalStates(contract) {
+  const declared = contract.run_state_schemas?.v2?.terminal_states
+  if (Array.isArray(declared) && declared.length > 0) {
+    return declared
+  }
+  return ['complete', 'aborted', 'abandoned', 'archived']
 }
 
 function checkV2States(contract, codeStates) {
@@ -161,12 +186,18 @@ function checkSubcommandContracts(contract) {
 }
 
 function checkStateSubtypeConsistency(contract) {
-  // Slice 2c plan v4 C3 — every state value in v2.states (minus v1-era
-  // terminal states) MUST have a matching state-transition:<value> in the
-  // canonical-fields table.
-  const v1TerminalStates = ['active', 'complete', 'aborted', 'abandoned', 'archived']
+  // Slice 2c plan v4 C3 — every state value in v2.states that is neither the
+  // initial state (`active`) nor a terminal state MUST have a matching
+  // state-transition:<value> in the canonical-fields table.
+  //
+  // Slice 2d-R: terminal-state set sourced from contract.run_state_schemas.v2
+  // .terminal_states (round-2 P2 AC) rather than hardcoded. This means adding
+  // a new terminal state requires ONE contract.json touchpoint, and the
+  // validator naturally requires canonical entries for new transition states.
+  const terminalStates = resolveTerminalStates(contract)
+  const nonTransitionStates = new Set(['active', ...terminalStates])
   const v2States = contract.run_state_schemas?.v2?.states ?? []
-  const transitionStates = v2States.filter(s => !v1TerminalStates.includes(s))
+  const transitionStates = v2States.filter(s => !nonTransitionStates.has(s))
   for (const state of transitionStates) {
     const expectedKey = `state-transition:${state}`
     if (!contract.episode_canonical_fields[expectedKey]) {

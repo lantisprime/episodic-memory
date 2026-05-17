@@ -97,7 +97,8 @@ function usage() {
     '  bp1-orchestrator detect-rfcs --project <projectRoot>\n' +
     '  bp1-orchestrator record-classifier-dispatch-pre --project <projectRoot> --run-id <runId> --input-sha256 <64-hex>\n' +
     '  bp1-orchestrator record-classification --project <projectRoot> --run-id <runId> --pre-episode-id <id> --result-file <abs-path>\n' +
-    '  bp1-orchestrator record-awaiting-approval --project <projectRoot> --run-id <runId> --classified-episode-id <id>\n',
+    '  bp1-orchestrator record-awaiting-approval --project <projectRoot> --run-id <runId> --classified-episode-id <id>\n' +
+    '  bp1-orchestrator confirm-approval --project <projectRoot> --run-id <runId> --outcome auto_approved\n',
   )
 }
 
@@ -105,7 +106,7 @@ function parseArgs(argv) {
   const out = {
     subcommand: null, project: null, rfcId: null, runId: null,
     inputSha256: null, preEpisodeId: null, resultFile: null,
-    classifiedEpisodeId: null,
+    classifiedEpisodeId: null, outcome: null,
   }
   if (argv.length === 0) return out
   out.subcommand = argv[0]
@@ -118,6 +119,7 @@ function parseArgs(argv) {
     else if (arg === '--pre-episode-id') out.preEpisodeId = argv[++i]
     else if (arg === '--result-file') out.resultFile = argv[++i]
     else if (arg === '--classified-episode-id') out.classifiedEpisodeId = argv[++i]
+    else if (arg === '--outcome') out.outcome = argv[++i]
     else if (arg === '--help' || arg === '-h') {
       usage()
       process.exit(0)
@@ -2357,6 +2359,276 @@ function recordAwaitingApproval(args) {
 }
 
 // ---------------------------------------------------------------------------
+// confirm-approval — Slice 2d-R (RFC-004 §178, §540 row 8)
+// ---------------------------------------------------------------------------
+//
+// Transitions `awaiting_approval → auto_approved` after the 1-hour deadline
+// has elapsed. Invoked by the H1 SessionStart hook (bp1-approval-check.sh)
+// once per validated-and-expired marker. Idempotent on re-invocation.
+//
+// This slice supports `--outcome auto_approved` only. `approved` and
+// `aborted` outcomes are reserved for the FU-2 operator-decision CLI.
+//
+// Exit codes (mirror contract.json subcommand_contracts.confirm-approval):
+//   0  ok | already-terminal (idempotent re-invocation)
+//   2  argv | project-root-resolution-failed | invalid-outcome
+//   3  marker-cleanup-failed (non-ENOENT unlink failure post-transition)
+//   5  state | run-missing | deadline-not-expired
+// ---------------------------------------------------------------------------
+
+const VALID_CONFIRM_APPROVAL_OUTCOMES = new Set(['auto_approved'])
+const VALID_TERMINAL_STATES_LOCAL = new Set([
+  'complete', 'aborted', 'abandoned', 'archived', 'approved', 'auto_approved',
+])
+
+function confirmApproval(args) {
+  if (!args.project) { usage(); return 2 }
+  if (!args.runId) {
+    process.stderr.write('error: --run-id is required\n')
+    return 2
+  }
+  try {
+    assertRunIdShape(args.runId)
+  } catch (e) {
+    process.stderr.write(`error: --run-id has invalid shape: ${e.message}\n`)
+    return 2
+  }
+  if (!args.outcome || !VALID_CONFIRM_APPROVAL_OUTCOMES.has(args.outcome)) {
+    process.stderr.write(
+      `error: --outcome required and must be one of [${[...VALID_CONFIRM_APPROVAL_OUTCOMES].join(', ')}] ` +
+      `(slice 2d-R; approved/aborted reserved for FU-2 operator CLI)\n`,
+    )
+    return 2
+  }
+
+  // Canonicalize --project: realpath → git toplevel → realpath. Linked-worktree
+  // safe (RFC §646). Mirror of recordAwaitingApproval L2036.
+  let projectRoot
+  try {
+    projectRoot = fs.realpathSync(args.project)
+  } catch (_e) {
+    process.stderr.write(`error: --project does not exist: ${args.project}\n`)
+    return 2
+  }
+  let toplevel
+  try {
+    toplevel = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch (e) {
+    process.stderr.write(`error: project-root-resolution-failed: not a git repo at ${projectRoot}: ${e.message}\n`)
+    return 2
+  }
+  if (!toplevel) {
+    process.stderr.write(`error: project-root-resolution-failed: empty toplevel at ${projectRoot}\n`)
+    return 2
+  }
+  try {
+    projectRoot = fs.realpathSync(toplevel)
+  } catch (e) {
+    process.stderr.write(`error: project-root-resolution-failed: realpath failed for ${toplevel}: ${e.message}\n`)
+    return 2
+  }
+
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() },
+  })
+  if (flagCheck.status !== 0) {
+    process.stderr.write(`bp1 inert for project ${projectRoot}\n`)
+    return 1
+  }
+
+  const keyResult = loadRunKey(projectRoot, args.runId)
+  if (keyResult.error) {
+    process.stderr.write(`error: run.key ${keyResult.error} for ${args.runId}\n`)
+    return 5
+  }
+  const { key32B } = keyResult
+
+  // ---------------------------------------------------------------------
+  // Atomic transition: state-check → episode-emit → state-mutation, all
+  // under a single withLockedRun. The lock writes the index after fn
+  // returns normally (bp1-atomic.mjs L228). We mutate run.state +
+  // run.terminal_at inline (cannot call markTerminal — self-deadlock).
+  // ---------------------------------------------------------------------
+  let outcomeState = args.outcome
+  let autoApprovedEpisodeId = null
+  let autoApprovedAt = null
+  let deadlineAt = null
+  let decidedClass = null
+  let awaitingApprovalEpisodeId = null
+  let lockExit = 0
+  let alreadyTerminalIdempotent = false
+  try {
+    withLockedRun(projectRoot, args.runId, ({ run }) => {
+      if (!run) {
+        process.stderr.write(`error: run-missing: ${args.runId}\n`)
+        lockExit = 5
+        return
+      }
+
+      // Already-terminal idempotent path. If state matches outcome, return
+      // success and reuse persisted terminal_at / deadline_at / decided_class.
+      // Foreign terminal state (e.g. complete, aborted) → state-violation
+      // exit 5 (operator must reason about the mismatch).
+      if (run.state === outcomeState) {
+        alreadyTerminalIdempotent = true
+        autoApprovedAt = run.terminal_at
+        deadlineAt = run.deadline_at
+        decidedClass = run.decided_class
+        // Find the signed transition episode (best-effort for response).
+        const found = findSignedStateEpisode(
+          projectRoot, args.runId, outcomeState, key32B,
+        )
+        if (found.status === 'match') autoApprovedEpisodeId = found.episodeId
+        return
+      }
+      if (VALID_TERMINAL_STATES_LOCAL.has(run.state)) {
+        process.stderr.write(
+          `error: state-violation: run.state=${JSON.stringify(run.state)} is terminal ` +
+          `and does not match --outcome ${outcomeState}\n`,
+        )
+        lockExit = 5
+        return
+      }
+      if (run.state !== 'awaiting_approval') {
+        process.stderr.write(
+          `error: state-violation: run.state=${JSON.stringify(run.state)} expected=awaiting_approval\n`,
+        )
+        lockExit = 5
+        return
+      }
+
+      if (!run.awaiting_approval_at || !run.deadline_at) {
+        process.stderr.write(
+          `error: state-violation: awaiting_approval_at=${run.awaiting_approval_at} ` +
+          `deadline_at=${run.deadline_at} both must be persisted before confirm-approval\n`,
+        )
+        lockExit = 5
+        return
+      }
+      deadlineAt = run.deadline_at
+      decidedClass = run.decided_class
+
+      // Deadline check (auto_approved only). Hook is contracted to verify
+      // expiry before invoking; this is defense-in-depth (race against clock
+      // drift / hook bug).
+      if (outcomeState === 'auto_approved') {
+        const deadlineMs = Date.parse(deadlineAt)
+        const nowMs = Date.now()
+        if (Number.isNaN(deadlineMs) || nowMs < deadlineMs) {
+          process.stderr.write(
+            `error: deadline-not-expired: now=${new Date(nowMs).toISOString()} ` +
+            `deadline_at=${deadlineAt} (auto_approved requires deadline elapsed)\n`,
+          )
+          lockExit = 5
+          return
+        }
+      }
+
+      // Locate parent awaiting_approval episode for parent_episode linkage.
+      const parentLookup = findSignedStateEpisode(
+        projectRoot, args.runId, 'awaiting_approval', key32B,
+      )
+      if (parentLookup.status !== 'match') {
+        process.stderr.write(
+          `error: state-violation: signed awaiting_approval episode not found on disk for ${args.runId} ` +
+          `(lookup status=${parentLookup.status})\n`,
+        )
+        lockExit = 5
+        return
+      }
+      awaitingApprovalEpisodeId = parentLookup.episodeId
+
+      // Resume support: if a prior crashed invocation already emitted a signed
+      // auto_approved episode (orphan), adopt its auto_approved_at + episode_id
+      // rather than minting fresh wall-clock. Mirrors recordAwaitingApproval
+      // orphan-attach pattern (L2242).
+      const orphan = findSignedStateEpisode(
+        projectRoot, args.runId, outcomeState, key32B,
+      )
+      if (orphan.status === 'match') {
+        const fm = orphan.frontmatter
+        if (fm.parent_episode !== awaitingApprovalEpisodeId) {
+          process.stderr.write(
+            `error: recoverable-canonical-drift: orphan ${outcomeState} parent_episode=` +
+            `${fm.parent_episode} != awaiting_approval episode ${awaitingApprovalEpisodeId}\n`,
+          )
+          lockExit = 5
+          return
+        }
+        if (fm.decided_class !== decidedClass) {
+          process.stderr.write(
+            `error: recoverable-canonical-drift: orphan ${outcomeState} decided_class=` +
+            `${fm.decided_class} != run.decided_class ${decidedClass}\n`,
+          )
+          lockExit = 5
+          return
+        }
+        autoApprovedAt = fm.auto_approved_at
+        autoApprovedEpisodeId = orphan.episodeId
+      } else {
+        autoApprovedAt = new Date().toISOString()
+        const written = writeBp1Episode({
+          projectRoot, runId: args.runId, runKey32B: key32B,
+          type: 'state-transition', state: outcomeState,
+          summary: `BP-1 ${outcomeState}: ${args.runId}`,
+          parentEpisode: awaitingApprovalEpisodeId, expectedPostEpisodeId: null,
+          customFm: {
+            auto_approved_at: autoApprovedAt,
+            deadline_at: deadlineAt,
+            decided_class: decidedClass,
+          },
+          tags: [`bp1-${outcomeState.replace(/_/g, '-')}`],
+          body: `# bp1-${outcomeState} — ${args.runId}\n\nauto_approved_at: \`${autoApprovedAt}\`\ndeadline_at: \`${deadlineAt}\`\ndecided_class: \`${decidedClass}\`\nparent_episode: \`${awaitingApprovalEpisodeId}\`\n\nTransitioned from \`awaiting_approval\` by H1 SessionStart hook (\`bp1-approval-check.sh\`) after deadline elapsed.\n`,
+          filenameSuffix: `${outcomeState.replace(/_/g, '-')}`,
+        })
+        autoApprovedEpisodeId = written.episodeId
+      }
+
+      // Atomic state mutation under the same lock.
+      run.state = outcomeState
+      run.terminal_at = autoApprovedAt
+    })
+  } catch (e) {
+    if (e && e.code === 'multiple-signed-match') {
+      process.stderr.write(`error: integrity-anomaly multiple-signed-match: ${e.message}\n`)
+      return 5
+    }
+    throw e
+  }
+  if (lockExit !== 0) return lockExit
+  if (!autoApprovedEpisodeId && !alreadyTerminalIdempotent) return 5
+
+  // ---------------------------------------------------------------------
+  // Marker cleanup (post-terminal). Non-ENOENT failure → exit 3 per contract.
+  // Idempotent: ENOENT is `status: 'ok' alreadyAbsent: true`.
+  // ---------------------------------------------------------------------
+  const cleanup = cleanupApprovalMarker(projectRoot, args.runId)
+  if (cleanup.status === 'error') {
+    process.stderr.write(
+      `error: marker-cleanup-failed: code=${cleanup.code} message=${cleanup.message} ` +
+      `marker_path=${cleanup.markerPath} (state already transitioned to ${outcomeState}; re-run idempotent to retry cleanup)\n`,
+    )
+    return 3
+  }
+
+  process.stdout.write(JSON.stringify({
+    status: 'ok',
+    state: outcomeState,
+    run_id: args.runId,
+    outcome_episode_id: autoApprovedEpisodeId,
+    auto_approved_at: autoApprovedAt,
+    deadline_at: deadlineAt,
+    decided_class: decidedClass,
+    marker_path: cleanup.markerPath,
+    marker_already_absent: !!cleanup.alreadyAbsent,
+    already_terminal: alreadyTerminalIdempotent,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -2383,6 +2655,9 @@ switch (args.subcommand) {
     break
   case 'record-awaiting-approval':
     exitCode = recordAwaitingApproval(args)
+    break
+  case 'confirm-approval':
+    exitCode = confirmApproval(args)
     break
   case null:
   case undefined:

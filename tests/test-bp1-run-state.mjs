@@ -248,6 +248,64 @@ tap('markTerminal rejects invalid terminal state', () => {
 })
 
 // =============================================================================
+// Slice 2d-R — `approved` and `auto_approved` terminal states.
+// The two new terminal states represent successful exit from the
+// `awaiting_approval` gate. They must be accepted by markTerminal and reject
+// post-terminal mutations identically to the existing terminals.
+// =============================================================================
+tap('2d-R/T1 markTerminal accepts auto_approved from awaiting_approval', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-2dr-t1-aabb', proj)
+  updateRunState(proj, 'bp1-run-2dr-t1-aabb', { state: 'awaiting_approval' })
+  const r = markTerminal(proj, 'bp1-run-2dr-t1-aabb', 'auto_approved')
+  assert.deepEqual({ ok: true }, r)
+  const state = getRunState(proj, 'bp1-run-2dr-t1-aabb')
+  assert.equal(state.state, 'auto_approved')
+  assert.ok(state.terminal_at, 'terminal_at populated')
+})
+
+tap('2d-R/T2 markTerminal accepts approved from awaiting_approval', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-2dr-t2-aabb', proj)
+  updateRunState(proj, 'bp1-run-2dr-t2-aabb', { state: 'awaiting_approval' })
+  const r = markTerminal(proj, 'bp1-run-2dr-t2-aabb', 'approved')
+  assert.deepEqual({ ok: true }, r)
+  assert.equal(getRunState(proj, 'bp1-run-2dr-t2-aabb').state, 'approved')
+})
+
+tap('2d-R/T3 updateRunState refuses post-auto_approved transitions', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-2dr-t3-aabb', proj)
+  updateRunState(proj, 'bp1-run-2dr-t3-aabb', { state: 'awaiting_approval' })
+  markTerminal(proj, 'bp1-run-2dr-t3-aabb', 'auto_approved')
+  const r = updateRunState(proj, 'bp1-run-2dr-t3-aabb', { state: 'planning' })
+  assert.equal(r.error, 'already-terminal')
+})
+
+tap('2d-R/T4 updateRunState refuses post-approved transitions', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-2dr-t4-aabb', proj)
+  updateRunState(proj, 'bp1-run-2dr-t4-aabb', { state: 'awaiting_approval' })
+  markTerminal(proj, 'bp1-run-2dr-t4-aabb', 'approved')
+  const r = updateRunState(proj, 'bp1-run-2dr-t4-aabb', { state: 'classified' })
+  assert.equal(r.error, 'already-terminal')
+})
+
+tap('2d-R/T5 markTerminal rejects re-mark of auto_approved as already-terminal', () => {
+  const proj = makeProjectRoot()
+  appendRun(proj, 'bp1-run-2dr-t5-aabb', proj)
+  updateRunState(proj, 'bp1-run-2dr-t5-aabb', { state: 'awaiting_approval' })
+  markTerminal(proj, 'bp1-run-2dr-t5-aabb', 'auto_approved')
+  const r = markTerminal(proj, 'bp1-run-2dr-t5-aabb', 'complete')
+  assert.equal(r.error, 'already-terminal')
+})
+
+tap('2d-R/T6 VALID_V2_STATES includes both approved + auto_approved', () => {
+  assert.ok(rs.VALID_V2_STATES.includes('approved'), 'approved in VALID_V2_STATES')
+  assert.ok(rs.VALID_V2_STATES.includes('auto_approved'), 'auto_approved in VALID_V2_STATES')
+})
+
+// =============================================================================
 // RC-LOCK2 — stale-lock detection via tier-1 PID timestamp
 // =============================================================================
 tap('RC-LOCK2 stale lockdir (PID + 60s-old timestamp) → tier-1 detects + breaks', () => {

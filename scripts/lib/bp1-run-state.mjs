@@ -92,7 +92,22 @@ import crypto from 'node:crypto'
 import { migrateV1ToV2, V1_SCHEMA, V2_SCHEMA } from './bp1-run-state-migrate.mjs'
 
 export const SCHEMA_VERSION = V2_SCHEMA
-const VALID_TERMINAL_STATES = Object.freeze(['complete', 'aborted', 'abandoned', 'archived'])
+// Slice 2d-R: add `approved` + `auto_approved` as terminal states. Both
+// represent successful exit from the `awaiting_approval` gate:
+//   - `auto_approved` — deadline expired without operator intervention
+//     (this slice's only auto-emission path; H1 hook detects expiry +
+//      calls `confirm-approval --outcome auto_approved`)
+//   - `approved` — operator explicitly approved (FU-2; not emitted by this slice
+//      but registered in the vocabulary so future operator-decision paths
+//      do not require a separate run-state schema bump)
+const VALID_TERMINAL_STATES = Object.freeze([
+  'complete',
+  'aborted',
+  'abandoned',
+  'archived',
+  'approved',
+  'auto_approved',
+])
 
 // v2 expands the state vocabulary. Slice 2c orchestrator subcommands assert
 // against this enum via updateRunState. Validator (validate-rfc-contract-mirror)
@@ -109,6 +124,8 @@ export const VALID_V2_STATES = Object.freeze([
   'aborted',
   'abandoned',
   'archived',
+  'approved',
+  'auto_approved',
 ])
 
 // Patchable transition fields per v2 schema. updateRunState() refuses

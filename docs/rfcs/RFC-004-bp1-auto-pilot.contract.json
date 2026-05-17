@@ -1,6 +1,6 @@
 {
-  "version": "v3.15",
-  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts (slice 2d-W). Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14).",
+  "version": "v3.16",
+  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts (slice 2d-R). Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14).",
   "episode_canonical_fields": {
     "state-transition:rfc-detected": ["state", "rfc_id", "frontmatter_sha256"],
     "state-transition:classifier-dispatch-pending": ["state", "input_sha256"],
@@ -8,10 +8,13 @@
     "state-transition:planning": ["state", "source_class"],
     "state-transition:needs-human": ["state", "reason", "decided_class"],
     "state-transition:awaiting_approval": ["state", "awaiting_approval_at", "deadline_at", "decided_class"],
+    "state-transition:auto_approved": ["state", "auto_approved_at", "deadline_at", "decided_class"],
+    "state-transition:approved": ["state", "approved_at", "decided_class"],
     "failure:classifier-schema-violation": ["failure_kind", "field_name", "observed_value", "violation_reason"],
     "failure:classifier-parent-tamper": ["failure_kind", "field_name", "observed_value", "violation_reason"],
     "failure:marker-write-failed": ["failure_kind", "marker_path", "reason"],
-    "failure:marker-cleanup-failed": ["failure_kind", "marker_path", "reason"]
+    "failure:marker-cleanup-failed": ["failure_kind", "marker_path", "reason"],
+    "failure:bp1-marker-invalid": ["failure_kind", "marker_path", "reason"]
   },
   "classifier_output_schema": {
     "type": "object",
@@ -55,8 +58,19 @@
         "complete",
         "aborted",
         "abandoned",
-        "archived"
+        "archived",
+        "approved",
+        "auto_approved"
       ],
+      "terminal_states": [
+        "complete",
+        "aborted",
+        "abandoned",
+        "archived",
+        "approved",
+        "auto_approved"
+      ],
+      "_terminal_states_doc": "Slice 2d-R: terminal_states is the authoritative set of states from which no further transitions are allowed (markTerminal targets). validate-rfc-contract-mirror.mjs consumes this field to determine which v2.states require state-transition:<state> canonical entries (transition states do; terminal states do not, though entries for terminal states are allowed for replay-audit purposes). The active state is implicitly the initial state and is excluded from both transition + terminal sets.",
       "fields": [
         "project_root",
         "state",
@@ -106,6 +120,17 @@
         "3": "marker-write-failed",
         "5": "state|parent-tamper"
       }
+    },
+    "confirm-approval": {
+      "required_args": ["--project", "--run-id", "--outcome"],
+      "exit_codes": {
+        "0": "ok|already-terminal",
+        "1": "flag-check-refused",
+        "2": "argv|project-root-resolution-failed|invalid-outcome",
+        "3": "marker-cleanup-failed",
+        "5": "state|run-missing|deadline-not-expired"
+      },
+      "_doc": "Slice 2d-R. Transitions a run from awaiting_approval → outcome. This slice supports outcome=auto_approved only (deadline-expired path triggered by H1 hook). outcome=approved|aborted reserved for FU-2 operator-decision CLI. exit 5 deadline-not-expired guards against premature auto-approval (hook must verify deadline_at < now before invoking). exit 1 flag-check-refused (codex r1 P3 closure 2026-05-17) — direct CLI invocation in an inactive project; H1 hook pre-gates with flag-check so runtime blast radius is bounded to operator typing the command by hand."
     }
   }
 }
