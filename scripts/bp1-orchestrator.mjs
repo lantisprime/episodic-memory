@@ -2856,14 +2856,33 @@ function fireA2({ projectRoot, runId, deadlineAt, parentTickId }) {
   }
   const runKey32B = keyResult.key32B
 
-  // Spawn confirm-approval with cwd = projectRoot.
+  // Spawn confirm-approval with cwd = projectRoot. 30s timeout caps
+  // tick-level hangs (E-P2.2): a wedged child would otherwise hold up
+  // the entire deadline-sweep until the parent scheduler kills it.
   const ORCH_SELF = new URL(import.meta.url).pathname
   const child = spawnSync('node', [
     ORCH_SELF, 'confirm-approval',
     '--project', projectRoot,
     '--run-id', runId,
     '--outcome', 'auto_approved',
-  ], { cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() } })
+  ], { cwd: projectRoot, encoding: 'utf8', timeout: 30_000, env: { ...process.env, HOME: os.homedir() } })
+
+  // spawnSync timeout: child.status=null, child.signal='SIGTERM',
+  // child.error?.code==='ETIMEDOUT'. Emit a typed failure child so
+  // operators can distinguish hang from crash.
+  if (child.error && child.error.code === 'ETIMEDOUT') {
+    const stderrPre = String(child.stderr || '')
+    const res = emitDeadlineFailureChild({
+      projectRoot, runId, runKey32B, parentTickId,
+      kind: 'deadline-tick-failed',
+      fields: {
+        subtype: 'a2-confirm-approval-timeout',
+        exit_code: 'timeout',
+      },
+      body: `A2 fire confirm-approval timed out after 30s on ${runId}.\nstderr_truncated_512B: ${stderrPre.slice(0, 512)}\n`,
+    })
+    return { run_id: runId, type: 'A2', status: 'failed', exit_code: 'timeout', episode_id: res.episodeId }
+  }
 
   if (child.status === 0) {
     // Parse stdout for already_terminal flag (FU2 success-vs-mismatch split).
@@ -2884,11 +2903,17 @@ function fireA2({ projectRoot, runId, deadlineAt, parentTickId }) {
   // with current state != awaiting_approval) from other tick failures.
   const stderr = String(child.stderr || '')
   if (child.status === 5 && /state-violation/.test(stderr)) {
-    // Try to extract observed state from stderr. Format:
-    //   `error: state-violation: run.state="<observed>" expected=awaiting_approval`
-    const m = stderr.match(/run\.state=("[^"]+"|\S+)\s+expected=([\w_-]+)/)
-    const observed = m ? m[1].replace(/^"|"$/g, '') : 'unknown'
-    const expected = m ? m[2] : 'awaiting_approval'
+    // confirm-approval emits state-violation in several shapes:
+    //   `run.state="X" expected=awaiting_approval`              (L2561)
+    //   `run.state="X" is terminal — refusing auto_approved`    (L2553)
+    //   `awaiting_approval_at=...`                              (L2569; no run.state token)
+    //   `auto_approved requires run.decided_class="trivial" ...`(L2586)
+    // Extract observed/expected independently so non-"expected=" formats
+    // still yield correct observed_state for forensics.
+    const runStateM = stderr.match(/run\.state=("[^"]+"|\S+)/)
+    const expectedM = stderr.match(/expected=([\w_-]+)/)
+    const observed = runStateM ? runStateM[1].replace(/^"|"$/g, '') : 'unknown'
+    const expected = expectedM ? expectedM[1] : 'awaiting_approval'
     const res = emitDeadlineFailureChild({
       projectRoot, runId, runKey32B, parentTickId,
       kind: 'deadline-state-mismatch',
@@ -2925,9 +2950,10 @@ function checkDeadlines(args) {
   const tickId = `bp1-deadline-tick-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`
 
   // Step 2: flag-check --no-emit. Non-zero (inert/disabled) → emit tick
-  // with activation=disabled, exit 0.
+  // with activation=disabled, exit 0. 30s timeout (E-P2.2) — a wedged
+  // flag-check shouldn't block all later ticks.
   const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
-    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() },
+    cwd: projectRoot, encoding: 'utf8', timeout: 30_000, env: { ...process.env, HOME: os.homedir() },
   })
   if (flagCheck.status !== 0) {
     writeUnsignedDeadlineTick({
@@ -3001,37 +3027,51 @@ function checkDeadlines(args) {
 
   // Step 8: per-fire actions (lock released — confirm-approval subprocess
   // re-acquires its own run-level lock via withLockedRun).
+  //
+  // G-P2.1 try/finally: the parent tick is the audit record for the
+  // sweep. If a per-fire emit throws mid-loop (signed child write
+  // failure, signing-key load error, etc.), signed children written
+  // earlier in the loop must not be orphaned with no parent tick. The
+  // tick fires in finally so the audit trail is always closed; the
+  // exception (if any) re-throws after.
   let firedA2 = 0
   const childResults = []
-  for (const fire of firings) {
-    if (fire.type !== 'A2') {
-      // A1 deferred to slice 2g. Forward-ready emit so future replay sees
-      // the skip; no signed child to emit yet (no per-run authority binding
-      // for the A1 retry-tree until slice 2g lands).
-      childResults.push({ run_id: fire.run_id, type: fire.type, status: 'skipped', reason: 'a1-deferred-to-slice-2g' })
-      continue
+  let loopError = null
+  try {
+    for (const fire of firings) {
+      if (fire.type !== 'A2') {
+        // A1 deferred to slice 2g. Forward-ready emit so future replay sees
+        // the skip; no signed child to emit yet (no per-run authority binding
+        // for the A1 retry-tree until slice 2g lands).
+        childResults.push({ run_id: fire.run_id, type: fire.type, status: 'skipped', reason: 'a1-deferred-to-slice-2g' })
+        continue
+      }
+      const r = fireA2({
+        projectRoot, runId: fire.run_id, deadlineAt: fire.deadline_at, parentTickId: tickId,
+      })
+      childResults.push(r)
+      if (r.status === 'fired') firedA2++
     }
-    const r = fireA2({
-      projectRoot, runId: fire.run_id, deadlineAt: fire.deadline_at, parentTickId: tickId,
+  } catch (e) {
+    loopError = e
+  } finally {
+    // Step 9: parent tick (unsigned). Always written.
+    writeUnsignedDeadlineTick({
+      projectRoot, tickId,
+      body: `bp1-deadline-tick activation=enabled fired_a2=${firedA2}/${firings.length} runs_inspected=${runsInspected}${loopError ? ' loop_error=true' : ''}\n`,
+      frontmatterFields: {
+        tick_source: tickSource,
+        activation: 'enabled',
+        lock_busy: false,
+        runs_inspected: String(runsInspected),
+        fired_count: String(firedA2),
+        fired_a1: '0',
+        fired_a2: String(firedA2),
+        loop_error: loopError ? true : false,
+      },
     })
-    childResults.push(r)
-    if (r.status === 'fired') firedA2++
   }
-
-  // Step 9: parent tick (unsigned).
-  writeUnsignedDeadlineTick({
-    projectRoot, tickId,
-    body: `bp1-deadline-tick activation=enabled fired_a2=${firedA2}/${firings.length} runs_inspected=${runsInspected}\n`,
-    frontmatterFields: {
-      tick_source: tickSource,
-      activation: 'enabled',
-      lock_busy: false,
-      runs_inspected: String(runsInspected),
-      fired_count: String(firedA2),
-      fired_a1: '0',
-      fired_a2: String(firedA2),
-    },
-  })
+  if (loopError) throw loopError
 
   // Step 10: JSON to stdout.
   process.stdout.write(JSON.stringify({

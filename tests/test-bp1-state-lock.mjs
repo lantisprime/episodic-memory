@@ -351,6 +351,35 @@ tap('SL10 stale evidence claim_age_seconds is HMAC-bound (tamper fails verify)',
   r.release()
 })
 
+// =============================================================================
+// SL11 orphan-lockfile prevention: if claim-episode emit fails AFTER the
+// lockfile is on disk, the lockfile MUST be unlinked before the exception
+// propagates, so the next acquirer doesn't have to wait for stale-break TTL.
+// =============================================================================
+tap('SL11 orphan-lockfile prevention: emit failure → lockfile unlinked + exception propagates', () => {
+  const proj = mkTmpProject()
+  // Plant a regular file at the episodes-dir path so mkdirSync({recursive})
+  // inside writeBp1Episode → emitClaimEpisode throws ENOTDIR/EEXIST. The
+  // exception is the trigger; the post-condition is that the orphan-
+  // lockfile rollback fires.
+  const episodesDir = path.join(proj, '.episodic-memory', 'episodes')
+  fs.mkdirSync(path.dirname(episodesDir), { recursive: true })
+  fs.writeFileSync(episodesDir, 'not-a-dir-blocks-writer')
+
+  const lp = stateLockPath(proj, RUN_ID, STATE_TAG)
+  assert.equal(fs.existsSync(lp), false, 'pre-condition: no lockfile')
+
+  let threw = null
+  try {
+    acquireStateLock({ projectRoot: proj, runId: RUN_ID, stateTag: STATE_TAG, runKey32B: KEY })
+  } catch (e) {
+    threw = e
+  }
+  assert.ok(threw, 'acquire must throw when emit fails')
+  // The critical invariant: lockfile is NOT left dangling for 60s.
+  assert.equal(fs.existsSync(lp), false, 'post-condition: lockfile unlinked after emit failure')
+})
+
 console.log(`# tests ${pass + fail}`)
 console.log(`# pass  ${pass}`)
 console.log(`# fail  ${fail}`)

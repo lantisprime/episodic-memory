@@ -323,9 +323,18 @@ export function acquireStateLock(opts) {
     }
   }
 
-  const claimEpisodePath = emitClaimEpisode({
-    projectRoot, runId, runKey32B, stateTag, claimEpisodeId,
-  })
+  // Orphan-lockfile prevention: if claim-episode emit fails AFTER the
+  // lockfile is on disk, the lock would block all acquirers for 60s
+  // (until stale-break). Roll back the lockfile so retry is immediate.
+  let claimEpisodePath
+  try {
+    claimEpisodePath = emitClaimEpisode({
+      projectRoot, runId, runKey32B, stateTag, claimEpisodeId,
+    })
+  } catch (e) {
+    try { fs.unlinkSync(lockPath) } catch (_e) {}
+    throw e
+  }
 
   let released = false
   const release = () => {

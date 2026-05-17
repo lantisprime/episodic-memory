@@ -285,6 +285,33 @@ tap('CD9 run-state lock busy → bp1-lock-busy evidence + tick lock_busy=true', 
   }
 })
 
+// =============================================================================
+// CD10 codifies RFC §104 design: --project <non-git-subdir-of-git-repo>
+// MUST canonicalize UP to git toplevel (matches init-run / confirm-approval
+// behavior — "single project shares one safety envelope"). The C4 code-
+// review HOLD on this resolver was REJECTED on the basis that the
+// resolution is spec-mandated. This test prevents future implementers
+// from accidentally inverting the design.
+// =============================================================================
+tap('CD10 RFC §104: --project <subdir-of-git> → tick lands at git toplevel (NOT at subdir)', () => {
+  const { project, home } = activateProject()
+  // Create a non-git subdir inside the activated (git-initialized) project.
+  const subdir = path.join(project, 'feature-x')
+  fs.mkdirSync(subdir, { recursive: true })
+
+  const r = runOrch(['check-deadlines', '--project', subdir], { HOME: home }, project)
+  assert.equal(r.status, 0, `expected exit 0; got ${r.status}; stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.activation, 'enabled', 'subdir resolved to project-root → activation map hits')
+
+  // Critical: tick lands under the GIT TOPLEVEL, not the subdir.
+  const topEpisode = path.join(project, '.episodic-memory/episodes', `${out.tick_id}.md`)
+  const subEpisode = path.join(subdir, '.episodic-memory/episodes', `${out.tick_id}.md`)
+  assert.ok(fs.existsSync(topEpisode), `tick MUST land at git toplevel: ${topEpisode}`)
+  assert.equal(fs.existsSync(subEpisode), false,
+    `tick MUST NOT land at subdir: ${subEpisode} (would violate RFC §104 single-safety-envelope)`)
+})
+
 console.log(`# tests ${pass + fail}`)
 console.log(`# pass  ${pass}`)
 console.log(`# fail  ${fail}`)
