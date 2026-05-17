@@ -164,28 +164,68 @@ function tryPublishLockfile(lockPath, content) {
 // fails while the stale lock still exists (i.e. until the breaker unlinks it).
 const STALE_BREAK_SENTINEL_SUFFIX = '.breaking'
 
+// C7 round-4 P1.2 (NEW CLASS): the sentinel itself needs TTL stale-break or
+// an orphaned sentinel permanently disables stale recovery. Set shorter than
+// STATE_LOCK_TTL_SECONDS because a healthy stale-break completes in <1s
+// (one episode emit + one unlink). 30s is conservative.
+export const STALE_BREAK_SENTINEL_TTL_SECONDS = 30
+
 /**
  * Attempt to take the stale-break sentinel via O_EXCL link. Returns true if
- * acquired; false if another stale-breaker already holds it. Caller MUST call
- * releaseStaleBreakSentinel in a finally if true was returned.
+ * acquired; false if another stale-breaker already holds a non-stale sentinel.
+ * Caller MUST call releaseStaleBreakSentinel in a finally if true was returned.
+ *
+ * Handles orphaned-sentinel recovery: if the existing sentinel's `created_at`
+ * is older than STALE_BREAK_SENTINEL_TTL_SECONDS, reclaim by unlink + retry.
+ * Without this, a crashed breaker between sentinel-create and sentinel-release
+ * would permanently block all future stale-break attempts.
  */
-function tryAcquireStaleBreakSentinel(lockPath) {
+function tryAcquireStaleBreakSentinel(lockPath, nowMs = Date.now()) {
   const breakingPath = lockPath + STALE_BREAK_SENTINEL_SUFFIX
   const tmp = `${breakingPath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
   fs.mkdirSync(path.dirname(lockPath), { recursive: true })
   const fd = fs.openSync(tmp, 'wx', 0o600)
   try {
-    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+    fs.writeFileSync(fd, JSON.stringify({
+      pid: process.pid,
+      created_at: new Date(nowMs).toISOString(),
+    }))
     fs.fsyncSync(fd)
   } finally {
     fs.closeSync(fd)
   }
   try {
-    fs.linkSync(tmp, breakingPath)
-    return true
-  } catch (e) {
-    if (e.code === 'EEXIST') return false
-    throw e
+    try {
+      fs.linkSync(tmp, breakingPath)
+      return true
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      // Sentinel busy. Check if it's stale-recoverable.
+      let existingAgeMs = null
+      try {
+        const existingRaw = fs.readFileSync(breakingPath, 'utf8')
+        const existing = JSON.parse(existingRaw)
+        const createdMs = Date.parse(existing.created_at)
+        if (!Number.isNaN(createdMs)) existingAgeMs = nowMs - createdMs
+      } catch (_e) {
+        // Corrupt or vanished. Treat corrupt as stale (recoverable); vanished
+        // would mean linkSync below succeeds.
+        existingAgeMs = Infinity
+      }
+      if (existingAgeMs == null || existingAgeMs < STALE_BREAK_SENTINEL_TTL_SECONDS * 1000) {
+        return false
+      }
+      // Orphaned sentinel: unlink + retry once. If the retry races another
+      // breaker that reclaimed first, return false; that breaker will run.
+      try { fs.unlinkSync(breakingPath) } catch (_e) { /* may have vanished */ }
+      try {
+        fs.linkSync(tmp, breakingPath)
+        return true
+      } catch (e2) {
+        if (e2.code === 'EEXIST') return false
+        throw e2
+      }
+    }
   } finally {
     try { fs.unlinkSync(tmp) } catch (_e) { /* best-effort */ }
   }
@@ -205,14 +245,18 @@ function releaseStaleBreakSentinel(lockPath) {
  * other breaker will perform the unlink + emit on its own behalf.
  */
 function emitStaleAndUnlink({
-  projectRoot, runId, runKey32B, stateTag, lockPath, existingClaim, ageSeconds,
+  projectRoot, runId, runKey32B, stateTag, lockPath, existingClaim, ageSeconds, nowMs,
 }) {
   // C7 round-3 P1.1: serialize stale-breakers via sentinel file. Without
   // this, two breakers can both see the same stale state, both decide to
   // unlink, and the second unlink can target a fresh acquirer's lockfile
   // that arrived between the first breaker's unlink and the second's
   // unlinkSync call.
-  if (!tryAcquireStaleBreakSentinel(lockPath)) {
+  //
+  // C7 round-4 P1.2: tryAcquireStaleBreakSentinel reclaims orphaned
+  // sentinels older than STALE_BREAK_SENTINEL_TTL_SECONDS so a crashed
+  // breaker can't permanently block future stale-break attempts.
+  if (!tryAcquireStaleBreakSentinel(lockPath, nowMs)) {
     return null
   }
 
@@ -387,7 +431,7 @@ export function acquireStateLock(opts) {
     if (age != null && age >= STATE_LOCK_TTL_SECONDS) {
       staleEpisodeId = emitStaleAndUnlink({
         projectRoot, runId, runKey32B, stateTag,
-        lockPath, existingClaim: existing, ageSeconds: age,
+        lockPath, existingClaim: existing, ageSeconds: age, nowMs,
       })
       // Fresh ID for the post-stale claim so replay can distinguish
       // pre-stale from post-stale claims (both signed under same key).

@@ -487,6 +487,80 @@ tap('SL12 TOCTOU-safe stale break: fresh lockfile from another writer NOT delete
   assert.equal(stillThere.claim_episode_id, 'fresh-claim-from-other-writer')
 })
 
+// =============================================================================
+// SL14 (C7 round-4 P1.2 NEW CLASS): orphaned `.breaking` sentinel must be
+// reclaimable. A crashed stale-breaker between sentinel-acquire and
+// sentinel-release would otherwise permanently disable stale-break, leaving
+// the main stale lockfile undeletable.
+// =============================================================================
+tap('SL14 P1.2: orphaned .breaking sentinel (age > TTL) is reclaimed; stale-break completes', () => {
+  const proj = mkTmpProject()
+  // Plant stale main lockfile.
+  const lp = stateLockPath(proj, RUN_ID, STATE_TAG)
+  fs.mkdirSync(path.dirname(lp), { recursive: true })
+  const stale = {
+    claim_episode_id: 'sl14-stale-original',
+    claimed_at: new Date(Date.now() - (STATE_LOCK_TTL_SECONDS + 30) * 1000).toISOString(),
+    ttl_seconds: STATE_LOCK_TTL_SECONDS,
+    lock_state_tag: STATE_TAG,
+    writer_pid: 99997,
+  }
+  fs.writeFileSync(lp, JSON.stringify(stale))
+  // Plant an ORPHANED .breaking sentinel from a long-crashed prior breaker.
+  // created_at well past STALE_BREAK_SENTINEL_TTL_SECONDS (default 30s).
+  const breakingPath = lp + '.breaking'
+  const orphanCreatedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString()  // 1h old
+  fs.writeFileSync(breakingPath, JSON.stringify({ pid: 99996, created_at: orphanCreatedAt }))
+
+  // Without sentinel-reclaim, this acquire would return acquired:false forever
+  // (sentinel busy → stale-break returns null → stale lock survives → publish
+  // fails EEXIST → busy). With reclaim, the orphan is unlinked + the live
+  // breaker proceeds, breaks the stale lock, and acquires fresh.
+  const r = acquireStateLock({ projectRoot: proj, runId: RUN_ID, stateTag: STATE_TAG, runKey32B: KEY })
+  assert.equal(r.acquired, true, `expected acquire after orphaned-sentinel reclaim; got busy`)
+  assert.ok(r.staleEpisodeId, 'stale-evidence must be emitted (proves stale-break ran)')
+  // Sentinel must be released after the live breaker finishes.
+  assert.equal(fs.existsSync(breakingPath), false, 'sentinel cleaned up by live breaker')
+  r.release()
+})
+
+// =============================================================================
+// SL15 (C7 round-4): a FRESH .breaking sentinel (age < TTL) still blocks
+// concurrent breakers. Reclaim is gated on TTL only, not "any EEXIST".
+// =============================================================================
+tap('SL15 P1.2: fresh .breaking sentinel (age < TTL) still blocks; stale-break returns busy', () => {
+  const proj = mkTmpProject()
+  const lp = stateLockPath(proj, RUN_ID, STATE_TAG)
+  fs.mkdirSync(path.dirname(lp), { recursive: true })
+  // Plant stale main lock.
+  fs.writeFileSync(lp, JSON.stringify({
+    claim_episode_id: 'sl15-stale',
+    claimed_at: new Date(Date.now() - (STATE_LOCK_TTL_SECONDS + 30) * 1000).toISOString(),
+    ttl_seconds: STATE_LOCK_TTL_SECONDS,
+    lock_state_tag: STATE_TAG,
+    writer_pid: 99995,
+  }))
+  // Plant a FRESH .breaking sentinel (5s old — well under TTL=30s).
+  const breakingPath = lp + '.breaking'
+  fs.writeFileSync(breakingPath, JSON.stringify({
+    pid: 99994,
+    created_at: new Date(Date.now() - 5 * 1000).toISOString(),
+  }))
+
+  const r = acquireStateLock({ projectRoot: proj, runId: RUN_ID, stateTag: STATE_TAG, runKey32B: KEY })
+  assert.equal(r.acquired, false, 'fresh sentinel must block stale-break → busy result')
+  // Critical: the live (other) breaker is still working; our caller did NOT
+  // forge a stale-evidence emit. No new episodes on disk.
+  const epDir = path.join(proj, '.episodic-memory', 'episodes')
+  const staleEpisodes = fs.existsSync(epDir)
+    ? fs.readdirSync(epDir).filter(f => /state-lock-stale/.test(f))
+    : []
+  assert.equal(staleEpisodes.length, 0, 'no stale evidence written under fresh-sentinel busy path')
+  // Both the stale lock AND the fresh sentinel remain on disk.
+  assert.ok(fs.existsSync(lp), 'main stale lock remains')
+  assert.ok(fs.existsSync(breakingPath), 'fresh sentinel remains')
+})
+
 console.log(`# tests ${pass + fail}`)
 console.log(`# pass  ${pass}`)
 console.log(`# fail  ${fail}`)
