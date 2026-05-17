@@ -82,6 +82,24 @@
  *   getRunState(projectRoot, runId) → { ... } | null  (read-only, NO lock)
  *   indexPath(projectRoot) → string
  *
+ * ## Slice 2e additions (RFC-004 M2 — non-blocking lock primitive)
+ *
+ *   tryAcquireRunStateLock(projectRoot) →
+ *       { acquired: true, release: () => void }
+ *     | { acquired: false, holder_pid: number|null, age_ms: number|null }
+ *
+ *   Sibling of `withRunStateLock` for cron callers (T1 5-min deadline-tick,
+ *   T1b 1-min naked-entry-sweep) that must not block when a long-running
+ *   write holds the lock. Single mkdirSync attempt; if EEXIST and the
+ *   lockdir is stale per `isLockStale` (timestamp-based), break it and
+ *   retry once. Otherwise return `acquired: false` with the holder
+ *   evidence (PID from `<lockdir>/pid` when readable; age_ms from
+ *   PID-timestamp or fallback to lockdir mtime).
+ *
+ *   The blocking `withRunStateLock` path is unchanged; non-cron callers
+ *   (record-*, mark-terminal, finalize-run, …) still take the blocking
+ *   semantics.
+ *
  * Zero deps; Node stdlib only.
  */
 
@@ -428,6 +446,129 @@ export function writeIndex(projectRoot, idx) {
  */
 export function withRunStateLockExclusive(projectRoot, fn) {
   return withRunStateLock(projectRoot, fn)
+}
+
+/**
+ * Non-blocking lock acquisition for cron callers (RFC-004 slice 2e B2 fix).
+ *
+ * Performs a single `mkdirSync` attempt against the lockdir. On EEXIST, the
+ * lockdir is inspected for staleness via the existing two-tier `isLockStale`
+ * predicate (PID-file timestamp, falling back to lockdir mtime). A stale
+ * lockdir is broken and a single retry is attempted; if the retry also fails
+ * EEXIST (concurrent re-acquisition won the race), the call returns
+ * `{ acquired: false, ... }` with the new holder's evidence.
+ *
+ * On `{ acquired: true, release }`, the caller MUST invoke `release()` exactly
+ * once when done. Calling `release()` twice is benign (rmSync ignores ENOENT).
+ *
+ * Stale-break is intentionally inside this primitive (matching
+ * `withRunStateLock`'s behavior) so cron paths recover from crashed writers
+ * without operator intervention. Pure non-blocking semantics: at most one
+ * mkdir-attempt-after-break, then return.
+ *
+ * @param {string} projectRoot
+ * @returns {{ acquired: true, release: () => void }
+ *          | { acquired: false, holder_pid: number|null, age_ms: number|null }}
+ */
+export function tryAcquireRunStateLock(projectRoot) {
+  const lockDir = lockDirPath(projectRoot)
+  fs.mkdirSync(path.dirname(lockDir), { recursive: true })
+
+  const acquired = tryMkdirAndStamp(lockDir)
+  if (acquired) return acquired
+
+  if (isLockStale(lockDir)) {
+    try {
+      fs.rmSync(lockDir, { recursive: true, force: true })
+    } catch (_rmErr) {
+      // Another writer broke the stale lock concurrently; fall through to retry.
+    }
+    const afterBreak = tryMkdirAndStamp(lockDir)
+    if (afterBreak) return afterBreak
+    // Race: a third party re-acquired between our break + retry. Report new holder.
+  }
+
+  return { acquired: false, ...readLockHolder(lockDir) }
+}
+
+/**
+ * Single mkdirSync attempt; on success, write PID+timestamp metadata (best
+ * effort) and return an `{ acquired: true, release }` result. On EEXIST,
+ * return null so the caller can decide stale-break vs report-busy. Other
+ * errors propagate.
+ *
+ * @param {string} lockDir
+ * @returns {{ acquired: true, release: () => void } | null}
+ */
+function tryMkdirAndStamp(lockDir) {
+  try {
+    fs.mkdirSync(lockDir)
+  } catch (e) {
+    if (e.code === 'EEXIST') return null
+    throw e
+  }
+  try {
+    fs.writeFileSync(
+      path.join(lockDir, 'pid'),
+      `${process.pid}\n${Date.now()}\n`,
+      { mode: 0o600 },
+    )
+  } catch (_pidErr) {
+    // Tier-2 mtime fallback in isLockStale covers this case.
+  }
+  let released = false
+  return {
+    acquired: true,
+    release: () => {
+      if (released) return
+      released = true
+      try {
+        fs.rmSync(lockDir, { recursive: true, force: true })
+      } catch (_rmErr) {
+        // Already gone; benign.
+      }
+    },
+  }
+}
+
+/**
+ * Read holder evidence from a lockdir for the busy-return path. Returns the
+ * recorded PID from `<lockdir>/pid` when readable, plus age_ms derived from
+ * the PID-file timestamp; falls back to lockdir mtime when the PID file is
+ * missing or malformed. Either field may be null if both sources are
+ * unreadable (lockdir vanished between EEXIST and the read).
+ *
+ * @param {string} lockDir
+ * @returns {{ holder_pid: number|null, age_ms: number|null }}
+ */
+function readLockHolder(lockDir) {
+  let holderPid = null
+  let pidTs = null
+  try {
+    const raw = fs.readFileSync(path.join(lockDir, 'pid'), 'utf8').trim()
+    const lines = raw.split('\n')
+    const parsedPid = Number(lines[0])
+    const parsedTs = Number(lines[1])
+    if (Number.isInteger(parsedPid) && parsedPid > 0) holderPid = parsedPid
+    if (Number.isFinite(parsedTs) && parsedTs > 0) pidTs = parsedTs
+  } catch (_e) {
+    // PID file missing or unreadable — tier-2 mtime below.
+  }
+  let ageMs = null
+  if (pidTs !== null) {
+    ageMs = Date.now() - pidTs
+  } else {
+    try {
+      ageMs = Date.now() - fs.statSync(lockDir).mtimeMs
+    } catch (_e) {
+      // Lockdir vanished between EEXIST and stat — leave age_ms null.
+    }
+  }
+  // Filesystem mtime granularity (sub-millisecond rounding) can produce a
+  // tiny negative age when we sample within the same tick as mkdirSync.
+  // Treat "negative" as zero; the lock is effectively brand-new.
+  if (ageMs !== null && ageMs < 0) ageMs = 0
+  return { holder_pid: holderPid, age_ms: ageMs }
 }
 
 /**
