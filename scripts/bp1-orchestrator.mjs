@@ -102,11 +102,31 @@ function usage() {
   )
 }
 
+// Recognized flags (M5 hardening — slice 2e C4). Any argv token starting
+// with `-` that isn't on this list is rejected at parse-time with exit 2
+// rather than silently consumed via `argv[++i]`. Flag-value tokens (the
+// argv[i+1] of a `--flag <value>` pair) are skipped by index-advance.
+const RECOGNIZED_VALUE_FLAGS = new Set([
+  '--project',
+  '--rfc-id',
+  '--run-id',
+  '--input-sha256',
+  '--pre-episode-id',
+  '--result-file',
+  '--classified-episode-id',
+  '--outcome',
+])
+const RECOGNIZED_BOOLEAN_FLAGS = new Set([
+  '--help',
+  '-h',
+])
+
 function parseArgs(argv) {
   const out = {
     subcommand: null, project: null, rfcId: null, runId: null,
     inputSha256: null, preEpisodeId: null, resultFile: null,
     classifiedEpisodeId: null, outcome: null,
+    parseError: null,
   }
   if (argv.length === 0) return out
   out.subcommand = argv[0]
@@ -124,8 +144,47 @@ function parseArgs(argv) {
       usage()
       process.exit(0)
     }
+    else if (arg.startsWith('-')) {
+      // M5 hardening: reject unknown flags rather than silently consuming
+      // the next argv token via `argv[++i]`. Silent consumption masked
+      // typos like `--runid` (missing hyphen) and `--proj` (truncation)
+      // which produced confusing downstream null-deref errors instead of
+      // a clear `unknown flag` exit.
+      out.parseError = `unknown flag: ${arg}`
+      return out
+    }
+    else {
+      out.parseError = `unexpected positional argument: ${arg}`
+      return out
+    }
+  }
+  // Tail-flag missing value (e.g. `--project` with no following token):
+  // RECOGNIZED_VALUE_FLAGS at end of argv → out[field] is undefined. Treat
+  // as parse error so the caller's required-args check returns a clean
+  // exit 2 with a specific message rather than a generic "required missing".
+  for (const f of RECOGNIZED_VALUE_FLAGS) {
+    const fieldName = flagToField(f)
+    if (fieldName != null && out[fieldName] === undefined) {
+      out.parseError = `missing value for flag: ${f}`
+      out[fieldName] = null
+      return out
+    }
   }
   return out
+}
+
+function flagToField(flag) {
+  switch (flag) {
+    case '--project': return 'project'
+    case '--rfc-id': return 'rfcId'
+    case '--run-id': return 'runId'
+    case '--input-sha256': return 'inputSha256'
+    case '--pre-episode-id': return 'preEpisodeId'
+    case '--result-file': return 'resultFile'
+    case '--classified-episode-id': return 'classifiedEpisodeId'
+    case '--outcome': return 'outcome'
+    default: return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2668,6 +2727,13 @@ function confirmApproval(args) {
 
 const args = parseArgs(process.argv.slice(2))
 let exitCode
+if (args.parseError) {
+  // M5 hardening — unknown flag, unexpected positional, or missing
+  // flag-value rejected before any subcommand runs.
+  process.stderr.write(`error: ${args.parseError}\n`)
+  usage()
+  process.exit(2)
+}
 switch (args.subcommand) {
   case 'init-run':
     exitCode = initRun(args)
