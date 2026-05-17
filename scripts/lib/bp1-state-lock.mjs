@@ -171,17 +171,30 @@ const STALE_BREAK_SENTINEL_SUFFIX = '.breaking'
 export const STALE_BREAK_SENTINEL_TTL_SECONDS = 30
 
 /**
- * Attempt to take the stale-break sentinel via O_EXCL link. Returns true if
- * acquired; false if another stale-breaker already holds a non-stale sentinel.
- * Caller MUST call releaseStaleBreakSentinel in a finally if true was returned.
+ * Attempt to take the stale-break sentinel via O_EXCL link. Returns
+ * `{ acquired: true, nonce }` on success, `{ acquired: false }` on busy.
+ * Caller MUST call releaseStaleBreakSentinel(lockPath, nonce) in a finally
+ * if acquired, AND MUST re-verify ownership via
+ * verifyStaleBreakSentinelOwned(lockPath, nonce) before any destructive op
+ * (e.g. unlinking the main lock).
  *
- * Handles orphaned-sentinel recovery: if the existing sentinel's `created_at`
- * is older than STALE_BREAK_SENTINEL_TTL_SECONDS, reclaim by unlink + retry.
- * Without this, a crashed breaker between sentinel-create and sentinel-release
+ * # C7 round-4 P1.2: orphan-sentinel recovery via TTL reclaim
+ * If existing sentinel's `created_at` is older than
+ * STALE_BREAK_SENTINEL_TTL_SECONDS, reclaim by unlink + retry. Without
+ * this, a crashed breaker between sentinel-create and sentinel-release
  * would permanently block all future stale-break attempts.
+ *
+ * # C7 round-5 P1: nonce-based ownership check
+ * TTL reclaim can transfer sentinel ownership mid-operation: breaker A
+ * pauses >30s after emitting stale evidence; breaker B reclaims via TTL;
+ * B emits + unlinks; fresh writer publishes; A resumes line 313 and
+ * would unlink the fresh lock. Sentinel content now carries a
+ * per-acquisition `nonce` (UUID); destructive ops re-verify nonce match
+ * before proceeding. Mismatch = reclaimed by another breaker = abort.
  */
 function tryAcquireStaleBreakSentinel(lockPath, nowMs = Date.now()) {
   const breakingPath = lockPath + STALE_BREAK_SENTINEL_SUFFIX
+  const nonce = crypto.randomUUID()
   const tmp = `${breakingPath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
   fs.mkdirSync(path.dirname(lockPath), { recursive: true })
   const fd = fs.openSync(tmp, 'wx', 0o600)
@@ -189,6 +202,7 @@ function tryAcquireStaleBreakSentinel(lockPath, nowMs = Date.now()) {
     fs.writeFileSync(fd, JSON.stringify({
       pid: process.pid,
       created_at: new Date(nowMs).toISOString(),
+      nonce,
     }))
     fs.fsyncSync(fd)
   } finally {
@@ -197,10 +211,9 @@ function tryAcquireStaleBreakSentinel(lockPath, nowMs = Date.now()) {
   try {
     try {
       fs.linkSync(tmp, breakingPath)
-      return true
+      return { acquired: true, nonce }
     } catch (e) {
       if (e.code !== 'EEXIST') throw e
-      // Sentinel busy. Check if it's stale-recoverable.
       let existingAgeMs = null
       try {
         const existingRaw = fs.readFileSync(breakingPath, 'utf8')
@@ -208,21 +221,17 @@ function tryAcquireStaleBreakSentinel(lockPath, nowMs = Date.now()) {
         const createdMs = Date.parse(existing.created_at)
         if (!Number.isNaN(createdMs)) existingAgeMs = nowMs - createdMs
       } catch (_e) {
-        // Corrupt or vanished. Treat corrupt as stale (recoverable); vanished
-        // would mean linkSync below succeeds.
         existingAgeMs = Infinity
       }
       if (existingAgeMs == null || existingAgeMs < STALE_BREAK_SENTINEL_TTL_SECONDS * 1000) {
-        return false
+        return { acquired: false }
       }
-      // Orphaned sentinel: unlink + retry once. If the retry races another
-      // breaker that reclaimed first, return false; that breaker will run.
       try { fs.unlinkSync(breakingPath) } catch (_e) { /* may have vanished */ }
       try {
         fs.linkSync(tmp, breakingPath)
-        return true
+        return { acquired: true, nonce }
       } catch (e2) {
-        if (e2.code === 'EEXIST') return false
+        if (e2.code === 'EEXIST') return { acquired: false }
         throw e2
       }
     }
@@ -231,7 +240,29 @@ function tryAcquireStaleBreakSentinel(lockPath, nowMs = Date.now()) {
   }
 }
 
-function releaseStaleBreakSentinel(lockPath) {
+/**
+ * Verify we still own the sentinel (its content's nonce matches what we
+ * wrote at acquire time). Returns true only if the sentinel exists AND
+ * contains our nonce. Use BEFORE any destructive op gated on our
+ * continued ownership of the sentinel.
+ */
+function verifyStaleBreakSentinelOwned(lockPath, nonce) {
+  if (!nonce) return false
+  try {
+    const raw = fs.readFileSync(lockPath + STALE_BREAK_SENTINEL_SUFFIX, 'utf8')
+    const parsed = JSON.parse(raw)
+    return parsed.nonce === nonce
+  } catch (_e) {
+    return false
+  }
+}
+
+/**
+ * Release sentinel only if we still own it (nonce matches). Prevents
+ * unlinking a reclaim-successor's sentinel.
+ */
+function releaseStaleBreakSentinel(lockPath, nonce) {
+  if (!verifyStaleBreakSentinelOwned(lockPath, nonce)) return
   try { fs.unlinkSync(lockPath + STALE_BREAK_SENTINEL_SUFFIX) } catch (_e) { /* benign */ }
 }
 
@@ -253,12 +284,15 @@ function emitStaleAndUnlink({
   // that arrived between the first breaker's unlink and the second's
   // unlinkSync call.
   //
-  // C7 round-4 P1.2: tryAcquireStaleBreakSentinel reclaims orphaned
-  // sentinels older than STALE_BREAK_SENTINEL_TTL_SECONDS so a crashed
-  // breaker can't permanently block future stale-break attempts.
-  if (!tryAcquireStaleBreakSentinel(lockPath, nowMs)) {
+  // C7 round-4 P1.2 + round-5 P1: tryAcquireStaleBreakSentinel reclaims
+  // orphaned sentinels (TTL-gated) AND returns a per-acquisition nonce.
+  // Every destructive op below re-verifies the nonce so a TTL-reclaim by
+  // another breaker cannot turn our unlink into a fresh-lock deletion.
+  const sentinel = tryAcquireStaleBreakSentinel(lockPath, nowMs)
+  if (!sentinel.acquired) {
     return null
   }
+  const { nonce } = sentinel
 
   try {
     const episodeId = staleEpisodeIdFor(runId)
@@ -275,8 +309,6 @@ function emitStaleAndUnlink({
         current.claimed_at === existingClaim?.claimed_at
       )
     } catch (_e) {
-      // Lockfile already gone (another breaker raced + finished). Treat
-      // as already-broken: no evidence to emit, no unlink to do.
       currentMatchesStale = false
     }
     if (!currentMatchesStale) {
@@ -305,20 +337,39 @@ function emitStaleAndUnlink({
       episodeId,
     })
 
-    // Under the sentinel, unlink the main lock. Concurrent acquirers cannot
-    // publish a fresh lock at lockPath until the stale lock is removed —
-    // their O_EXCL link fails until we unlink. Once we unlink + release the
-    // sentinel, the next acquirer's link succeeds atomically.
+    // C7 round-5: re-verify sentinel ownership immediately before the
+    // destructive unlink. The writeBp1Episode call above performs disk
+    // I/O + HMAC + rename; if that paused us past STALE_BREAK_SENTINEL_
+    // TTL_SECONDS, another breaker could have TTL-reclaimed the sentinel,
+    // run its own break, and a fresh writer could be on disk now. Without
+    // this check the unlink would target the fresh writer's lock.
+    if (!verifyStaleBreakSentinelOwned(lockPath, nonce)) {
+      return episodeId  // evidence still emitted; do NOT unlink.
+    }
+    // Also re-verify the main lock still matches the stale tuple. Defense
+    // in depth: if a successor breaker unlinked and a fresh writer
+    // published while sentinel ownership was being checked, the tuple
+    // mismatch catches it.
+    try {
+      const beforeUnlinkRaw = fs.readFileSync(lockPath, 'utf8')
+      const beforeUnlink = JSON.parse(beforeUnlinkRaw)
+      if (
+        beforeUnlink.claim_episode_id !== existingClaim?.claim_episode_id ||
+        beforeUnlink.claimed_at !== existingClaim?.claimed_at
+      ) {
+        return episodeId  // main lock changed; do NOT unlink.
+      }
+    } catch (_e) {
+      return episodeId  // main lock gone; nothing to unlink.
+    }
     try {
       fs.unlinkSync(lockPath)
     } catch (_e) {
-      // Vanished between re-read and unlink (extremely narrow window —
-      // would require external process unlinking from outside the lock
-      // protocol). Benign.
+      // Vanished between the verify-read and unlink. Benign.
     }
     return episodeId
   } finally {
-    releaseStaleBreakSentinel(lockPath)
+    releaseStaleBreakSentinel(lockPath, nonce)
   }
 }
 
@@ -523,3 +574,7 @@ export function releaseStateLock(opts) {
 
 // Path helpers — exported for cross-process discovery + tests.
 export { stateLockPath, stateLockDir }
+// C7 round-5: test-only export so SL16/17 can verify the nonce-ownership
+// gate that emitStaleAndUnlink uses to abort mid-break unlinks. Not
+// intended for callers outside the test suite.
+export { verifyStaleBreakSentinelOwned, STALE_BREAK_SENTINEL_SUFFIX }

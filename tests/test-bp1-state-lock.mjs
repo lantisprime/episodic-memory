@@ -38,6 +38,9 @@ const {
   acquireStateLock,
   releaseStateLock,
   STATE_LOCK_TTL_SECONDS,
+  STALE_BREAK_SENTINEL_TTL_SECONDS,
+  STALE_BREAK_SENTINEL_SUFFIX,
+  verifyStaleBreakSentinelOwned,
   stateLockPath,
 } = lockMod
 
@@ -559,6 +562,81 @@ tap('SL15 P1.2: fresh .breaking sentinel (age < TTL) still blocks; stale-break r
   // Both the stale lock AND the fresh sentinel remain on disk.
   assert.ok(fs.existsSync(lp), 'main stale lock remains')
   assert.ok(fs.existsSync(breakingPath), 'fresh sentinel remains')
+})
+
+// =============================================================================
+// SL16 (C7 round-5 P1): codex round-4 race — successor TTL-reclaim replaces
+// sentinel mid-break. Breaker A pauses past sentinel TTL; B reclaims via
+// TTL + runs its own break + a fresh writer C publishes; A resumes and
+// must NOT unlink C's fresh lock. The verifyStaleBreakSentinelOwned gate
+// is what makes A's verify-before-unlink check abort the unlink.
+// =============================================================================
+tap('SL16 P1: successor TTL-reclaim of sentinel → A.verifyOwned returns false → no fresh-lock unlink', () => {
+  const proj = mkTmpProject()
+  const lp = stateLockPath(proj, RUN_ID, STATE_TAG)
+  fs.mkdirSync(path.dirname(lp), { recursive: true })
+
+  // Step 1: A acquires sentinel with nonce_A. Simulate by planting one.
+  const nonceA = 'sl16-nonce-A-uuid'
+  const breakingPath = lp + STALE_BREAK_SENTINEL_SUFFIX
+  fs.writeFileSync(breakingPath, JSON.stringify({
+    pid: 11111,
+    created_at: new Date(Date.now() - (STALE_BREAK_SENTINEL_TTL_SECONDS + 5) * 1000).toISOString(),
+    nonce: nonceA,
+  }))
+  // Pre-flight: A still believes it owns the sentinel.
+  assert.equal(verifyStaleBreakSentinelOwned(lp, nonceA), true)
+
+  // Step 2: B reclaims (TTL-driven), runs its break, releases. Then
+  // freshWriter C publishes. We simulate the post-replacement disk state:
+  //   - sentinel now has nonce_B (B's brief tenure before release) OR is gone
+  //   - lockPath has C's fresh content
+  // Realistic: B released its sentinel after unlinking. Most stringent case
+  // for the gate: sentinel was reclaimed with different nonce content.
+  fs.unlinkSync(breakingPath)
+  const nonceB = 'sl16-nonce-B-uuid'
+  fs.writeFileSync(breakingPath, JSON.stringify({
+    pid: 22222,
+    created_at: new Date().toISOString(),
+    nonce: nonceB,
+  }))
+  fs.writeFileSync(lp, JSON.stringify({
+    claim_episode_id: 'sl16-C-fresh-claim',
+    claimed_at: new Date().toISOString(),
+    ttl_seconds: STATE_LOCK_TTL_SECONDS,
+    lock_state_tag: STATE_TAG,
+    writer_pid: 33333,
+  }))
+
+  // Step 3: A resumes its verify-before-unlink gate. The nonce mismatch
+  // means A is no longer the sentinel owner; A MUST NOT proceed to unlink.
+  assert.equal(verifyStaleBreakSentinelOwned(lp, nonceA), false,
+    'A no longer owns sentinel (B replaced); unlink gate must fail closed')
+
+  // Verify C's fresh lock survives (would be deleted if A's unlink had run).
+  const lockNow = JSON.parse(fs.readFileSync(lp, 'utf8'))
+  assert.equal(lockNow.claim_episode_id, 'sl16-C-fresh-claim',
+    "C's fresh lock must remain on disk")
+})
+
+// =============================================================================
+// SL17 (C7 round-5): sentinel-gone (e.g. B reclaimed + released) → A's
+// verifyOwned returns false. Same gate behavior, different intermediate state.
+// =============================================================================
+tap('SL17 P1: sentinel gone after successor break → A.verifyOwned returns false', () => {
+  const proj = mkTmpProject()
+  const lp = stateLockPath(proj, RUN_ID, STATE_TAG)
+  fs.mkdirSync(path.dirname(lp), { recursive: true })
+
+  // A "had" a sentinel but it's been unlinked (B reclaimed + released).
+  const nonceA = 'sl17-nonce-A-uuid'
+  assert.equal(verifyStaleBreakSentinelOwned(lp, nonceA), false,
+    'sentinel-absent must read as not-owned (fail closed)')
+
+  // Also: missing/null nonce always fails.
+  assert.equal(verifyStaleBreakSentinelOwned(lp, null), false)
+  assert.equal(verifyStaleBreakSentinelOwned(lp, ''), false)
+  assert.equal(verifyStaleBreakSentinelOwned(lp, undefined), false)
 })
 
 console.log(`# tests ${pass + fail}`)
