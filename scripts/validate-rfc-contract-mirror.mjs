@@ -105,13 +105,23 @@ function checkCanonicalFields(contract, code) {
     }
   }
   // Reverse direction: subtypes the code declares that the contract doesn't
-  // mirror. Limit to slice-2c-shape subtypes so we don't false-positive on
-  // pre-slice-2c entries like 'state-transition:codex_review' / run-started /
-  // evidence:* (those are documented in RFC §689-719 prose, not contract.json).
-  const SLICE_2C_SUBTYPES_RE = /^(state-transition:(rfc-detected|classifier-dispatch-pending|classified|planning|needs-human)|failure:.+)$/
+  // mirror. Codex r1 B2 cleanup (slice 2d-W): derive the expected reverse-set
+  // from contract `v2.states` (minus v1-terminal states) + every `failure:*`
+  // subtype the code declares. This eliminates the hard-coded slice-2c regex
+  // so future v2 state additions (awaiting_approval, future) require only one
+  // touchpoint in this validator (the `v2.states` mirror), not two.
+  //
+  // Pre-slice-2c subtypes (`state-transition:codex_review`, run-started, and
+  // evidence:*) are intentionally NOT mirrored in contract.json (they live in
+  // RFC §689-719 prose only); we skip them by keying off the v2 state set.
+  const v1TerminalStates = new Set(['active', 'complete', 'aborted', 'abandoned', 'archived'])
+  const v2States = (contract.run_state_schemas?.v2?.states ?? []).filter(s => !v1TerminalStates.has(s))
+  const reverseStateTransitionSet = new Set(v2States.map(s => `state-transition:${s}`))
   for (const subtype of Object.keys(code)) {
-    if (SLICE_2C_SUBTYPES_RE.test(subtype) && !contract.episode_canonical_fields[subtype]) {
-      errors.push(`canonical-fields: code declares slice-2c subtype "${subtype}" but contract.json missing entry`)
+    const isCheckedStateTransition = reverseStateTransitionSet.has(subtype)
+    const isFailureSubtype = subtype.startsWith('failure:')
+    if ((isCheckedStateTransition || isFailureSubtype) && !contract.episode_canonical_fields[subtype]) {
+      errors.push(`canonical-fields: code declares subtype "${subtype}" but contract.json missing entry`)
     }
   }
 }

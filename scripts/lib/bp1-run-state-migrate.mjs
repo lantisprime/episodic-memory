@@ -17,10 +17,11 @@
  *     NOT rewrite existing state values: a v1 `state: 'active'` stays `active`.
  *
  * The v2 branch (input already v2) ALSO normalizes pre-existing rows to
- * default `classified_episode_id` and `route_episode_id` to null when missing
- * (soft schema addition without bumping schema_version). This is the
- * primary recovery path for runs that were persisted before the cluster
- * #286/#287/#288 schema additions landed.
+ * default `classified_episode_id`, `route_episode_id`, `awaiting_approval_at`,
+ * and `deadline_at` to null when missing (soft schema additions without
+ * bumping schema_version). Cluster #286/#287/#288 added the first two; slice
+ * 2d-W adds the latter two. The normalization here is the single read-side
+ * reconciliation point.
  *
  * This module exports a **pure function** — no IO, no lock acquisition. Used
  * inside `bp1-run-state.mjs`'s `loadIndex` (unlocked entry point) and
@@ -67,6 +68,8 @@ export function migrateV1ToV2(idx) {
         ...run,
         classified_episode_id: run.classified_episode_id ?? null,
         route_episode_id: run.route_episode_id ?? null,
+        awaiting_approval_at: run.awaiting_approval_at ?? null,
+        deadline_at: run.deadline_at ?? null,
       }
     }
     return copy
@@ -88,6 +91,8 @@ export function migrateV1ToV2(idx) {
       rfc_detected_episode_id: v1Run.rfc_detected_episode_id ?? null,
       classified_episode_id: v1Run.classified_episode_id ?? null,
       route_episode_id: v1Run.route_episode_id ?? null,
+      awaiting_approval_at: v1Run.awaiting_approval_at ?? null,
+      deadline_at: v1Run.deadline_at ?? null,
     }
   }
   return out

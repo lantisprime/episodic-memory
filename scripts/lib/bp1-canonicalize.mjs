@@ -99,6 +99,34 @@ export const TYPE_SPECIFIC_CANONICAL_FIELDS = Object.freeze({
     'reason',
     'decided_class',
   ]),
+  // Slice 2d-W — awaiting_approval state-transition for approval-marker
+  // writer surface (RFC §954). `awaiting_approval_at` and `deadline_at` are
+  // canonical so post-emit tampering invalidates the HMAC.
+  // `decided_class` is canonical because it gates 2d-R hook routing
+  // (class-restricted auto-proceed per RFC §1574 F6).
+  'state-transition:awaiting_approval': Object.freeze([
+    'state',
+    'awaiting_approval_at',
+    'deadline_at',
+    'decided_class',
+  ]),
+  // Slice 2d-W — marker write/cleanup failure subtypes. failure_kind is the
+  // subtype-derivation field. `marker-write-failed` is emitted by
+  // `record-awaiting-approval` Phase B when atomic rename fails (per-run key
+  // is still live, so HMAC signing is possible). `marker-cleanup-failed` is
+  // reserved for callers that retain the per-run key when invoking
+  // cleanupApprovalMarker (post-shred finalize-* paths stderr-log instead
+  // because the key is no longer available).
+  'failure:marker-write-failed': Object.freeze([
+    'failure_kind',
+    'marker_path',
+    'reason',
+  ]),
+  'failure:marker-cleanup-failed': Object.freeze([
+    'failure_kind',
+    'marker_path',
+    'reason',
+  ]),
   // Slice 2c — failure subtypes. failure_kind is the subtype-derivation field;
   // it IS canonicalized here so post-emit tampering of failure_kind invalidates
   // the HMAC. Both kinds share the same canonical-field shape but are kept as

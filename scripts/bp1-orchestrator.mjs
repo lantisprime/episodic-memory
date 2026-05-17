@@ -73,6 +73,7 @@ import {
 import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
 import { writeBp1Episode } from './lib/bp1-episode-writer.mjs'
 import { verifyEpisodeOnDisk } from './lib/bp1-episode-verify.mjs'
+import { writeMarker, cleanupApprovalMarker } from './lib/bp1-marker.mjs'
 
 const REPO_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const FLAG_CHECK = path.join(REPO_DIR, 'scripts', 'bp1-flag-check.mjs')
@@ -95,7 +96,8 @@ function usage() {
     '  bp1-orchestrator finalize-recover --project <projectRoot> --run-id <runId>\n' +
     '  bp1-orchestrator detect-rfcs --project <projectRoot>\n' +
     '  bp1-orchestrator record-classifier-dispatch-pre --project <projectRoot> --run-id <runId> --input-sha256 <64-hex>\n' +
-    '  bp1-orchestrator record-classification --project <projectRoot> --run-id <runId> --pre-episode-id <id> --result-file <abs-path>\n',
+    '  bp1-orchestrator record-classification --project <projectRoot> --run-id <runId> --pre-episode-id <id> --result-file <abs-path>\n' +
+    '  bp1-orchestrator record-awaiting-approval --project <projectRoot> --run-id <runId> --classified-episode-id <id>\n',
   )
 }
 
@@ -103,6 +105,7 @@ function parseArgs(argv) {
   const out = {
     subcommand: null, project: null, rfcId: null, runId: null,
     inputSha256: null, preEpisodeId: null, resultFile: null,
+    classifiedEpisodeId: null,
   }
   if (argv.length === 0) return out
   out.subcommand = argv[0]
@@ -114,6 +117,7 @@ function parseArgs(argv) {
     else if (arg === '--input-sha256') out.inputSha256 = argv[++i]
     else if (arg === '--pre-episode-id') out.preEpisodeId = argv[++i]
     else if (arg === '--result-file') out.resultFile = argv[++i]
+    else if (arg === '--classified-episode-id') out.classifiedEpisodeId = argv[++i]
     else if (arg === '--help' || arg === '-h') {
       usage()
       process.exit(0)
@@ -794,6 +798,21 @@ function finalizeRun(args) {
   }
   maybeAbortHook(7, projectRoot)
 
+  // Slice 2d-W: best-effort approval-marker cleanup. Idempotent (ENOENT is
+  // status: 'ok'). Per-run.key is shredded by this point so HMAC-signed
+  // failure-evidence emission is no longer possible; on non-ENOENT failure
+  // stderr-log and let the marker file persist as forensic evidence (the
+  // 2d-R hook reader will refuse the stale marker on next session because
+  // run-state is terminal). Does NOT fail the terminal transition.
+  const cleanup = cleanupApprovalMarker(projectRoot, runId)
+  if (cleanup.status === 'error') {
+    process.stderr.write(
+      `bp1-finalize-run: cleanupApprovalMarker non-ENOENT failure: ` +
+      `code=${cleanup.code} message=${cleanup.message} marker_path=${cleanup.markerPath} ` +
+      `(marker persists on disk; terminal transition unaffected)\n`,
+    )
+  }
+
   process.stdout.write(JSON.stringify({
     run_id: runId,
     manifest_episode_id: manifestEpId,
@@ -856,6 +875,15 @@ function finalizeRecover(args) {
       process.stderr.write(`bp1-finalize-recover: markTerminal returned ${term.error} (State B)\n`)
       return 3
     }
+    // Slice 2d-W: best-effort marker cleanup (idempotent; key shredded so no
+    // signed evidence on failure).
+    const cleanup = cleanupApprovalMarker(projectRoot, runId)
+    if (cleanup.status === 'error') {
+      process.stderr.write(
+        `bp1-finalize-recover: cleanupApprovalMarker non-ENOENT failure (State B): ` +
+        `code=${cleanup.code} marker_path=${cleanup.markerPath}\n`,
+      )
+    }
   } else if (keyResult.error) {
     // State D: manifest valid, key damaged (mode/size/unreadable). Unlink
     // damaged key then mark terminal. DEFER `4b35`: compound terminal/key
@@ -877,6 +905,13 @@ function finalizeRecover(args) {
       process.stderr.write(`bp1-finalize-recover: markTerminal returned ${term.error} (State D)\n`)
       return 3
     }
+    const cleanup = cleanupApprovalMarker(projectRoot, runId)
+    if (cleanup.status === 'error') {
+      process.stderr.write(
+        `bp1-finalize-recover: cleanupApprovalMarker non-ENOENT failure (State D): ` +
+        `code=${cleanup.code} marker_path=${cleanup.markerPath}\n`,
+      )
+    }
   } else {
     // State A: manifest valid, key still present. Shred then terminal.
     // I4 requires failing closed when shred fails with key still on disk
@@ -891,6 +926,13 @@ function finalizeRecover(args) {
     if (term.error && term.error !== 'already-terminal') {
       process.stderr.write(`bp1-finalize-recover: markTerminal returned ${term.error} (State A)\n`)
       return 3
+    }
+    const cleanup = cleanupApprovalMarker(projectRoot, runId)
+    if (cleanup.status === 'error') {
+      process.stderr.write(
+        `bp1-finalize-recover: cleanupApprovalMarker non-ENOENT failure (State A): ` +
+        `code=${cleanup.code} marker_path=${cleanup.markerPath}\n`,
+      )
     }
   }
 
@@ -1415,18 +1457,21 @@ function validateClassifierOutput(obj) {
 // Phase B's resume branches can compare run.state against targetState and
 // reject inconsistent state/decided_class pairs (closes F2).
 function deriveRouteSpec(decidedClass, runId) {
+  // Slice 2d-W (Option A, codex r3 ACCEPT episode 20260517-021728-...-fd95):
+  // trivial-class runs stop at stable `classified` state — no route episode
+  // emitted by record-classification. The safety-envelope transition into
+  // `awaiting_approval` (with 1hr auto-approval window) is the work of
+  // `record-awaiting-approval`, which consumes state==classified.
+  //
+  // Per RFC §954 + §1574 F6: trivial → awaiting_approval (1hr); non-trivial
+  // → needs-human (no timeout). The pre-slice-2d shortcut "trivial →
+  // planning" was a stub pending the safety envelope.
   if (decidedClass === 'trivial') {
-    return {
-      targetState: 'planning',
-      customFm: { source_class: 'trivial' },
-      tags: ['bp1-planning'],
-      summary: `BP-1 planning (source: trivial): ${runId}`,
-      body: `# bp1-planning — ${runId}\n\nsource_class: \`trivial\`\n`,
-      filenameSuffix: 'planning',
-    }
+    return { targetState: null, skip: true }
   }
   return {
     targetState: 'needs-human',
+    skip: false,
     customFm: { reason: 'risky-class', decided_class: decidedClass },
     tags: ['bp1-needs-human'],
     summary: `BP-1 needs-human (risky-class ${decidedClass}): ${runId}`,
@@ -1718,16 +1763,75 @@ function recordClassification(args) {
   if (!classifiedEpisodeId) return 5
 
   // ---------------------------------------------------------------------
-  // Phase B: emit route (planning|needs-human) + persist state/route_episode_id
+  // Phase B: emit route (needs-human for risky) or no-op (trivial stays at classified)
   // ---------------------------------------------------------------------
   // Single source-of-truth for the route episode: customFm IS the predicate.
   // Closes F1 (orphan-attach predicate-completeness) and F2 (state-vs-
   // targetState consistency) — both Phase B parallel branches now inherit
   // Phase A's invariant-discipline.
+  //
+  // Slice 2d-W (Option A, codex r3 episode 20260517-021728-...-fd95): trivial
+  // skips Phase B entirely. State stays at `classified`; route_episode_id
+  // stays null; no bp1-planning episode emitted. The safety-envelope
+  // transition into `awaiting_approval` is the responsibility of the
+  // record-awaiting-approval subcommand.
   const routeSpec = deriveRouteSpec(decidedClass, args.runId)
   let nextState = null
   let routeEpisodeId = null
   let phaseBExit = 0
+  if (routeSpec.skip) {
+    // Trivial path (Option A) — Phase A's `classified` state is the stable
+    // post-classification state. record-awaiting-approval (slice 2d-W) is
+    // the next intended caller. We still enforce the F2 invariant: if past
+    // Phase A advanced state to planning/needs-human under decided_class=
+    // trivial, that's a slice-2c-era artifact / drift — reject as a
+    // state-violation rather than silently overwrite.
+    let trivialSkipExit = 0
+    try {
+      withLockedRun(projectRoot, args.runId, ({ run }) => {
+        if (!run) {
+          process.stderr.write(`error: run ${args.runId} missing in Phase B (trivial skip)\n`)
+          trivialSkipExit = 5
+          return
+        }
+        if (run.state === 'planning' || run.state === 'needs-human') {
+          process.stderr.write(
+            `error: state-violation (Phase B): run.state=${run.state} but ` +
+            `decided_class=${decidedClass} implies no route emission (Option A — trivial stays at classified). ` +
+            `Manual recovery: inspect run row + signed episodes; either revert run.state to 'classified' ` +
+            `(if state was advanced by slice-2c-era code) or correct decided_class.\n`,
+          )
+          trivialSkipExit = 5
+          return
+        }
+        // Legitimate trivial state should be 'classified' here. Anything
+        // else (terminal, etc) is also a state-violation.
+        if (run.state !== 'classified') {
+          process.stderr.write(
+            `error: state-violation (Phase B): run.state=${JSON.stringify(run.state)} expected=classified for trivial\n`,
+          )
+          trivialSkipExit = 5
+          return
+        }
+      })
+    } catch (e) {
+      if (e.code === 'multiple-signed-match') {
+        process.stderr.write(`error: integrity-anomaly multiple-signed-match (Phase B trivial-skip): ${e.message}\n`)
+        return 5
+      }
+      throw e
+    }
+    if (trivialSkipExit !== 0) return trivialSkipExit
+    process.stdout.write(JSON.stringify({
+      status: 'ok',
+      state: 'classified',
+      run_id: args.runId,
+      decided_class: decidedClass,
+      classified_episode_id: classifiedEpisodeId,
+      route_episode_id: null,
+    }) + '\n')
+    return 0
+  }
   try {
     withLockedRun(projectRoot, args.runId, ({ run }) => {
       if (!run) {
@@ -1873,6 +1977,383 @@ function recordClassification(args) {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: record-awaiting-approval (slice 2d-W, M2)
+//
+// Transitions a run from `classified` (trivial decided_class) to
+// `awaiting_approval` and writes the per-run approval marker
+// `<canonical_project_root>/.checkpoints/bp1-approval-<run_id>.json`.
+//
+// Per RFC §954: 1-hour deadline from the awaiting-approval timestamp;
+// auto-approval at deadline if no human intervention (auto-proceed routing
+// owned by 2d-R hook + future check-deadlines path A, slice 2e).
+//
+// Class restriction (RFC §1574 F6): only `trivial` decided_class reaches
+// this subcommand. Non-trivial classes route directly to `needs-human` via
+// `record-classification` Phase B and are NOT eligible for the 1-hr auto-
+// approval window. Caller asserts this; the contract here also gates by
+// checking run.decided_class === 'trivial'.
+//
+// Phase A (in-lock, signed-evidence + state transition):
+//   - Verify parent `classified` episode HMAC + state == 'classified'.
+//   - Compute awaiting_approval_at (wall-clock now, ONLY at fresh emit) +
+//     deadline_at (=+1hr).
+//   - Emit signed `bp1-awaiting-approval` evidence (state-transition).
+//   - Persist run.state='awaiting_approval' + awaiting_approval_at + deadline_at.
+//
+// Phase B (out-of-lock, deterministic marker write):
+//   - Read awaiting_approval_at + deadline_at + decided_class from run-state.
+//     NEVER wall-clock — codex r1 M1 / r2: byte-identical retry contract.
+//   - writeMarker() with persisted fields. On rename-fail → emit signed
+//     `marker-write-failed` failure episode; state stays at 'awaiting_approval'.
+//   - Idempotent: alreadyPresent=true → no-op return.
+//
+// Crash semantics:
+//   - Between Phase A and B → state at 'awaiting_approval' with no marker.
+//     Recovery: re-run record-awaiting-approval; Phase A no-ops via orphan-
+//     attach + state assert; Phase B re-derives marker from persisted fields
+//     and produces byte-identical bytes.
+//   - During Phase B writeMarker tmp write → no observable marker file
+//     (atomic tmp+rename). Retry produces identical marker.
+// ---------------------------------------------------------------------------
+
+function recordAwaitingApproval(args) {
+  if (!args.project) { usage(); return 2 }
+  if (!args.runId) {
+    process.stderr.write('error: --run-id is required\n')
+    return 2
+  }
+  if (!args.classifiedEpisodeId || !EPISODE_ID_RE.test(args.classifiedEpisodeId)) {
+    process.stderr.write('error: --classified-episode-id required and must match episode-id shape\n')
+    return 2
+  }
+  try {
+    assertRunIdShape(args.runId)
+  } catch (e) {
+    process.stderr.write(`error: --run-id has invalid shape: ${e.message}\n`)
+    return 2
+  }
+
+  // Canonicalize --project per RFC §104 strict: realpath the arg → spawn
+  // git rev-parse --show-toplevel from that cwd → realpath result. Handles
+  // nested --project <target/subdir> (codex r1 B3).
+  let projectRoot
+  try {
+    projectRoot = fs.realpathSync(args.project)
+  } catch (_e) {
+    process.stderr.write(`error: --project does not exist: ${args.project}\n`)
+    return 2
+  }
+  // Resolve canonical via git toplevel from the realpath'd cwd.
+  let toplevel
+  try {
+    toplevel = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch (e) {
+    process.stderr.write(`error: project-root-resolution-failed: not a git repo at ${projectRoot}: ${e.message}\n`)
+    return 2
+  }
+  if (!toplevel) {
+    process.stderr.write(`error: project-root-resolution-failed: empty toplevel at ${projectRoot}\n`)
+    return 2
+  }
+  try {
+    projectRoot = fs.realpathSync(toplevel)
+  } catch (e) {
+    process.stderr.write(`error: project-root-resolution-failed: realpath failed for ${toplevel}: ${e.message}\n`)
+    return 2
+  }
+
+  // Flag-check gate.
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() },
+  })
+  if (flagCheck.status !== 0) {
+    process.stderr.write(`bp1 inert for project ${projectRoot}\n`)
+    return 1
+  }
+
+  // Load run.key.
+  const keyResult = loadRunKey(projectRoot, args.runId)
+  if (keyResult.error) {
+    process.stderr.write(`error: run.key ${keyResult.error} for ${args.runId}\n`)
+    return 5
+  }
+  const { key32B } = keyResult
+
+  // ---------------------------------------------------------------------
+  // Phase A: emit awaiting_approval state-transition + persist
+  // ---------------------------------------------------------------------
+  let awaitingEpisodeId = null
+  let awaitingApprovalAt = null
+  let deadlineAt = null
+  let decidedClass = null
+  let phaseAExit = 0
+  try {
+    withLockedRun(projectRoot, args.runId, ({ run }) => {
+      if (!run) {
+        process.stderr.write(`error: run ${args.runId} not found\n`)
+        phaseAExit = 5
+        return
+      }
+
+      // Resume / backfill: state already at awaiting_approval. Phase A no-op
+      // unless awaiting_approval_episode pointer is missing.
+      if (run.state === 'awaiting_approval') {
+        // Codex r3 P1 (round 3): re-enforce trivial-class restriction on the
+        // resume path. If a non-trivial class somehow reached awaiting_approval
+        // (stale data / external tamper), refuse rather than continue to
+        // marker write — RFC §1574 F6 class restriction applies to retries too.
+        if (run.decided_class !== 'trivial') {
+          process.stderr.write(
+            `error: state-violation: state=awaiting_approval but decided_class=` +
+            `${JSON.stringify(run.decided_class)} is not 'trivial'; ` +
+            `class-restriction (RFC §1574 F6) holds on resume path\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        // Parity with fresh-emit equality gate (L2178): a --classified-episode-id
+        // mismatch on resume should surface the precise state-violation error
+        // rather than the generic recoverable-canonical-drift from
+        // findSignedStateEpisode field-mismatch later in this branch.
+        if (args.classifiedEpisodeId !== run.classified_episode_id) {
+          process.stderr.write(
+            `error: state-violation: --classified-episode-id ${args.classifiedEpisodeId} ` +
+            `!= run.classified_episode_id ${run.classified_episode_id}\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        if (!run.awaiting_approval_at || !run.deadline_at) {
+          process.stderr.write(
+            `error: recoverable-canonical-drift: state=awaiting_approval but ` +
+            `awaiting_approval_at=${run.awaiting_approval_at} deadline_at=${run.deadline_at} ` +
+            `both must be persisted\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        awaitingApprovalAt = run.awaiting_approval_at
+        deadlineAt = run.deadline_at
+        decidedClass = run.decided_class
+        // Find existing signed awaiting_approval episode for downstream
+        // emission idempotence verification.
+        const verify = findSignedStateEpisode(
+          projectRoot, args.runId, 'awaiting_approval', key32B, {
+            parent_episode: args.classifiedEpisodeId,
+            awaiting_approval_at: awaitingApprovalAt,
+            deadline_at: deadlineAt,
+            decided_class: decidedClass,
+          },
+        )
+        if (verify.status === 'match') {
+          awaitingEpisodeId = verify.episodeId
+          return
+        }
+        if (verify.status === 'field-mismatch') {
+          const ids = verify.candidates.map(c => c.episodeId).join(', ')
+          process.stderr.write(
+            `error: recoverable-canonical-drift: state=awaiting_approval but ` +
+            `${verify.candidates.length} signed candidate(s) [${ids}] do not match args\n`,
+          )
+          phaseAExit = 5
+          return
+        }
+        process.stderr.write(
+          `error: recoverable-no-parent: state=awaiting_approval but no signed ` +
+          `awaiting_approval episode on disk\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      if (run.state !== 'classified') {
+        process.stderr.write(
+          `error: state-violation: run.state=${JSON.stringify(run.state)} expected=classified\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      // Class restriction: only trivial reaches this subcommand.
+      if (run.decided_class !== 'trivial') {
+        process.stderr.write(
+          `error: state-violation: decided_class=${JSON.stringify(run.decided_class)} ` +
+          `is not 'trivial'; non-trivial classes route to needs-human via record-classification\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      // Equality gate: --classified-episode-id === run.classified_episode_id.
+      if (args.classifiedEpisodeId !== run.classified_episode_id) {
+        process.stderr.write(
+          `error: state-violation: --classified-episode-id ${args.classifiedEpisodeId} ` +
+          `!= run.classified_episode_id ${run.classified_episode_id}\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+
+      // Verify parent classified episode on disk.
+      const verifyParent = verifyEpisodeOnDisk({
+        projectRoot, episodeId: args.classifiedEpisodeId, runKey32B: key32B,
+        expectedType: 'state-transition', expectedState: 'classified',
+        expectedRunId: args.runId,
+      })
+      if (!verifyParent.ok) {
+        try {
+          writeBp1Episode({
+            projectRoot, runId: args.runId, runKey32B: key32B,
+            type: 'failure', state: null,
+            summary: `BP-1 classifier parent-tamper at record-awaiting-approval: ${args.runId}`,
+            parentEpisode: null, expectedPostEpisodeId: null,
+            customFm: {
+              failure_kind: 'classifier-parent-tamper',
+              field_name: 'classified_episode_id',
+              observed_value: safeTruncate(JSON.stringify(args.classifiedEpisodeId), 66),
+              violation_reason: verifyParent.errors.join('; '),
+            },
+            tags: ['bp1-classifier-parent-tamper'],
+            body: `# bp1-classifier-parent-tamper\n\nErrors:\n\n${verifyParent.errors.map(e => `- \`${e}\``).join('\n')}\n`,
+            filenameSuffix: 'parent-tamper',
+          })
+        } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+        process.stderr.write(`error: parent-tamper: ${verifyParent.errors.join('; ')}\n`)
+        phaseAExit = 5
+        return
+      }
+
+      // Fresh emit: compute wall-clock timestamps ONCE here.
+      decidedClass = run.decided_class
+      awaitingApprovalAt = new Date().toISOString()
+      const deadlineMs = new Date(awaitingApprovalAt).getTime() + 60 * 60 * 1000  // +1hr
+      deadlineAt = new Date(deadlineMs).toISOString()
+
+      const awaitingFields = {
+        parent_episode: args.classifiedEpisodeId,
+        awaiting_approval_at: awaitingApprovalAt,
+        deadline_at: deadlineAt,
+        decided_class: decidedClass,
+      }
+
+      // Orphan-attach: crash-after-emit-before-writeIndex window.
+      const orphan = findSignedStateEpisode(
+        projectRoot, args.runId, 'awaiting_approval', key32B, awaitingFields,
+      )
+      if (orphan.status === 'match') {
+        run.state = 'awaiting_approval'
+        run.awaiting_approval_at = awaitingApprovalAt
+        run.deadline_at = deadlineAt
+        awaitingEpisodeId = orphan.episodeId
+        return
+      }
+      if (orphan.status === 'field-mismatch') {
+        // Codex r3 P1: field-mismatch means a signed candidate exists with
+        // different values for one or more of {parent_episode, decided_class,
+        // awaiting_approval_at, deadline_at}. Adopting candidate[0]
+        // unconditionally is unsafe — could attach to a stale episode from a
+        // prior run, leaking marker contents from the wrong context. Mirror
+        // the classified Phase A pattern (L1609): reject as drift; operator
+        // must inspect signed episodes manually.
+        //
+        // Determinism (codex r1 M1) is preserved: legitimate retry from
+        // persisted run-state will land in the 'match' branch (timestamps
+        // from run-state == timestamps in the signed episode). Field-mismatch
+        // is ONLY reachable when args/run-state diverge from the disk
+        // episode, which is a real drift signal.
+        const ids = orphan.candidates.map(c => c.episodeId).join(', ')
+        process.stderr.write(
+          `error: recoverable-canonical-drift: ${orphan.candidates.length} signed ` +
+          `awaiting_approval episode(s) [${ids}] do not match args ` +
+          `(parent_episode/awaiting_approval_at/deadline_at/decided_class)\n`,
+        )
+        phaseAExit = 5
+        return
+      }
+      // Fresh emit.
+      const written = writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'state-transition', state: 'awaiting_approval',
+        summary: `BP-1 awaiting_approval (deadline ${deadlineAt}): ${args.runId}`,
+        parentEpisode: args.classifiedEpisodeId, expectedPostEpisodeId: null,
+        customFm: {
+          awaiting_approval_at: awaitingApprovalAt,
+          deadline_at: deadlineAt,
+          decided_class: decidedClass,
+        },
+        tags: ['bp1-awaiting-approval'],
+        body: `# bp1-awaiting-approval — ${args.runId}\n\nawaiting_approval_at: \`${awaitingApprovalAt}\`\ndeadline_at: \`${deadlineAt}\`\ndecided_class: \`${decidedClass}\`\n`,
+        filenameSuffix: 'awaiting-approval',
+      })
+      run.state = 'awaiting_approval'
+      run.awaiting_approval_at = awaitingApprovalAt
+      run.deadline_at = deadlineAt
+      awaitingEpisodeId = written.episodeId
+    })
+  } catch (e) {
+    if (e.code === 'multiple-signed-match') {
+      process.stderr.write(`error: integrity-anomaly multiple-signed-match (Phase A): ${e.message}\n`)
+      return 5
+    }
+    throw e
+  }
+  if (phaseAExit !== 0) return phaseAExit
+  if (!awaitingEpisodeId) return 5
+
+  // ---------------------------------------------------------------------
+  // Phase B: write deterministic marker from persisted run-state fields
+  // ---------------------------------------------------------------------
+  const writeResult = writeMarker({
+    projectRoot,
+    runId: args.runId,
+    decidedClass,
+    createdAt: awaitingApprovalAt,
+    deadlineAt,
+    runKey32B: key32B,
+  })
+  if (writeResult.status === 'error') {
+    // Emit signed marker-write-failed failure episode. run.key is still live
+    // at this point (Phase B runs while the run is non-terminal), so HMAC
+    // signing succeeds. Caller-side emission per codex r2 FU1.
+    try {
+      writeBp1Episode({
+        projectRoot, runId: args.runId, runKey32B: key32B,
+        type: 'failure', state: null,
+        summary: `BP-1 marker-write-failed at record-awaiting-approval: ${args.runId}`,
+        parentEpisode: awaitingEpisodeId, expectedPostEpisodeId: null,
+        customFm: {
+          failure_kind: 'marker-write-failed',
+          marker_path: writeResult.markerPath,
+          reason: safeTruncate(`${writeResult.code}: ${writeResult.message}`, 66),
+        },
+        tags: ['bp1-marker-write-failed'],
+        body: `# bp1-marker-write-failed\n\nmarker_path: \`${writeResult.markerPath}\`\ncode: \`${writeResult.code}\`\nmessage: \`${writeResult.message}\`\n\nRetry: state remains 'awaiting_approval'; re-run \`record-awaiting-approval\` produces byte-identical marker from persisted run-state fields.\n`,
+        filenameSuffix: 'marker-write-failed',
+      })
+    } catch (e) { process.stderr.write(`debug: failure-ep emit threw: ${e.message}\n`) }
+    process.stderr.write(
+      `error: marker-write-failed: code=${writeResult.code} message=${writeResult.message} ` +
+      `marker_path=${writeResult.markerPath} (state remains awaiting_approval; retry idempotent)\n`,
+    )
+    return 3
+  }
+
+  process.stdout.write(JSON.stringify({
+    status: 'ok',
+    state: 'awaiting_approval',
+    run_id: args.runId,
+    awaiting_approval_episode_id: awaitingEpisodeId,
+    awaiting_approval_at: awaitingApprovalAt,
+    deadline_at: deadlineAt,
+    marker_path: writeResult.markerPath,
+    marker_already_present: writeResult.alreadyPresent,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -1896,6 +2377,9 @@ switch (args.subcommand) {
     break
   case 'record-classification':
     exitCode = recordClassification(args)
+    break
+  case 'record-awaiting-approval':
+    exitCode = recordAwaitingApproval(args)
     break
   case null:
   case undefined:
