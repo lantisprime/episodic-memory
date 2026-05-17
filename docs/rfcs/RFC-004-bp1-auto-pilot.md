@@ -892,6 +892,46 @@ payload = {
   //   deadline_at,                    // ISO-8601 UTC; = awaiting_approval_at + 1hr (trivial)
   //   decided_class,                  // mirror of classified episode's decided_class
   //
+  // For type == "state-transition" with state == "auto_approved" (NEW v3.16,
+  // slice 2d-R): terminal exit from `awaiting_approval` via deadline expiry
+  // (H1 SessionStart hook detects expired marker; orchestrator confirm-approval
+  // emits this episode under run-lock; idempotent).
+  //   state,                          // "auto_approved"
+  //   auto_approved_at,               // ISO-8601 UTC; emitted wall-clock now AT
+  //                                   // the confirm-approval transition (NOT the
+  //                                   // marker's deadline_at). Anti-forge for
+  //                                   // "when did the system actually decide".
+  //   deadline_at,                    // ISO-8601 UTC; MUST equal the parent
+  //                                   // `awaiting_approval` episode's deadline_at
+  //                                   // (anti-forge: auto-approval is bound to a
+  //                                   // specific deadline, replay-safe).
+  //   decided_class,                  // mirror of parent's decided_class (trivial
+  //                                   // only — risky classes never reach this
+  //                                   // path; deriveRouteSpec routes them to
+  //                                   // needs-human directly).
+  //
+  // For type == "state-transition" with state == "approved" (NEW v3.16,
+  // slice 2d-R; REGISTERED but NOT emitted by this slice): operator-decided
+  // approval via future FU-2 CLI. Reserved so future ops paths don't need a
+  // re-sign cycle.
+  //   state,                          // "approved"
+  //   approved_at,                    // ISO-8601 UTC; operator-decision moment.
+  //   decided_class,                  // mirror of parent's decided_class.
+  //
+  // For type == "failure" with failure_kind == "bp1-marker-invalid" (NEW
+  // v3.16, slice 2d-R): emitted by `bp1-emit-marker-invalid-evidence.mjs`
+  // when the marker fails validation AND a parseable run_id + run.key are
+  // available (Case A — signed). Case B (key shredded) and Case C (filename
+  // unparseable) emit NO episode — they write structured JSON to stderr only,
+  // and the marker file itself is the persisting forensic.
+  //   failure_kind,                   // "bp1-marker-invalid" (subtype-derivation)
+  //   marker_path,                    // absolute path to the invalid marker file
+  //                                   // (preserved on disk as forensic evidence)
+  //   reason,                         // validator failure-mode label
+  //                                   // (`missing-fields` | `hmac-mismatch` |
+  //                                   // `body-sha-mismatch` | `unparseable-json`
+  //                                   // | `deadline-not-iso` | ...)
+  //
   // For type == "failure" with failure_kind in {marker-write-failed,
   //                                              marker-cleanup-failed}:
   //   failure_kind,                   // subtype-derivation field (canonicalized)
