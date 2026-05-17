@@ -1,14 +1,17 @@
 {
-  "version": "v3.14",
-  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts (slice 2c). Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14).",
+  "version": "v3.15",
+  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts (slice 2d-W). Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14).",
   "episode_canonical_fields": {
     "state-transition:rfc-detected": ["state", "rfc_id", "frontmatter_sha256"],
     "state-transition:classifier-dispatch-pending": ["state", "input_sha256"],
     "state-transition:classified": ["state", "decided_class", "classifier_confidence"],
     "state-transition:planning": ["state", "source_class"],
     "state-transition:needs-human": ["state", "reason", "decided_class"],
+    "state-transition:awaiting_approval": ["state", "awaiting_approval_at", "deadline_at", "decided_class"],
     "failure:classifier-schema-violation": ["failure_kind", "field_name", "observed_value", "violation_reason"],
-    "failure:classifier-parent-tamper": ["failure_kind", "field_name", "observed_value", "violation_reason"]
+    "failure:classifier-parent-tamper": ["failure_kind", "field_name", "observed_value", "violation_reason"],
+    "failure:marker-write-failed": ["failure_kind", "marker_path", "reason"],
+    "failure:marker-cleanup-failed": ["failure_kind", "marker_path", "reason"]
   },
   "classifier_output_schema": {
     "type": "object",
@@ -48,6 +51,7 @@
         "classified",
         "planning",
         "needs-human",
+        "awaiting_approval",
         "complete",
         "aborted",
         "abandoned",
@@ -62,7 +66,9 @@
         "pre_episode_id",
         "rfc_detected_episode_id",
         "classified_episode_id",
-        "route_episode_id"
+        "route_episode_id",
+        "awaiting_approval_at",
+        "deadline_at"
       ]
     }
   },
@@ -90,6 +96,15 @@
         "0": "ok",
         "2": "argv|relative-result-file",
         "5": "state|schema|parent-tamper"
+      }
+    },
+    "record-awaiting-approval": {
+      "required_args": ["--project", "--run-id", "--classified-episode-id"],
+      "exit_codes": {
+        "0": "ok",
+        "2": "argv|project-root-resolution-failed",
+        "3": "marker-write-failed",
+        "5": "state|parent-tamper"
       }
     }
   }
