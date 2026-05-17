@@ -42,6 +42,12 @@
  *     tags,                  // string[] — appended to file's tags array
  *     body,                  // body markdown text (string or Buffer)
  *     filenameSuffix,        // suffix in episode-id (e.g. 'rfc-detected', 'pre')
+ *     episodeId,             // OPTIONAL pre-generated episode_id (slice 2e C4
+ *                            // bp1-state-lock — lockfile-gates-episode protocol
+ *                            // needs the id BEFORE the episode is written so the
+ *                            // O_EXCL lockfile content can reference it). When
+ *                            // present MUST be a non-empty string; supplants
+ *                            // the auto-generated `${runId}-${filenameSuffix}-<rand>`.
  *   }) → { episodeId, episodePath, hmacHex }
  *
  * Zero deps; Node stdlib only.
@@ -124,6 +130,7 @@ export function writeBp1Episode(opts) {
     tags,
     body,
     filenameSuffix,
+    episodeId: providedEpisodeId,
   } = opts
 
   assertString('projectRoot', projectRoot)
@@ -153,6 +160,23 @@ export function writeBp1Episode(opts) {
     throw new TypeError('writeBp1Episode: tags must be an array or omitted')
   }
 
+  // Compute allTags FIRST — canonicalize.subtypeKey looks up `evidence:<tag>`
+  // for evidence-typed episodes, so the tags array must be present on the
+  // frontmatter object passed to canonicalize() at write-time, otherwise the
+  // canonical-fields set silently degrades to GENERIC-only and the read-back
+  // path (which sees tags on disk) computes a different canonical payload —
+  // HMAC mismatch on round-trip. (Slice 2e C4 bug found when emitting the
+  // first evidence-typed episode bp1-state-lock-claim.)
+  const allTags = ['bp1-evidence-snapshot']
+  if (tags) {
+    for (const t of tags) {
+      if (typeof t !== 'string' || t === '' || /[,\[\]"'\s]/.test(t)) {
+        throw new TypeError(`writeBp1Episode: tag must be a bare token; got ${JSON.stringify(t)}`)
+      }
+      if (!allTags.includes(t)) allTags.push(t)
+    }
+  }
+
   // 1. Compose frontmatter object for canonicalize() input.
   const frontmatter = {
     type,
@@ -160,6 +184,7 @@ export function writeBp1Episode(opts) {
     parent_episode: parentEpisode ?? null,
     expected_post_episode_id: expectedPostEpisodeId ?? null,
     summary,
+    tags: allTags,
   }
   if (state != null) frontmatter.state = state
   if (customFm) {
@@ -176,14 +201,28 @@ export function writeBp1Episode(opts) {
   }
 
   // 2. Canonicalize + sign. canonicalize() picks subtype based on (type, state)
-  //    or (type, failure_kind) and selects type-specific canonical fields from
-  //    TYPE_SPECIFIC_CANONICAL_FIELDS in bp1-canonicalize.mjs.
+  //    or (type, tags[]) or (type, failure_kind) and selects type-specific
+  //    canonical fields from TYPE_SPECIFIC_CANONICAL_FIELDS.
   const bodyText = typeof body === 'string' ? body : (body ?? '')
   const { canonicalBytes, payload } = canonicalize(frontmatter, bodyText)
   const hmacHex = signCanonical(canonicalBytes, runKey32B)
 
-  // 3. Generate episode_id + path.
-  const episodeId = genEpisodeId(runId, filenameSuffix)
+  // 3. Generate episode_id + path. Caller-supplied episodeId takes precedence
+  //    (slice 2e C4 lockfile-gates-episode protocol — the lockfile content
+  //    must reference the claim episode id atomically, so the id is fixed
+  //    before the episode write).
+  let episodeId
+  if (providedEpisodeId !== undefined && providedEpisodeId !== null) {
+    if (typeof providedEpisodeId !== 'string' || providedEpisodeId === '') {
+      throw new TypeError('writeBp1Episode: episodeId must be a non-empty string when provided')
+    }
+    if (!/^[a-z0-9-]+$/.test(providedEpisodeId)) {
+      throw new TypeError(`writeBp1Episode: episodeId shape invalid: ${JSON.stringify(providedEpisodeId)}`)
+    }
+    episodeId = providedEpisodeId
+  } else {
+    episodeId = genEpisodeId(runId, filenameSuffix)
+  }
   const episodesDir = path.join(projectRoot, '.episodic-memory', 'episodes')
   fs.mkdirSync(episodesDir, { recursive: true })
   const episodePath = path.join(episodesDir, `${episodeId}.md`)
@@ -207,10 +246,12 @@ export function writeBp1Episode(opts) {
   // TYPE_SPECIFIC_CANONICAL_FIELDS (the canonicalize subtype lookup). This
   // keeps the file readable next to the canonical-fields table.
   // Skip 'state' (already written above). Skip generic fields that aren't part
-  // of the type-specific table.
+  // of the type-specific table. Skip 'tags' — written separately AFTER
+  // hmac_signature to preserve the on-disk field-order convention.
   for (const [k, v] of Object.entries(frontmatter)) {
     if (k === 'type' || k === 'run_id' || k === 'parent_episode' ||
-        k === 'expected_post_episode_id' || k === 'summary' || k === 'state') {
+        k === 'expected_post_episode_id' || k === 'summary' || k === 'state' ||
+        k === 'tags') {
       continue
     }
     lines.push(fmLine(k, v))
@@ -218,16 +259,6 @@ export function writeBp1Episode(opts) {
 
   lines.push(`body_sha256: ${payload.body_sha256}`)
   lines.push(`hmac_signature: ${hmacHex}`)
-  // Tags include the type-default plus any caller-supplied additional tags.
-  const allTags = ['bp1-evidence-snapshot']
-  if (tags) {
-    for (const t of tags) {
-      if (typeof t !== 'string' || t === '' || /[,\[\]"'\s]/.test(t)) {
-        throw new TypeError(`writeBp1Episode: tag must be a bare token; got ${JSON.stringify(t)}`)
-      }
-      if (!allTags.includes(t)) allTags.push(t)
-    }
-  }
   lines.push(`tags: [${allTags.join(', ')}]`)
   lines.push('category: workflow.lifecycle')
   lines.push(`date: ${iso.slice(0, 10)}`)

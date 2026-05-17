@@ -180,6 +180,47 @@ export const TYPE_SPECIFIC_CANONICAL_FIELDS = Object.freeze({
     'lock_state_tag',
     'lock_ttl_seconds',
   ]),
+  // Slice 2e C4 — bp1-state-lock release counterpart (RFC §1212). Emitted
+  // when releasing a held state-transition lock. `lock_state_tag` is canonical
+  // so the release is anti-forge-bound to the specific lock state being released.
+  'evidence:bp1-state-lock-release': Object.freeze([
+    'lock_state_tag',
+  ]),
+  // Slice 2e C4 — stale-claim recovery (RFC §1212 TTL break). Emitted when a
+  // state-lock claim has elapsed TTL without a matching release; reclaim
+  // follows. `claim_age_seconds` is pre-stringified so post-emit tampering of
+  // the observed-staleness value invalidates the HMAC.
+  'evidence:bp1-state-lock-stale': Object.freeze([
+    'lock_state_tag',
+    'claim_age_seconds',
+  ]),
+  // Slice 2e C4 — deadline tick per-fire child episode. Note: 'deadline-fired'
+  // is NOT a v2 run-state lifecycle state (excluded from VALID_V2_STATES); it
+  // labels the canonicalize subtype-lookup key only. Per-fire children bind to
+  // the affected run's per-run HMAC key. `deadline_type` (A1|A2) + `fire_action`
+  // are anti-forge so the fire-decision is replay-stable.
+  'state-transition:deadline-fired': Object.freeze([
+    'state',
+    'deadline_type',
+    'fire_action',
+  ]),
+  // Slice 2e C4 — deadline-tick fire failed (e.g. confirm-approval subprocess
+  // exited non-zero on A2 path). `subtype` partitions failure modes for
+  // queryability; `exit_code` is pre-stringified.
+  'failure:deadline-tick-failed': Object.freeze([
+    'failure_kind',
+    'subtype',
+    'exit_code',
+  ]),
+  // Slice 2e C4 — A2 fire raced with concurrent state mutation; run-state
+  // observed at confirm-approval invocation time was not awaiting_approval.
+  // `observed_state` + `expected_state` are anti-forge so the race outcome is
+  // queryable and replay-stable.
+  'failure:deadline-state-mismatch': Object.freeze([
+    'failure_kind',
+    'observed_state',
+    'expected_state',
+  ]),
 })
 
 // ---------------------------------------------------------------------------

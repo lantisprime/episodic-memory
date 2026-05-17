@@ -124,11 +124,44 @@ function checkCanonicalFields(contract, code) {
   const nonTransitionStates = new Set(['active', ...terminalStates])
   const v2States = (contract.run_state_schemas?.v2?.states ?? []).filter(s => !nonTransitionStates.has(s))
   const reverseStateTransitionSet = new Set(v2States.map(s => `state-transition:${s}`))
+  // C7 round-2 P2.1: explicit allowlist of subtypes intentionally NOT mirrored
+  // in contract.json. Prior to this allowlist the validator's skip-by-v2-state
+  // logic silently passed non-v2-keyed transitions (e.g. per-fire children)
+  // and all evidence:* subtypes — future contributors had no signal that the
+  // skip was by design. Drift on these subtypes is caught by the canonical-
+  // fields validator (validate-rfc-canonical-fields.mjs) against RFC prose.
+  const INTENTIONALLY_NOT_MIRRORED = new Set([
+    // Pre-slice-2c historical: state-transition:codex_review was removed from
+    // VALID_V2_STATES (v3.14) and state-transition:run-started has never been
+    // a v2 state — both live in RFC §689-719 prose only.
+    'state-transition:codex_review',
+    'state-transition:run-started',
+    // Slice 2e: per-fire children of bp1-deadline-tick (not v2-gated).
+    'state-transition:deadline-fired',
+    // evidence:* subtypes are operational/non-v2-gated by design; enumerated
+    // for explicitness (matches what bp1-canonicalize.mjs currently declares):
+    'evidence:bp1-codex-request-sent',
+    'evidence:bp1-state-lock-claim',
+    'evidence:bp1-state-lock-release',
+    'evidence:bp1-state-lock-stale',
+  ])
   for (const subtype of Object.keys(code)) {
+    if (INTENTIONALLY_NOT_MIRRORED.has(subtype)) continue
     const isCheckedStateTransition = reverseStateTransitionSet.has(subtype)
     const isFailureSubtype = subtype.startsWith('failure:')
+    const isStateTransition = subtype.startsWith('state-transition:')
+    const isEvidence = subtype.startsWith('evidence:')
     if ((isCheckedStateTransition || isFailureSubtype) && !contract.episode_canonical_fields[subtype]) {
       errors.push(`canonical-fields: code declares subtype "${subtype}" but contract.json missing entry`)
+    }
+    // C7 round-2 P2.1: catch the silent-pass drift class — non-v2-keyed
+    // state-transitions and ALL evidence:* subtypes were previously skipped
+    // implicitly. If a new such subtype appears in code without either a
+    // contract entry OR an INTENTIONALLY_NOT_MIRRORED allowlist entry, fail.
+    if ((isStateTransition && !isCheckedStateTransition) || isEvidence) {
+      if (!contract.episode_canonical_fields[subtype]) {
+        errors.push(`canonical-fields: code declares "${subtype}" but it is neither in contract.json nor in INTENTIONALLY_NOT_MIRRORED; add a contract entry or allowlist with rationale`)
+      }
     }
   }
 }

@@ -219,6 +219,53 @@ tap('CV8 C3 drift: v2 state without matching state-transition:<state> subtype', 
 })
 
 // =============================================================================
+// CV10 (C7 round-2 P2.1): non-allowlisted state-transition/evidence subtype
+// in code without contract entry MUST fail. Catches the "silent skip" drift
+// class that was invisible before the explicit INTENTIONALLY_NOT_MIRRORED
+// allowlist + enforcement check.
+// =============================================================================
+tap('CV10 P2.1: non-v2-keyed state-transition without allowlist/contract → drift error', () => {
+  const repo = mkRepoFixture()
+  // Add a state-transition:* subtype to the code stub that is neither a v2
+  // state nor in the validator's INTENTIONALLY_NOT_MIRRORED allowlist.
+  const canon = fs.readFileSync(path.join(repo, 'scripts', 'lib', 'bp1-canonicalize.mjs'), 'utf8')
+  fs.writeFileSync(path.join(repo, 'scripts', 'lib', 'bp1-canonicalize.mjs'),
+    canon.replace(
+      '})',
+      '  "state-transition:future-experimental-thing": Object.freeze(["state", "experimental_field"]),\n})',
+    ))
+  writeContract(repo, happyContract())  // contract does NOT declare the new subtype
+  const r = run(repo)
+  assert.equal(r.status, 1, `stdout=${r.stdout}`)
+  const out = JSON.parse(r.stdout)
+  assert.ok(out.errors.some(e =>
+    e.includes('state-transition:future-experimental-thing') &&
+    e.includes('INTENTIONALLY_NOT_MIRRORED')
+  ), `expected allowlist drift error; got: ${JSON.stringify(out.errors)}`)
+})
+
+// =============================================================================
+// CV11 (C7 round-2 P2.1): same enforcement for evidence:* subtypes.
+// =============================================================================
+tap('CV11 P2.1: evidence:* subtype without allowlist/contract → drift error', () => {
+  const repo = mkRepoFixture()
+  const canon = fs.readFileSync(path.join(repo, 'scripts', 'lib', 'bp1-canonicalize.mjs'), 'utf8')
+  fs.writeFileSync(path.join(repo, 'scripts', 'lib', 'bp1-canonicalize.mjs'),
+    canon.replace(
+      '})',
+      '  "evidence:bp1-some-new-operational-thing": Object.freeze(["snapshot_sha256"]),\n})',
+    ))
+  writeContract(repo, happyContract())
+  const r = run(repo)
+  assert.equal(r.status, 1)
+  const out = JSON.parse(r.stdout)
+  assert.ok(out.errors.some(e =>
+    e.includes('evidence:bp1-some-new-operational-thing') &&
+    e.includes('INTENTIONALLY_NOT_MIRRORED')
+  ))
+})
+
+// =============================================================================
 // CV9: real-repo sanity — validator runs against the real contract.json
 // (skipped if real orchestrator doesn't yet have new subcommands — task #7)
 // =============================================================================

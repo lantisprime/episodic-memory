@@ -363,6 +363,53 @@ tap('canonicalizeFrontmatterBytes: throws on invalid input type', () => {
   assert.throws(() => canonicalizeFrontmatterBytes(null), /must be Buffer/)
 })
 
+// =============================================================================
+// Slice 2e C4 — new canonicalize types (state-transition:deadline-fired,
+// failure:deadline-state-mismatch, evidence:bp1-state-lock-release/stale).
+// =============================================================================
+tap('C4 tamper deadline_type in state-transition:deadline-fired → verify false', () => {
+  const baseFm = {
+    type: 'state-transition',
+    state: 'deadline-fired',
+    run_id: 'bp1-run-test-deadline-aabbcc',
+    parent_episode: 'parent-tick-ep',
+    expected_post_episode_id: null,
+    summary: 'A2 deadline fired',
+    deadline_type: 'A2',
+    fire_action: 'auto-approved',
+  }
+  const tamperedFm = { ...baseFm, deadline_type: 'A1' }
+  const a = canonicalize(baseFm, 'body')
+  const b = canonicalize(tamperedFm, 'body')
+  const sigA = signCanonical(a.canonicalBytes, KEY)
+  assert.equal(verifyCanonical(b.canonicalBytes, KEY, sigA), false)
+  // Sanity: original verifies and includes the new canonical fields.
+  assert.equal(verifyCanonical(a.canonicalBytes, KEY, sigA), true)
+  assert.equal(a.payload.deadline_type, 'A2')
+  assert.equal(a.payload.fire_action, 'auto-approved')
+})
+
+tap('C4 tamper observed_state in failure:deadline-state-mismatch → verify false', () => {
+  const baseFm = {
+    type: 'failure',
+    failure_kind: 'deadline-state-mismatch',
+    run_id: 'bp1-run-test-mismatch-aabbcc',
+    parent_episode: 'parent-tick-ep',
+    expected_post_episode_id: null,
+    summary: 'A2 fire state mismatch',
+    observed_state: 'auto_approved',
+    expected_state: 'awaiting_approval',
+  }
+  const tamperedFm = { ...baseFm, observed_state: 'awaiting_approval' }
+  const a = canonicalize(baseFm, 'body')
+  const b = canonicalize(tamperedFm, 'body')
+  const sigA = signCanonical(a.canonicalBytes, KEY)
+  assert.equal(verifyCanonical(b.canonicalBytes, KEY, sigA), false)
+  assert.equal(verifyCanonical(a.canonicalBytes, KEY, sigA), true)
+  assert.equal(a.payload.observed_state, 'auto_approved')
+  assert.equal(a.payload.expected_state, 'awaiting_approval')
+})
+
 console.log(`# tests ${pass + fail}`)
 console.log(`# pass  ${pass}`)
 console.log(`# fail  ${fail}`)
