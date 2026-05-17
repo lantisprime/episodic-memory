@@ -57,7 +57,9 @@ import {
 import {
   appendRun, markTerminal, getRunState, loadIndex, updateRunState,
   withRunStateLockExclusive, loadIndexLocked, writeIndex,
+  tryAcquireRunStateLock,
 } from './lib/bp1-run-state.mjs'
+import { evaluateDeadlines, pickFiredDeadlines } from './lib/bp1-deadlines.mjs'
 import {
   findSignedStateEpisode, withLockedRun, removeRunFromIndex,
 } from './lib/bp1-atomic.mjs'
@@ -98,7 +100,8 @@ function usage() {
     '  bp1-orchestrator record-classifier-dispatch-pre --project <projectRoot> --run-id <runId> --input-sha256 <64-hex>\n' +
     '  bp1-orchestrator record-classification --project <projectRoot> --run-id <runId> --pre-episode-id <id> --result-file <abs-path>\n' +
     '  bp1-orchestrator record-awaiting-approval --project <projectRoot> --run-id <runId> --classified-episode-id <id>\n' +
-    '  bp1-orchestrator confirm-approval --project <projectRoot> --run-id <runId> --outcome auto_approved\n',
+    '  bp1-orchestrator confirm-approval --project <projectRoot> --run-id <runId> --outcome auto_approved\n' +
+    '  bp1-orchestrator check-deadlines --project <projectRoot> [--tick-source scheduled-task|fallback-sweep]\n',
   )
 }
 
@@ -115,6 +118,7 @@ const RECOGNIZED_VALUE_FLAGS = new Set([
   '--result-file',
   '--classified-episode-id',
   '--outcome',
+  '--tick-source',
 ])
 const RECOGNIZED_BOOLEAN_FLAGS = new Set([
   '--help',
@@ -125,7 +129,7 @@ function parseArgs(argv) {
   const out = {
     subcommand: null, project: null, rfcId: null, runId: null,
     inputSha256: null, preEpisodeId: null, resultFile: null,
-    classifiedEpisodeId: null, outcome: null,
+    classifiedEpisodeId: null, outcome: null, tickSource: null,
     parseError: null,
   }
   if (argv.length === 0) return out
@@ -140,6 +144,7 @@ function parseArgs(argv) {
     else if (arg === '--result-file') out.resultFile = argv[++i]
     else if (arg === '--classified-episode-id') out.classifiedEpisodeId = argv[++i]
     else if (arg === '--outcome') out.outcome = argv[++i]
+    else if (arg === '--tick-source') out.tickSource = argv[++i]
     else if (arg === '--help' || arg === '-h') {
       usage()
       process.exit(0)
@@ -183,6 +188,7 @@ function flagToField(flag) {
     case '--result-file': return 'resultFile'
     case '--classified-episode-id': return 'classifiedEpisodeId'
     case '--outcome': return 'outcome'
+    case '--tick-source': return 'tickSource'
     default: return null
   }
 }
@@ -2722,6 +2728,325 @@ function confirmApproval(args) {
 }
 
 // ---------------------------------------------------------------------------
+// check-deadlines subcommand (slice 2e C4, RFC §1261-1300 Path A — A2 only)
+// ---------------------------------------------------------------------------
+//
+// A1 retry-tree is OUT OF SCOPE for this slice (deferred to slice 2g per
+// codex round 2 ACCEPT-with-FU). Reasons: A1 requires (a) state-lock
+// primitive (shipped here as bp1-state-lock.mjs, no callers yet),
+// (b) em-review-request BP1 mode with --idempotency-key extension
+// (ISSUE-A), (c) codex_review state in VALID_V2_STATES tied to C6 v3.17
+// contract bump (ISSUE-C). With those three gates, slice 2g consumes
+// the libs shipped in C4 and adds the A1 branch here.
+//
+// A2 path is fully implemented: tick fires when an awaiting_approval run's
+// persisted deadline_at < now, and the tick spawns confirm-approval to
+// transition the run to auto_approved. Per-fire children are signed under
+// the affected run's per-run HMAC key; the parent tick is unsigned (per
+// RFC §1280 — the tick writer has no per-run authority because it spans
+// all runs).
+
+function resolveCheckDeadlinesProjectRoot(projectArg) {
+  if (typeof projectArg !== 'string' || !projectArg) return null
+  let abs
+  try { abs = fs.realpathSync(projectArg) } catch (_e) { return null }
+  let toplevel = null
+  try {
+    toplevel = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: abs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch (_e) {
+    // Non-git project — fall back to realpath result (caller may still
+    // operate on a non-git dir; flag-check will inert appropriately).
+    return abs
+  }
+  if (!toplevel) return abs
+  try { return fs.realpathSync(toplevel) } catch (_e) { return abs }
+}
+
+function writeUnsignedDeadlineTick({ projectRoot, tickId, body, frontmatterFields }) {
+  const episodesDir = path.join(projectRoot, '.episodic-memory', 'episodes')
+  fs.mkdirSync(episodesDir, { recursive: true })
+  const target = path.join(episodesDir, `${tickId}.md`)
+  const iso = new Date().toISOString()
+  const fmLines = ['---']
+  fmLines.push(`id: "${tickId}"`)
+  fmLines.push('type: evidence')
+  fmLines.push('parent_episode: null')
+  fmLines.push(`summary: ${JSON.stringify(`bp1-deadline-tick ${tickId}`)}`)
+  for (const [k, v] of Object.entries(frontmatterFields)) {
+    if (typeof v === 'boolean' || v === null) fmLines.push(`${k}: ${v}`)
+    else if (typeof v === 'number') fmLines.push(`${k}: "${v}"`)
+    else fmLines.push(`${k}: ${JSON.stringify(String(v))}`)
+  }
+  fmLines.push('tags: [bp1-deadline-tick]')
+  fmLines.push('category: workflow.lifecycle')
+  fmLines.push(`date: ${iso.slice(0, 10)}`)
+  fmLines.push(`time: "${iso.slice(11, 16)}"`)
+  fmLines.push(`project: ${JSON.stringify(path.basename(projectRoot) || 'unknown')}`)
+  fmLines.push('---')
+  fmLines.push('')
+  const text = fmLines.join('\n') + (body ?? '')
+  const tmp = `${target}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
+  const fd = fs.openSync(tmp, 'wx', 0o600)
+  try {
+    fs.writeFileSync(fd, text)
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
+  try { fs.renameSync(tmp, target) }
+  catch (e) { try { fs.unlinkSync(tmp) } catch (_e) {} ; throw e }
+  return target
+}
+
+function writeUnsignedLockBusyEvidence({ projectRoot, parentTickId, holderPid, ageMs }) {
+  const episodeId = `bp1-lock-busy-${parentTickId}`
+  return writeUnsignedDeadlineTick({
+    projectRoot, tickId: episodeId,
+    body: `Lock-busy at parent tick ${parentTickId}.\nholder_pid: ${holderPid}\nholder_age_ms: ${ageMs}\n`,
+    frontmatterFields: {
+      tick_parent: parentTickId,
+      holder_pid: holderPid == null ? null : String(holderPid),
+      holder_age_ms: ageMs == null ? null : String(ageMs),
+    },
+  })
+}
+
+function emitDeadlineFiredChild({ projectRoot, runId, runKey32B, parentTickId, deadlineType, fireAction, deadlineAt }) {
+  return writeBp1Episode({
+    projectRoot, runId, runKey32B,
+    type: 'state-transition', state: 'deadline-fired',
+    summary: `${deadlineType} deadline fired for ${runId} (${fireAction})`,
+    parentEpisode: parentTickId,
+    expectedPostEpisodeId: null,
+    customFm: {
+      deadline_type: deadlineType,
+      fire_action: fireAction,
+      deadline_at: deadlineAt ?? 'null',
+    },
+    tags: ['bp1-deadline-fired'],
+    body: `${deadlineType} deadline fired on run ${runId}.\nAction: ${fireAction}.\nDeadline: ${deadlineAt ?? 'null'}.\n`,
+    filenameSuffix: 'deadline-fired',
+  })
+}
+
+function emitDeadlineFailureChild({ projectRoot, runId, runKey32B, parentTickId, kind, fields, body }) {
+  return writeBp1Episode({
+    projectRoot, runId, runKey32B,
+    type: 'failure', state: null,
+    summary: `${kind} for ${runId}`,
+    parentEpisode: parentTickId,
+    expectedPostEpisodeId: null,
+    customFm: { failure_kind: kind, ...fields },
+    tags: [kind === 'deadline-state-mismatch' ? 'bp1-deadline-state-mismatch' : 'bp1-deadline-tick-failed'],
+    body,
+    filenameSuffix: kind === 'deadline-state-mismatch' ? 'deadline-state-mismatch' : 'deadline-tick-failed',
+  })
+}
+
+function fireA2({ projectRoot, runId, deadlineAt, parentTickId }) {
+  // Load per-run key to sign children. Missing key → emit unsigned-equivalent
+  // failure via tick stderr (we still skip the per-run signed children but
+  // count the fire as a failure).
+  const keyResult = loadRunKey(projectRoot, runId)
+  if (keyResult.error) {
+    process.stderr.write(`error: a2-fire run.key ${keyResult.error} for ${runId}\n`)
+    return { run_id: runId, type: 'A2', status: 'no-key', error: keyResult.error }
+  }
+  const runKey32B = keyResult.key32B
+
+  // Spawn confirm-approval with cwd = projectRoot.
+  const ORCH_SELF = new URL(import.meta.url).pathname
+  const child = spawnSync('node', [
+    ORCH_SELF, 'confirm-approval',
+    '--project', projectRoot,
+    '--run-id', runId,
+    '--outcome', 'auto_approved',
+  ], { cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() } })
+
+  if (child.status === 0) {
+    // Parse stdout for already_terminal flag (FU2 success-vs-mismatch split).
+    let alreadyTerminal = false
+    try {
+      const parsed = JSON.parse((child.stdout || '').trim().split('\n').pop() || '{}')
+      alreadyTerminal = !!parsed.already_terminal
+    } catch (_e) { /* default false */ }
+    const fireAction = alreadyTerminal ? 'auto-approved-idempotent' : 'auto-approved'
+    const res = emitDeadlineFiredChild({
+      projectRoot, runId, runKey32B, parentTickId,
+      deadlineType: 'A2', fireAction, deadlineAt,
+    })
+    return { run_id: runId, type: 'A2', status: 'fired', already_terminal: alreadyTerminal, episode_id: res.episodeId }
+  }
+
+  // Non-zero exit. Distinguish state-mismatch (stderr contains "state-violation"
+  // with current state != awaiting_approval) from other tick failures.
+  const stderr = String(child.stderr || '')
+  if (child.status === 5 && /state-violation/.test(stderr)) {
+    // Try to extract observed state from stderr. Format:
+    //   `error: state-violation: run.state="<observed>" expected=awaiting_approval`
+    const m = stderr.match(/run\.state=("[^"]+"|\S+)\s+expected=([\w_-]+)/)
+    const observed = m ? m[1].replace(/^"|"$/g, '') : 'unknown'
+    const expected = m ? m[2] : 'awaiting_approval'
+    const res = emitDeadlineFailureChild({
+      projectRoot, runId, runKey32B, parentTickId,
+      kind: 'deadline-state-mismatch',
+      fields: { observed_state: observed, expected_state: expected },
+      body: `A2 fire raced concurrent mutator on ${runId}.\nObserved: ${observed}\nExpected: ${expected}\nstderr_truncated_512B: ${stderr.slice(0, 512)}\n`,
+    })
+    return { run_id: runId, type: 'A2', status: 'state-mismatch', observed_state: observed, episode_id: res.episodeId }
+  }
+
+  const res = emitDeadlineFailureChild({
+    projectRoot, runId, runKey32B, parentTickId,
+    kind: 'deadline-tick-failed',
+    fields: {
+      subtype: 'a2-confirm-approval-failed',
+      exit_code: String(child.status ?? 'null'),
+    },
+    body: `A2 fire confirm-approval subprocess failed on ${runId}.\nexit_code: ${child.status}\nstderr_truncated_512B: ${stderr.slice(0, 512)}\n`,
+  })
+  return { run_id: runId, type: 'A2', status: 'failed', exit_code: child.status, episode_id: res.episodeId }
+}
+
+function checkDeadlines(args) {
+  const projectRoot = resolveCheckDeadlinesProjectRoot(args.project)
+  if (!projectRoot) {
+    process.stderr.write(`error: --project required + must be an existing directory\n`)
+    return 2
+  }
+  const tickSource = args.tickSource ?? 'scheduled-task'
+  if (tickSource !== 'scheduled-task' && tickSource !== 'fallback-sweep') {
+    process.stderr.write(`error: invalid --tick-source: ${tickSource}\n`)
+    return 2
+  }
+
+  const tickId = `bp1-deadline-tick-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`
+
+  // Step 2: flag-check --no-emit. Non-zero (inert/disabled) → emit tick
+  // with activation=disabled, exit 0.
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, HOME: os.homedir() },
+  })
+  if (flagCheck.status !== 0) {
+    writeUnsignedDeadlineTick({
+      projectRoot, tickId,
+      body: `bp1-deadline-tick activation=disabled (flag-check exit ${flagCheck.status})\n`,
+      frontmatterFields: {
+        tick_source: tickSource,
+        activation: 'disabled',
+        lock_busy: false,
+        runs_inspected: '0',
+        fired_count: '0',
+        fired_a1: '0',
+        fired_a2: '0',
+      },
+    })
+    process.stdout.write(JSON.stringify({
+      status: 'ok', tick_id: tickId, tick_source: tickSource,
+      activation: 'disabled', lock_busy: false,
+      runs_inspected: 0, fired_count: 0, fired_a1: 0, fired_a2: 0,
+    }) + '\n')
+    return 0
+  }
+
+  // Step 3: non-blocking run-state lock. Busy → emit bp1-lock-busy
+  // evidence + tick lock_busy=true, exit 0.
+  const lockResult = tryAcquireRunStateLock(projectRoot)
+  if (!lockResult.acquired) {
+    writeUnsignedLockBusyEvidence({
+      projectRoot, parentTickId: tickId,
+      holderPid: lockResult.holder_pid, ageMs: lockResult.age_ms,
+    })
+    writeUnsignedDeadlineTick({
+      projectRoot, tickId,
+      body: `bp1-deadline-tick lock_busy=true (run-state index held)\n`,
+      frontmatterFields: {
+        tick_source: tickSource,
+        activation: 'enabled',
+        lock_busy: true,
+        runs_inspected: '0',
+        fired_count: '0',
+        fired_a1: '0',
+        fired_a2: '0',
+        holder_pid: lockResult.holder_pid == null ? null : String(lockResult.holder_pid),
+        holder_age_ms: lockResult.age_ms == null ? null : String(lockResult.age_ms),
+      },
+    })
+    process.stdout.write(JSON.stringify({
+      status: 'ok', tick_id: tickId, tick_source: tickSource,
+      activation: 'enabled', lock_busy: true,
+      runs_inspected: 0, fired_count: 0, fired_a1: 0, fired_a2: 0,
+      holder_pid: lockResult.holder_pid, holder_age_ms: lockResult.age_ms,
+    }) + '\n')
+    return 0
+  }
+
+  // Steps 4-7: under lock — load index, evaluate deadlines, release.
+  // runEntryDataMap is intentionally empty: A1 codepath is slice 2g, and
+  // VALID_V2_STATES currently excludes codex_review so evaluateDeadlines
+  // never produces A1 firings from this index.
+  let runsInspected = 0
+  let firings = []
+  try {
+    const idx = loadIndexLocked(projectRoot)
+    const runs = idx?.runs ?? {}
+    runsInspected = Object.keys(runs).length
+    const evaluated = evaluateDeadlines(runs, {}, Date.now())
+    firings = pickFiredDeadlines(evaluated)
+  } finally {
+    lockResult.release()
+  }
+
+  // Step 8: per-fire actions (lock released — confirm-approval subprocess
+  // re-acquires its own run-level lock via withLockedRun).
+  let firedA2 = 0
+  const childResults = []
+  for (const fire of firings) {
+    if (fire.type !== 'A2') {
+      // A1 deferred to slice 2g. Forward-ready emit so future replay sees
+      // the skip; no signed child to emit yet (no per-run authority binding
+      // for the A1 retry-tree until slice 2g lands).
+      childResults.push({ run_id: fire.run_id, type: fire.type, status: 'skipped', reason: 'a1-deferred-to-slice-2g' })
+      continue
+    }
+    const r = fireA2({
+      projectRoot, runId: fire.run_id, deadlineAt: fire.deadline_at, parentTickId: tickId,
+    })
+    childResults.push(r)
+    if (r.status === 'fired') firedA2++
+  }
+
+  // Step 9: parent tick (unsigned).
+  writeUnsignedDeadlineTick({
+    projectRoot, tickId,
+    body: `bp1-deadline-tick activation=enabled fired_a2=${firedA2}/${firings.length} runs_inspected=${runsInspected}\n`,
+    frontmatterFields: {
+      tick_source: tickSource,
+      activation: 'enabled',
+      lock_busy: false,
+      runs_inspected: String(runsInspected),
+      fired_count: String(firedA2),
+      fired_a1: '0',
+      fired_a2: String(firedA2),
+    },
+  })
+
+  // Step 10: JSON to stdout.
+  process.stdout.write(JSON.stringify({
+    status: 'ok', tick_id: tickId, tick_source: tickSource,
+    activation: 'enabled', lock_busy: false,
+    runs_inspected: runsInspected,
+    fired_count: firedA2,
+    fired_a1: 0,
+    fired_a2: firedA2,
+    children: childResults,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -2758,6 +3083,9 @@ switch (args.subcommand) {
     break
   case 'confirm-approval':
     exitCode = confirmApproval(args)
+    break
+  case 'check-deadlines':
+    exitCode = checkDeadlines(args)
     break
   case null:
   case undefined:
