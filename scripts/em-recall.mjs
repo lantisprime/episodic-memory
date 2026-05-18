@@ -624,34 +624,40 @@ allEntries = allEntries.filter(e => {
 const activeEntries = allEntries.filter(e => e.status !== 'superseded')
 
 // ---------------------------------------------------------------------------
-// SessionStart orphan-clear (#146 P1-2 + P1-3). MUST run BEFORE arming so
-// a freshly armed .checkpoint-required isn't a cleanup candidate.
+// SessionStart legacy-plan-marker sweep (PR #314). Runs BEFORE bp-001 arm
+// to keep the plan-approval lifecycle deterministic on fresh SessionStart.
 //
-// Dual-root sweep (.checkpoints/ migration): for every TASK_SIGNAL_MARKERS
-// member at EITHER root that exists with mtime <= prior baseline: rm at
-// THAT root (don't touch the other side; iterate independently).
-//
-// priorBaselineMtime is the MAX of primary and legacy baseline mtimes
-// (whichever is most recent). If neither baseline exists (first session
-// ever after migration), skipped entirely.
+// Scope reduction (2026-05-18 orphan-deadlock fix): only the unconditional
+// legacy-suffix-less `.plan-approval-pending` basename is swept here.
+// Checkpoint markers (`.checkpoint-required`, `.post-checkpoint-required`)
+// are no longer baseline-mtime-swept — the M5 retime-and-rearm contract
+// (force-monotonic baseline below) unblocks Stop while preserving the
+// writer-gate for any concurrent live session.
 //
 // Symlinks ignored (lstat-based; threat-model: honest-agent only).
 // ---------------------------------------------------------------------------
-let priorBaselineMtime = null
 if (sessionStartFlag) {
   try {
     ensurePrimaryDir(REPO_ROOT)
 
     // ---------------------------------------------------------------------
-    // Unconditional legacy-suffix-less plan-marker sweep (post-2026-05-18
-    // deadlock fix; codex R1 P1.4 + R2 P1). Runs OUTSIDE the
-    // priorBaselineMtime guard below so first-ever SessionStart on a fresh
-    // clone (no prior baseline) still reaps any pre-existing legacy orphan.
-    // Suffixed forms `.plan-approval-pending.<sid>` are NEVER swept here —
-    // SessionEnd hook (em-session-end-prompt.mjs, registry E21) owns
-    // own-session cleanup; cross-session crashed-orphan cleanup is the
-    // operator-cleanup FU. legacy-read-only: ok (this site only sweeps the
-    // legacy basename; never writes it).
+    // Unconditional legacy-suffix-less plan-marker sweep (PR #314 contract).
+    // Runs unconditionally so first-ever SessionStart on a fresh clone still
+    // reaps any pre-existing legacy orphan. Suffixed forms
+    // `.plan-approval-pending.<sid>` are NEVER swept here — SessionEnd hook
+    // (em-session-end-prompt.mjs, registry E21) owns own-session cleanup;
+    // cross-session crashed-orphan cleanup is the operator-cleanup FU.
+    // legacy-read-only: ok (this site only sweeps the legacy basename;
+    // never writes it).
+    //
+    // Checkpoint markers (`.checkpoint-required`, `.post-checkpoint-required`)
+    // are NOT swept here. Codex R2/R3 P1: the prior baseline-mtime-keyed
+    // sweep created a transient rm→rearm window where a concurrent writer
+    // could pass `checkpoint-gate.sh:541` between sweep and
+    // `armCheckpointMarker`. The M5 retime-and-rearm contract (force-
+    // monotonic baseline below) instead unblocks Stop via baseline mtime
+    // refresh while preserving the writer-gate for any concurrent live
+    // session.
     // ---------------------------------------------------------------------
     for (const dir of [path.join(REPO_ROOT, PRIMARY_MARKER_DIR), path.join(REPO_ROOT, LEGACY_MARKER_DIR)]) {
       const p = path.join(dir, PLAN_MARKER_LEGACY_BASENAME)
@@ -665,42 +671,9 @@ if (sessionStartFlag) {
       }
     }
 
-    // Read baseline mtime from BOTH roots; take the most recent.
-    for (const baselinePath of [primaryMarkerPath(REPO_ROOT, BASELINE_NAME), legacyMarkerPath(REPO_ROOT, BASELINE_NAME)]) {
-      try {
-        const st = fs.lstatSync(baselinePath)
-        if (st.isSymbolicLink()) continue
-        if (priorBaselineMtime === null || st.mtimeMs > priorBaselineMtime) {
-          priorBaselineMtime = st.mtimeMs
-        }
-      } catch {}
-    }
-
-    if (priorBaselineMtime !== null) {
-      for (const name of TASK_SIGNAL_MARKERS) {
-        // Plan-marker class is handled exclusively by the unconditional
-        // legacy-suffix-less sweep above + em-session-end-prompt.mjs for
-        // own-session cleanup. Suffixed forms `.plan-approval-pending.<sid>`
-        // are NEVER swept by SessionStart — any baseline-mtime-based sweep
-        // can false-sweep a still-live session whose marker mtime > baseline
-        // (codex R2 P1: repeated SessionStart/resume rewrites baseline,
-        // then next SessionStart sees marker.mtime <= newer baseline and
-        // would remove it while session is still at plan approval).
-        if (name === PLAN_MARKER_LEGACY_BASENAME) continue
-        for (const p of bothMarkerPaths(REPO_ROOT, name)) {
-          try {
-            const st = fs.lstatSync(p)
-            if (st.isSymbolicLink()) continue
-            if (st.mtimeMs <= priorBaselineMtime) {
-              fs.rmSync(p, { force: true })
-            }
-          } catch {}
-        }
-      }
-    }
   } catch {
-    // Best-effort: a failure here leaves carve-out inactive (fall back to
-    // original blocking behavior).
+    // Best-effort: a failure here leaves the legacy-plan-marker sweep
+    // inactive; SessionEnd hook still owns own-session cleanup.
   }
 }
 
@@ -719,26 +692,64 @@ if (shouldArmBp001Checkpoint(activeEntries, new Date())) {
 }
 
 // ---------------------------------------------------------------------------
-// SessionStart baseline write (#146 A2). Runs AFTER the arming block above
-// so a fresh `.checkpoint-required` armed for this session has mtime <=
-// baseline mtime (carve-out treats it as "armed at session start").
+// SessionStart baseline write — M5 retime-and-rearm (#146 A2 + 2026-05-18
+// orphan-deadlock fix). Runs AFTER the arming block above.
+//
+// Force-monotonic semantics (codex R3/R4): baseline.mtime is set to
+//   max(Date.now(), ceil(max(CR.mtime, PostR.mtime)) + 1)
+// so the carve-out invariant `marker.mtime <= baseline.mtime` holds for
+// every checkpoint marker OBSERVED during the SessionStart probe loop,
+// regardless of whether it was armed by this session or left by a prior
+// crashed session. Residual liveness edge (codex code-review R1 FU): a
+// marker armed AFTER the probe but BEFORE `fs.utimesSync` is not retimed
+// — but it fails CLOSED (stop-gate conservatively blocks when
+// marker.mtime > baseline.mtime), so it is a residual orphan-deadlock
+// edge, not a safety hole. The next SessionStart resolves it.
+//
+// Why force-monotonic instead of `Date.now()/1000`:
+//   - APFS / ext4 preserve sub-ms file mtime (ns-precision).
+//   - `Date.now()` is ms-truncated; `fs.writeFileSync` writes with kernel
+//     ns precision. A marker armed at sub-ms past `Date.now()`'s tick can
+//     land with mtime > baseline.mtime → carve-out inverts → orphan stop-
+//     gate deadlock. This is the empirical bug observed 2026-05-18.
+//   - `+1` (ms unit) guarantees ordering on APFS/ext4/NTFS (sub-second).
+//
+// Concurrent-session-safety (codex R2/R3): no rm of CR/PostR — Session A's
+// live marker is preserved across Session B SessionStart; writer-gate
+// remains active for both. Stop is unblocked because B's baseline now
+// dominates A's marker mtime.
 //
 // .checkpoints/ migration: baseline written at PRIMARY only. Carve-out
-// reader takes the MAX of primary + legacy baseline mtimes, so a stale
-// .claude/.session-baseline with newer mtime would still be honored
-// (defensive). Once burn-in completes and fallback drops, only primary
-// is read.
-//
-// fs.utimesSync forces baseline mtime to Date.now() — guarantees ordering
-// against the arm above regardless of filesystem mtime resolution (P2-1).
+// reader takes the MAX of primary + legacy baseline mtimes (defensive).
 // ---------------------------------------------------------------------------
 if (sessionStartFlag) {
   try {
     ensurePrimaryDir(REPO_ROOT)
+
+    // Probe checkpoint marker mtimes across BOTH roots (dual-root burn-in).
+    // Plan-marker excluded — PR #314 contract handles plan-approval lifecycle.
+    let maxCheckpointMarkerMs = 0
+    for (const name of ['.checkpoint-required', '.post-checkpoint-required']) {
+      for (const p of bothMarkerPaths(REPO_ROOT, name)) {
+        try {
+          const st = fs.lstatSync(p)
+          if (st.isSymbolicLink()) continue
+          if (st.mtimeMs > maxCheckpointMarkerMs) {
+            maxCheckpointMarkerMs = st.mtimeMs
+          }
+        } catch (e) {
+          if (e.code !== 'ENOENT') {
+            process.stderr.write(`em-recall: baseline-monotonic-probe skipped ${p}: ${e.code || e.message}\n`)
+          }
+        }
+      }
+    }
+
     const baseline = writeMarkerPath(REPO_ROOT, BASELINE_NAME)
     fs.writeFileSync(baseline, '')
-    const now = Date.now() / 1000
-    fs.utimesSync(baseline, now, now)
+    const baselineTargetMs = Math.max(Date.now(), Math.ceil(maxCheckpointMarkerMs) + 1)
+    const baselineTargetSec = baselineTargetMs / 1000
+    fs.utimesSync(baseline, baselineTargetSec, baselineTargetSec)
   } catch {
     // Best-effort: baseline write failure leaves carve-out inactive for
     // this session (gate falls back to original behavior — original

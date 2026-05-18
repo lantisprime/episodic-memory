@@ -314,8 +314,9 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
 }
 
 // 2.5b NEW: first-ever run with leftover LEGACY plan-pending is ALWAYS swept.
-// Codex R1 P1.4: the unconditional sweep runs OUTSIDE the priorBaselineMtime
-// guard, so legacy is reaped even when no prior baseline exists.
+// Codex R1 P1.4 + 2026-05-18 orphan-deadlock fix: the unconditional legacy
+// plan-marker sweep runs regardless of baseline state, so legacy is reaped
+// even when no prior baseline exists.
 {
   const d = mkRepo('2-5b'); cleanupDirs.push(d)
   const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
@@ -343,24 +344,38 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
   setMtime(baseline, Date.now() - 60_000)
   const baselineM = fs.statSync(baseline).mtimeMs
   // Plant all 3 markers older than baseline
-  const markers = [
-    '.checkpoint-required',
-    '.post-checkpoint-required',
-    '.plan-approval-pending'
-  ].map(m => path.join(d, '.checkpoints', m))
-  for (const m of markers) {
+  const planLegacy = path.join(d, '.checkpoints', '.plan-approval-pending')
+  const checkReq = path.join(d, '.checkpoints', '.checkpoint-required')
+  const postReq = path.join(d, '.checkpoints', '.post-checkpoint-required')
+  for (const m of [planLegacy, checkReq, postReq]) {
     fs.writeFileSync(m, '')
     setMtime(m, baselineM - 5_000)
   }
   runSessionStart(d)
-  // Defensive: confirm the markers we just planted existed at the moment
-  // we recorded their mtimes (per feedback_test_resource_existence_check.md).
-  // This isn't quite the canonical pattern (cleanup happened between plant
-  // and check), so we instead rely on the pre-cleanup writes succeeding.
-  const cleared = markers.map(m => !fs.existsSync(m))
-  if (cleared.every(Boolean)) ok('3.1: SessionStart clears all 3 stale task-signal markers (P1-2)')
-  else bad('3.1: same-class clear incomplete',
-    markers.map((m, i) => `${path.basename(m)}=${cleared[i] ? 'cleared' : 'PRESENT'}`).join(' '))
+  // Post-2026-05-18 contract (codex R3 P1):
+  //   - Legacy plan-marker SWEPT (PR #314 unchanged).
+  //   - Checkpoint markers PRESERVED (M5 retime contract — Stop unblocked
+  //     via baseline mtime refresh, writer-gate intact for concurrent live
+  //     sessions). Replaces prior baseline-mtime-keyed sweep that created
+  //     a rm→rearm transient unarmed window (codex R2 P1).
+  const legacyCleared = !fs.existsSync(planLegacy)
+  const crPreserved = fs.existsSync(checkReq)
+  const postRPreserved = fs.existsSync(postReq)
+  if (legacyCleared && crPreserved && postRPreserved) {
+    ok('3.1: SessionStart sweeps legacy plan-marker; preserves CR/PostR (M5 retime)')
+  } else {
+    bad('3.1: M5 retime contract violated',
+      `planLegacy_cleared=${legacyCleared} CR_preserved=${crPreserved} PostR_preserved=${postRPreserved}`)
+  }
+  // Carve-out invariant: new baseline.mtime > preserved-marker mtimes.
+  const newBaselineMs = fs.lstatSync(baseline).mtimeMs
+  const crMs = fs.lstatSync(checkReq).mtimeMs
+  const postRMs = fs.lstatSync(postReq).mtimeMs
+  if (newBaselineMs >= crMs && newBaselineMs >= postRMs) {
+    ok('3.1 (carve-out): baseline.mtime dominates preserved markers (Stop unblocked)')
+  } else {
+    bad('3.1 carve-out invariant', `baseline=${newBaselineMs} CR=${crMs} PostR=${postRMs}`)
+  }
 }
 
 // 3.2 SessionStart preserves in-flight NON-plan-marker class members.
@@ -608,24 +623,26 @@ function runHook(hookPath, inputJson, cwd, home) {
   if (fs.existsSync(postReq)) ok('4.1c (defensive): postReq still present at decision time')
   else bad('4.1c defensive', 'postReq disappeared')
 
-  // (d) Next SessionStart — roll baseline back FIRST, then set postReq
-  // mtime even further back. Cleanup-loop reads PRIOR baseline (= rolled-
-  // back value) and rms postReq if its mtime <= prior baseline. Order
-  // matters: setMtime(postReq) must use a value strictly less than the
-  // ROLLED baseline, not the original baseline.
+  // (d) Next SessionStart — post-2026-05-18 fix (codex R3 P1): SessionStart
+  // does NOT sweep .post-checkpoint-required; it advances baseline so the
+  // carve-out invariant holds. postReq is PRESERVED but Stop becomes
+  // unblocked because new baseline.mtime > postReq.mtime.
   const rolledBaseline = Date.now() - 60_000
   setMtime(baseline, rolledBaseline)
   const rolledBaselineM = fs.statSync(baseline).mtimeMs
   setMtime(postReq, rolledBaselineM - 5_000) // strictly older than rolled baseline
   const startR2 = runHook(SESSIONSTART_HOOK, startInput, d, home)
-  if (startR2.status === 0 && !fs.existsSync(postReq)) {
-    ok('4.1d: next SessionStart clears stale postReq')
+  if (startR2.status === 0 && fs.existsSync(postReq)) {
+    ok('4.1d: SessionStart PRESERVES postReq (M5 retime contract)')
   } else {
-    bad('4.1d: stale postReq not cleared', `status=${startR2.status} postReq_exists=${fs.existsSync(postReq)}`)
+    bad('4.1d: postReq should be preserved', `status=${startR2.status} postReq_exists=${fs.existsSync(postReq)}`)
   }
   const newBaselineM = fs.statSync(baseline).mtimeMs
+  const postReqM = fs.statSync(postReq).mtimeMs
   if (newBaselineM > rolledBaselineM) ok('4.1d (defensive): baseline mtime strictly advanced')
   else bad('4.1d defensive', `baseline did not advance: rolled=${rolledBaselineM} new=${newBaselineM}`)
+  if (newBaselineM >= postReqM) ok('4.1d (carve-out): new baseline.mtime dominates postReq.mtime')
+  else bad('4.1d carve-out', `baseline=${newBaselineM} < postReq=${postReqM}`)
 }
 
 // 4.2 Checkpoint-gate B1 absolute-path emission via real hook.
