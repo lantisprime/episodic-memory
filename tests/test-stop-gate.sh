@@ -352,6 +352,80 @@ else
 fi
 
 # ============================================================================
+# Layer 4 — M5 retime-and-rearm contract (2026-05-18 orphan-deadlock fix)
+#
+# After SessionStart force-monotonic baseline, the stop-gate carve-out
+# invariant `marker.mtime <= baseline.mtime` holds for ANY pre-existing
+# checkpoint marker:
+#   E1  Stop is ALLOWED (carve-out fires).
+#   E2  The writer-gate (checkpoint-gate.sh) still BLOCKS writes because
+#       the marker file is still present on disk — preserving safety for
+#       concurrent live sessions while unblocking Stop for crashed-session
+#       orphans.
+#
+# Together E1+E2 prove the M5 trade-off: Stop unblocked, writer-gate intact.
+# ============================================================================
+echo ""
+echo "=== Layer 4: M5 retime-and-rearm contract ==="
+
+L4_HOME="$TMP_ROOT/L4_HOME"
+L4_REPO="$TMP_ROOT/L4_REPO"
+mk_fake_home "$L4_HOME"
+mk_repo "$L4_REPO"
+mkdir -p "$L4_REPO/.checkpoints" "$L4_REPO/.claude"
+
+# Plant an orphan .checkpoint-required from a notional prior crashed session.
+touch "$L4_REPO/.checkpoints/.checkpoint-required"
+# Force its mtime to 1 hour in the past so it's clearly "stale".
+PAST_TS=$(($(date +%s) - 3600))
+touch -t "$(date -r $PAST_TS '+%Y%m%d%H%M.%S')" "$L4_REPO/.checkpoints/.checkpoint-required" 2>/dev/null || \
+  touch -d "@$PAST_TS" "$L4_REPO/.checkpoints/.checkpoint-required"
+
+# Fire SessionStart on the repo (force-monotonic baseline writes).
+( cd "$L4_REPO" && HOME="$L4_HOME" node "$EM_RECALL" --session-start --limit 1 >/dev/null 2>&1 ) || true
+
+# Marker MUST be preserved (M5 contract: no rm of CR/PostR).
+if [ -e "$L4_REPO/.checkpoints/.checkpoint-required" ]; then
+  pass "L4 setup: pre-existing CR preserved across SessionStart (M5 retime)"
+else
+  fail "L4 setup: pre-existing CR was swept" "expected M5 retime contract"
+fi
+
+# E1: Stop is ALLOWED — carve-out fires because baseline.mtime > marker.mtime.
+input_e1="{\"stop_hook_active\":false,\"cwd\":\"$L4_REPO\"}"
+out_e1="$(echo "$input_e1" | HOME="$L4_HOME" bash "$HOOK" 2>/dev/null)"
+if [ -z "$out_e1" ]; then
+  pass "E1: Stop ALLOWED after force-monotonic baseline (carve-out invariant)"
+else
+  fail "E1: Stop should be allowed" "got: $out_e1 (expected empty)"
+fi
+
+# E2: Writer-gate BLOCKS various tool surfaces — marker is on disk.
+CHECKPOINT_HOOK="$REPO_ROOT/hooks/checkpoint-gate.sh"
+if [ ! -x "$CHECKPOINT_HOOK" ]; then
+  echo "  (skip E2: checkpoint-gate.sh not executable)"
+else
+  for tool in Write Edit MultiEdit NotebookEdit; do
+    input_e2="{\"cwd\":\"$L4_REPO\",\"tool_name\":\"$tool\",\"tool_input\":{\"file_path\":\"$L4_REPO/x.txt\",\"content\":\"x\"}}"
+    out_e2="$(echo "$input_e2" | HOME="$L4_HOME" bash "$CHECKPOINT_HOOK" 2>/dev/null || true)"
+    if echo "$out_e2" | grep -qiE 'block|checkpoint required|pre-checkpoint'; then
+      pass "E2 ($tool): writer-gate BLOCKS — marker still on disk"
+    else
+      fail "E2 ($tool): writer-gate should block" "got: $out_e2"
+    fi
+  done
+
+  # Bash write-class (e.g., redirect via tee). The checkpoint-gate may also gate
+  # Bash; treat block-or-allow as acceptable but not silently broken — the key
+  # invariant is the marker is on disk.
+  if [ -e "$L4_REPO/.checkpoints/.checkpoint-required" ]; then
+    pass "E2 (disk-state): .checkpoint-required present after gate dispatches"
+  else
+    fail "E2 (disk-state): .checkpoint-required vanished mid-test" "M5 contract broken"
+  fi
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

@@ -180,24 +180,27 @@ test('primary baseline newer than legacy markers → carve-out applies (no block
   }
 })
 
-console.log('\nSessionStart orphan-clear sweeps BOTH roots:')
+console.log('\nSessionStart sweep policy (post-2026-05-18 orphan-deadlock fix):')
 
-test('removes stale legacy + primary markers below prior baseline', () => {
+test('legacy plan-marker swept; checkpoint markers PRESERVED (M5 retime contract)', () => {
+  // Post-2026-05-18 contract (codex R3 P1): SessionStart sweeps ONLY the
+  // unconditional legacy-suffix-less `.plan-approval-pending`. Checkpoint
+  // markers (.checkpoint-required, .post-checkpoint-required) are PRESERVED
+  // — the M5 retime-and-rearm contract advances the baseline so Stop is
+  // unblocked while the writer-gate stays armed for concurrent live sessions.
   const root = setupRepo()
-  // Seed an OLD baseline at primary (sets priorBaselineMtime).
   fs.mkdirSync(path.join(root, '.checkpoints'), { recursive: true })
   const baseline = path.join(root, '.checkpoints', '.session-baseline')
   fs.writeFileSync(baseline, '')
   const past = (Date.now() - 60000) / 1000
   fs.utimesSync(baseline, past, past)
 
-  // Stale markers at BOTH roots, mtime older than baseline → should be cleared.
   for (const dir of ['.checkpoints', '.claude']) {
     fs.mkdirSync(path.join(root, dir), { recursive: true })
     for (const name of ['.checkpoint-required', '.post-checkpoint-required', '.plan-approval-pending']) {
       const p = path.join(root, dir, name)
       fs.writeFileSync(p, '')
-      const older = past - 10  // 10s older than baseline
+      const older = past - 10
       fs.utimesSync(p, older, older)
       assertExists(p, 'pre-condition: stale marker exists')
     }
@@ -205,14 +208,26 @@ test('removes stale legacy + primary markers below prior baseline', () => {
 
   sessionStart(root)
 
-  // After SessionStart: orphan-clear should have removed all stale markers
-  // at BOTH roots (em-recall.mjs SessionStart orphan-clear uses
-  // bothMarkerPaths). Then a NEW baseline + possibly a fresh
-  // .checkpoint-required at primary may be re-armed if violations exist —
-  // for this test there are no seeded violations, so neither marker is re-armed.
+  // Legacy plan-marker: swept at BOTH roots (PR #314 contract).
   for (const dir of ['.checkpoints', '.claude']) {
-    for (const name of ['.checkpoint-required', '.post-checkpoint-required', '.plan-approval-pending']) {
-      assertMissing(path.join(root, dir, name), `stale ${dir}/${name} should be cleared`)
+    assertMissing(path.join(root, dir, '.plan-approval-pending'),
+      `legacy plan-marker at ${dir}/ should be swept`)
+  }
+  // Checkpoint markers: PRESERVED at BOTH roots (M5 retime contract).
+  for (const dir of ['.checkpoints', '.claude']) {
+    for (const name of ['.checkpoint-required', '.post-checkpoint-required']) {
+      assertExists(path.join(root, dir, name),
+        `${dir}/${name} should be PRESERVED (M5 retime — no rm)`)
+    }
+  }
+  // Carve-out invariant: new baseline.mtime > all preserved-marker mtimes.
+  const newBaselineMs = fs.lstatSync(baseline).mtimeMs
+  for (const dir of ['.checkpoints', '.claude']) {
+    for (const name of ['.checkpoint-required', '.post-checkpoint-required']) {
+      const mt = fs.lstatSync(path.join(root, dir, name)).mtimeMs
+      if (newBaselineMs < mt) {
+        throw new Error(`baseline.mtime (${newBaselineMs}) must dominate ${dir}/${name}.mtime (${mt})`)
+      }
     }
   }
 })

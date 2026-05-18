@@ -217,9 +217,16 @@ test('T3: --session-start advances .session-baseline mtime on subsequent invocat
 })
 
 // ---------------------------------------------------------------------------
-// T4 — orphan cleanup removes task-signal markers older than baseline
+// T4 — M5 retime-and-rearm: checkpoint markers PRESERVED across SessionStart,
+// baseline.mtime force-monotonic dominates marker.mtime (carve-out invariant).
+//
+// Inverted from the prior baseline-mtime-sweep contract (2026-05-18 orphan-
+// deadlock fix; codex R3 P1). Old contract removed CR/PostR with mtime <=
+// baseline → rm→rearm race + cross-session A/B stomp. New contract preserves
+// markers; Stop is unblocked via baseline mtime refresh while the writer-gate
+// stays armed for any concurrent live session.
 // ---------------------------------------------------------------------------
-test('T4: --session-start orphan-cleans pre-baseline task-signal markers', () => {
+test('T4: --session-start PRESERVES checkpoint markers; baseline.mtime dominates (M5 retime contract)', () => {
   clearMarkers()
   clearLocalStore()
 
@@ -229,24 +236,27 @@ test('T4: --session-start orphan-cleans pre-baseline task-signal markers', () =>
   })
   assert.ok(fs.existsSync(mainBaseline), 'pre: baseline exists')
 
-  // Manually plant a stale .post-checkpoint-required (older than baseline).
-  // utimesSync to force its mtime to BEFORE current baseline mtime.
+  // Plant a pre-existing .post-checkpoint-required with mtime BEFORE baseline.
   const orphan = path.join(mainPrimaryDir, '.post-checkpoint-required')
   fs.writeFileSync(orphan, 'stale')
   const baselineMtime = fs.statSync(mainBaseline).mtimeMs / 1000
   fs.utimesSync(orphan, baselineMtime - 10, baselineMtime - 10)
-  assert.ok(fs.existsSync(orphan), 'pre: orphan marker planted')
+  assert.ok(fs.existsSync(orphan), 'pre: marker planted')
 
-  // Sleep so the next baseline write produces an mtime > planted orphan mtime.
   execSync('sleep 0.1')
 
-  // Second invocation: orphan-cleanup must remove the stale marker.
+  // Second invocation: marker must be PRESERVED (NOT swept).
   execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
-  assert.ok(!fs.existsSync(orphan),
-    `orphan ${orphan} (pre-baseline mtime) should have been swept`)
+  assert.ok(fs.existsSync(orphan),
+    `marker ${orphan} should be PRESERVED across SessionStart (M5 retime contract)`)
+  // Carve-out invariant: baseline.mtime >= marker.mtime so Stop is unblocked.
+  const newBaselineMs = fs.statSync(mainBaseline).mtimeMs
+  const markerMs = fs.statSync(orphan).mtimeMs
+  assert.ok(newBaselineMs >= markerMs,
+    `baseline.mtime (${newBaselineMs}) should dominate marker.mtime (${markerMs}) — Stop unblocked`)
 })
 
 // ---------------------------------------------------------------------------

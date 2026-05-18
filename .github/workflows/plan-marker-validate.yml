@@ -42,6 +42,9 @@ jobs:
       - name: Run em-recall plan-marker sweep regression (2026-05-18 concurrent-session fix)
         run: node tests/test-em-recall-plan-marker-sweep.mjs
 
+      - name: Run em-recall force-monotonic baseline regression (2026-05-18 orphan-deadlock fix)
+        run: node tests/test-em-recall-baseline-monotonic.mjs
+
       - name: Run em-recall --session-id binding regression
         run: node tests/test-em-recall-session-id-binding.mjs
 
