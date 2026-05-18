@@ -178,6 +178,55 @@ assert_allowed "18. Bash heredoc to pre-checkpoint-done allowed" \
 
 # ============================================================================
 echo ""
+echo "--- fd-redirect tokenizer (T3 empirical repros) ---"
+# ============================================================================
+# Bug repro (2026-05-18): with CR armed + pre-done absent, read-only
+# commands using the `2>&1` stderr-merge idiom were misclassified as
+# `shared_write` and BLOCKED by pre-gate, defeating routine inspection
+# during the very state the gate exists to enforce a single checkpoint
+# write. Codex R1-R5 chain (ACCEPT-with-FU at R5) drove the
+# operand-completeness fix.
+reset_state
+touch "$PRE_REQ"
+
+# Read-only base commands with fd-dup stderr merge → ALLOW (the bug fix)
+assert_allowed "18a. ls 2>&1 allowed during pre-gate" \
+  "$(mock_json 'Bash' 'ls -la /tmp 2>&1')"
+assert_allowed "18b. ls 2>&1 | head allowed during pre-gate" \
+  "$(mock_json 'Bash' 'ls -la /tmp 2>&1 | head -40')"
+assert_allowed "18c. em-search 2>&1 piped allowed during pre-gate" \
+  "$(mock_json 'Bash' 'node scripts/em-search.mjs --tag x 2>&1 | head')"
+assert_allowed "18d. find ... 2>&1 allowed" \
+  "$(mock_json 'Bash' 'find .checkpoints -maxdepth 2 -type f 2>&1')"
+assert_allowed "18e. echo hi >&2 allowed (fd-dup, not file)" \
+  "$(mock_json 'Bash' 'echo hi >&2')"
+assert_allowed "18f. >& 2 whitespace-fd-dup allowed" \
+  "$(mock_json 'Bash' 'ls >& 2')"
+assert_allowed "18g. 2>& 1 whitespace-fd-dup allowed" \
+  "$(mock_json 'Bash' 'ls 2>& 1')"
+assert_allowed "18h. cat <&5 input-fd-dup allowed" \
+  "$(mock_json 'Bash' 'cat <&5')"
+assert_allowed "18i. &>>/dev/null allowed" \
+  "$(mock_json 'Bash' 'ls &>>/dev/null')"
+
+# Negative: real file writes via `>&word` MUST still block (codex R4 finding)
+assert_blocked "18j. >&2foo blocks (file redirect, not fd-dup)" \
+  "$(mock_json 'Bash' 'echo hi >&2foo')" "Checkpoint required"
+assert_blocked "18k. >& foo (ws non-digit) blocks" \
+  "$(mock_json 'Bash' 'ls >& foo')" "Checkpoint required"
+assert_blocked "18l. >& \"out.txt\" (quoted file) blocks" \
+  "$(mock_json 'Bash' 'ls >& "/tmp/out.txt"')" "Checkpoint required"
+assert_blocked "18m. 2>file (real file redirect) blocks" \
+  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')" "Checkpoint required"
+assert_blocked "18n. &>>real-file blocks" \
+  "$(mock_json 'Bash' 'ls &>>/tmp/all.log')" "Checkpoint required"
+
+# Most-restrictive across segments: fd-dup-read then push → push wins (blocked)
+assert_blocked "18o. fd-dup then push (compound) blocked by pre-gate" \
+  "$(mock_json 'Bash' 'git status 2>&1 && git push')" "Checkpoint required"
+
+# ============================================================================
+echo ""
 echo "--- Empty pre-checkpoint-done does NOT unblock ---"
 # ============================================================================
 reset_state
