@@ -76,8 +76,8 @@ function runGateStop(cwd) {
   return { stdout: r.stdout || '', status: r.status }
 }
 
-function runSessionStart(cwd) {
-  const r = spawnSync('node', [EM_RECALL, '--session-start', '--limit', '1'], {
+function runSessionStart(cwd, extraArgs = []) {
+  const r = spawnSync('node', [EM_RECALL, '--session-start', '--limit', '1', ...extraArgs], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, HOME: TEST_HOME }
   })
@@ -266,30 +266,64 @@ console.log('\n=== L2 — em-recall --session-start side effects ===')
   else bad('2.3 defensive', `baseline did not advance: before=${baselineM} after=${newBaselineM}`)
 }
 
-// 2.4 in-flight plan-pending (mtime > prior baseline) preserved
+// 2.4 in-flight plan-pending (SUFFIXED, mtime > prior baseline) preserved.
+// Post-2026-05-18 policy (codex R1 P1.1 + R2 P1): suffixed forms are NEVER
+// swept by SessionStart; lifecycle is em-session-end-prompt.mjs (own-session)
+// + operator-cleanup FU (cross-session). Legacy suffix-less `.plan-approval-pending`
+// is covered by 2.4b below.
 {
   const d = mkRepo('2-4'); cleanupDirs.push(d)
   runSessionStart(d) // baseline at T0
   const baseline = path.join(d, '.checkpoints', '.session-baseline')
-  const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
+  const planP = path.join(d, '.checkpoints', '.plan-approval-pending.session-A')
   const baselineM = fs.statSync(baseline).mtimeMs
   fs.writeFileSync(planP, '')
   setMtime(planP, baselineM + 5_000) // newer than prior baseline
-  // second SessionStart: plan-pending should NOT be cleared (in-flight)
-  runSessionStart(d)
-  if (fs.existsSync(planP)) ok('2.4: in-flight plan-pending preserved across SessionStart')
-  else bad('2.4: in-flight plan-pending wrongly cleared', 'plan-pending was newer than prior baseline')
+  // second SessionStart: suffixed plan-pending should NOT be cleared (in-flight)
+  runSessionStart(d, ['--session-id', 'session-A'])
+  if (fs.existsSync(planP)) ok('2.4: in-flight SUFFIXED plan-pending preserved across SessionStart')
+  else bad('2.4: in-flight suffixed plan-pending wrongly cleared', 'suffixed forms must never be swept by SessionStart')
 }
 
-// 2.5 first-ever run with leftover plan-pending leaves it alone
+// 2.4b NEW: in-flight LEGACY-SUFFIX-LESS plan-pending is ALWAYS swept.
+// Codex R1 P1.4 + R2 P1: no current code path writes the suffix-less form;
+// any sighting is orphan. Unconditional sweep above the baseline guard.
+{
+  const d = mkRepo('2-4b'); cleanupDirs.push(d)
+  runSessionStart(d)
+  const baseline = path.join(d, '.checkpoints', '.session-baseline')
+  const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
+  const baselineM = fs.statSync(baseline).mtimeMs
+  fs.writeFileSync(planP, '')
+  setMtime(planP, baselineM + 5_000) // newer than prior baseline (the 2026-05-18 bug class)
+  runSessionStart(d)
+  if (!fs.existsSync(planP)) ok('2.4b: in-flight LEGACY plan-pending swept (codex R1 P1.4 + R2 P1)')
+  else bad('2.4b: legacy plan-pending wrongly preserved', 'legacy form must always be swept')
+}
+
+// 2.5 first-ever run with leftover SUFFIXED plan-pending leaves it alone.
+// Post-fix: suffixed forms never swept by SessionStart.
 {
   const d = mkRepo('2-5'); cleanupDirs.push(d)
+  const planP = path.join(d, '.checkpoints', '.plan-approval-pending.session-A')
+  fs.writeFileSync(planP, '')
+  // No prior baseline exists.
+  runSessionStart(d, ['--session-id', 'session-A'])
+  if (fs.existsSync(planP)) ok('2.5: first-ever SessionStart leaves SUFFIXED plan-pending alone')
+  else bad('2.5: first-ever wrongly cleared suffixed plan-pending', 'suffixed forms must never be swept by SessionStart')
+}
+
+// 2.5b NEW: first-ever run with leftover LEGACY plan-pending is ALWAYS swept.
+// Codex R1 P1.4: the unconditional sweep runs OUTSIDE the priorBaselineMtime
+// guard, so legacy is reaped even when no prior baseline exists.
+{
+  const d = mkRepo('2-5b'); cleanupDirs.push(d)
   const planP = path.join(d, '.checkpoints', '.plan-approval-pending')
   fs.writeFileSync(planP, '')
   // No prior baseline exists.
   runSessionStart(d)
-  if (fs.existsSync(planP)) ok('2.5: first-ever SessionStart leaves plan-pending alone (conservative)')
-  else bad('2.5: first-ever wrongly cleared plan-pending', 'baseline was absent — should be conservative')
+  if (!fs.existsSync(planP)) ok('2.5b: first-ever SessionStart sweeps LEGACY plan-pending even without baseline (codex R1 P1.4)')
+  else bad('2.5b: legacy plan-pending wrongly preserved on first-ever', 'unconditional sweep must fire without baseline')
 }
 
 // ============================================================================
@@ -329,27 +363,45 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
     markers.map((m, i) => `${path.basename(m)}=${cleared[i] ? 'cleared' : 'PRESENT'}`).join(' '))
 }
 
-// 3.2 SessionStart preserves in-flight markers (newer than prior baseline).
-// Symmetric to 2.4 but covers all 3 markers, not just plan-pending.
+// 3.2 SessionStart preserves in-flight NON-plan-marker class members.
+// Post-2026-05-18 fix: plan-marker class has a different lifecycle (codex
+// R1 + R2) — legacy suffix-less always swept, suffixed never swept by
+// SessionStart. Other 2 task-signal markers (checkpoint-required +
+// post-checkpoint-required) retain the in-flight-preserve contract.
 {
   const d = mkRepo('3-2'); cleanupDirs.push(d)
   runSessionStart(d)
   const baseline = path.join(d, '.checkpoints', '.session-baseline')
   const baselineM = fs.statSync(baseline).mtimeMs
-  const markers = [
+  const nonPlanMarkers = [
     '.checkpoint-required',
-    '.post-checkpoint-required',
-    '.plan-approval-pending'
+    '.post-checkpoint-required'
   ].map(m => path.join(d, '.checkpoints', m))
-  for (const m of markers) {
+  for (const m of nonPlanMarkers) {
     fs.writeFileSync(m, '')
     setMtime(m, baselineM + 5_000) // in-flight (mid-session)
   }
-  runSessionStart(d)
-  const preserved = markers.map(m => fs.existsSync(m))
-  if (preserved.every(Boolean)) ok('3.2: SessionStart preserves in-flight markers across all 3 class members')
-  else bad('3.2: in-flight wrongly cleared',
-    markers.map((m, i) => `${path.basename(m)}=${preserved[i] ? 'present' : 'CLEARED'}`).join(' '))
+  // Plus an in-flight LEGACY plan-pending — should be swept regardless
+  const planLegacy = path.join(d, '.checkpoints', '.plan-approval-pending')
+  fs.writeFileSync(planLegacy, '')
+  setMtime(planLegacy, baselineM + 5_000)
+  // Plus an in-flight SUFFIXED plan-pending — should be preserved
+  const planSuffixed = path.join(d, '.checkpoints', '.plan-approval-pending.session-A')
+  fs.writeFileSync(planSuffixed, '')
+  setMtime(planSuffixed, baselineM + 5_000)
+
+  runSessionStart(d, ['--session-id', 'session-A'])
+
+  const nonPlanPreserved = nonPlanMarkers.map(m => fs.existsSync(m))
+  if (nonPlanPreserved.every(Boolean)) ok('3.2: SessionStart preserves in-flight non-plan-marker class members')
+  else bad('3.2: non-plan-marker in-flight wrongly cleared',
+    nonPlanMarkers.map((m, i) => `${path.basename(m)}=${nonPlanPreserved[i] ? 'present' : 'CLEARED'}`).join(' '))
+
+  if (!fs.existsSync(planLegacy)) ok('3.2: in-flight LEGACY plan-pending swept (different lifecycle — codex R1 P1.4)')
+  else bad('3.2: legacy plan-pending wrongly preserved', 'must always be swept')
+
+  if (fs.existsSync(planSuffixed)) ok('3.2: in-flight SUFFIXED plan-pending preserved (different lifecycle — codex R1 P1.1)')
+  else bad('3.2: suffixed plan-pending wrongly swept', 'must never be swept by SessionStart')
 }
 
 // 3.3 Symlink defense (P2-2): a symlinked baseline does not enable the
@@ -478,7 +530,8 @@ function mkE2EHome() {
   // .checkpoints/ migration: marker-paths.mjs ships alongside local-dir.mjs;
   // omit it and em-recall fails to load (same fix as test-stop-gate.sh's
   // mk_fake_home).
-  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'stop-gate-helpers.mjs']) {
+  // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs.
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'stop-gate-helpers.mjs', 'session-id.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }

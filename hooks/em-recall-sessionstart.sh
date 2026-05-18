@@ -148,6 +148,16 @@ fi
 if ! cd "$CWD" 2>/dev/null; then
   exit 0
 fi
-node "$EM_RECALL" --limit 5 --session-start >/dev/null 2>&1 || true
+
+# Parse stdin .session_id for em-recall's --session-id flag (codex R1 P1.2:
+# bind from authoritative SessionStart stdin, not env var). Empty value →
+# omit the flag, preserving prior wrapper contract. Validation lives inside
+# em-recall.mjs (warn-on-invalid; no exit-non-zero per codex R2 Q3).
+MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")"
+if [ -n "$MY_SID" ]; then
+  node "$EM_RECALL" --limit 5 --session-start --session-id "$MY_SID" >/dev/null 2>&1 || true
+else
+  node "$EM_RECALL" --limit 5 --session-start >/dev/null 2>&1 || true
+fi
 
 exit 0

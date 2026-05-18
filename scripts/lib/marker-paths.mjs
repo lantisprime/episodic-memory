@@ -298,7 +298,14 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
 
   // E19-E20: em-recall.mjs iteration consumers.
   { file: 'scripts/em-recall.mjs', line: 170, role: 'TASK_SIGNAL_MARKERS carve-out loop (glob-expands suffixed forms)', kind: 'js-array-iter', semantic_role: 'read-any' },
-  { file: 'scripts/em-recall.mjs', line: 587, role: 'TASK_SIGNAL_MARKERS orphan-clear sweep (glob-expands suffixed forms)', kind: 'js-array-iter', semantic_role: 'sweep-stale' },
+  { file: 'scripts/em-recall.mjs', line: 587, role: 'TASK_SIGNAL_MARKERS orphan-clear sweep (non-plan-marker class only; plan-marker handled by sibling unconditional sweep — post-2026-05-18 deadlock fix)', kind: 'js-array-iter', semantic_role: 'sweep-stale' },
+
+  // E20b: NEW unconditional legacy-suffix-less plan-marker sweep above the
+  // baseline guard. Suffixed forms `.plan-approval-pending.<sid>` are
+  // intentionally NOT swept here (codex R2 P1: baseline-mtime sweep can
+  // false-sweep live sessions on resume). Own-session cleanup remains the
+  // exclusive responsibility of E21 (em-session-end-prompt.mjs).
+  { file: 'scripts/em-recall.mjs', line: 587, role: 'unconditional .plan-approval-pending (suffix-less, legacy-only) sweep above baseline guard — post-2026-05-18 deadlock fix; suffixed forms NEVER swept here', kind: 'js-block', semantic_role: 'sweep-stale' },
 
   // E21: em-session-end-prompt.mjs own-session-only delete (F12 — codex r1 F1 fold).
   { file: 'scripts/em-session-end-prompt.mjs', line: 19, role: 'SessionEnd cleanup (own-session-only — F12)', kind: 'js-array-iter-own-session', semantic_role: 'remove-own-session' },

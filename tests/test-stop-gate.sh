@@ -80,6 +80,9 @@ mk_fake_home() {
   # rank-1 plan v7 (2026-05-12): em-recall also imports stop-gate-helpers.mjs
   # for the active-plan exemption (_maxMtimeAcrossRootsStrict).
   cp "$REPO_ROOT/scripts/lib/stop-gate-helpers.mjs" "$fake_home/.episodic-memory/scripts/lib/stop-gate-helpers.mjs"
+  # 2026-05-18 concurrent-session fix: em-recall imports session-id.mjs for
+  # the --session-id flag (codex R1 P1.2; logging-only in v6 sweep).
+  cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$fake_home/.episodic-memory/scripts/lib/session-id.mjs"
 }
 
 TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"

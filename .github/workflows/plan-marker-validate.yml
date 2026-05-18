@@ -39,6 +39,18 @@ jobs:
       - name: Run em-recall session-start orphan-sweep regression
         run: node tests/test-em-recall-session-start-early-exit.mjs
 
+      - name: Run em-recall plan-marker sweep regression (2026-05-18 concurrent-session fix)
+        run: node tests/test-em-recall-plan-marker-sweep.mjs
+
+      - name: Run em-recall --session-id binding regression
+        run: node tests/test-em-recall-session-id-binding.mjs
+
+      - name: Run em-recall-sessionstart hook-wrapper integration (cwd + stdin sid binding)
+        run: bash tests/test-em-recall-sessionstart-hook-binding.sh
+
+      - name: Run no-legacy-plan-marker-writes detector (Rule 13)
+        run: node tests/test-no-legacy-plan-marker-writes.mjs
+
       - name: Run em-strict-lstat regression
         run: node tests/test-em-strict-lstat.mjs
 
