@@ -73,6 +73,159 @@ _tokenize() {
     fi
   }
 
+  # Read one shell token starting at position $i in $cmd. Skips leading
+  # horizontal whitespace (spaces/tabs only — newline terminates the
+  # redirect operand). Honors single quotes, double quotes (same rules as
+  # main loop), and backslash escapes. Stops at unquoted whitespace,
+  # control operator, redirect operator, or EOF.
+  #
+  # Outputs (globals): OPERAND_TEXT, OPERAND_PRESENT (1 if a token was
+  # read, 0 if EOF/control-op was hit first), OPERAND_ERROR (non-empty
+  # on tokenizer-level error). Advances $i past the token.
+  _read_one_token() {
+    OPERAND_TEXT=""
+    OPERAND_PRESENT=0
+    OPERAND_ERROR=""
+
+    # Skip leading spaces/tabs (but not newline — newline terminates the
+    # redirect-spec without an operand)
+    while [ $i -lt $n ]; do
+      local rc="${cmd:$i:1}"
+      case "$rc" in
+        ' '|$'\t') i=$((i+1)) ;;
+        *) break ;;
+      esac
+    done
+
+    [ $i -ge $n ] && return 0
+
+    local rc="${cmd:$i:1}"
+    case "$rc" in
+      $'\n'|';'|'&'|'|'|'<'|'>') return 0 ;;
+    esac
+
+    local tok=""
+    while [ $i -lt $n ]; do
+      rc="${cmd:$i:1}"
+      case "$rc" in
+        ' '|$'\t'|$'\n'|';'|'&'|'|'|'<'|'>')
+          break
+          ;;
+        "'")
+          i=$((i+1))
+          local sq=""
+          local sclosed=0
+          while [ $i -lt $n ]; do
+            local sc="${cmd:$i:1}"
+            if [ "$sc" = "'" ]; then
+              i=$((i+1))
+              sclosed=1
+              break
+            fi
+            sq="$sq$sc"
+            i=$((i+1))
+          done
+          if [ $sclosed -eq 0 ]; then
+            OPERAND_ERROR="unbalanced_single_quote"
+            return 0
+          fi
+          tok="$tok$sq"
+          ;;
+        '"')
+          i=$((i+1))
+          local dq=""
+          local dclosed=0
+          while [ $i -lt $n ]; do
+            local dc="${cmd:$i:1}"
+            if [ "$dc" = '"' ]; then
+              i=$((i+1))
+              dclosed=1
+              break
+            fi
+            if [ "$dc" = '\' ] && [ $((i+1)) -lt $n ]; then
+              local nx="${cmd:$((i+1)):1}"
+              case "$nx" in
+                '"'|'\'|'$'|'`')
+                  dq="$dq$nx"
+                  i=$((i+2))
+                  continue
+                  ;;
+              esac
+              dq="$dq$dc"
+              i=$((i+1))
+              continue
+            fi
+            if [ "$dc" = '$' ] && [ $((i+1)) -lt $n ] && [ "${cmd:$((i+1)):1}" = '(' ]; then
+              OPERAND_ERROR="command_substitution_in_double_quote"
+              return 0
+            fi
+            if [ "$dc" = '`' ]; then
+              OPERAND_ERROR="backtick_in_double_quote"
+              return 0
+            fi
+            dq="$dq$dc"
+            i=$((i+1))
+          done
+          if [ $dclosed -eq 0 ]; then
+            OPERAND_ERROR="unbalanced_double_quote"
+            return 0
+          fi
+          tok="$tok$dq"
+          ;;
+        '\')
+          if [ $((i+1)) -lt $n ]; then
+            tok="$tok${cmd:$((i+1)):1}"
+            i=$((i+2))
+          else
+            i=$((i+1))
+          fi
+          ;;
+        *)
+          tok="$tok$rc"
+          i=$((i+1))
+          ;;
+      esac
+    done
+
+    OPERAND_TEXT="$tok"
+    OPERAND_PRESENT=1
+    return 0
+  }
+
+  # Emit a redirect record for `>&` / `<&` based on operand-completeness:
+  #   fd-dup if operand is exactly `-` OR exactly `[0-9]+`
+  #   file redirect otherwise (operand is a path token)
+  # Per Bash grammar (Codex R4 finding): `>&2foo` is a file redirect to
+  # `./2foo`, NOT fd-dup. Decision happens on the COMPLETE operand word.
+  _emit_redir_or_fddup() {
+    local op="$1"
+    local has_operand="$2"
+    local operand="$3"
+    if [ "$has_operand" = "1" ]; then
+      if [ "$operand" = "-" ]; then
+        printf 'O FDDUP\n'
+        return 0
+      fi
+      case "$operand" in
+        *[!0-9]*|"")
+          # Non-digit char present (or empty) — file redirect
+          printf 'O %s\n' "$op"
+          printf 'T %s\n' "$operand"
+          return 0
+          ;;
+        *)
+          # All digits → fd-dup
+          printf 'O FDDUP\n'
+          return 0
+          ;;
+      esac
+    fi
+    # No operand at all (EOF/control-op immediately after `>&`) — emit op
+    # as bare redirect; downstream classifier will see no target and
+    # leave it as no-op (defensive fallback for malformed input).
+    printf 'O %s\n' "$op"
+  }
+
   while [ $i -lt $n ]; do
     c="${cmd:$i:1}"
 
@@ -256,9 +409,14 @@ _tokenize() {
           printf 'O &&\n'
           i=$((i+2))
         elif [ "${cmd:$((i+1)):1}" = ">" ]; then
-          # &> redirect — emit as redirect op
-          printf 'O &>\n'
-          i=$((i+2))
+          # &> or &>> redirect — both fds to file (truncate vs append).
+          if [ "${cmd:$((i+2)):1}" = ">" ]; then
+            printf 'O &>>\n'
+            i=$((i+3))
+          else
+            printf 'O &>\n'
+            i=$((i+2))
+          fi
         else
           printf 'O &\n'
           i=$((i+1))
@@ -275,6 +433,15 @@ _tokenize() {
         fi
         ;;
       '>')
+        # fd-prefix detection: if cur is exactly [0-9]+ (collected with no
+        # whitespace before this `>`), it's a numeric fd prefix — suppress
+        # its flush as a token. Otherwise flush as normal.
+        if [ "$has_token" = "1" ]; then
+          case "$cur" in
+            *[!0-9]*|"") ;;  # has non-digit (or empty) → normal token
+            *) cur=""; has_token=0 ;;  # all digits → fd prefix, drop
+          esac
+        fi
         _flush
         if [ "${cmd:$((i+1)):1}" = ">" ]; then
           printf 'O >>\n'
@@ -282,13 +449,31 @@ _tokenize() {
         elif [ "${cmd:$((i+1)):1}" = "(" ]; then
           printf 'E process_substitution\n'
           return 0
+        elif [ "${cmd:$((i+1)):1}" = "&" ]; then
+          # `>&` — fd-dup (`>&2`, `>&-`) OR file redirect (`>&foo`,
+          # `>&2foo`, `>& "out.txt"`). Decided on the COMPLETE operand.
+          i=$((i+2))
+          _read_one_token
+          if [ -n "$OPERAND_ERROR" ]; then
+            printf 'E %s\n' "$OPERAND_ERROR"
+            return 0
+          fi
+          _emit_redir_or_fddup ">&" "$OPERAND_PRESENT" "$OPERAND_TEXT"
         else
           printf 'O >\n'
           i=$((i+1))
         fi
         ;;
       '<')
-        # Heredoc / here-string / redirect / process-sub
+        # fd-prefix detection (mirror of '>'): if cur is exactly [0-9]+,
+        # treat as numeric fd prefix and drop.
+        if [ "$has_token" = "1" ]; then
+          case "$cur" in
+            *[!0-9]*|"") ;;
+            *) cur=""; has_token=0 ;;
+          esac
+        fi
+        # Heredoc / here-string / redirect / process-sub / fd-dup
         if [ "${cmd:$((i+1)):1}" = "<" ]; then
           # << or <<< or <<-
           if [ "${cmd:$((i+2)):1}" = "<" ]; then
@@ -404,6 +589,17 @@ _tokenize() {
         elif [ "${cmd:$((i+1)):1}" = "(" ]; then
           printf 'E process_substitution\n'
           return 0
+        elif [ "${cmd:$((i+1)):1}" = "&" ]; then
+          # `<&` — fd-dup input (`<&5`, `<&-`) OR input from file
+          # (`<&foo`). Symmetric with `>&`. Operand-completeness rule.
+          _flush
+          i=$((i+2))
+          _read_one_token
+          if [ -n "$OPERAND_ERROR" ]; then
+            printf 'E %s\n' "$OPERAND_ERROR"
+            return 0
+          fi
+          _emit_redir_or_fddup "<&" "$OPERAND_PRESENT" "$OPERAND_TEXT"
         else
           _flush
           printf 'O <\n'
@@ -783,6 +979,26 @@ _classify_segment() {
       "O &>")
         pending_redir="&>"
         ;;
+      "O &>>")
+        # Append-both-fds: same write effect as `&>` for classification.
+        pending_redir="&>"
+        ;;
+      "O >&")
+        # `>&file` file-redirect form (both fds to file). Tokenizer only
+        # emits this when the operand failed the fd-dup completeness rule
+        # (operand is not exactly `-` or `[0-9]+`).
+        pending_redir="&>"
+        ;;
+      "O <&")
+        # `<&file` input-from-file form. Same as plain `<`: input, not a
+        # write. The following T-record is the source path — letting it
+        # fall through to TOKS (as the existing `O <` case does) keeps
+        # this in lockstep with input-redirect behavior.
+        ;;
+      "O FDDUP")
+        # fd-dup (n>&m, n<&m, n>&-, n<&-): in-process file-descriptor
+        # plumbing, no file write, no segment break.
+        ;;
       "O <"|"O <<<"|"O HEREDOC")
         # Inputs / heredocs don't matter for write classification
         ;;
@@ -811,7 +1027,11 @@ _classify_segment() {
   for r in ${REDIRS[@]+"${REDIRS[@]}"}; do
     local rop="${r%%	*}"
     local rtarget="${r#*	}"
-    local rbase="$(basename "$rtarget")"
+    # `--` separator: redirect operands may legitimately begin with `-`
+    # (e.g. `>&-1` is a file `./-1`); raw `basename "-1"` exits non-zero
+    # with `illegal option -- 1` on stderr, leaking through the hook
+    # JSON-on-stdout contract. Codex PR #320 R1 P2 finding.
+    local rbase="$(basename -- "$rtarget")"
     case "$rtarget" in
       /dev/null|/dev/stdout|/dev/stderr|/dev/tty|/dev/zero)
         # Benign device sink — skip the has_nonmarker_redirect upgrade.

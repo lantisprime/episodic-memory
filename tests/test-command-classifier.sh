@@ -382,6 +382,100 @@ assert_label "T240 dev-null look-alike" "ls /tmp >/dev/null2" "shared_write"
 assert_label "T241 dev-not-null" "ls /tmp >/devnull" "shared_write"
 
 echo ""
+echo "--- fd-redirect tokenizer (operand-completeness rule) ---"
+# Bug: tokenizer split `cmd 2>&1` into `T cmd, T 2, O >, O &, T 1`. The
+# stray `O &` triggered a segment break in classify_command (the `&`
+# control op set), and the bare `T 1` second segment classified as
+# `shared_write`. So every read-only command with a stderr→stdout merge
+# (the standard `2>&1 | head` idiom) was misclassified as a write and
+# blocked under checkpoint-gate / plan-gate. R5 fix: digit-fd prefix
+# consumption + `_parse_redirect_spec` operand-completeness rule —
+# fd-dup only when the complete operand word is exactly `-` or exactly
+# `[0-9]+`. `>&2foo` etc. correctly stay as file redirects.
+#
+# Reference: codex review chain R1-R5, accepted at R5 with FU on
+# `&>`/`&>>` parser routing (this implementation).
+
+# fd-dup forms (no file write, segment is read-only base command)
+assert_label "FD01 cmd 2>&1" "ls -la 2>&1" "read_only"
+assert_label "FD02 cmd 2>&1 | pipe" "ls -la 2>&1 | head -40" "read_only"
+assert_label "FD03 cmd >&2" "echo hi >&2" "read_only"
+assert_label "FD04 cmd 1>&2" "ls 1>&2" "read_only"
+assert_label "FD05 cmd 3>&4" "ls 3>&4" "read_only"
+assert_label "FD06 cmd 2>&-" "ls 2>&-" "read_only"
+assert_label "FD07 cmd >&-" "ls >&-" "read_only"
+assert_label "FD08 cmd >& 2 (ws)" "ls >& 2" "read_only"
+assert_label "FD09 cmd 2>& 1 (ws)" "ls 2>& 1" "read_only"
+assert_label "FD10 cmd >& - (ws)" "ls >& -" "read_only"
+# Original bug repro from session 2026-05-18
+assert_label "FD11 em-search 2>&1 piped" \
+  "node scripts/em-search.mjs --tag x 2>&1 | head" "read_only"
+assert_label "FD12 find ... 2>&1" \
+  "find .checkpoints -maxdepth 2 -type f 2>&1" "read_only"
+
+# File-redirect forms via `>&` (operand-completeness: not all-digits, not `-`)
+# Codex R4 finding: `>&2foo` is `./2foo`, not fd-dup to 2.
+assert_label "FD20 >&2foo (digit-prefixed file)" "echo hi >&2foo" "shared_write"
+assert_label "FD21 >&foo (non-digit file)" "ls >&foo" "shared_write"
+assert_label "FD22 >& foo (ws + non-digit)" "ls >& foo" "shared_write"
+assert_label "FD23 >& \"out.txt\" (quoted)" "ls >& \"out.txt\"" "shared_write"
+assert_label "FD24 >& 'out.txt' (single-quoted)" "ls >& 'out.txt'" "shared_write"
+assert_label "FD25 >&1- (digits+dash)" "ls >&1-" "shared_write"
+assert_label "FD26 >&-1 (dash+digits)" "ls >&-1" "shared_write"
+# Codex PR #320 R1 P2: leading-dash redirect operands MUST NOT leak
+# `basename: illegal option` to stderr. Hook caller (checkpoint-gate.sh)
+# emits the block JSON on stdout; any classifier stderr pollutes the
+# hook output. Use `--` separator on basename calls for redirect targets.
+_assert_stderr_empty() {
+  local desc="$1" cmd="$2"
+  local err
+  err="$(classify_command "$cmd" "$TEST_ROOT" 2>&1 >/dev/null)"
+  if [ -z "$err" ]; then
+    echo "  ✓ $desc"
+    passed=$((passed+1))
+  else
+    echo "  ✗ $desc — stderr leaked: $err"
+    failed=$((failed+1))
+  fi
+}
+_assert_stderr_empty "FD26a >&-1 emits no stderr" "ls >&-1"
+_assert_stderr_empty "FD26b >& -1 (ws) emits no stderr" "ls >& -1"
+_assert_stderr_empty "FD26c >&-foo emits no stderr" "ls >&-foo"
+_assert_stderr_empty "FD26d 2>-flagy (leading dash file) emits no stderr" \
+  "ls 2>-flagy"
+
+# Plain file redirects with explicit fd-prefix
+assert_label "FD30 cmd 2>file" "ls 2>file" "shared_write"
+assert_label "FD31 cmd 2>>file (append)" "ls 2>>file" "shared_write"
+assert_label "FD32 cmd 1>file" "ls 1>file" "shared_write"
+assert_label "FD33 cmd 3>file" "ls 3>file" "shared_write"
+
+# Both-fds-to-file
+assert_label "FD40 &>out" "ls &>out" "shared_write"
+assert_label "FD41 &>>out (append)" "ls &>>out" "shared_write"
+# /dev/null sink with both-fds-append
+assert_label "FD42 &>>/dev/null" "ls &>>/dev/null" "read_only"
+
+# `<&` symmetric (input fd-dup vs input-from-file — neither writes)
+assert_label "FD50 cmd <&5" "cat <&5" "read_only"
+assert_label "FD51 cmd <&-" "cat <&-" "read_only"
+assert_label "FD52 cmd <&file" "cat <&file" "read_only"
+assert_label "FD53 cmd <&5foo" "cat <&5foo" "read_only"
+
+# Marker-write detection still fires through `>&` parser when target is marker
+assert_label "FD60 >& marker (no space)" \
+  "echo hi >&.plan-approval-pending" "marker_write"
+assert_label "FD61 &>>marker" "echo hi &>>.plan-approval-pending" "marker_write"
+
+# fd-dup doesn't downgrade a real write on the same command
+assert_label "FD70 write + fd-dup" "echo hi > /tmp/out 2>&1" "shared_write"
+# Most-restrictive across segments: push wins over fd-dup-read
+assert_label "FD71 fd-dup then push" "git status 2>&1 && git push" "push_or_pr_create"
+# Compound with fd-dup on each segment
+assert_label "FD72 compound 2>&1 both" \
+  "ls 2>&1; cat /etc/hosts 2>&1" "read_only"
+
+echo ""
 echo "--- classify_path ---"
 assert_path() {
   local desc="$1"
