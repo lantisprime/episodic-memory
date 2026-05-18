@@ -426,6 +426,13 @@ function buildTempHome(homeRoot) {
     path.join(SCRIPTS, 'lib', 'stop-gate-helpers.mjs'),
     path.join(installedLib, 'stop-gate-helpers.mjs'),
   )
+  // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs
+  // for the --session-id flag validation. Mirror per
+  // feedback_fixture_transitive_imports.md.
+  fs.copyFileSync(
+    path.join(SCRIPTS, 'lib', 'session-id.mjs'),
+    path.join(installedLib, 'session-id.mjs'),
+  )
   // No hook-install.json; warn_hook_freshness soft-fails on missing manifest.
   return installedScripts
 }

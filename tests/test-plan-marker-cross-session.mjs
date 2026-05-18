@@ -119,34 +119,51 @@ function check(cond, label) {
   check(r.decision === 'block', `X3 legacy → BLOCK (got ${r.decision})`)
 }
 
-// ---------------- X4: orphan-sweep removes stale plan markers ----------------
+// ---------------- X4a: legacy suffix-less swept regardless of baseline -------
+// Post-2026-05-18 fix (codex R1 P1.4 + R2 P1): the legacy suffix-less form
+// is swept UNCONDITIONALLY at SessionStart, even when its mtime is newer
+// than the prior baseline. Suffixed forms `.plan-approval-pending.<sid>`
+// are NEVER swept by SessionStart anymore — that lifecycle belongs to
+// em-session-end-prompt.mjs (own-session) + operator-cleanup FU.
 {
   const root = mkTmpRepo()
   const ck = path.join(root, '.checkpoints')
-  // 3 stale orphans + legacy + a session-baseline whose mtime is NEWER than them.
-  fs.writeFileSync(path.join(ck, '.plan-approval-pending.A'), '')
-  fs.writeFileSync(path.join(ck, '.plan-approval-pending.B'), '')
-  fs.writeFileSync(path.join(ck, '.plan-approval-pending.C'), '')
-  fs.writeFileSync(path.join(ck, '.plan-approval-pending'), '')
-  // Make all markers' mtime old (5 minutes ago).
-  const oldMs = Date.now() / 1000 - 300
-  for (const f of ['.plan-approval-pending.A', '.plan-approval-pending.B', '.plan-approval-pending.C', '.plan-approval-pending']) {
-    fs.utimesSync(path.join(ck, f), oldMs, oldMs)
-  }
-  // Baseline mtime is newer (now).
+  // Legacy marker NEWER than baseline — the bug class from 2026-05-18.
   fs.writeFileSync(path.join(ck, '.session-baseline'), '')
-
-  // Run em-recall --session-start: it will write a NEW baseline and sweep orphans
-  // whose mtime <= prior baseline. The prior baseline mtime IS the "now" baseline
-  // we just wrote, so all 4 stale orphans (5 min ago) should sweep.
+  const baselineMs = Date.now() / 1000 - 3600  // 1h ago
+  fs.utimesSync(path.join(ck, '.session-baseline'), baselineMs, baselineMs)
+  fs.writeFileSync(path.join(ck, '.plan-approval-pending'), '')
+  const markerMs = Date.now() / 1000 - 1800  // 30m ago — NEWER than baseline
+  fs.utimesSync(path.join(ck, '.plan-approval-pending'), markerMs, markerMs)
   const r = spawnSync('node', [EM_RECALL, '--session-start', '--no-track', '--limit', '1'], {
     cwd: root, encoding: 'utf8'
   })
-  check(r.status === 0, `X4 em-recall --session-start exit 0 (got ${r.status})`)
-  check(!fs.existsSync(path.join(ck, '.plan-approval-pending.A')), `X4: orphan A swept`)
-  check(!fs.existsSync(path.join(ck, '.plan-approval-pending.B')), `X4: orphan B swept`)
-  check(!fs.existsSync(path.join(ck, '.plan-approval-pending.C')), `X4: orphan C swept`)
-  check(!fs.existsSync(path.join(ck, '.plan-approval-pending')), `X4: legacy orphan swept`)
+  check(r.status === 0, `X4a em-recall --session-start exit 0 (got ${r.status})`)
+  check(!fs.existsSync(path.join(ck, '.plan-approval-pending')), `X4a: legacy swept (regardless of baseline mtime — codex R1 P1.4)`)
+}
+
+// ---------------- X4b: suffixed orphans PRESERVED across SessionStart ---------
+// Under post-2026-05-18 policy, SessionStart NEVER sweeps suffixed forms.
+// Was incorrectly swept in pre-fix code (the v3 fix).
+{
+  const root = mkTmpRepo()
+  const ck = path.join(root, '.checkpoints')
+  fs.writeFileSync(path.join(ck, '.plan-approval-pending.A'), '')
+  fs.writeFileSync(path.join(ck, '.plan-approval-pending.B'), '')
+  fs.writeFileSync(path.join(ck, '.plan-approval-pending.C'), '')
+  // All suffixed orphans OLD (5 min ago); baseline NEWER (now).
+  const oldMs = Date.now() / 1000 - 300
+  for (const f of ['.plan-approval-pending.A', '.plan-approval-pending.B', '.plan-approval-pending.C']) {
+    fs.utimesSync(path.join(ck, f), oldMs, oldMs)
+  }
+  fs.writeFileSync(path.join(ck, '.session-baseline'), '')
+  const r = spawnSync('node', [EM_RECALL, '--session-start', '--no-track', '--limit', '1', '--session-id', '35522aab-5f44-4b84-b1cc-035cca7b9305'], {
+    cwd: root, encoding: 'utf8'
+  })
+  check(r.status === 0, `X4b em-recall --session-start exit 0 (got ${r.status})`)
+  check(fs.existsSync(path.join(ck, '.plan-approval-pending.A')), `X4b: suffixed A PRESERVED (post-fix; codex R1 P1.1 + R2 P1)`)
+  check(fs.existsSync(path.join(ck, '.plan-approval-pending.B')), `X4b: suffixed B PRESERVED`)
+  check(fs.existsSync(path.join(ck, '.plan-approval-pending.C')), `X4b: suffixed C PRESERVED`)
 }
 
 // ---------------- X5: worktree-cwd helper writes at canonical root, not cwd --

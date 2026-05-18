@@ -37,6 +37,7 @@ import {
   _maxMtimeAcrossRootsStrict,
   _maxMtimeAcrossRootsForPlanMarkerStrict,
 } from './lib/stop-gate-helpers.mjs'
+import { validateSessionId } from './lib/session-id.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -63,6 +64,22 @@ const warnCount = parseInt(flag('--warn-count') || '5000', 10)
 const taskTypeFlag = flag('--task-type')
 const gateFlag = flag('--gate')
 const sessionStartFlag = argv.includes('--session-start')
+
+// --session-id <sid> — bound from SessionStart stdin `.session_id` via the
+// hook wrapper (em-recall-sessionstart.sh). Logging-only in v6 sweep: NOT
+// used to gate any sweep decision. Reserved for forward-compat with future
+// operator-cleanup tooling. Validation: per codex R2 Q3, missing/invalid
+// emits stderr warning, does NOT exit non-zero (hook reliability outweighs
+// strict contract).
+const sessionIdFlag = flag('--session-id')
+let mySid = null
+if (sessionIdFlag !== undefined) {
+  if (sessionIdFlag !== '' && validateSessionId(sessionIdFlag)) {
+    mySid = sessionIdFlag
+  } else if (sessionIdFlag !== '') {
+    process.stderr.write(`em-recall: warn — --session-id "${sessionIdFlag}" failed validateSessionId; treating as missing (no functional impact in v6 sweep)\n`)
+  }
+}
 
 const VALID_SCOPES = ['local', 'global', 'all']
 if (!VALID_SCOPES.includes(scope)) {
@@ -624,6 +641,30 @@ let priorBaselineMtime = null
 if (sessionStartFlag) {
   try {
     ensurePrimaryDir(REPO_ROOT)
+
+    // ---------------------------------------------------------------------
+    // Unconditional legacy-suffix-less plan-marker sweep (post-2026-05-18
+    // deadlock fix; codex R1 P1.4 + R2 P1). Runs OUTSIDE the
+    // priorBaselineMtime guard below so first-ever SessionStart on a fresh
+    // clone (no prior baseline) still reaps any pre-existing legacy orphan.
+    // Suffixed forms `.plan-approval-pending.<sid>` are NEVER swept here —
+    // SessionEnd hook (em-session-end-prompt.mjs, registry E21) owns
+    // own-session cleanup; cross-session crashed-orphan cleanup is the
+    // operator-cleanup FU. legacy-read-only: ok (this site only sweeps the
+    // legacy basename; never writes it).
+    // ---------------------------------------------------------------------
+    for (const dir of [path.join(REPO_ROOT, PRIMARY_MARKER_DIR), path.join(REPO_ROOT, LEGACY_MARKER_DIR)]) {
+      const p = path.join(dir, PLAN_MARKER_LEGACY_BASENAME)
+      try {
+        const st = fs.lstatSync(p)
+        if (!st.isSymbolicLink()) fs.rmSync(p, { force: true })
+      } catch (e) {
+        if (e.code !== 'ENOENT') {
+          process.stderr.write(`em-recall: legacy-plan-marker-sweep skipped ${p}: ${e.code || e.message}\n`)
+        }
+      }
+    }
+
     // Read baseline mtime from BOTH roots; take the most recent.
     for (const baselinePath of [primaryMarkerPath(REPO_ROOT, BASELINE_NAME), legacyMarkerPath(REPO_ROOT, BASELINE_NAME)]) {
       try {
@@ -637,28 +678,15 @@ if (sessionStartFlag) {
 
     if (priorBaselineMtime !== null) {
       for (const name of TASK_SIGNAL_MARKERS) {
-        // #268 fix E20: plan-marker member glob-expands suffixed forms.
-        // Sweep legacy `.plan-approval-pending` + every `.plan-approval-pending.<sid>`
-        // at both roots whose mtime <= prior baseline (stale orphan).
-        if (name === PLAN_MARKER_LEGACY_BASENAME) {
-          const prefix = `${PLAN_MARKER_LEGACY_BASENAME}.`
-          for (const dir of [path.join(REPO_ROOT, PRIMARY_MARKER_DIR), path.join(REPO_ROOT, LEGACY_MARKER_DIR)]) {
-            let entries = []
-            try { entries = fs.readdirSync(dir) } catch { continue }
-            for (const e of entries) {
-              if (e !== PLAN_MARKER_LEGACY_BASENAME && !e.startsWith(prefix)) continue
-              const p = path.join(dir, e)
-              try {
-                const st = fs.lstatSync(p)
-                if (st.isSymbolicLink()) continue
-                if (st.mtimeMs <= priorBaselineMtime) {
-                  fs.rmSync(p, { force: true })
-                }
-              } catch {}
-            }
-          }
-          continue
-        }
+        // Plan-marker class is handled exclusively by the unconditional
+        // legacy-suffix-less sweep above + em-session-end-prompt.mjs for
+        // own-session cleanup. Suffixed forms `.plan-approval-pending.<sid>`
+        // are NEVER swept by SessionStart — any baseline-mtime-based sweep
+        // can false-sweep a still-live session whose marker mtime > baseline
+        // (codex R2 P1: repeated SessionStart/resume rewrites baseline,
+        // then next SessionStart sees marker.mtime <= newer baseline and
+        // would remove it while session is still at plan approval).
+        if (name === PLAN_MARKER_LEGACY_BASENAME) continue
         for (const p of bothMarkerPaths(REPO_ROOT, name)) {
           try {
             const st = fs.lstatSync(p)
