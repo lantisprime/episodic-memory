@@ -1027,7 +1027,11 @@ _classify_segment() {
   for r in ${REDIRS[@]+"${REDIRS[@]}"}; do
     local rop="${r%%	*}"
     local rtarget="${r#*	}"
-    local rbase="$(basename "$rtarget")"
+    # `--` separator: redirect operands may legitimately begin with `-`
+    # (e.g. `>&-1` is a file `./-1`); raw `basename "-1"` exits non-zero
+    # with `illegal option -- 1` on stderr, leaking through the hook
+    # JSON-on-stdout contract. Codex PR #320 R1 P2 finding.
+    local rbase="$(basename -- "$rtarget")"
     case "$rtarget" in
       /dev/null|/dev/stdout|/dev/stderr|/dev/tty|/dev/zero)
         # Benign device sink — skip the has_nonmarker_redirect upgrade.

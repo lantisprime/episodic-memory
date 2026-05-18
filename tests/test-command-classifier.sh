@@ -422,6 +422,27 @@ assert_label "FD23 >& \"out.txt\" (quoted)" "ls >& \"out.txt\"" "shared_write"
 assert_label "FD24 >& 'out.txt' (single-quoted)" "ls >& 'out.txt'" "shared_write"
 assert_label "FD25 >&1- (digits+dash)" "ls >&1-" "shared_write"
 assert_label "FD26 >&-1 (dash+digits)" "ls >&-1" "shared_write"
+# Codex PR #320 R1 P2: leading-dash redirect operands MUST NOT leak
+# `basename: illegal option` to stderr. Hook caller (checkpoint-gate.sh)
+# emits the block JSON on stdout; any classifier stderr pollutes the
+# hook output. Use `--` separator on basename calls for redirect targets.
+_assert_stderr_empty() {
+  local desc="$1" cmd="$2"
+  local err
+  err="$(classify_command "$cmd" "$TEST_ROOT" 2>&1 >/dev/null)"
+  if [ -z "$err" ]; then
+    echo "  ✓ $desc"
+    passed=$((passed+1))
+  else
+    echo "  ✗ $desc — stderr leaked: $err"
+    failed=$((failed+1))
+  fi
+}
+_assert_stderr_empty "FD26a >&-1 emits no stderr" "ls >&-1"
+_assert_stderr_empty "FD26b >& -1 (ws) emits no stderr" "ls >& -1"
+_assert_stderr_empty "FD26c >&-foo emits no stderr" "ls >&-foo"
+_assert_stderr_empty "FD26d 2>-flagy (leading dash file) emits no stderr" \
+  "ls 2>-flagy"
 
 # Plain file redirects with explicit fd-prefix
 assert_label "FD30 cmd 2>file" "ls 2>file" "shared_write"
