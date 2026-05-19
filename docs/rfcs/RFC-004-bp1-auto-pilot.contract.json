@@ -1,6 +1,6 @@
 {
-  "version": "v3.17",
-  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts. Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14). v3.17 (slice 2e C4) adds deadline-tick failure subtypes (deadline-tick-failed, deadline-state-mismatch) — canonical-fields registry in scripts/lib/bp1-canonicalize.mjs also gains state-transition:deadline-fired + evidence:bp1-state-lock-release/stale (state-transitions/evidence not mirrored here since they're not v2 valid-state-gated; bidirectional drift caught by validate-rfc-canonical-fields.mjs against the RFC payload block).",
+  "version": "v3.18",
+  "_doc": "Machine-readable mirror of RFC-004 BP-1 auto-pilot contracts. Single source of truth for cross-component invariants (canonical-field tables, classifier output schema, run-state schemas, subcommand argv + exit codes). Validator scripts/validate-rfc-contract-mirror.mjs diffs this against code surfaces on every PR/push (per Rule 13/14). v3.17 (slice 2e C4) added deadline-tick failure subtypes. v3.18 (slice 2f) adds sweep-naked-entries subcommand (Path B detection, M3 deferral pattern) and the bp1-activation-disabled state-transition surface for bp1-flag-flip --disable. Slice 2f canonical-field additions (bp1-naked-sweep-tick, -detected, -action-pending-m3, -no-key, bp1-activation-disabled, bp1-disable-marker-rm, bp1-disable-already) are registered in scripts/lib/bp1-canonicalize.mjs; bidirectional drift caught by validate-rfc-canonical-fields.mjs against the RFC payload block.",
   "episode_canonical_fields": {
     "state-transition:rfc-detected": ["state", "rfc_id", "frontmatter_sha256"],
     "state-transition:classifier-dispatch-pending": ["state", "input_sha256"],
@@ -16,7 +16,8 @@
     "failure:marker-cleanup-failed": ["failure_kind", "marker_path", "reason"],
     "failure:bp1-marker-invalid": ["failure_kind", "marker_path", "reason"],
     "failure:deadline-tick-failed": ["failure_kind", "subtype", "exit_code"],
-    "failure:deadline-state-mismatch": ["failure_kind", "observed_state", "expected_state"]
+    "failure:deadline-state-mismatch": ["failure_kind", "observed_state", "expected_state"],
+    "failure:bp1-disable-already": ["failure_kind", "project_root_sha256"]
   },
   "classifier_output_schema": {
     "type": "object",
@@ -133,6 +134,16 @@
         "5": "state|run-missing|deadline-not-expired"
       },
       "_doc": "Slice 2d-R. Transitions a run from awaiting_approval → outcome. This slice supports outcome=auto_approved only (deadline-expired path triggered by H1 hook). outcome=approved|aborted reserved for FU-2 operator-decision CLI. exit 5 deadline-not-expired guards against premature auto-approval (hook must verify deadline_at < now before invoking). exit 1 flag-check-refused (codex r1 P3 closure 2026-05-17) — direct CLI invocation in an inactive project; H1 hook pre-gates with flag-check so runtime blast radius is bounded to operator typing the command by hand."
+    },
+    "sweep-naked-entries": {
+      "required_args": ["--project"],
+      "optional_args": ["--tick-source"],
+      "exit_codes": {
+        "0": "ok|inert|lock-busy",
+        "2": "argv|project-root-resolution-failed",
+        "3": "scan-failed|internal"
+      },
+      "_doc": "Slice 2f. Path B sweep tick: scans active runs for naked codex_review entries (no bp1-codex-request-sent evidence) older than the 5-min age threshold per RFC §555/§177. Mirrors check-deadlines exit-code shape (codex plan-tier r1 P1 closure 2026-05-19): lock-busy emits unsigned bp1-lock-busy evidence + writes parent tick with lock_busy=true + returns 0 (scheduled-task-friendly). exit 3 reserved for scan/load failures. Per-fire children: signed bp1-naked-sweep-detected when run.key is loadable; unsigned bp1-naked-sweep-no-key when not (mirrors A2 no-key audit). Per-candidate hand-off: unsigned bp1-naked-sweep-action-pending-m3 (M3 planning-team orchestrator consumes to drive em-review-request re-issue). --tick-source defaults to scheduled-task (alternative: fallback-sweep when invoked from --once executor)."
     }
   }
 }
