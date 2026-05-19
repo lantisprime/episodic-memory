@@ -1,0 +1,43 @@
+{
+  "name": "episodic-memory",
+  "version": "0.1.0",
+  "description": "Cross-tool episodic memory + BP-1 auto-pilot (RFC-004). All BP-1 surfaces are activation-gated and remain inert until M5 dry-run flips bp1.enabled per project.",
+  "scheduled-tasks": [
+    {
+      "name": "bp1-deadline-tick",
+      "description": "RFC-004 §606 T1 — Path A deadline-tick scheduled task. Fires every 5 minutes; activation-gated (no-op when project is inert).",
+      "cron": "*/5 * * * *",
+      "command": "node",
+      "args": [
+        "scripts/bp1-orchestrator.mjs",
+        "check-deadlines",
+        "--project",
+        "${PROJECT_ROOT}",
+        "--tick-source",
+        "scheduled-task"
+      ]
+    },
+    {
+      "name": "bp1-naked-entry-sweep",
+      "description": "RFC-004 §606 T1b — Path B naked-entry sweep. Fires every 1 minute (5-min age threshold = ~6 min upper bound on recovery latency); activation-gated.",
+      "cron": "*/1 * * * *",
+      "command": "node",
+      "args": [
+        "scripts/bp1-orchestrator.mjs",
+        "sweep-naked-entries",
+        "--project",
+        "${PROJECT_ROOT}",
+        "--tick-source",
+        "scheduled-task"
+      ]
+    }
+  ],
+  "slash-commands": [
+    {
+      "name": "bp1-auto",
+      "description": "BP-1 auto-pilot (inert until M5 dry-run flips bp1.enabled per RFC-004 §195).",
+      "command": "node",
+      "args": ["scripts/bp1-auto-stub.mjs"]
+    }
+  ]
+}
