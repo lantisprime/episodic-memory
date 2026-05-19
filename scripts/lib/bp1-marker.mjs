@@ -336,6 +336,12 @@ export function sweepApprovalMarkers(projectRoot) {
   }
   const removed = []
   const errors = []
+  // The /^bp1-approval-.+\.json$/ filter assumes `readdirSync(dir)` returns
+  // non-recursive basenames (no path separators). That is the documented
+  // Node behavior — we do NOT pass `{ recursive: true }`. If a future
+  // refactor flips the call to recursive, the regex's `.+` would match
+  // strings with `/` and the unlink would target paths outside `dir`.
+  // Slice 2f PR-tier M2 (PR #322 review reply ...-e2c3).
   for (const f of entries) {
     if (!/^bp1-approval-.+\.json$/.test(f)) continue
     const target = path.join(dir, f)

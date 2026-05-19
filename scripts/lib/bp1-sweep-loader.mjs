@@ -92,8 +92,14 @@ export function loadActiveRunsFromDir(runsDir) {
     }
   }
   const activeRuns = []
+  // Defense-in-depth: ent.name flows into path.join below. scanForCandidates
+  // also shape-validates run_id before allowing candidacy, but a malformed
+  // directory name shouldn't even reach the readFileSync. Slice 2f PR-tier
+  // M1 (PR #322 review reply ...-e2c3).
+  const ENT_NAME_RE = /^[A-Za-z0-9_-]+$/
   for (const ent of entries) {
     if (!ent.isDirectory()) continue
+    if (!ENT_NAME_RE.test(ent.name)) continue
     const statePath = path.join(runsDir, ent.name, 'state.json')
     if (!fs.existsSync(statePath)) continue
     let state
