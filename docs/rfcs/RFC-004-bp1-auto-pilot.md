@@ -976,6 +976,78 @@ payload = {
   //   observed_state,                 // run-state observed at fire time
   //   expected_state,                 // run-state expected (e.g. awaiting_approval)
 
+  // Slice 2f (NEW v3.18, M2 finish-line — Path B naked-entry sweep +
+  // bp1-flag-flip --disable). Mirrored in scripts/lib/bp1-canonicalize.mjs
+  // (TYPE_SPECIFIC_CANONICAL_FIELDS) and docs/rfcs/RFC-004-bp1-auto-pilot.contract.json
+  // (v3.18); validate-rfc-canonical-fields.mjs CI gate enforces drift detection
+  // across all three mirrors.
+  //
+  // For tag == "bp1-naked-sweep-tick" evidence (unsigned project-level parent
+  // emitted once per sweep-naked-entries subcommand invocation; T1b scheduled
+  // task or fallback. Scan-result mirror so an operator can reconstruct the
+  // sweep without re-walking the entry tree):
+  //   tick_source,                    // "T1b-scheduled" | "fallback-once" | etc.
+  //   runs_inspected_count,           // pre-stringified count of active runs walked
+  //   entries_inspected_count,        // pre-stringified count of codex_review entries walked
+  //   path_b_candidate_count,         // pre-stringified count of naked entries detected
+  //   stale_or_corrupt_count,         // pre-stringified count of unparseable state files
+  //   activation,                     // "active" | "inert" — project activation state at tick
+  //   lock_busy,                      // boolean — true iff state-lock contended; tick was no-op
+  //
+  // For tag == "bp1-naked-sweep-detected" evidence (signed per-run child
+  // emitted when a naked entry is detected AND the affected run's per-run HMAC
+  // key is available. Mirrors bp1-deadline-fired shape for Path B detection.
+  // age_ms + threshold_ms are anti-forge so the trigger condition is
+  // replay-stable):
+  //   tick_parent,                    // episode_id of the bp1-naked-sweep-tick parent
+  //   entry_id,                       // codex_review entry id detected as naked
+  //   age_ms,                         // pre-stringified observed age of the entry at tick
+  //   threshold_ms,                   // pre-stringified threshold used (5min default)
+  //
+  // For tag == "bp1-naked-sweep-action-pending-m3" evidence (per-candidate
+  // hand-off-pending; M3's planning-team orchestrator consumes this to drive
+  // em-review-request re-issue. Until M3 lands, this is the queryable signal
+  // that a candidate was detected. Name mirrors bp1-sweep-action-pending-m1
+  // from the M0 fallback executor):
+  //   tick_parent,                    // episode_id of the bp1-naked-sweep-tick parent
+  //   entry_id,                       // codex_review entry id requiring hand-off
+  //   pending_action,                 // hand-off action label (e.g. "em-review-request-reissue")
+  //
+  // For tag == "bp1-naked-sweep-no-key" evidence (unsigned audit child emitted
+  // when a Path B candidate is detected but the affected run's run.key is
+  // missing/unreadable. Mirrors bp1-a2-no-key audit shape per RFC §2816.
+  // Operators inspect <projectRoot>/.episodic-memory/runs/<runId>/run.key to
+  // diagnose):
+  //   tick_parent,                    // episode_id of the bp1-naked-sweep-tick parent
+  //   entry_id,                       // codex_review entry id for which key was unavailable
+  //   error,                          // failure-mode label (e.g. "ENOENT" | "EACCES" | "malformed")
+  //
+  // For type == "state-transition" with state == "bp1-activation-disabled"
+  // (operator-initiated activation removal via bp1-flag-flip --disable.
+  // Per-project event. Verify-key signed — global authority, NOT per-run.
+  // marker_rm_count records concurrent forensic side effects):
+  //   state,                          // "bp1-activation-disabled" (already declared above)
+  //   project_root_sha256,            // 64-hex sha256 of canonicalized project root path
+  //   disabled_at,                    // ISO-8601 UTC wall-clock at config-write moment
+  //   disabled_via,                   // "bp1-flag-flip-disable" (operator-facing label)
+  //   marker_rm_count,                // pre-stringified count of bp1-approval-*.json removed
+  //                                   // during the same --disable transaction
+  //   verify_key_id,                  // global verify-key identifier (signing authority)
+  //
+  // For tag == "bp1-disable-marker-rm" evidence (unsigned per-marker forensic
+  // trail of bp1-approval-*.json removal during --disable. One emission per
+  // removed marker; parent links to the bp1-activation-disabled state-transition):
+  //   parent,                         // episode_id of the bp1-activation-disabled state-transition
+  //   marker_path,                    // absolute path to the removed approval marker file
+  //   run_id,                         // run_id extracted from the marker filename (generic, but
+  //                                   // bound here as forensic context for the removal)
+  //
+  // For type == "failure" with failure_kind == "bp1-disable-already"
+  // (idempotent --disable on an already-absent activation entry. RFC §217 A7:
+  // two concurrent --disable calls race; first wins, second emits this no-op):
+  //   failure_kind,                   // "bp1-disable-already" (subtype-derivation)
+  //   project_root_sha256,            // 64-hex sha256 of canonicalized project root path
+
   // Future-extensibility: any episode-type-specific authorization-bearing field
   // MUST be added here at the time the field is introduced. Two CI gates enforce:
   //   - validate-rfc-failure-table.mjs (v3.7) — failure-row evidence-tag drift.
