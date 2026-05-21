@@ -276,3 +276,86 @@ export function cleanupApprovalMarker(projectRoot, runId) {
     return { status: 'error', code: e.code || 'unlink-failed', message: e.message, markerPath: target }
   }
 }
+
+// ---------------------------------------------------------------------------
+// sweepApprovalMarkers — slice 2f, bulk removal during --disable
+// ---------------------------------------------------------------------------
+
+/**
+ * Remove ALL bp1-approval-*.json marker files from a project's .checkpoints
+ * directory. Used by `bp1-flag-flip --disable` to ensure the operator-
+ * disabled project does not retain expired-but-trusted approval markers that
+ * a future H1 hook (after re-enable) could pick up out of context.
+ *
+ * Idempotent on missing directory (ENOENT → status: 'ok', removed: []).
+ * Non-matching files in .checkpoints/ are left untouched.
+ *
+ * Per-file unlink errors are collected in `errors[]` but the sweep continues;
+ * the caller decides whether 'partial' constitutes a hard failure. This
+ * mirrors the bare-catch P1 lesson (PR-1a round 3): record, never silently
+ * swallow.
+ *
+ * Authority: caller-supplied projectRoot. This helper does NOT canonicalize
+ * the root — that is the caller's responsibility (bp1-flag-flip resolves to
+ * git-toplevel realpath before invoking).
+ *
+ * @param {string} projectRoot — absolute path to the canonical project root
+ * @returns {{
+ *   status: 'ok' | 'partial' | 'error',
+ *   removed: string[],
+ *   errors: Array<{ path: string, code: string, message: string }>,
+ *   code?: string,
+ *   message?: string
+ * }}
+ */
+export function sweepApprovalMarkers(projectRoot) {
+  if (typeof projectRoot !== 'string' || !path.isAbsolute(projectRoot)) {
+    return {
+      status: 'error',
+      code: 'invalid-input',
+      message: `sweepApprovalMarkers: projectRoot must be absolute; got ${projectRoot}`,
+      removed: [],
+      errors: [],
+    }
+  }
+  const dir = path.join(projectRoot, '.checkpoints')
+  let entries
+  try {
+    entries = fs.readdirSync(dir)
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      return { status: 'ok', removed: [], errors: [] }
+    }
+    return {
+      status: 'error',
+      code: e.code || 'readdir-failed',
+      message: e.message,
+      removed: [],
+      errors: [],
+    }
+  }
+  const removed = []
+  const errors = []
+  // The /^bp1-approval-.+\.json$/ filter assumes `readdirSync(dir)` returns
+  // non-recursive basenames (no path separators). That is the documented
+  // Node behavior — we do NOT pass `{ recursive: true }`. If a future
+  // refactor flips the call to recursive, the regex's `.+` would match
+  // strings with `/` and the unlink would target paths outside `dir`.
+  // Slice 2f PR-tier M2 (PR #322 review reply ...-e2c3).
+  for (const f of entries) {
+    if (!/^bp1-approval-.+\.json$/.test(f)) continue
+    const target = path.join(dir, f)
+    try {
+      fs.unlinkSync(target)
+      removed.push(target)
+    } catch (e) {
+      if (e.code === 'ENOENT') continue
+      errors.push({ path: target, code: e.code || 'unlink-failed', message: e.message })
+    }
+  }
+  return {
+    status: errors.length ? 'partial' : 'ok',
+    removed,
+    errors,
+  }
+}

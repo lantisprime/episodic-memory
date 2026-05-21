@@ -221,6 +221,75 @@ export const TYPE_SPECIFIC_CANONICAL_FIELDS = Object.freeze({
     'observed_state',
     'expected_state',
   ]),
+  // Slice 2f — Path B naked-entry sweep parent tick (RFC §606 T1b, RFC §1276-
+  // 1310). Project-level operational evidence; no per-run authority. Emitted
+  // unsigned by sweep-naked-entries (T1b scheduled task or fallback). Counts
+  // are scan-result mirrors so an operator can reconstruct the sweep without
+  // re-walking the entry tree.
+  'evidence:bp1-naked-sweep-tick': Object.freeze([
+    'tick_source',
+    'runs_inspected_count',
+    'entries_inspected_count',
+    'path_b_candidate_count',
+    'stale_or_corrupt_count',
+    'activation',
+    'lock_busy',
+  ]),
+  // Slice 2f — signed per-run child emitted when a naked entry is detected
+  // and the affected run's per-run HMAC key is available. Mirror of
+  // bp1-deadline-fired shape for Path B detection. `age_ms` + `threshold_ms`
+  // are anti-forge so the trigger condition is replay-stable.
+  'evidence:bp1-naked-sweep-detected': Object.freeze([
+    'tick_parent',
+    'entry_id',
+    'age_ms',
+    'threshold_ms',
+  ]),
+  // Slice 2f — per-candidate hand-off-pending evidence. M3's planning-team
+  // orchestrator consumes this to drive em-review-request re-issue. Until M3
+  // lands, this is the queryable signal that a candidate was detected. Name
+  // mirrors bp1-sweep-action-pending-m1 from the M0 fallback executor.
+  'evidence:bp1-naked-sweep-action-pending-m3': Object.freeze([
+    'tick_parent',
+    'entry_id',
+    'pending_action',
+  ]),
+  // Slice 2f — unsigned audit child emitted when a Path B candidate is
+  // detected but the affected run's run.key is missing/unreadable. Mirrors
+  // bp1-a2-no-key audit shape (RFC §2816). Operators inspect
+  // <projectRoot>/.episodic-memory/runs/<runId>/run.key to diagnose.
+  'evidence:bp1-naked-sweep-no-key': Object.freeze([
+    'tick_parent',
+    'run_id',
+    'entry_id',
+    'error',
+  ]),
+  // Slice 2f — operator-initiated activation removal via bp1-flag-flip
+  // --disable. Per-project event. Verify-key signed (global authority);
+  // marker_rm_count records concurrent forensic side effects.
+  'state-transition:bp1-activation-disabled': Object.freeze([
+    'state',
+    'project_root_sha256',
+    'disabled_at',
+    'disabled_via',
+    'marker_rm_count',
+    'verify_key_id',
+  ]),
+  // Slice 2f — per-marker forensic trail of bp1-approval-*.json removal
+  // during --disable. One emission per removed marker; parent links to the
+  // bp1-activation-disabled state-transition.
+  'evidence:bp1-disable-marker-rm': Object.freeze([
+    'parent',
+    'marker_path',
+    'run_id',
+  ]),
+  // Slice 2f — idempotent --disable on an already-absent activation entry.
+  // RFC §217 A7: two concurrent --disable calls race; first wins, second
+  // emits this (no-op).
+  'failure:bp1-disable-already': Object.freeze([
+    'failure_kind',
+    'project_root_sha256',
+  ]),
 })
 
 // ---------------------------------------------------------------------------

@@ -138,12 +138,25 @@ function checkCanonicalFields(contract, code) {
     'state-transition:run-started',
     // Slice 2e: per-fire children of bp1-deadline-tick (not v2-gated).
     'state-transition:deadline-fired',
+    // Slice 2f: per-project operator-initiated state-transition (--disable
+    // emission). Verify-key signed; project-level authority; not part of the
+    // per-run lifecycle so not in v2.states. Contract surface for --disable
+    // is the bp1-flag-flip script, not a run-state schema entry.
+    'state-transition:bp1-activation-disabled',
     // evidence:* subtypes are operational/non-v2-gated by design; enumerated
     // for explicitness (matches what bp1-canonicalize.mjs currently declares):
     'evidence:bp1-codex-request-sent',
     'evidence:bp1-state-lock-claim',
     'evidence:bp1-state-lock-release',
     'evidence:bp1-state-lock-stale',
+    // Slice 2f — Path B sweep evidence + disable forensic trail. None of
+    // these are v2-state-gated. bp1-flag-flip surface contract handled
+    // separately (script-level argv contract, not orchestrator subcommand).
+    'evidence:bp1-naked-sweep-tick',
+    'evidence:bp1-naked-sweep-detected',
+    'evidence:bp1-naked-sweep-action-pending-m3',
+    'evidence:bp1-naked-sweep-no-key',
+    'evidence:bp1-disable-marker-rm',
   ])
   for (const subtype of Object.keys(code)) {
     if (INTENTIONALLY_NOT_MIRRORED.has(subtype)) continue

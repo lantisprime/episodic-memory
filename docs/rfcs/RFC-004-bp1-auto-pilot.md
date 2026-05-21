@@ -202,7 +202,7 @@ The map entry for a project flips `enabled: false` (or absent) → `enabled: tru
 2. End-to-end happy-path dry run completes against a fixture RFC (`docs/rfcs/RFC-fixture-trivial-dryrun.md` in this project) without merging any PR
 3. `bp1-flag-flip.mjs` takes the global config lock, writes the entry for `<canonical_project_root>` (sets enabled, artifact-hash, enabled_at, enabled_via, verify_key_id), and emits a `bp1-activation` episode (local scope; per-project audit trail)
 
-A reverse `bp1-flag-flip.mjs --disable` removes only the named project's entry (M5 deliverable). Other projects' entries are untouched.
+A reverse `bp1-flag-flip.mjs --disable` removes only the named project's entry (shipped in slice 2f — M5 `--disable` marker-rm deferral closed). Other projects' entries are untouched. The `--disable` flow additionally sweeps `<canonical_project_root>/.checkpoints/bp1-approval-*.json` markers so a future re-enable does not inherit stale (expired-but-trusted) markers; per-marker forensic trail is emitted as unsigned `bp1-disable-marker-rm` evidence parented to the operator-initiated `bp1-activation-disabled` state-transition episode. `--enable`, `--dry-run-on`, and `--dry-run-off` remain stubs in slice 2f (exit 5 with M5-pending message); M5 ships the actual flip semantics plus the dry-run bypass mechanism (RFC §630-642).
 
 ### Negative tests for the activation map (M5)
 
@@ -543,7 +543,7 @@ All 10 follow the canonical-prompt-as-episode loader pattern (per `feedback_cano
 | 10 | `scripts/bp1-token-budget.mjs` | Cumulative token math; called by sentinel | ✅ pure arithmetic |
 | 11 | `scripts/em-review-request.mjs` (extension) | Adds `--target plan-episode:<id>` mode + `--idempotency-key <hex>` (NEW v3.8 — local idempotency enforcement per I4) | ✅ existing pattern extension |
 | 12 (NEW v3.8) | `scripts/bp1-canonicalize.mjs` | Per-episode canonical-bytes builder; projects frontmatter to canonical payload spec (generic + episode-type-specific fields) and emits sha256. Called by HMAC-signing path. | ✅ pure deterministic |
-| 13 (NEW v3.8) | `scripts/bp1-naked-entry-sweep.mjs` | Path B sweep: scans active runs for naked `codex_review` entries (no `bp1-codex-request-sent` evidence) older than 5min. Called by T1b scheduled task. Emits `bp1-naked-sweep-tick` per fire. | ✅ deterministic data walk |
+| 13 (NEW v3.8, REVISED v3.18) | `bp1-orchestrator.mjs sweep-naked-entries` (subcommand) | Path B sweep: scans active runs for naked `codex_review` entries (no `bp1-codex-request-sent` evidence) older than 5min. Called by T1b scheduled task. Emits `bp1-naked-sweep-tick` parent + per-candidate signed `bp1-naked-sweep-detected` (or unsigned `bp1-naked-sweep-no-key` when run.key absent) + unsigned `bp1-naked-sweep-action-pending-m3` per fire. v3.18 (slice 2f): wired as orchestrator subcommand mirroring `check-deadlines` (T1) rather than a standalone script — same flag-check + state-lock + cwd-binding discipline. Active-run state loaded via `scripts/lib/bp1-sweep-loader.mjs` (also consumed by the M0 fallback `bp1-deadline-sweep.mjs --once`). | ✅ deterministic data walk |
 | 14 (NEW v3.10) | `scripts/bp1-deadline-sweep.mjs` | Unified fallback for T1 + T1b when `mcp__scheduled-tasks` unavailable. Invocable manually (`--once`) and auto-wired as a SessionStart hook (see hook H2 below). Activation-gated (no-op if project's flag-check fails). Emits `bp1-sweep-tick` per invocation. | ✅ deterministic; activation-gated |
 | 15 (NEW v3.15) | `scripts/lib/bp1-marker.mjs` | Approval-marker write/cleanup helpers. Exports `markerPath`, `canonicalizeMarkerPayload`, `writeMarker` (atomic + idempotent), `cleanupApprovalMarker`. Pure file I/O + canonicalization — does NOT emit evidence (caller-side per §595 ownership split). Called by `record-awaiting-approval` (write) and finalize-* paths (cleanup). | ✅ deterministic; idempotent byte-equal rewrite |
 
@@ -975,6 +975,78 @@ payload = {
   //   failure_kind,                   // "deadline-state-mismatch" (subtype-derivation)
   //   observed_state,                 // run-state observed at fire time
   //   expected_state,                 // run-state expected (e.g. awaiting_approval)
+
+  // Slice 2f (NEW v3.18, M2 finish-line — Path B naked-entry sweep +
+  // bp1-flag-flip --disable). Mirrored in scripts/lib/bp1-canonicalize.mjs
+  // (TYPE_SPECIFIC_CANONICAL_FIELDS) and docs/rfcs/RFC-004-bp1-auto-pilot.contract.json
+  // (v3.18); validate-rfc-canonical-fields.mjs CI gate enforces drift detection
+  // across all three mirrors.
+  //
+  // For tag == "bp1-naked-sweep-tick" evidence (unsigned project-level parent
+  // emitted once per sweep-naked-entries subcommand invocation; T1b scheduled
+  // task or fallback. Scan-result mirror so an operator can reconstruct the
+  // sweep without re-walking the entry tree):
+  //   tick_source,                    // "T1b-scheduled" | "fallback-once" | etc.
+  //   runs_inspected_count,           // pre-stringified count of active runs walked
+  //   entries_inspected_count,        // pre-stringified count of codex_review entries walked
+  //   path_b_candidate_count,         // pre-stringified count of naked entries detected
+  //   stale_or_corrupt_count,         // pre-stringified count of unparseable state files
+  //   activation,                     // "active" | "inert" — project activation state at tick
+  //   lock_busy,                      // boolean — true iff state-lock contended; tick was no-op
+  //
+  // For tag == "bp1-naked-sweep-detected" evidence (signed per-run child
+  // emitted when a naked entry is detected AND the affected run's per-run HMAC
+  // key is available. Mirrors bp1-deadline-fired shape for Path B detection.
+  // age_ms + threshold_ms are anti-forge so the trigger condition is
+  // replay-stable):
+  //   tick_parent,                    // episode_id of the bp1-naked-sweep-tick parent
+  //   entry_id,                       // codex_review entry id detected as naked
+  //   age_ms,                         // pre-stringified observed age of the entry at tick
+  //   threshold_ms,                   // pre-stringified threshold used (5min default)
+  //
+  // For tag == "bp1-naked-sweep-action-pending-m3" evidence (per-candidate
+  // hand-off-pending; M3's planning-team orchestrator consumes this to drive
+  // em-review-request re-issue. Until M3 lands, this is the queryable signal
+  // that a candidate was detected. Name mirrors bp1-sweep-action-pending-m1
+  // from the M0 fallback executor):
+  //   tick_parent,                    // episode_id of the bp1-naked-sweep-tick parent
+  //   entry_id,                       // codex_review entry id requiring hand-off
+  //   pending_action,                 // hand-off action label (e.g. "em-review-request-reissue")
+  //
+  // For tag == "bp1-naked-sweep-no-key" evidence (unsigned audit child emitted
+  // when a Path B candidate is detected but the affected run's run.key is
+  // missing/unreadable. Mirrors bp1-a2-no-key audit shape per RFC §2816.
+  // Operators inspect <projectRoot>/.episodic-memory/runs/<runId>/run.key to
+  // diagnose):
+  //   tick_parent,                    // episode_id of the bp1-naked-sweep-tick parent
+  //   entry_id,                       // codex_review entry id for which key was unavailable
+  //   error,                          // failure-mode label (e.g. "ENOENT" | "EACCES" | "malformed")
+  //
+  // For type == "state-transition" with state == "bp1-activation-disabled"
+  // (operator-initiated activation removal via bp1-flag-flip --disable.
+  // Per-project event. Verify-key signed — global authority, NOT per-run.
+  // marker_rm_count records concurrent forensic side effects):
+  //   state,                          // "bp1-activation-disabled" (already declared above)
+  //   project_root_sha256,            // 64-hex sha256 of canonicalized project root path
+  //   disabled_at,                    // ISO-8601 UTC wall-clock at config-write moment
+  //   disabled_via,                   // "bp1-flag-flip-disable" (operator-facing label)
+  //   marker_rm_count,                // pre-stringified count of bp1-approval-*.json removed
+  //                                   // during the same --disable transaction
+  //   verify_key_id,                  // global verify-key identifier (signing authority)
+  //
+  // For tag == "bp1-disable-marker-rm" evidence (unsigned per-marker forensic
+  // trail of bp1-approval-*.json removal during --disable. One emission per
+  // removed marker; parent links to the bp1-activation-disabled state-transition):
+  //   parent,                         // episode_id of the bp1-activation-disabled state-transition
+  //   marker_path,                    // absolute path to the removed approval marker file
+  //   run_id,                         // run_id extracted from the marker filename (generic, but
+  //                                   // bound here as forensic context for the removal)
+  //
+  // For type == "failure" with failure_kind == "bp1-disable-already"
+  // (idempotent --disable on an already-absent activation entry. RFC §217 A7:
+  // two concurrent --disable calls race; first wins, second emits this no-op):
+  //   failure_kind,                   // "bp1-disable-already" (subtype-derivation)
+  //   project_root_sha256,            // 64-hex sha256 of canonicalized project root path
 
   // Future-extensibility: any episode-type-specific authorization-bearing field
   // MUST be added here at the time the field is introduced. Two CI gates enforce:
@@ -1763,6 +1835,7 @@ graph TD
 | PR-2b (M2 part 1 — slice 2b) | `scripts/bp1-rfc-scan.mjs` (new, ~290 LOC), `scripts/lib/bp1-canonicalize.mjs` (+`canonicalizeFrontmatterBytes` export, ~50 LOC), `.claude/agents/bp1-rfc-classifier.md` (new loader, ~45 LOC), canonical-prompt episode `20260513-053454-...-a0c0` (global) | `tests/test-bp1-rfc-scan.mjs` (33 new), `tests/test-bp1-canonicalize.mjs` (+7 cases for canonicalizeFrontmatterBytes) — 40 cases | _shipped_ ✓ (slice 2b). Activation-gated trigger + classifier loader. Plan v3 closed planner HOLD (1 P0 + 2 P1 + 2 P2 + 2 P3) and codex plan-tier r1 HOLD (2 P1 + 1 P2) — round-2 codex verdict ACCEPT (episode `20260513-052358-...-80ad`). Subprocess spawn discipline (`cwd: projectRoot` + `bp1-flag-check --no-emit`) closes PR #262-class cwd-binding bug at slice boundary. Status routing matches strict-parser semantics; closed reason vocab = 8 entries. |
 | PR-2d-W (M2 part 2 — slice 2d-W) | `scripts/lib/bp1-marker.mjs` (NEW, 279 LOC — `markerPath`/`canonicalizeMarkerPayload`/`writeMarker`/`cleanupApprovalMarker`); `scripts/bp1-orchestrator.mjs` (`record-awaiting-approval` subcommand + `deriveRouteSpec` Option A — trivial skips routing, `record-awaiting-approval` consumes state==classified; 4 finalize cleanup callsites at L790/L854/L875/L890); `scripts/lib/bp1-canonicalize.mjs` (+`state-transition:awaiting_approval` + `failure:marker-write-failed` + reserved `failure:marker-cleanup-failed`); `scripts/lib/bp1-run-state.mjs` + migrate (+`awaiting_approval` state + `awaiting_approval_at` + `deadline_at` patch fields); `scripts/validate-rfc-contract-mirror.mjs` (reverse-set derivation refactor — codex r1 B2 cleanup); `docs/rfcs/RFC-004-bp1-auto-pilot.contract.json` v3.15 | `tests/test-bp1-marker.mjs` (NEW, 24); `tests/test-bp1-orchestrator-record-awaiting-approval.mjs` (NEW, 18); `tests/test-bp1-orchestrator-classifier-fence.mjs` + `tests/test-bp1-orchestrator-288-resume.mjs` adjusted — 42+ new cases (211+ total across 14 BP-1 test files, all green) | slice 2d-W PR — pending merge. Reshapes gate placement: trivial-class runs now hit `awaiting_approval` immediately post-classify (1hr auto-approve), not post-codex; risky-class runs route `classified → needs_human` directly. Codex plan-tier 4-round consensus ACCEPT-with-FU (r3 reply `20260517-023916-...-8e33`). RFC-update plan separately reviewed by codex r1 HOLD → r2 ACCEPT (reply `20260517-030005-...-69e3`) — closed source-aware `needs_human` resume gap (risky entries resume to `planning`, not `implementing`) + Phase B determinism-not-relock wording + `marker-cleanup-failed` reserved-only wording. 4 follow-ups deferred: linked-worktree fixture + splice-before-H2 + hook exit-0-always semantics → slice 2d-R; M5 `--disable` marker-rm → slice 2f; plan-tier live-reachability addendum → new GitHub issue post-merge. |
 | PR-2d-R (M2 part 3 — slice 2d-R) | `scripts/bp1-marker-validate.mjs` (NEW, ~270 LOC — pure validator); `scripts/bp1-emit-marker-invalid-evidence.mjs` (NEW, ~190 LOC — three-case evidence helper Case A signed / Case B unsigned-stderr); `scripts/bp1-orchestrator.mjs` (+`confirm-approval` subcommand — idempotent `awaiting_approval → auto_approved` transition with defense-in-depth deadline check); `scripts/lib/bp1-run-state.mjs` (+`approved` + `auto_approved` terminal states); `scripts/lib/bp1-canonicalize.mjs` (+`state-transition:auto_approved` + `state-transition:approved` + `failure:bp1-marker-invalid`); `scripts/validate-rfc-contract-mirror.mjs` (consumes new `terminal_states` field from contract.json instead of hardcoding); `.claude/hooks/bp1-approval-check.sh` (NEW, ~165 LOC — H1 SessionStart hook; resolves canonical project root via `git rev-parse --show-toplevel` BEFORE flag-check; iterates `<canonical_root>/.checkpoints/bp1-approval-*.json`; branches on validator status; always exit 0 per §178 four-mode silent-exit); `scripts/lib/bp1-install-helpers.mjs` (+`mergeSessionStartH1Hook` with splice-before-H2 semantics + `entryReferencesBasename` helper); `install.mjs` §2c (H1 wiring block — file copy + chmod 0o755 + divergent-skip semantics mirroring H2 + settings.json registration via splice-before-H2); `docs/rfcs/RFC-004-bp1-auto-pilot.contract.json` v3.16 (+`confirm-approval` subcommand + `state-transition:auto_approved`/`approved` + `failure:bp1-marker-invalid` + `terminal_states` field for validator consumption) | `tests/test-bp1-marker-validate.mjs` (NEW, 18 cases — pipeline steps 4-11 + argv); `tests/test-bp1-emit-marker-invalid-evidence.mjs` (NEW, 8 cases — Case A signed / Case B stderr / argv); `tests/test-bp1-orchestrator-confirm-approval.mjs` (NEW, 10 cases — happy path / idempotent / deadline-not-expired / state-violation / run-missing / argv / marker-already-absent / canonical-fields); `tests/test-bp1-approval-check-hook.mjs` (NEW, 12 cases — inert / no-markers / valid+expired → auto_approved / valid+!expired no-op / race / Case A / Case B / Case C / multi-marker / transient-failure exit-0 / git-toplevel subdir); `tests/test-bp1-run-state.mjs` (+6 cases for new terminal states); `tests/test-install-bp1-wiring.mjs` (+8 H1-specific cases — file copy / idempotent / divergent-skip / force-overwrite / splice-before-H2 / helper purity / no-H2-target / already-present); `tests/test-bp1-run-state.mjs` + `tests/test-bp1-orchestrator-record-awaiting-approval.mjs` adjusted for new terminal states — 62 new + adjusted cases (273+ total across BP-1 test files, all green) | slice 2d-R PR — pending merge. Consumer side of #189 (closes the trivial-class auto-approve loop end-to-end). Closes 3 deferrals from PR-2d-W: linked-worktree fixture (writer + reader both use `git rev-parse --show-toplevel` — symmetric per RFC §646; reader-side test fixture covered by AC-12 subdir test which exercises the same code path); splice-before-H2 insertion semantics (`mergeSessionStartH1Hook` finds H2 by basename match and `arr.splice(h2Index, 0, h1)` — preserves unrelated pre-existing entries); hook exit-0-always semantics (§178 four-mode table: bp1-inert / marker-missing / Case A signed / Case B stderr / Case C hook-stderr / valid+!expired / valid+expired+confirm-approval / confirm-approval transient failure — all exit 0). Codex plan-tier consensus 3-round HOLD→HOLD→ACCEPT-with-FU. FU-1 (stale-comment fix in test-bp1-orchestrator-record-awaiting-approval.mjs) inline. |
+| PR-2f (M2 finish-line — slice 2f) | `scripts/lib/bp1-sweep-loader.mjs` (NEW, ~110 LOC — shared `loadActiveRunsForSweep` + `loadActiveRunsFromDir` extracted from `bp1-deadline-sweep.mjs:282-315`; pure path-based loader, single authority for codex_review_entries on disk); `scripts/bp1-deadline-sweep.mjs` (refactored to consume shared loader — behavior unchanged); `scripts/bp1-orchestrator.mjs` (+`sweep-naked-entries` subcommand mirroring `check-deadlines` shape — Path B detection, M3 hand-off via `bp1-naked-sweep-action-pending-m3` evidence, signed `bp1-naked-sweep-detected` child per affected run, unsigned `bp1-naked-sweep-no-key` audit when run.key missing); `scripts/lib/bp1-marker.mjs` (+`sweepApprovalMarkers(projectRoot)` — bulk removal of `bp1-approval-*.json` from project's `.checkpoints/`); `scripts/bp1-flag-flip.mjs` (NEW, ~390 LOC — `--disable` working with git-toplevel-required canonicalization + flock-serialized config write + marker sweep + verify-key-aware forensic episodes; `--enable`/`--dry-run-on`/`--dry-run-off` stubs exit 5 with M5-pending message); `scripts/bp1-auto-stub.mjs` (NEW, ~25 LOC — /bp1-auto inert-mode stub); `.claude-plugin/plugin.json` (NEW — registers T1 deadline-tick + T1b naked-entry-sweep scheduled tasks + /bp1-auto slash command; T2 weekly audit deferred to M6); `scripts/lib/bp1-canonicalize.mjs` (+5 evidence + 1 state-transition + 1 failure: bp1-naked-sweep-tick, bp1-naked-sweep-detected, bp1-naked-sweep-action-pending-m3, bp1-naked-sweep-no-key, bp1-activation-disabled, bp1-disable-marker-rm, bp1-disable-already); `scripts/validate-rfc-contract-mirror.mjs` (+INTENTIONALLY_NOT_MIRRORED entries for slice 2f evidence subtypes); `docs/rfcs/RFC-004-bp1-auto-pilot.contract.json` v3.18 (+sweep-naked-entries subcommand contract + failure:bp1-disable-already) | `tests/test-bp1-sweep-loader.mjs` (NEW, 15 cases — missing dirs / corrupt JSON / mixed siblings / cwd-mismatch / v1-index orthogonality); `tests/test-bp1-orchestrator-sweep-naked-entries.mjs` (NEW, 15 cases — no runs / inert / detected+no-key / argv / cwd-mismatch / lock-busy / git-toplevel / corrupt-state / below-threshold / Path-A-not-B / multi-run / action-pending / signed-child); `tests/test-bp1-flag-flip.mjs` (NEW, 14 cases — stubs / non-git rejection / config-missing-idempotent / entry-absent-idempotent + marker-sweep / live disable / A6 sibling preservation / per-marker evidence / missing-verify-key tolerated / argv / atomic config write); `tests/test-plugin-json.mjs` (NEW, 6 cases — shape / T1+T1b present, T2 absent / /bp1-auto stub / manifest-filter parity); `tests/test-bp1-marker.mjs` (+6 sweepApprovalMarkers cases) — **56 new cases (all green); 28-test regression on `bp1-deadline-sweep` preserved through loader refactor**. | slice 2f — closes M2. Codex plan-tier consensus 2-round HOLD→ACCEPT-with-FU. Round-1 HOLD (2 P1 + 2 P2): state-root mismatch on `_index.json` shape → shared `bp1-sweep-loader.mjs` path-based + bp1-runs/ authoritative; lock-busy exit-code conflict → mirror check-deadlines (exit 0 + bp1-lock-busy evidence); non-git disable ambiguity → git-toplevel required; missing run.key audit → unsigned `bp1-naked-sweep-no-key` child mirroring A2 pattern. Round-2 ACCEPT-with-FU: v1-index loader wording clarified inline (loader is path-based, orthogonal to v1→v2 migration). Episodes: `20260519-120833-…-f794` (r1 request), `20260519-121129-…-4956` (r1 reply HOLD), `20260519-121303-…-e8df` (r2 request), `20260519-121539-…-b88f` (r2 reply ACCEPT). M5 `--disable` marker-rm deferral from slice 2d-W closed. M5 `--enable` / dry-run-on/off stubs registered; M5 ships the real flips. |
 
 ---
 

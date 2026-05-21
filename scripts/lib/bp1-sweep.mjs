@@ -105,16 +105,33 @@ export function scanForCandidates({ activeRuns, now, config } = {}) {
   let entries_inspected_count = 0
   let stale_or_corrupt_count = 0
 
+  // Slice 2f BLOCKER closure (codex code-review r1, episode ...-f964):
+  // persisted run_id + entry_id are interpolated into unsigned-episode
+  // filenames downstream (e.g. `bp1-naked-sweep-action-pending-m3-${tickId}-
+  // ${run_id}-${entry_id}.md`). An unvalidated string can carry path-
+  // traversal sequences like "../escape" that bypass the episodes/ directory
+  // boundary, causing the action-pending + no-key audit emissions to fail
+  // silently while the parent tick still reports `path_b_candidate_count: 1`.
+  // Reject IDs that aren't path-safe at scan time; surface them as
+  // stale_or_corrupt instead of as actionable candidates.
+  const ID_SHAPE_RE = /^[A-Za-z0-9_-]+$/
+
   for (const run of activeRuns) {
     if (!run || typeof run !== 'object') {
       stale_or_corrupt_count++
       continue
     }
     const runId = run.run_id
+    const runIdSafe = typeof runId === 'string' && ID_SHAPE_RE.test(runId)
     const entries = Array.isArray(run.codex_review_entries) ? run.codex_review_entries : []
     for (const entry of entries) {
       entries_inspected_count++
       if (!entry || typeof entry !== 'object' || typeof entry.entry_id !== 'string') {
+        stale_or_corrupt_count++
+        continue
+      }
+      // Path-traversal + shape guard: both IDs become filename components.
+      if (!runIdSafe || !ID_SHAPE_RE.test(entry.entry_id)) {
         stale_or_corrupt_count++
         continue
       }

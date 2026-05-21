@@ -76,6 +76,8 @@ import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
 import { writeBp1Episode } from './lib/bp1-episode-writer.mjs'
 import { verifyEpisodeOnDisk } from './lib/bp1-episode-verify.mjs'
 import { writeMarker, cleanupApprovalMarker } from './lib/bp1-marker.mjs'
+import { loadActiveRunsForSweep } from './lib/bp1-sweep-loader.mjs'
+import { scanForCandidates, PATH_B_AGE_THRESHOLD_MS } from './lib/bp1-sweep.mjs'
 
 const REPO_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const FLAG_CHECK = path.join(REPO_DIR, 'scripts', 'bp1-flag-check.mjs')
@@ -101,7 +103,8 @@ function usage() {
     '  bp1-orchestrator record-classification --project <projectRoot> --run-id <runId> --pre-episode-id <id> --result-file <abs-path>\n' +
     '  bp1-orchestrator record-awaiting-approval --project <projectRoot> --run-id <runId> --classified-episode-id <id>\n' +
     '  bp1-orchestrator confirm-approval --project <projectRoot> --run-id <runId> --outcome auto_approved\n' +
-    '  bp1-orchestrator check-deadlines --project <projectRoot> [--tick-source scheduled-task|fallback-sweep]\n',
+    '  bp1-orchestrator check-deadlines --project <projectRoot> [--tick-source scheduled-task|fallback-sweep]\n' +
+    '  bp1-orchestrator sweep-naked-entries --project <projectRoot> [--tick-source scheduled-task|fallback-sweep]\n',
   )
 }
 
@@ -3126,6 +3129,270 @@ function checkDeadlines(args) {
 }
 
 // ---------------------------------------------------------------------------
+// sweep-naked-entries subcommand (slice 2f, RFC §606 T1b — Path B detection)
+// ---------------------------------------------------------------------------
+//
+// Mirrors check-deadlines shape (slice 2e C4). Detects naked codex_review
+// entries (request_sent=false, age >= PATH_B_AGE_THRESHOLD_MS) and emits
+// per-candidate evidence so the M3 planning-team orchestrator can re-issue
+// the request when it lands. Slice 2f does NOT issue the request itself —
+// that requires the em-review-request BP1-mode extension (M3 deliverable).
+//
+// Exit-code shape matches check-deadlines (codex plan-tier r1 P1 closure):
+//   0  ok | inert (flag-check disabled) | lock-busy
+//   2  argv | project-root-resolution-failed
+//   3  scan-failed | internal (reserved; not currently used — load failures
+//      degrade gracefully via loadActiveRunsForSweep's loadIssue surface)
+
+function writeUnsignedNakedSweepTick({ projectRoot, tickId, body, frontmatterFields }) {
+  // Mirror of writeUnsignedDeadlineTick from check-deadlines. Reuses the
+  // same episodes dir + atomic-write discipline.
+  return writeUnsignedDeadlineTick({
+    projectRoot, tickId, body,
+    frontmatterFields: { ...frontmatterFields, _tick_kind: 'naked-sweep' },
+  })
+}
+
+function emitNakedSweepDetectedChild({ projectRoot, runId, runKey32B, parentTickId, entryId, ageMs, thresholdMs }) {
+  return writeBp1Episode({
+    projectRoot, runId, runKey32B,
+    type: 'evidence', state: null,
+    summary: `bp1-naked-sweep-detected entry=${entryId} run=${runId}`,
+    parentEpisode: parentTickId,
+    expectedPostEpisodeId: null,
+    customFm: {
+      entry_id: entryId,
+      age_ms: String(ageMs),
+      threshold_ms: String(thresholdMs),
+    },
+    tags: ['bp1-naked-sweep-detected'],
+    body: `Path B naked entry detected on run ${runId}.\nEntry: ${entryId}\nAge: ${ageMs} ms (threshold ${thresholdMs} ms).\n` +
+      `Hand-off: M3 planning-team orchestrator should re-issue codex_review request via em-review-request BP1-mode.\n`,
+    filenameSuffix: 'naked-sweep-detected',
+  })
+}
+
+function writeUnsignedNakedSweepNoKey({ projectRoot, runId, parentTickId, entryId, error }) {
+  // Mirrors writeUnsignedA2NoKeyFailure (RFC §2816). Unsigned because run.key
+  // is what's missing; sweep has no per-run authority to sign.
+  const episodeId = `bp1-naked-sweep-no-key-${parentTickId}-${runId}-${entryId}`
+  return writeUnsignedDeadlineTick({
+    projectRoot, tickId: episodeId,
+    body:
+      `Path B detection skipped for ${runId}/${entryId}: run.key unavailable.\n` +
+      `error: ${error}\n` +
+      `parent_tick: ${parentTickId}\n` +
+      `Operators: inspect <projectRoot>/.episodic-memory/runs/${runId}/run.key.\n` +
+      `M3 hand-off (bp1-naked-sweep-action-pending-m3) is still emitted at parent level.\n`,
+    frontmatterFields: {
+      _tick_kind: 'naked-sweep-no-key',
+      tick_parent: parentTickId,
+      run_id: runId,
+      entry_id: entryId,
+      failure_kind: 'naked-sweep-no-run-key',
+      signed: false,
+    },
+  })
+}
+
+function writeUnsignedNakedSweepActionPending({ projectRoot, parentTickId, runId, entryId }) {
+  // Project-level (unsigned) hand-off marker for M3. One per candidate.
+  // Distinct from the signed per-run child so a run with missing run.key
+  // still produces the queryable M3-hand-off signal.
+  const episodeId = `bp1-naked-sweep-action-pending-m3-${parentTickId}-${runId}-${entryId}`
+  return writeUnsignedDeadlineTick({
+    projectRoot, tickId: episodeId,
+    body:
+      `Path B candidate awaiting M3 re-issue.\n` +
+      `Run: ${runId}\nEntry: ${entryId}\nParent tick: ${parentTickId}\n` +
+      `Slice 2f detects; M3 (em-review-request BP1-mode) issues.\n`,
+    frontmatterFields: {
+      _tick_kind: 'naked-sweep-action-pending-m3',
+      tick_parent: parentTickId,
+      run_id: runId,
+      entry_id: entryId,
+      pending_action: 'em-review-request-reissue',
+    },
+  })
+}
+
+function sweepNakedEntries(args) {
+  // Reuses check-deadlines's project-root resolver: realpath + git-toplevel.
+  const projectRoot = resolveCheckDeadlinesProjectRoot(args.project)
+  if (!projectRoot) {
+    process.stderr.write(`error: --project required + must be an existing directory\n`)
+    return 2
+  }
+  const tickSource = args.tickSource ?? 'scheduled-task'
+  if (tickSource !== 'scheduled-task' && tickSource !== 'fallback-sweep') {
+    process.stderr.write(`error: invalid --tick-source: ${tickSource}\n`)
+    return 2
+  }
+
+  const tickId = `bp1-naked-sweep-tick-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`
+
+  // Step 2: flag-check --no-emit (mirrors check-deadlines).
+  const flagCheck = spawnSync('node', [FLAG_CHECK, '--project', projectRoot, '--no-emit'], {
+    cwd: projectRoot, encoding: 'utf8', timeout: 30_000, env: { ...process.env, HOME: os.homedir() },
+  })
+  if (flagCheck.status !== 0) {
+    writeUnsignedNakedSweepTick({
+      projectRoot, tickId,
+      body: `bp1-naked-sweep-tick activation=disabled (flag-check exit ${flagCheck.status})\n`,
+      frontmatterFields: {
+        tick_source: tickSource,
+        activation: 'disabled',
+        lock_busy: false,
+        runs_inspected_count: '0',
+        entries_inspected_count: '0',
+        path_b_candidate_count: '0',
+        stale_or_corrupt_count: '0',
+      },
+    })
+    process.stdout.write(JSON.stringify({
+      status: 'ok', tick_id: tickId, tick_source: tickSource,
+      activation: 'disabled', lock_busy: false,
+      runs_inspected_count: 0, entries_inspected_count: 0,
+      path_b_candidate_count: 0, stale_or_corrupt_count: 0,
+      children: [],
+    }) + '\n')
+    return 0
+  }
+
+  // Step 3: non-blocking run-state lock (shared with check-deadlines).
+  const lockResult = tryAcquireRunStateLock(projectRoot)
+  if (!lockResult.acquired) {
+    writeUnsignedLockBusyEvidence({
+      projectRoot, parentTickId: tickId,
+      holderPid: lockResult.holder_pid, ageMs: lockResult.age_ms,
+    })
+    writeUnsignedNakedSweepTick({
+      projectRoot, tickId,
+      body: `bp1-naked-sweep-tick lock_busy=true (run-state index held)\n`,
+      frontmatterFields: {
+        tick_source: tickSource,
+        activation: 'enabled',
+        lock_busy: true,
+        runs_inspected_count: '0',
+        entries_inspected_count: '0',
+        path_b_candidate_count: '0',
+        stale_or_corrupt_count: '0',
+        holder_pid: lockResult.holder_pid == null ? null : String(lockResult.holder_pid),
+        holder_age_ms: lockResult.age_ms == null ? null : String(lockResult.age_ms),
+      },
+    })
+    process.stdout.write(JSON.stringify({
+      status: 'ok', tick_id: tickId, tick_source: tickSource,
+      activation: 'enabled', lock_busy: true,
+      runs_inspected_count: 0, entries_inspected_count: 0,
+      path_b_candidate_count: 0, stale_or_corrupt_count: 0,
+      holder_pid: lockResult.holder_pid, holder_age_ms: lockResult.age_ms,
+      children: [],
+    }) + '\n')
+    return 0
+  }
+
+  // Step 4: under lock — load runs from disk via shared loader.
+  // We hold the run-state lock for symmetry with check-deadlines even
+  // though the sweep loader reads bp1-runs/ (not _index.json). This
+  // serializes against any writer that may touch run state concurrently
+  // and gives the sweep a stable read window.
+  let loadIssue = null
+  let scan
+  try {
+    const { activeRuns, loadIssue: li } = loadActiveRunsForSweep({ projectRoot })
+    if (li) loadIssue = li
+    scan = scanForCandidates({ activeRuns, now: Date.now() })
+  } finally {
+    lockResult.release()
+  }
+
+  // Step 5: per-candidate emission (Path B only).
+  // G-P2.1 try/finally: parent tick fires in finally so partial loops
+  // still close the audit trail.
+  const childResults = []
+  let loopError = null
+  try {
+    for (const cand of scan.path_b_candidates) {
+      // Always emit the M3 hand-off marker (unsigned, project-level). This
+      // is the queryable signal for M3 regardless of per-run key availability.
+      let actionPendingPath = null
+      try {
+        actionPendingPath = writeUnsignedNakedSweepActionPending({
+          projectRoot, parentTickId: tickId, runId: cand.run_id, entryId: cand.entry_id,
+        })
+      } catch (e) {
+        process.stderr.write(`warn: action-pending emit failed for ${cand.run_id}/${cand.entry_id}: ${e.message}\n`)
+      }
+
+      // Attempt signed per-run detection child. Missing run.key → unsigned no-key audit.
+      const keyResult = loadRunKey(projectRoot, cand.run_id)
+      if (keyResult.error) {
+        let noKeyPath = null
+        try {
+          noKeyPath = writeUnsignedNakedSweepNoKey({
+            projectRoot, runId: cand.run_id, parentTickId: tickId, entryId: cand.entry_id, error: keyResult.error,
+          })
+        } catch (e) {
+          process.stderr.write(`warn: no-key audit emit failed for ${cand.run_id}/${cand.entry_id}: ${e.message}\n`)
+        }
+        childResults.push({
+          run_id: cand.run_id, entry_id: cand.entry_id,
+          status: 'no-key', error: keyResult.error,
+          audit_episode_path: noKeyPath, action_pending_path: actionPendingPath,
+        })
+        continue
+      }
+
+      const res = emitNakedSweepDetectedChild({
+        projectRoot, runId: cand.run_id, runKey32B: keyResult.key32B,
+        parentTickId: tickId, entryId: cand.entry_id,
+        ageMs: cand.age_ms, thresholdMs: cand.threshold_ms,
+      })
+      childResults.push({
+        run_id: cand.run_id, entry_id: cand.entry_id,
+        status: 'detected', episode_id: res.episodeId,
+        action_pending_path: actionPendingPath,
+      })
+    }
+  } catch (e) {
+    loopError = e
+  } finally {
+    // Step 6: parent tick (unsigned). Always written.
+    writeUnsignedNakedSweepTick({
+      projectRoot, tickId,
+      body: `bp1-naked-sweep-tick activation=enabled candidates=${scan.path_b_candidates.length} runs_inspected=${scan.counts.runs_inspected_count}${loopError ? ' loop_error=true' : ''}\n`,
+      frontmatterFields: {
+        tick_source: tickSource,
+        activation: 'enabled',
+        lock_busy: false,
+        runs_inspected_count: String(scan.counts.runs_inspected_count),
+        entries_inspected_count: String(scan.counts.entries_inspected_count),
+        path_b_candidate_count: String(scan.counts.path_b_candidate_count),
+        stale_or_corrupt_count: String(scan.counts.stale_or_corrupt_count),
+        loop_error: loopError ? true : false,
+        load_issue: loadIssue ? loadIssue.code : null,
+      },
+    })
+  }
+  if (loopError) throw loopError
+
+  // Step 7: JSON to stdout.
+  process.stdout.write(JSON.stringify({
+    status: 'ok', tick_id: tickId, tick_source: tickSource,
+    activation: 'enabled', lock_busy: false,
+    runs_inspected_count: scan.counts.runs_inspected_count,
+    entries_inspected_count: scan.counts.entries_inspected_count,
+    path_b_candidate_count: scan.counts.path_b_candidate_count,
+    stale_or_corrupt_count: scan.counts.stale_or_corrupt_count,
+    threshold_ms: PATH_B_AGE_THRESHOLD_MS,
+    load_issue: loadIssue,
+    children: childResults,
+  }) + '\n')
+  return 0
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -3165,6 +3432,9 @@ switch (args.subcommand) {
     break
   case 'check-deadlines':
     exitCode = checkDeadlines(args)
+    break
+  case 'sweep-naked-entries':
+    exitCode = sweepNakedEntries(args)
     break
   case null:
   case undefined:

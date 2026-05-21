@@ -22,7 +22,7 @@ import crypto from 'node:crypto'
 import assert from 'node:assert/strict'
 
 const mod = await import(new URL('../scripts/lib/bp1-marker.mjs', import.meta.url).href)
-const { markerPath, canonicalizeMarkerPayload, writeMarker, cleanupApprovalMarker } = mod
+const { markerPath, canonicalizeMarkerPayload, writeMarker, cleanupApprovalMarker, sweepApprovalMarkers } = mod
 
 const hmacMod = await import(new URL('../scripts/lib/bp1-hmac.mjs', import.meta.url).href)
 const { verifyCanonical } = hmacMod
@@ -341,6 +341,88 @@ tap('cleanupApprovalMarker artifact targeted by projectRoot regardless of cwd', 
     assert.equal(result.status, 'ok')
     assert.equal(result.alreadyAbsent, false)
     assert.ok(!fs.existsSync(path.join(target, '.checkpoints', `bp1-approval-${RUN_ID}.json`)))
+  } finally {
+    process.chdir(origCwd)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// sweepApprovalMarkers — slice 2f --disable bulk-removal helper
+// ---------------------------------------------------------------------------
+
+tap('sweepApprovalMarkers returns ok on missing .checkpoints dir (ENOENT)', () => {
+  const root = tmpProjectRoot()
+  const r = sweepApprovalMarkers(root)
+  assert.equal(r.status, 'ok')
+  assert.deepEqual(r.removed, [])
+  assert.deepEqual(r.errors, [])
+})
+
+tap('sweepApprovalMarkers returns ok on empty .checkpoints dir', () => {
+  const root = tmpProjectRoot()
+  fs.mkdirSync(path.join(root, '.checkpoints'))
+  const r = sweepApprovalMarkers(root)
+  assert.equal(r.status, 'ok')
+  assert.deepEqual(r.removed, [])
+})
+
+tap('sweepApprovalMarkers removes only bp1-approval-*.json files', () => {
+  const root = tmpProjectRoot()
+  const cp = path.join(root, '.checkpoints')
+  fs.mkdirSync(cp)
+  // Two bp1-approval markers
+  fs.writeFileSync(path.join(cp, 'bp1-approval-run-1.json'), '{}')
+  fs.writeFileSync(path.join(cp, 'bp1-approval-run-2.json'), '{}')
+  // Non-matching neighbors that must survive
+  fs.writeFileSync(path.join(cp, '.pre-checkpoint-done'), 'preserved')
+  fs.writeFileSync(path.join(cp, 'other-marker.json'), 'preserved')
+  fs.writeFileSync(path.join(cp, 'bp1-approval-but-not.txt'), 'preserved')
+  const r = sweepApprovalMarkers(root)
+  assert.equal(r.status, 'ok')
+  assert.equal(r.removed.length, 2)
+  assert.ok(!fs.existsSync(path.join(cp, 'bp1-approval-run-1.json')))
+  assert.ok(!fs.existsSync(path.join(cp, 'bp1-approval-run-2.json')))
+  assert.ok(fs.existsSync(path.join(cp, '.pre-checkpoint-done')))
+  assert.ok(fs.existsSync(path.join(cp, 'other-marker.json')))
+  assert.ok(fs.existsSync(path.join(cp, 'bp1-approval-but-not.txt')))
+})
+
+tap('sweepApprovalMarkers is idempotent on re-invocation', () => {
+  const root = tmpProjectRoot()
+  const cp = path.join(root, '.checkpoints')
+  fs.mkdirSync(cp)
+  fs.writeFileSync(path.join(cp, 'bp1-approval-run-x.json'), '{}')
+  const a = sweepApprovalMarkers(root)
+  const b = sweepApprovalMarkers(root)
+  assert.equal(a.removed.length, 1)
+  assert.equal(b.removed.length, 0)
+  assert.equal(b.status, 'ok')
+})
+
+tap('sweepApprovalMarkers rejects non-absolute projectRoot', () => {
+  const r = sweepApprovalMarkers('./relative')
+  assert.equal(r.status, 'error')
+  assert.equal(r.code, 'invalid-input')
+})
+
+tap('sweepApprovalMarkers axis-9: cwd-mismatch targets correct project', () => {
+  const target = tmpProjectRoot()
+  const other = tmpProjectRoot()
+  const tcp = path.join(target, '.checkpoints')
+  fs.mkdirSync(tcp)
+  fs.writeFileSync(path.join(tcp, 'bp1-approval-run-z.json'), '{}')
+  // Marker in `other` must NOT be touched.
+  const ocp = path.join(other, '.checkpoints')
+  fs.mkdirSync(ocp)
+  fs.writeFileSync(path.join(ocp, 'bp1-approval-other.json'), '{}')
+  const origCwd = process.cwd()
+  try {
+    process.chdir(other)
+    const r = sweepApprovalMarkers(target)
+    assert.equal(r.removed.length, 1)
+    assert.ok(!fs.existsSync(path.join(tcp, 'bp1-approval-run-z.json')))
+    assert.ok(fs.existsSync(path.join(ocp, 'bp1-approval-other.json')),
+      'sibling project marker untouched')
   } finally {
     process.chdir(origCwd)
   }

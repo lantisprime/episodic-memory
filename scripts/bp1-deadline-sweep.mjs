@@ -56,6 +56,7 @@ import crypto from 'crypto'
 import { execFileSync } from 'child_process'
 import { canonicalProjectRoot } from './lib/bp1-manifest.mjs'
 import { scanForCandidates } from './lib/bp1-sweep.mjs'
+import { loadActiveRunsFromDir } from './lib/bp1-sweep-loader.mjs'
 
 // In-process lock TTL. Two concurrent --once invocations are the realistic
 // concurrency: each takes ≪1s to evaluate a candidate. A stale lock older
@@ -183,7 +184,9 @@ try {
     }
   } else {
     const runsDir = path.join(projectRoot, '.episodic-memory', 'bp1-runs')
-    activeRuns = loadActiveRunsFromDisk(runsDir)
+    const { activeRuns: loaded, loadIssue: li } = loadActiveRunsFromDir(runsDir)
+    activeRuns = loaded
+    if (li) loadIssue = li
   }
 } catch (e) {
   loadIssue = { code: 'active_runs_load_error', message: e.message }
@@ -279,40 +282,9 @@ emitFinalAndExit({
 // Helpers
 // ===========================================================================
 
-function loadActiveRunsFromDisk(runsDir) {
-  // PR-1b-A scope: production loader. Walks <runs>/<run_id>/state.json files.
-  // M0 has no active runs (orchestrator is M1) — this returns [] in
-  // production until M1 starts writing run state. Test paths use --input.
-  if (!fs.existsSync(runsDir)) return []
-  let entries
-  try {
-    entries = fs.readdirSync(runsDir, { withFileTypes: true })
-  } catch (e) {
-    throw new Error(`runs dir read failed: ${e.message}`)
-  }
-  const out = []
-  for (const ent of entries) {
-    if (!ent.isDirectory()) continue
-    const statePath = path.join(runsDir, ent.name, 'state.json')
-    if (!fs.existsSync(statePath)) continue
-    let state
-    try {
-      state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-    } catch (e) {
-      // Bare-catch P1 lesson (PR-1a round 3): record the corruption,
-      // never silently swallow. Pure scan will count this as stale.
-      out.push({ run_id: ent.name, codex_review_entries: [], _corrupt: e.message })
-      continue
-    }
-    if (state && typeof state === 'object') {
-      out.push({
-        run_id: typeof state.run_id === 'string' ? state.run_id : ent.name,
-        codex_review_entries: Array.isArray(state.codex_review_entries) ? state.codex_review_entries : [],
-      })
-    }
-  }
-  return out
-}
+// loadActiveRunsFromDisk extracted to scripts/lib/bp1-sweep-loader.mjs in
+// slice 2f so the M0 fallback and the M2 sweep-naked-entries subcommand
+// share one authoritative loader (codex plan-tier r1 P1, episode ...-4956).
 
 function entryLockPath(projectRoot, cand) {
   // Per-entry advisory lock under <project>/.episodic-memory/bp1-locks/
