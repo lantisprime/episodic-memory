@@ -114,6 +114,17 @@ Instruction-only support is deliberately modest for OpenCode and Pi Agent:
 
 Future MCP support should be a thin wrapper around existing scripts (`recall`, `search`, `store`, `revise`) with no second store, no daemon, no polling, explicit activation, and reversible uninstall.
 
+## Skills
+
+This project ships two in-tree skills. Each is a self-contained SKILL.md the agent loads on demand.
+
+| Skill | Location | What it does |
+|---|---|---|
+| `episodic-memory` | `instructions/SKILL.md` → installed to `.claude/skills/episodic-memory/`, `.agents/skills/episodic-memory/`, etc. (see [Supported Tools](#supported-tools)) | The main skill the agent reads at session start to learn how to recall, store, revise, and surface episodes. Wraps every `em-*` script. |
+| `classify-correction` | `skills/classify-correction/SKILL.md` (PR [#327](https://github.com/lantisprime/episodic-memory/pull/327)) | Records a per-project override for the LLM checkpoint-gate classifier when a command was mislabeled (e.g. a read-only inspector blocked as `shared_write`). Writes to `<project>/.episodic-memory/classifier-overrides.jsonl`. |
+
+Three additional SKILLs are invoked from `launchd` rather than the agent's session loop — see [Scheduled Routines](#scheduled-routines-launchd-macos): `episodic-memory-daily-mining`, `episodic-memory-weekly-digest`, `instruction-hygiene-maintenance`.
+
 ## Episode Categories
 
 | Category | Use for |
@@ -200,7 +211,8 @@ Behavioral patterns are documentation by default — but the most-violated patte
 - **Session-end prompt** (`em-session-end-prompt.mjs`) — SessionEnd hook that asks about violations
 - **Proactive recall** (`em-recall.mjs`) — surfaces past violations at session start as pre-flight warnings
 - **Checkpoint enforcement gate** (RFC-002 Phase 3b, shipped + activated 2026-05-02 via [#78](https://github.com/lantisprime/episodic-memory/pull/78) and [#84](https://github.com/lantisprime/episodic-memory/pull/84)) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done. Opt-in via `node install.mjs --tool claude-code --install-hooks --project <path>`; registers SessionStart + PreToolUse + SessionEnd hooks in `~/.claude/settings.json`.
-- **BP-1 Auto-Pilot** (RFC-004, M0 + M1 shipped 2026-05-06..09 via [#181](https://github.com/lantisprime/episodic-memory/pull/181), [#186](https://github.com/lantisprime/episodic-memory/pull/186), [#188](https://github.com/lantisprime/episodic-memory/pull/188), [#200](https://github.com/lantisprime/episodic-memory/pull/200), [#206](https://github.com/lantisprime/episodic-memory/pull/206)) — activation gate, deadline sweep, finalize-replay state machine, and HMAC-signed run manifests that mechanically enforce bp-001 (implementation workflow). Replaces documentation-only enforcement for the workflow lifecycle.
+- **LLM intent classifier for the checkpoint gate** (Tier 2/3 shipped 2026-05-22 via [#326](https://github.com/lantisprime/episodic-memory/pull/326); replaced by agent-self-classify marker 2026-05-23 via [#331](https://github.com/lantisprime/episodic-memory/pull/331)) — when the Tier 1 heuristic table doesn't recognize a `Bash` command, the gate consults a per-session marker (`scripts/classifier-marker.mjs`) populated by the active agent's own reasoning, then falls through to the Tier 1 safe-default if no marker exists. Configuration loaded by `scripts/classifier-config-loader.mjs` from `<project>/.episodic-memory/classifier-config.json` (or the global file under `~/.episodic-memory/`); set `enabled: false` to disable LLM dispatch entirely and run on the Tier 1 heuristic alone. False-positives (read-only inspectors blocked as `shared_write`) are corrected via the `classify-correction` skill — see [Skills](#skills) below.
+- **BP-1 Auto-Pilot** (RFC-004, M0 + M1 + M2 shipped 2026-05-06..23 via [#181](https://github.com/lantisprime/episodic-memory/pull/181), [#186](https://github.com/lantisprime/episodic-memory/pull/186), [#188](https://github.com/lantisprime/episodic-memory/pull/188), [#200](https://github.com/lantisprime/episodic-memory/pull/200), [#206](https://github.com/lantisprime/episodic-memory/pull/206), [#305](https://github.com/lantisprime/episodic-memory/pull/305), [#309](https://github.com/lantisprime/episodic-memory/pull/309), [#313](https://github.com/lantisprime/episodic-memory/pull/313), [#322](https://github.com/lantisprime/episodic-memory/pull/322)) — activation gate, deadline sweep, finalize-replay state machine, HMAC-signed run manifests, per-session preflight markers, and the M2 finish-line `bp1-flag-flip` cutover that mechanically enforce bp-001 (implementation workflow). Replaces documentation-only enforcement for the workflow lifecycle.
 
 **External ([user-preferences](https://github.com/lantisprime/user-preferences)):**
 - **Pre-tool hooks** (e.g., `plan-gate.sh`) that block writes during the planning phase
@@ -216,7 +228,7 @@ Episodic-memory and user-preferences are fully independent — install either or
 | [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted (Phases 1-3 shipped) |
 | [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-3 + 3b shipped + runtime-deployed) |
 | [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
-| [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 shipped) |
+| [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 + M2 shipped) |
 | [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Draft |
 | [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Accepted (harness shipped PR #222) |
 
@@ -478,7 +490,21 @@ node ~/.episodic-memory/scripts/bp1-deadline-sweep.mjs --once [--project <root>]
 node ~/.episodic-memory/scripts/bp1-orchestrator.mjs init-run --project <root>
 node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-run --run-id <id>
 node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-recover --run-id <id>
+
+# Marker validation — verify a checkpoint marker's HMAC + shape (slice 2d-W, #305)
+node ~/.episodic-memory/scripts/bp1-marker-validate.mjs --marker <path>
+
+# Crash-class classification for SessionStart resumption (slice 2e, #313)
+node ~/.episodic-memory/scripts/bp1-crash-classify.mjs --run-id <id>
+
+# Emit a marker-invalid evidence episode (used by the deadline-firing path, #313)
+node ~/.episodic-memory/scripts/bp1-emit-marker-invalid-evidence.mjs --run-id <id> --reason <code>
+
+# M2 finish-line: flip the BP-1 activation flag (slice 2f, #322)
+node ~/.episodic-memory/scripts/bp1-flag-flip.mjs --enable    # or --disable
 ```
+
+The orchestrator also auto-stubs a missing run on first interaction via `scripts/bp1-auto-stub.mjs` — not normally invoked directly.
 
 ### Compliance Audit & Transcript Mining
 

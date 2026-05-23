@@ -520,6 +520,21 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 
 **To clear a gate:** Approve the AI's plan in chat. The AI writes the checkpoint marker on your behalf — you don't run any commands manually. (Marker location is an internal implementation detail; PR #207 relocated it from `<repo>/.claude/.X` to `<repo>/.checkpoints/.X` to escape Claude Code's built-in sensitive-file prompt — readers honor both during burn-in.)
 
+**False-positive: the gate blocked a read-only command.** The checkpoint gate uses a command classifier (PR #326 / PR #331) to decide whether a `Bash` invocation writes state. The classifier defaults to "shared_write" when uncertain, which can block read-only inspectors (`python3 src/inspect.py`, ad-hoc diagnostics, etc.) that the gate should ignore. When this happens you have three escape hatches:
+
+1. **Record a per-project override** via the `classify-correction` skill. This pins the correct label for that exact command shape in that project — next time the gate sees it, no LLM call, no block:
+   ```bash
+   node ~/.episodic-memory/scripts/classify-correction.mjs \
+     --project-root "$(git rev-parse --show-toplevel)" \
+     --caller-cwd  "$(pwd)" \
+     --command     "python3 src/inspect.py" \
+     --label       read_only \
+     --reason      "inspector — read-only diagnostic, no writes"
+   ```
+   Labels: `read_only`, `shared_write`, `marker_write`, `push_or_pr_create`, `unsafe_complex`. Overrides are per-project (cache key includes the project root + the script's sha256 digest — they don't bleed across repos and re-trigger if the script content changes). See `skills/classify-correction/SKILL.md` for the full reference, including the `--allow-non-git` mode for non-git projects (PR #327).
+2. **Disable LLM dispatch entirely** by setting `enabled: false` in `<project-root>/.episodic-memory/classifier-config.json` (or globally at `~/.episodic-memory/classifier-config.json`). The Tier 1 heuristic table + safe `shared_write` default then apply — useful if you're offline, don't have an API key, or want to minimize cost.
+3. **Remove the hook entry** from `~/.claude/settings.json` to opt out of the gate entirely.
+
 **Behind the scenes — BP-1 Auto-Pilot (RFC-004).** These three gates are part of a run-lifecycle system that signs each implementation run with HMAC, tracks state across crashes, and replays unfinished work via a finalize-recovery state machine. You don't interact with it directly — the gates above are its user-facing edges.
 
 **To opt out entirely:** Don't pass `--install-hooks` during install, or remove the hook entries from `~/.claude/settings.json`.
