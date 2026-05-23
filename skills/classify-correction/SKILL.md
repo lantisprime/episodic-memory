@@ -52,6 +52,39 @@ project's identically-named script. If the script content changes, the digest
 changes, and the override no longer matches — re-run the correction with the
 new content.
 
+## Non-git projects
+
+By default the helper requires `.git` under `--project-root`. For projects
+that are intentionally not checked into git, pass `--allow-non-git`:
+
+```bash
+node ~/.episodic-memory/scripts/classify-correction.mjs \
+  --project-root "$(pwd)" \
+  --caller-cwd  "$(pwd)" \
+  --command     "python3 src/inspect.py" \
+  --label       read_only \
+  --allow-non-git
+```
+
+The `.episodic-memory/` directory under `--project-root` MUST already exist
+(create it yourself: `mkdir .episodic-memory`). It serves as the explicit
+opt-in signal — the helper will not create it implicitly in non-git mode.
+
+The same hardened validation applies to both modes: `.episodic-memory/` must
+be a real directory (rejected if it is a symlink or its realpath escapes the
+project root), and `classifier-overrides.jsonl` is opened with `O_NOFOLLOW`
+so a symlinked leaf is rejected too. Concurrent first-time corrections on a
+fresh git repo are safe — the helper tolerates `EEXIST` from racing creators
+and re-validates the directory before appending.
+
+Linked-worktree behavior is unchanged: `resolveRepoRoot` walks to the main
+repository root via `git rev-parse --git-common-dir`, so worktree callers
+write under the main repo's `.episodic-memory/`, not the worktree's.
+
+**Threat boundary:** the helper does not defend against a same-UID attacker
+who can swap filesystem state within the syscall granularity between the
+final validation and `open()`. Windows is not supported (no `O_NOFOLLOW`).
+
 ## Disabling Tier 3 entirely
 
 If you do not want LLM dispatch at all (offline, no API key, or cost-
