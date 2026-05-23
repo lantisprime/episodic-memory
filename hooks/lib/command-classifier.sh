@@ -1496,7 +1496,39 @@ _classify_segment() {
           # helper validates --project-root == resolveRepoRoot(process.cwd()).
           # Same gate-treatment as em-search (label=read_only, reason carries
           # the helper-write nature).
+          #
+          # Same-class env-prefix defense as plan-marker.mjs (PR #272 F-4):
+          # `FOO=bar node classify-correction.mjs --project-root ...` MUST NOT
+          # ride the allowlist lane. Reject any leading POSIX env assignment.
+          if [ $env_prefix_count -gt 0 ]; then
+            printf '%s\t\t%s\n' "unsafe_complex" "classify_correction_env_override"
+            return 0
+          fi
           printf '%s\t\t%s\n' "read_only" "interpreter_classify_correction"
+          return 0
+          ;;
+        classifier-marker.mjs)
+          # Agent-self-classify helper (replaces direct-API Tier 3). Writes
+          # only to <project>/.checkpoints/classify/<sha>.json after the
+          # helper validates --project-root == resolveRepoRoot(process.cwd())
+          # and refuses cross-repo writes / symlinked ancestors / wrong cwd.
+          #
+          # Same-class env-prefix defense as plan-marker.mjs and
+          # classify-correction.mjs: leading env assignment is a
+          # cross-session attack vector (PR #271 / PR #272 F-4). The
+          # command-local env override can desync the classifier's view of
+          # session_id from the helper's view, planting a marker for the
+          # wrong session. Reject any env-prefix invocation form.
+          if [ $env_prefix_count -gt 0 ]; then
+            printf '%s\t\t%s\n' "unsafe_complex" "classifier_marker_env_override"
+            return 0
+          fi
+          # Marker-write label: gate-treatment matches preflight-marker-write
+          # / plan-marker (writes only to .checkpoints/ + helper validates
+          # its own authority). Read invocations are also marker_write —
+          # the read mode never writes anything but the gate doesn't need
+          # to distinguish; helper enforces.
+          printf '%s\t\t%s\n' "marker_write" "interpreter_classifier_marker"
           return 0
           ;;
       esac
