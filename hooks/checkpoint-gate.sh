@@ -266,47 +266,113 @@ _command_has_relative_marker_path() {
   printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
 }
 
-# E2E-discovered absolute-non-canonical detection: for Bash commands where
-# the classifier returns shared_write (touch/mv/cp/install/dd of=) on an
-# ABSOLUTE marker path NOT under canonical PRIMARY/LEGACY. The
-# marker_write-branch check covers absolute paths classified AS marker_write
-# (redirect/rm/tee); this catches the shared_write-classified-but-targets-
-# marker case. Echoes the first offending path on match (exit 0); empty on
-# no match (exit 1).
+# Absolute-non-canonical detection: for Bash commands where the classifier
+# returns shared_write (touch/mv/cp/install/dd of=) on an ABSOLUTE marker path
+# NOT under canonical PRIMARY/LEGACY. The marker_write-branch check covers
+# absolute paths classified AS marker_write (redirect/rm/tee); this catches
+# the shared_write-classified-but-targets-marker case.
+#
+# Three-pass per-token scan (codex review rounds R1–R8, 2026-05-23):
+#
+#   Pass A   — T token IS itself an absolute marker path. Handles paths
+#              containing spaces because `_tokenize` preserves quoted
+#              whitespace inside a single T value (closes the original bug
+#              class — Home Network Improvement style repos).
+#   Pass A'  — T token has `key=path` prefix (e.g. `of=/path with sp/X`,
+#              `--output=/path with sp/X`). Walks `=`-delimited tails;
+#              re-runs Pass A on each `/`-prefixed candidate. Preserves
+#              spaces in the path portion.
+#   Pass B   — T token CONTAINS an absolute marker-path substring (handles
+#              `bash -c "touch /tmp/.checkpoints/.X"` payloads where the
+#              path arrives inside a multi-word T token, no leading `/`).
+#              Inner paths-with-spaces under this shape remain unhandled —
+#              same as pre-fix behavior; not a new regression.
+#
+# Canonical short-circuit: if Pass A or A' recognizes a canonical full marker
+# candidate, the per-token `continue` skips Pass B for that token. Without
+# this, Pass B's regex would truncate a spacey canonical path at the first
+# space and false-positive against the equality check.
+#
+# Echoes the first offending path on match. Returns 0 always so `x="$(...)"`
+# under `set -e` never triggers script exit on the no-match case.
 _command_first_absolute_noncanonical_marker() {
-  # Empty output = no wrong-root marker found; non-empty = the offending
-  # path. Function always returns 0 so `x="$(...)"` under `set -e` never
-  # triggers script exit on the no-match case (caller uses `[ -n "$x" ]`).
-  local cmd
-  cmd="$(_strip_shell_quotes "$1")"
-  local matches p basename
-  matches=$(printf '%s' "$cmd" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
-  [ -z "$matches" ] && return 0
-  while IFS= read -r p; do
-    [ -z "$p" ] && continue
-    # PR-review P1: occurrence-scoped relative-vs-absolute disambiguation.
-    # Strip all literal `.${p}` occurrences from cmd, then check if $p
-    # still appears. If it does, there's at least one NON-relative
-    # occurrence (a genuine absolute reference). Avoids the global-filter
-    # false-negative where `echo ./tmp/.checkpoints/X >/dev/null; touch
-    # /tmp/.checkpoints/X` would have skipped the check because
-    # `./tmp/.checkpoints/X` exists somewhere in the command.
-    #
-    # PR-review round-2 P1: `${var//pattern/}` interprets glob meta chars
-    # in the pattern. Escape `*`/`?`/`[` in `$p` so the substitution is
-    # truly literal-equivalent (codex episode ...5b9e).
-    local p_escaped
-    p_escaped="$(_escape_bash_glob "$p")"
-    local cmd_filtered="${cmd//\.${p_escaped}/}"
-    if [[ "$cmd_filtered" != *"$p"* ]]; then
-      continue
-    fi
-    basename="${p##*/}"
-    if [ "$p" != "$PRIMARY_DIR/$basename" ] && [ "$p" != "$LEGACY_DIR/$basename" ]; then
-      printf '%s' "$p"
-      return 0
-    fi
-  done <<< "$matches"
+  local cmd="$1"
+  local stream line type val
+  # SIGPIPE-safe capture (feedback_shell_sigpipe_done_pipe.md): capture the
+  # tokenizer output BEFORE iterating so an early `return` inside the loop
+  # doesn't close the pipe while _tokenize is still writing on Linux.
+  stream="$(_tokenize "$cmd")"
+  while IFS= read -r line; do
+    type="${line:0:1}"
+    val="${line:2}"
+    [ "$type" = "T" ] || continue
+
+    local recognized_marker=0
+
+    # ---- Pass A: token IS an absolute marker path.
+    case "$val" in
+      /*)
+        if _marker_basename_in_set "$val"; then
+          if _is_canonical_marker_path "$val"; then
+            recognized_marker=1
+          else
+            printf '%s' "$val"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+
+    # ---- Pass A': `key=path` prefix walk.
+    local rest="$val" candidate
+    while [ "${rest#*=}" != "$rest" ]; do
+      rest="${rest#*=}"
+      case "$rest" in
+        /*)
+          candidate="$rest"
+          if _marker_basename_in_set "$candidate"; then
+            if _is_canonical_marker_path "$candidate"; then
+              recognized_marker=1
+            else
+              printf '%s' "$candidate"
+              return 0
+            fi
+          fi
+          ;;
+      esac
+    done
+
+    # Canonical short-circuit: if Pass A or A' already identified a
+    # canonical full candidate for this token, skip Pass B (which would
+    # truncate a spacey canonical path and false-positive).
+    [ "$recognized_marker" = "1" ] && continue
+
+    # ---- Pass B: token CONTAINS an absolute marker-path substring.
+    local tok_matches p basename p_escaped tok_filtered
+    tok_matches=$(printf '%s' "$val" | grep -oE '/[^[:space:]]*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)' 2>/dev/null || true)
+    [ -z "$tok_matches" ] && continue
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+
+      # Per-token occurrence-scoped relative-vs-absolute disambiguation
+      # (preserved from prior code, scoped to the current T value). Strip
+      # literal `.${p}` occurrences from the token; if `$p` no longer
+      # appears, the match was a relative reference (e.g. `./tmp/.X`);
+      # skip. `_escape_bash_glob` handles `*`/`?`/`[` in `$p` so the
+      # substitution stays literal.
+      p_escaped="$(_escape_bash_glob "$p")"
+      tok_filtered="${val//\.${p_escaped}/}"
+      if [[ "$tok_filtered" != *"$p"* ]]; then
+        continue
+      fi
+
+      basename="${p##*/}"
+      if [ "$p" != "$PRIMARY_DIR/$basename" ] && [ "$p" != "$LEGACY_DIR/$basename" ]; then
+        printf '%s' "$p"
+        return 0
+      fi
+    done <<< "$tok_matches"
+  done <<< "$stream"
   return 0
 }
 

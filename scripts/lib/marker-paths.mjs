@@ -272,7 +272,7 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
   { file: 'hooks/checkpoint-gate.sh', line: 99, role: 'marker_basename_for_target exact-equality', kind: 'shell-equality', semantic_role: 'read-any' },
   { file: 'hooks/checkpoint-gate.sh', line: 120, role: '_marker_basename_in_set closed set', kind: 'shell-case', semantic_role: 'read-any' },
   { file: 'hooks/checkpoint-gate.sh', line: 196, role: '_command_has_relative_marker_path grep-E alternation', kind: 'grep-E-alternation', semantic_role: 'read-any' },
-  { file: 'hooks/checkpoint-gate.sh', line: 213, role: '_command_first_absolute_noncanonical grep-oE alternation', kind: 'grep-E-alternation', semantic_role: 'read-any' },
+  { file: 'hooks/checkpoint-gate.sh', line: 276, role: '_command_first_absolute_noncanonical_marker three-pass detector (token-equality + key=path walk + substring grep with relative-occurrence disambiguation; canonical short-circuit; path-with-spaces safe)', kind: 'shell-tokenizer-three-pass', semantic_role: 'read-any' },
 
   // E10: plan-gate.sh existence check + marker_write allowlist.
   { file: 'hooks/plan-gate.sh', line: 57, role: 'PLAN_PENDING_W resolution + existence check + marker_write allowlist (session-aware after #268 fix)', kind: 'shell-equality', semantic_role: 'read-own-session' },
