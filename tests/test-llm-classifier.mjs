@@ -464,15 +464,14 @@ test('F1-fix stale lock is auto-reclaimed (dead PID detected)', () => {
   const project = mkrepo('stale-lock')
   const storeDir = path.join(project, '.episodic-memory')
   fs.mkdirSync(storeDir, { recursive: true })
-  // Plant a stale lock with a definitely-dead PID (1 is init, but on macOS
-  // sending signal 0 to PID 1 may succeed for non-root — use a guaranteed
-  // dead PID by spawning a child, capturing its PID, waiting for exit).
+  // Plant a stale lock with a definitely-dead PID. Round-2 lock semantics:
+  // lock is a regular file (created via openSync 'wx'), containing the
+  // owner's PID as text — not a directory with a pid file inside.
   const sub = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' })
   const deadPid = sub.pid
   assert.ok(deadPid)
   const lock = path.join(storeDir, '.lock')
-  fs.mkdirSync(lock)
-  fs.writeFileSync(path.join(lock, 'pid'), String(deadPid))
+  fs.writeFileSync(lock, String(deadPid))
   // Now run a correction — should reclaim the stale lock and succeed.
   const t0 = Date.now()
   const r = spawnSync(process.execPath, [
@@ -547,12 +546,16 @@ test('F13-fix classify-correction rejects non-git project root', () => {
 // ---------------------------------------------------------------------------
 test('§T4 shell wrapper invocation forces subprocess cwd to repo_root', () => {
   const project = mkrepo('wrapper')
+  // F2-fix (codex R1): use explicit `export` lines instead of env-prefix
+  // wrapper form (FOO=bar cmd). The project's env-prefix discipline rejects
+  // the wrapper shape even on internal variables; tests must model the
+  // canonical invocation that the gate would actually permit.
   const script = `#!/usr/bin/env bash
 set -u
 source ${WRAPPER}
-LLM_CLASSIFIER_DISPATCH_PATH=${DISPATCH} \
-LLM_CLASSIFIER_ENABLED=false \
-ANTHROPIC_API_KEY=dummy \
+export LLM_CLASSIFIER_DISPATCH_PATH=${DISPATCH}
+export LLM_CLASSIFIER_ENABLED=false
+export ANTHROPIC_API_KEY=dummy
 llm_classify_command "python3 ${project}/inspect.py" "${project}" "/tmp"
 echo "rc=$?"
 `
@@ -641,31 +644,96 @@ test('§T9 fail_mode=heuristic on HTTP 500 → label=null', async () => {
 })
 
 // ---------------------------------------------------------------------------
-// §T13 — concurrent override writes
+// §T13 — concurrent override writes (codex R1 F1: prior version used
+// spawnSync in a loop = sequential, not parallel; new version uses async
+// spawn so children genuinely race against the lock).
 // ---------------------------------------------------------------------------
-test('§T13 concurrent correction writes do not corrupt overrides.jsonl', () => {
-  const project = mkrepo('concurrent')
-  const procs = []
-  for (let i = 0; i < 5; i++) {
-    procs.push(spawnSync(process.execPath, [
+test('§T13 (codex-R1-F1-fix) TRULY concurrent correction writes do not corrupt overrides.jsonl', async () => {
+  const project = mkrepo('concurrent-real')
+  const N = 8
+  const promises = []
+  for (let i = 0; i < N; i++) {
+    promises.push(spawnAsync(process.execPath, [
       CORRECTION,
       '--project-root', project,
       '--caller-cwd', project,
       '--command', `node ./tool.mjs run-${i}`,
       '--label', 'read_only',
-      '--reason', `concurrent-${i}`
-    ], { cwd: project, env: process.env, encoding: 'utf8' }))
+      '--reason', `parallel-${i}`
+    ], { cwd: project }))
   }
-  for (const p of procs) {
-    assert.strictEqual(p.status, 0, `proc failed: ${p.stderr}`)
+  const results = await Promise.all(promises)
+  for (let i = 0; i < N; i++) {
+    assert.strictEqual(results[i].status, 0, `child ${i} failed: stderr=${results[i].stderr}`)
   }
   const file = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)
-  assert.strictEqual(lines.length, 5)
+  const text = fs.readFileSync(file, 'utf8')
+  const lines = text.split('\n').filter(Boolean)
+  assert.strictEqual(lines.length, N, `expected ${N} entries; got ${lines.length}; raw:\n${text}`)
+  const seen = new Set()
   for (const l of lines) {
-    const obj = JSON.parse(l)
+    const obj = JSON.parse(l)  // throws if any line is corrupted
     assert.strictEqual(obj.label, 'read_only')
+    seen.add(obj.reason)
   }
+  assert.strictEqual(seen.size, N, 'each parallel writer\'s reason should be present (no losses)')
+  // Lock file should not be left behind.
+  const lockPath = path.join(project, '.episodic-memory', '.lock')
+  assert.ok(!fs.existsSync(lockPath), `lock file leaked: ${lockPath}`)
+})
+
+test('(codex-R1-F1-fix) TRULY concurrent cache writes do not corrupt classifier-cache.json', async () => {
+  // Plant a mock subprocess that emits valid Tier 3 responses with different
+  // labels per child, then race N dispatchers writing to the global cache.
+  const project = mkrepo('cache-concurrent')
+  const home = mktmp('cache-home')
+  fs.mkdirSync(path.join(home, '.episodic-memory'), { recursive: true })
+  const mock = path.join(project, 'mock.mjs')
+  fs.writeFileSync(mock, `#!/usr/bin/env node
+const args = process.argv.slice(2)
+const cmd = args[args.indexOf("--command") + 1]
+process.stdout.write(JSON.stringify({
+  label: "read_only",
+  confidence: 0.9,
+  reason: "mock " + cmd,
+  project_root_used: ${JSON.stringify(project)},
+  model_used: "mock",
+  latency_ms: 1,
+  fail_mode_applied: null
+}) + "\\n")
+process.exit(0)
+`)
+  const N = 8
+  const promises = []
+  for (let i = 0; i < N; i++) {
+    promises.push(spawnAsync(process.execPath, [
+      DISPATCH,
+      '--project-root', project,
+      '--caller-cwd', project,
+      '--command', `node ./tool.mjs cache-race-${i}`
+    ], {
+      cwd: project,
+      env: {
+        HOME: home,
+        ANTHROPIC_API_KEY: 'mock',
+        LLM_CLASSIFY_OVERRIDE_PATH: mock
+      }
+    }))
+  }
+  const results = await Promise.all(promises)
+  for (let i = 0; i < N; i++) {
+    assert.strictEqual(results[i].status, 0, `child ${i} failed: stderr=${results[i].stderr}`)
+  }
+  const cacheFile = path.join(home, '.episodic-memory', 'classifier-cache.json')
+  const obj = JSON.parse(fs.readFileSync(cacheFile, 'utf8'))
+  const keys = Object.keys(obj)
+  assert.strictEqual(keys.length, N, `expected ${N} cache entries; got ${keys.length}`)
+  for (const k of keys) {
+    assert.strictEqual(obj[k].label, 'read_only')
+    assert.strictEqual(obj[k]._project_root_canonical, project, 'F3 embed must survive concurrent writes')
+  }
+  const lockPath = path.join(home, '.episodic-memory', '.classifier-cache.lock')
+  assert.ok(!fs.existsSync(lockPath), `lock file leaked: ${lockPath}`)
 })
 
 // ---------------------------------------------------------------------------

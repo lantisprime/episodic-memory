@@ -28,8 +28,8 @@ fields fall through.
 | `max_tokens` | number | `200` | Response token cap. Clamped to `[1, 4096]`. |
 | `temperature` | number | `0` | Sampling temperature. `0` for deterministic classification; clamped to `[0, 2]`. |
 | `confidence_threshold` | number | `0.7` | Tier 3 emits a label only if confidence ≥ threshold. Below threshold → `fail_mode` applies. Clamped to `[0, 1]`. |
-| `api_base` | string | `https://api.anthropic.com` | API base URL. |
-| `api_version` | string | `2023-06-01` | `anthropic-version` header value. |
+| `api_base` | string | `https://api.anthropic.com` | API base URL. **Anthropic-compatible `/v1/messages` endpoints only.** Codex R1 F3: the dispatcher hard-codes `x-api-key` + `anthropic-version` headers and POSTs to `<api_base>/v1/messages`. Bedrock / Vertex / OpenAI-compatible endpoints will NOT work without a compatibility proxy that translates auth + request shape. To run against a compatibility proxy, point `api_base` at the proxy's base URL. |
+| `api_version` | string | `2023-06-01` | `anthropic-version` header value (sent to all configured `api_base` endpoints). |
 
 ## Environment variable overrides
 

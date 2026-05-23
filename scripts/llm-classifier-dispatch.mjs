@@ -162,38 +162,49 @@ function lookupGlobalCache(homeDir, key) {
   return obj && obj[key] ? obj[key] : null
 }
 
-// F1-fix: stale-lock detection. Lock is a directory; inside it we write a
-// `pid` file. If acquire sees EEXIST, we check whether the recorded PID is
-// alive (process.kill(pid, 0) — signal 0 only checks existence). Dead PID
-// or unparseable pid → reclaim. Live PID → spin-wait until timeout.
+// F1-fix (round 2): atomic file-create lock to close the TOCTOU race
+// codex caught in round 1 — `mkdir(lock_dir) + writeFile(pid)` was a
+// two-step operation; a racing process could see EEXIST, read no pid yet,
+// and "reclaim" a live lock. `open(path, 'wx')` is O_CREAT|O_EXCL|O_WRONLY
+// in one syscall, so pid creation and content write are inseparable.
+//
+// Stale detection: on EEXIST, read pid → check `kill(pid, 0)` ESRCH → reclaim.
+// Pidless / unparseable + age > 1s → reclaim (the only way to land here with
+// atomic create is a crashed writer between open and write, very rare).
 function acquireLock(lockPath, timeoutMs = 5000) {
   const start = Date.now()
   while (true) {
+    let fd
     try {
-      fs.mkdirSync(lockPath)
-      try { fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid)) } catch {}
+      fd = fs.openSync(lockPath, 'wx')
+      fs.writeSync(fd, String(process.pid))
+      fs.closeSync(fd)
       return
     } catch (err) {
+      if (fd) { try { fs.closeSync(fd) } catch {} }
       if (err.code !== 'EEXIST') throw err
-      // EEXIST: try to detect stale.
       let staleReclaimed = false
       try {
-        const pidStr = fs.readFileSync(path.join(lockPath, 'pid'), 'utf8').trim()
+        const pidStr = fs.readFileSync(lockPath, 'utf8').trim()
         const pid = parseInt(pidStr, 10)
         if (!Number.isFinite(pid) || pid <= 0) {
-          fs.rmSync(lockPath, { recursive: true, force: true })
-          staleReclaimed = true
+          const age = Date.now() - fs.statSync(lockPath).mtimeMs
+          if (age > 1000) {
+            fs.unlinkSync(lockPath)
+            staleReclaimed = true
+          }
         } else {
           try { process.kill(pid, 0) } catch (e) {
             if (e.code === 'ESRCH') {
-              fs.rmSync(lockPath, { recursive: true, force: true })
+              fs.unlinkSync(lockPath)
               staleReclaimed = true
             }
           }
         }
-      } catch {
-        // pid file absent or unreadable → treat as stale.
-        try { fs.rmSync(lockPath, { recursive: true, force: true }); staleReclaimed = true } catch {}
+      } catch (statErr) {
+        if (statErr.code === 'ENOENT') {
+          staleReclaimed = true  // racing release; try again immediately
+        }
       }
       if (staleReclaimed) continue
       if (Date.now() - start > timeoutMs) throw new Error(`lock timeout: ${lockPath}`)
@@ -203,7 +214,7 @@ function acquireLock(lockPath, timeoutMs = 5000) {
   }
 }
 
-function releaseLock(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch {} }
+function releaseLock(p) { try { fs.unlinkSync(p) } catch {} }
 
 function recordGlobalCache(homeDir, key, entry) {
   const dir = path.join(homeDir, '.episodic-memory')

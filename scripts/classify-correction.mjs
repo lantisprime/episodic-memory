@@ -116,34 +116,41 @@ function cacheKey(tuple) {
   return crypto.createHash('sha256').update(canon).digest('hex')
 }
 
-// F1-fix: stale-lock detection — see llm-classifier-dispatch.mjs for the
-// algorithm. Same shape: PID file inside lock dir + ESRCH-based reclaim.
+// F1-fix (round 2): see llm-classifier-dispatch.mjs for the algorithm.
+// Atomic `open(path, 'wx')` + PID write closes the TOCTOU race that the
+// prior mkdir-then-write pattern suffered (codex round-1 F1).
 function acquireLock(lockPath, timeoutMs = 5000) {
   const start = Date.now()
   while (true) {
+    let fd
     try {
-      fs.mkdirSync(lockPath)
-      try { fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid)) } catch {}
+      fd = fs.openSync(lockPath, 'wx')
+      fs.writeSync(fd, String(process.pid))
+      fs.closeSync(fd)
       return
     } catch (err) {
+      if (fd) { try { fs.closeSync(fd) } catch {} }
       if (err.code !== 'EEXIST') throw err
       let staleReclaimed = false
       try {
-        const pidStr = fs.readFileSync(path.join(lockPath, 'pid'), 'utf8').trim()
+        const pidStr = fs.readFileSync(lockPath, 'utf8').trim()
         const pid = parseInt(pidStr, 10)
         if (!Number.isFinite(pid) || pid <= 0) {
-          fs.rmSync(lockPath, { recursive: true, force: true })
-          staleReclaimed = true
+          const age = Date.now() - fs.statSync(lockPath).mtimeMs
+          if (age > 1000) {
+            fs.unlinkSync(lockPath)
+            staleReclaimed = true
+          }
         } else {
           try { process.kill(pid, 0) } catch (e) {
             if (e.code === 'ESRCH') {
-              fs.rmSync(lockPath, { recursive: true, force: true })
+              fs.unlinkSync(lockPath)
               staleReclaimed = true
             }
           }
         }
-      } catch {
-        try { fs.rmSync(lockPath, { recursive: true, force: true }); staleReclaimed = true } catch {}
+      } catch (statErr) {
+        if (statErr.code === 'ENOENT') staleReclaimed = true
       }
       if (staleReclaimed) continue
       if (Date.now() - start > timeoutMs) {
@@ -156,7 +163,7 @@ function acquireLock(lockPath, timeoutMs = 5000) {
 }
 
 function releaseLock(lockPath) {
-  try { fs.rmSync(lockPath, { recursive: true, force: true }) } catch {}
+  try { fs.unlinkSync(lockPath) } catch {}
 }
 
 function appendOverride(storeDir, entry) {
