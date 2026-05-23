@@ -460,6 +460,51 @@ process.exit(3)  // explicit failure signal
   }
 })
 
+test('(codex-R2-BLOCKER repro) stale lock + 24 concurrent writers — no entry loss, no double-release', async () => {
+  // Reproduces codex PR #326 R2 BLOCKER finding: prior round-2 fix did
+  // `read-pid -> unlink -> retry-open`, which let process B unlink process A's
+  // freshly-created live lock (B read the stale pid before A's unlink).
+  // Atomic-rename CAS in lib/file-lock.mjs is the fix; this test proves it.
+  const project = mkrepo('stale-plus-contention')
+  const storeDir = path.join(project, '.episodic-memory')
+  fs.mkdirSync(storeDir, { recursive: true })
+  // Plant a stale lock with a guaranteed-dead pid.
+  const sub = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' })
+  const deadPid = sub.pid
+  fs.writeFileSync(path.join(storeDir, '.lock'), String(deadPid))
+
+  const N = 24
+  const promises = []
+  for (let i = 0; i < N; i++) {
+    promises.push(spawnAsync(process.execPath, [
+      CORRECTION,
+      '--project-root', project,
+      '--caller-cwd', project,
+      '--command', `node ./tool.mjs racer-${i}`,
+      '--label', 'read_only',
+      '--reason', `racer-${i}`
+    ], { cwd: project }))
+  }
+  const results = await Promise.all(promises)
+  for (let i = 0; i < N; i++) {
+    assert.strictEqual(results[i].status, 0, `racer ${i} failed: stderr=${results[i].stderr}`)
+  }
+  const file = path.join(storeDir, 'classifier-overrides.jsonl')
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)
+  assert.strictEqual(lines.length, N, `expected ${N} entries; got ${lines.length}`)
+  const seen = new Set()
+  for (const l of lines) {
+    const obj = JSON.parse(l)
+    seen.add(obj.reason)
+  }
+  assert.strictEqual(seen.size, N, 'every racer\'s reason should be present (no losses)')
+  // Lock file must not be leaked after the storm.
+  assert.ok(!fs.existsSync(path.join(storeDir, '.lock')), 'lock should be released')
+  // Stale-claim sidecars must not be left behind.
+  const sidecars = fs.readdirSync(storeDir).filter(f => f.includes('.stale-claim.'))
+  assert.strictEqual(sidecars.length, 0, `stale-claim sidecars leaked: ${sidecars.join(', ')}`)
+})
+
 test('F1-fix stale lock is auto-reclaimed (dead PID detected)', () => {
   const project = mkrepo('stale-lock')
   const storeDir = path.join(project, '.episodic-memory')

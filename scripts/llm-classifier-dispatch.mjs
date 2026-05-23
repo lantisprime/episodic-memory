@@ -33,6 +33,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { loadConfig } from './classifier-config-loader.mjs'
+import { acquireLock, releaseLock } from './lib/file-lock.mjs'
 
 function flag(argv, name) {
   const i = argv.indexOf(name)
@@ -162,59 +163,12 @@ function lookupGlobalCache(homeDir, key) {
   return obj && obj[key] ? obj[key] : null
 }
 
-// F1-fix (round 2): atomic file-create lock to close the TOCTOU race
-// codex caught in round 1 — `mkdir(lock_dir) + writeFile(pid)` was a
-// two-step operation; a racing process could see EEXIST, read no pid yet,
-// and "reclaim" a live lock. `open(path, 'wx')` is O_CREAT|O_EXCL|O_WRONLY
-// in one syscall, so pid creation and content write are inseparable.
-//
-// Stale detection: on EEXIST, read pid → check `kill(pid, 0)` ESRCH → reclaim.
-// Pidless / unparseable + age > 1s → reclaim (the only way to land here with
-// atomic create is a crashed writer between open and write, very rare).
-function acquireLock(lockPath, timeoutMs = 5000) {
-  const start = Date.now()
-  while (true) {
-    let fd
-    try {
-      fd = fs.openSync(lockPath, 'wx')
-      fs.writeSync(fd, String(process.pid))
-      fs.closeSync(fd)
-      return
-    } catch (err) {
-      if (fd) { try { fs.closeSync(fd) } catch {} }
-      if (err.code !== 'EEXIST') throw err
-      let staleReclaimed = false
-      try {
-        const pidStr = fs.readFileSync(lockPath, 'utf8').trim()
-        const pid = parseInt(pidStr, 10)
-        if (!Number.isFinite(pid) || pid <= 0) {
-          const age = Date.now() - fs.statSync(lockPath).mtimeMs
-          if (age > 1000) {
-            fs.unlinkSync(lockPath)
-            staleReclaimed = true
-          }
-        } else {
-          try { process.kill(pid, 0) } catch (e) {
-            if (e.code === 'ESRCH') {
-              fs.unlinkSync(lockPath)
-              staleReclaimed = true
-            }
-          }
-        }
-      } catch (statErr) {
-        if (statErr.code === 'ENOENT') {
-          staleReclaimed = true  // racing release; try again immediately
-        }
-      }
-      if (staleReclaimed) continue
-      if (Date.now() - start > timeoutMs) throw new Error(`lock timeout: ${lockPath}`)
-      const end = Date.now() + 25
-      while (Date.now() < end) { /* spin */ }
-    }
-  }
-}
-
-function releaseLock(p) { try { fs.unlinkSync(p) } catch {} }
+// Lock helper imported from ./lib/file-lock.mjs. The shared module uses
+// atomic openSync('wx') for the fast path and atomic-rename CAS for stale
+// claim. Codex PR #326 R2 BLOCKER repro proved that "read pid → unlink →
+// retry" is unsafe under contention because the unlink can target a
+// successor's live lock. Rename gives us OS-level mutual exclusion on
+// "who gets to claim this stale lock."
 
 function recordGlobalCache(homeDir, key, entry) {
   const dir = path.join(homeDir, '.episodic-memory')
