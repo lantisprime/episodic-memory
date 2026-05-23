@@ -1478,11 +1478,11 @@ _classify_segment() {
       script_base="$(basename "$script" 2>/dev/null)"
       case "$script_base" in
         em-search.mjs|em-list.mjs|em-watch-codex.mjs|em-pattern-health.mjs|em-check-stale.mjs|em-rebuild-index.mjs)
-          # em-rebuild-index touches index.jsonl — treat as shared_write
-          if [ "$script_base" = "em-rebuild-index.mjs" ]; then
-            printf '%s\t\t%s\n' "shared_write" "interpreter_em_rebuild"
-            return 0
-          fi
+          # em-rebuild-index writes index.jsonl but the operation is metadata
+          # sync derived deterministically from episode files (idempotent,
+          # atomic-rename, no partial-corruption window). Same gate-class as
+          # em-search (which also writes — access_count). Treating as
+          # read_only so the gate stops false-positive-blocking metadata sync.
           printf '%s\t\t%s\n' "read_only" "interpreter_em_read"
           return 0
           ;;
