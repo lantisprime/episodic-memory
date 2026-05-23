@@ -24,7 +24,6 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { resolveRepoRoot } from './lib/local-dir.mjs'
-import { acquireLock, releaseLock } from './lib/file-lock.mjs'
 
 const LABELS = new Set([
   'read_only',
@@ -117,25 +116,27 @@ function cacheKey(tuple) {
   return crypto.createHash('sha256').update(canon).digest('hex')
 }
 
-// Lock helper imported from ./lib/file-lock.mjs (shared with the dispatcher).
-// See that module for the atomic-rename CAS algorithm that closes codex
-// PR #326 R2's stale-claim race BLOCKER.
-
+// codex PR #326 R3 BLOCKER: stale-lock identity binding is unsolvable in
+// pure POSIX (no `rename-if-inode-matches` primitive). Per the same-class
+// stop rule (feedback_handoff_complete_bug_class.md), we change the
+// enforcement boundary instead of patching the same class again: drop the
+// lock entirely and rely on `O_APPEND` write atomicity.
+//
+// POSIX guarantees that a single `write()` of size <= PIPE_BUF (4096B on
+// Linux/macOS) to a file opened with O_APPEND is atomic — interleaving
+// processes will get whole-line appends without truncation or interleave.
+// Our entries are ~500B JSON. Safe.
+//
+// `fs.appendFileSync(file, line, {flag: 'a'})` opens, writes, closes in one
+// call; Node's underlying syscall uses `O_APPEND` which the kernel honors.
 function appendOverride(storeDir, entry) {
   fs.mkdirSync(storeDir, { recursive: true })
   const target = path.join(storeDir, 'classifier-overrides.jsonl')
-  const lock = path.join(storeDir, '.lock')
-  acquireLock(lock)
-  try {
-    const line = JSON.stringify(entry) + '\n'
-    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`
-    let existing = ''
-    try { existing = fs.readFileSync(target, 'utf8') } catch {}
-    fs.writeFileSync(tmp, existing + line)
-    fs.renameSync(tmp, target)
-  } finally {
-    releaseLock(lock)
+  const line = JSON.stringify(entry) + '\n'
+  if (line.length > 4096) {
+    throw new Error(`override entry size ${line.length} exceeds PIPE_BUF atomicity guarantee (4096B); refusing to append`)
   }
+  fs.appendFileSync(target, line, { flag: 'a' })
   return target
 }
 

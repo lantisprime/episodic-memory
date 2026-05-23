@@ -33,7 +33,6 @@ import os from 'os'
 import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { loadConfig } from './classifier-config-loader.mjs'
-import { acquireLock, releaseLock } from './lib/file-lock.mjs'
 
 function flag(argv, name) {
   const i = argv.indexOf(name)
@@ -163,28 +162,34 @@ function lookupGlobalCache(homeDir, key) {
   return obj && obj[key] ? obj[key] : null
 }
 
-// Lock helper imported from ./lib/file-lock.mjs. The shared module uses
-// atomic openSync('wx') for the fast path and atomic-rename CAS for stale
-// claim. Codex PR #326 R2 BLOCKER repro proved that "read pid → unlink →
-// retry" is unsafe under contention because the unlink can target a
-// successor's live lock. Rename gives us OS-level mutual exclusion on
-// "who gets to claim this stale lock."
+// codex PR #326 R3 BLOCKER: dropped the lock helper entirely. Stale-lock
+// identity binding can't be made fully atomic in pure POSIX, and each
+// previous patch shifted the race rather than closing it (R1: mkdir+write
+// race; R2: read+unlink race; R3: rename-without-inode-check race).
+//
+// Per the same-class stop rule (feedback_handoff_complete_bug_class.md),
+// we change the enforcement boundary instead. The cache is read-modify-
+// write with atomic temp+rename; under contention this is last-writer-wins
+// — some entries may be lost in a race, but the file is always a valid
+// JSON object (rename is atomic), so reads never see torn writes. A lost
+// cache entry just triggers one extra Tier 3 dispatch the next time the
+// same command is classified; cache-miss is the safe fallback.
 
 function recordGlobalCache(homeDir, key, entry) {
   const dir = path.join(homeDir, '.episodic-memory')
   fs.mkdirSync(dir, { recursive: true })
   const file = path.join(dir, 'classifier-cache.json')
-  const lock = path.join(dir, '.classifier-cache.lock')
-  acquireLock(lock)
-  try {
-    const obj = readJsonOrEmpty(file)
-    obj[key] = entry
-    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2))
-    fs.renameSync(tmp, file)
-  } finally {
-    releaseLock(lock)
-  }
+  // Lockless read-modify-write: read current map, merge our entry, write to
+  // a uniquely-named temp file, atomic-rename over the target. rename() is
+  // atomic, so readers never see a torn write. Under concurrent writers the
+  // final state reflects the LAST rename to land — earlier writers' entries
+  // for OTHER keys may be lost. For a classifier cache that's acceptable:
+  // a lost entry triggers one extra Tier 3 dispatch on the next hit.
+  const obj = readJsonOrEmpty(file)
+  obj[key] = entry
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2))
+  fs.renameSync(tmp, file)
 }
 
 function dispatchTier3({ projectRoot, callerCwd, command, cfgTimeout }) {
