@@ -498,26 +498,67 @@ test('(codex-R3-BLOCKER-fix) lockless append: 24 concurrent correction writes �
   assert.ok(!fs.existsSync(path.join(project, '.episodic-memory', '.lock')))
 })
 
-test('(codex-R3-BLOCKER-fix) lockless append: oversized entry refused (PIPE_BUF guard)', () => {
-  const project = mkrepo('pipe-buf')
+test('(codex-R3-BLOCKER-fix) lockless append: ascii entries pass the PIPE_BUF guard', () => {
+  const project = mkrepo('pipe-buf-ascii')
   const r = spawnSync(process.execPath, [
     CORRECTION,
     '--project-root', project,
     '--caller-cwd', project,
     '--command', 'x',
     '--label', 'read_only',
-    '--reason', 'A'.repeat(8000)  // forces line size > PIPE_BUF
+    '--reason', 'A'.repeat(8000)  // upstream caps reason to 500 chars
   ], { cwd: project, env: process.env, encoding: 'utf8' })
-  // Helper accepts the reason (truncated to 500 chars upstream) — the
-  // PIPE_BUF guard is a defense in depth. To actually exercise it we'd
-  // need a path where the line itself exceeds 4096B, which our 500-char
-  // reason cap prevents. Verify the happy path still works.
   assert.strictEqual(r.status, 0, `stderr=${r.stderr}`)
   const file = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
   const line = fs.readFileSync(file, 'utf8').trim()
   const obj = JSON.parse(line)
   assert.ok(obj.reason.length <= 500, 'reason capped at 500 chars upstream')
-  assert.ok(line.length < 4096, `serialized line ${line.length}B must stay under PIPE_BUF`)
+  assert.ok(Buffer.byteLength(line, 'utf8') < 4096, `serialized line ${Buffer.byteLength(line, 'utf8')}B must stay under PIPE_BUF`)
+})
+
+test('(codex-R4-BLOCKER-F1-fix) PIPE_BUF guard is byte-counted, not char-counted (multibyte UTF-8)', () => {
+  // codex R4 F1: a 2200-char string of `é` (2 bytes UTF-8 each) is 4400
+  // bytes — over PIPE_BUF — but a `String.length`-based guard accepts it.
+  // The fix uses Buffer.byteLength('utf8'). This test exercises the guard
+  // by sending a multibyte --command that produces a serialized line > 4096
+  // bytes. The --command field has no upstream length cap (unlike --reason).
+  const project = mkrepo('pipe-buf-multibyte')
+  const longMultibyteCmd = 'é'.repeat(2200)  // 4400 bytes
+  const r = spawnSync(process.execPath, [
+    CORRECTION,
+    '--project-root', project,
+    '--caller-cwd', project,
+    '--command', longMultibyteCmd,
+    '--label', 'read_only',
+    '--reason', 'multibyte byte-guard test'
+  ], { cwd: project, env: process.env, encoding: 'utf8' })
+  assert.strictEqual(r.status, 1, `expected guard rejection (exit 1); got ${r.status} stderr=${r.stderr}`)
+  assert.match(r.stderr, /bytes exceeds PIPE_BUF/, `expected byte-guard error message; got: ${r.stderr}`)
+  // No partial write landed on disk.
+  const file = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
+  assert.ok(!fs.existsSync(file), 'no override entry should be written when guard rejects')
+})
+
+test('(codex-R4-BLOCKER-F1-fix) PIPE_BUF guard permits multibyte entries safely under the limit', () => {
+  // Boundary test: the --command appears in the tuple TWICE (as
+  // normalized_command and executable_resolved when it parses as a script
+  // path), so a 2B-per-char multibyte command effectively counts ~4×.
+  // Pick a size that's genuinely under 4096B serialized.
+  const project = mkrepo('pipe-buf-multibyte-under')
+  const cmd = 'é'.repeat(400)  // 800 bytes literal; ~3200B serialized w/ tuple duplication
+  const r = spawnSync(process.execPath, [
+    CORRECTION,
+    '--project-root', project,
+    '--caller-cwd', project,
+    '--command', cmd,
+    '--label', 'read_only',
+    '--reason', 'under limit'
+  ], { cwd: project, env: process.env, encoding: 'utf8' })
+  assert.strictEqual(r.status, 0, `stderr=${r.stderr}`)
+  const file = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
+  const line = fs.readFileSync(file, 'utf8').trim()
+  assert.ok(Buffer.byteLength(line + '\n', 'utf8') <= 4096,
+    `serialized line ${Buffer.byteLength(line + '\n', 'utf8')}B must fit in PIPE_BUF`)
 })
 
 test('F3-fix tampered cache entry (wrong project_root_canonical) is rejected', () => {

@@ -133,8 +133,14 @@ function appendOverride(storeDir, entry) {
   fs.mkdirSync(storeDir, { recursive: true })
   const target = path.join(storeDir, 'classifier-overrides.jsonl')
   const line = JSON.stringify(entry) + '\n'
-  if (line.length > 4096) {
-    throw new Error(`override entry size ${line.length} exceeds PIPE_BUF atomicity guarantee (4096B); refusing to append`)
+  // codex R4 BLOCKER F1: O_APPEND atomicity is BYTE-sized (PIPE_BUF =
+  // 4096 bytes), not char-sized. `String.length` counts UTF-16 code units;
+  // a 2200-char ASCII line is 2200 bytes but a 2200-char multibyte UTF-8
+  // line can be > 4096 bytes. Use Buffer.byteLength('utf8') for the real
+  // serialized size the kernel will write.
+  const byteLen = Buffer.byteLength(line, 'utf8')
+  if (byteLen > 4096) {
+    throw new Error(`override entry size ${byteLen} bytes exceeds PIPE_BUF atomicity guarantee (4096B); refusing to append`)
   }
   fs.appendFileSync(target, line, { flag: 'a' })
   return target
