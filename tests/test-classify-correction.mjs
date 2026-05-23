@@ -5,7 +5,8 @@
  * validator (symlink reject, realpath equality, O_NOFOLLOW leaf, TOCTOU
  * recheck, EEXIST-tolerant first-time creation).
  *
- * 15 cases — see plan v6 §"Negative-matrix coverage (final v6)".
+ * 16 cases — see plan v6 §"Negative-matrix coverage (final v6)" plus
+ * test 16 (linked worktree + --allow-non-git) added in impl review R1.
  *
  * Usage: node tests/test-classify-correction.mjs
  */
