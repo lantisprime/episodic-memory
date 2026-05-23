@@ -1088,6 +1088,282 @@ git -C "$TEST_DIR" worktree remove --force "$WORKTREE_DIR" 2>/dev/null
 git -C "$TEST_DIR" branch -D test-wt-branch 2>/dev/null
 
 # ============================================================================
+# B-S: paths-with-spaces wrong-root detector (codex R1-R8 / PR #<TBD>)
+#
+# Covers the bug class where `_command_first_absolute_noncanonical_marker`
+# truncated absolute marker paths at the first whitespace, breaking marker
+# operations in any repo whose absolute path contains a space (e.g.
+# "Home Network Improvement").
+#
+# Implementation: three-pass per-token scan (whole-token equality, key=path
+# walk, substring-regex with canonical short-circuit + relative disambig).
+# ============================================================================
+
+# ---- B-S helpers ----
+
+# Run hook from an explicit caller process cwd (different from JSON .cwd) so
+# B-S9 / B-S13 / B-S26 actually exercise the caller-cwd ≠ JSON-cwd axis.
+run_hook_from_cwd() {
+  local caller_cwd="$1"
+  (cd "$caller_cwd" && HOME="$TEST_HOME" bash "$HOOK")
+}
+
+# Assert hook blocks AND reason JSON contains BOTH expected-attempted and
+# expected-canonical path literals (substring match via grep -qF / jq -r).
+assert_blocked_with_reason() {
+  local test_name="$1" json="$2" expected_attempted="$3" expected_canonical="$4"
+  local output reason exit_code=0
+  output=$(echo "$json" | run_hook 2>/dev/null) || exit_code=$?
+  if ! echo "$output" | grep -q '"decision".*"block"'; then
+    echo "  ✗ $test_name (expected block; exit=$exit_code output=$output)"
+    ((failed++))
+    return
+  fi
+  reason=$(echo "$output" | jq -r '.reason // ""' 2>/dev/null)
+  if [ -z "$reason" ] || ! printf '%s' "$reason" | grep -qF -- "$expected_attempted"; then
+    echo "  ✗ $test_name (reason missing attempted='$expected_attempted'): $reason"
+    ((failed++))
+    return
+  fi
+  if ! printf '%s' "$reason" | grep -qF -- "$expected_canonical"; then
+    echo "  ✗ $test_name (reason missing canonical='$expected_canonical'): $reason"
+    ((failed++))
+    return
+  fi
+  echo "  ✓ $test_name"
+  ((passed++))
+}
+
+# Paired disk assertion (B-S26): target marker exists (fixture-seeded);
+# caller cwd has no leaked .checkpoints/ dir.
+assert_disk_artifacts() {
+  local test_name="$1" target_marker_path="$2" caller_cwd="$3"
+  if [ ! -e "$target_marker_path" ]; then
+    echo "  ✗ $test_name (target marker missing: $target_marker_path)"
+    ((failed++))
+    return
+  fi
+  if [ -e "$caller_cwd/.checkpoints" ]; then
+    echo "  ✗ $test_name (caller-cwd leak: $(ls -la "$caller_cwd/.checkpoints" 2>&1))"
+    ((failed++))
+    return
+  fi
+  echo "  ✓ $test_name (disk artifacts: target=$target_marker_path, caller no-leak)"
+  ((passed++))
+}
+
+# ---- B-S fixture: spacey main repo + spacey linked worktree ----
+
+SPACE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/em-space test.XXXXXX")"
+SPACE_DIR="$(cd -P "$SPACE_DIR" && pwd)"
+git -C "$SPACE_DIR" init -q 2>/dev/null
+mkdir -p "$SPACE_DIR/.checkpoints"
+touch "$SPACE_DIR/.checkpoints/.checkpoint-required"
+git -C "$SPACE_DIR" -c user.email=t@t.test -c user.name=test commit --allow-empty -m init -q
+
+SPACE_DIR_WT="$(mktemp -d "${TMPDIR:-/tmp}/em-space wt.XXXXXX")"
+SPACE_DIR_WT="$(cd -P "$SPACE_DIR_WT" && pwd)"
+rmdir "$SPACE_DIR_WT"
+
+# R6 P1.1: explicit -b avoids invalid-ref-name from spacey basename
+# (git would otherwise infer the branch as `em-space wt.xxxx` and fail).
+if ! git -C "$SPACE_DIR" worktree add -b test-spacey-wt-branch "$SPACE_DIR_WT" -q; then
+  echo "FAIL: B-S fixture: git worktree add failed (spacey basename branch-inference bug?)"
+  exit 1
+fi
+
+# Fixture precondition: worktree's git-common-dir resolves to main repo.
+B_S_EXPECTED_COMMON_DIR="$SPACE_DIR/.git"
+B_S_ACTUAL_COMMON_DIR="$(git -C "$SPACE_DIR_WT" rev-parse --git-common-dir)"
+case "$B_S_ACTUAL_COMMON_DIR" in
+  /*) ;;
+  *) B_S_ACTUAL_COMMON_DIR="$SPACE_DIR_WT/$B_S_ACTUAL_COMMON_DIR" ;;
+esac
+B_S_ACTUAL_COMMON_DIR="$(cd -P "$B_S_ACTUAL_COMMON_DIR" 2>/dev/null && pwd)" || true
+if [ "$B_S_ACTUAL_COMMON_DIR" != "$B_S_EXPECTED_COMMON_DIR" ]; then
+  echo "FAIL: B-S fixture: common-dir resolved to '$B_S_ACTUAL_COMMON_DIR'; expected '$B_S_EXPECTED_COMMON_DIR'"
+  exit 1
+fi
+
+# Nested subdir under spacey repo (for B-S11).
+SPACE_DIR_NESTED="$SPACE_DIR/sub dir"
+mkdir -p "$SPACE_DIR_NESTED"
+
+# Clean-name canonical repo (for B-S16): canonical bash -c without spaces.
+CLEAN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/em-clean.XXXXXX")"
+CLEAN_DIR="$(cd -P "$CLEAN_DIR" && pwd)"
+git -C "$CLEAN_DIR" init -q 2>/dev/null
+mkdir -p "$CLEAN_DIR/.checkpoints"
+
+# ---- B-S cases ----
+
+# B-S1: quoted canonical absolute path-with-space → no wrong-root block
+assert_no_wrong_root_block "B-S1. Quoted canonical path-with-space" \
+  "$(mock_json_cwd 'Bash' "rm \"$SPACE_DIR/.checkpoints/.plan-approval-pending\"" "$SPACE_DIR")"
+
+# B-S2: quoted non-canonical absolute path-with-space (different repo) → BLOCK
+assert_blocked_with_reason "B-S2. Quoted non-canonical path-with-space" \
+  "$(mock_json_cwd 'Bash' "rm \"/tmp/some other repo/.checkpoints/.pre-checkpoint-done\"" "$SPACE_DIR")" \
+  "/tmp/some other repo/.checkpoints/.pre-checkpoint-done" \
+  "$SPACE_DIR/.checkpoints/.pre-checkpoint-done"
+
+# B-S3: touch quoted canonical with space → allow
+assert_no_wrong_root_block "B-S3. touch quoted canonical with space" \
+  "$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR")"
+
+# B-S4: redirect to quoted canonical with space → allow
+assert_no_wrong_root_block "B-S4. Redirect to quoted canonical with space" \
+  "$(mock_json_cwd 'Bash' "echo done > \"$SPACE_DIR/.checkpoints/.pre-checkpoint-done\"" "$SPACE_DIR")"
+
+# B-S5: cp to quoted non-canonical /tmp marker path-with-space → BLOCK
+assert_blocked_with_reason "B-S5. cp to non-canonical /tmp path-with-space" \
+  "$(mock_json_cwd 'Bash' "cp /etc/hosts \"/tmp/wrong dir/.checkpoints/.plan-approval-pending\"" "$SPACE_DIR")" \
+  "/tmp/wrong dir/.checkpoints/.plan-approval-pending" \
+  "$SPACE_DIR/.checkpoints/.plan-approval-pending"
+
+# B-S6: single-quoted non-canonical absolute path-with-space → BLOCK
+assert_blocked_with_reason "B-S6. Single-quoted non-canonical path-with-space" \
+  "$(mock_json_cwd 'Bash' "rm '/tmp/another dir/.checkpoints/.post-checkpoint-done'" "$SPACE_DIR")" \
+  "/tmp/another dir/.checkpoints/.post-checkpoint-done" \
+  "$SPACE_DIR/.checkpoints/.post-checkpoint-done"
+
+# B-S7: multiple markers; first is non-canonical → BLOCK
+assert_blocked_with_reason "B-S7. Multiple markers, first non-canonical" \
+  "$(mock_json_cwd 'Bash' "rm '/tmp/wrong/.checkpoints/.pre-checkpoint-done' \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR")" \
+  "/tmp/wrong/.checkpoints/.pre-checkpoint-done" \
+  "$SPACE_DIR/.checkpoints/.pre-checkpoint-done"
+
+# B-S8: regression — unquoted absolute non-canonical (no spaces) → still BLOCK
+assert_blocked_with_reason "B-S8. Regression: unquoted absolute non-canonical (no spaces)" \
+  "$(mock_json_cwd 'Bash' "rm /tmp/nospaces/.checkpoints/.plan-approval-pending" "$SPACE_DIR")" \
+  "/tmp/nospaces/.checkpoints/.plan-approval-pending" \
+  "$SPACE_DIR/.checkpoints/.plan-approval-pending"
+
+# B-S9: caller process cwd ≠ JSON cwd; canonical-with-spaces target → allow + no leak
+B_S9_JSON="$(mock_json_cwd 'Bash' "rm \"$SPACE_DIR/.checkpoints/.plan-approval-pending\"" "$SPACE_DIR")"
+B_S9_OUT=$(echo "$B_S9_JSON" | run_hook_from_cwd "/tmp" 2>/dev/null)
+if echo "$B_S9_OUT" | grep -qE 'non-canonical path|Relative marker reference'; then
+  echo "  ✗ B-S9. Caller cwd=/tmp, JSON cwd=spacey (wrong-root falsely fired): $B_S9_OUT"
+  ((failed++))
+else
+  echo "  ✓ B-S9. Caller cwd=/tmp, JSON cwd=spacey (no wrong-root block)"
+  ((passed++))
+fi
+if [ -e "/tmp/.checkpoints" ]; then
+  echo "  ✗ B-S9 (leak: /tmp/.checkpoints exists)"
+  ((failed++))
+else
+  echo "  ✓ B-S9 (no caller-cwd leak)"
+  ((passed++))
+fi
+
+# B-S10: linked worktree (both spacey, no-space marker in path) → allow
+assert_no_wrong_root_block "B-S10. Linked worktree (spacey), main canonical marker" \
+  "$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR_WT")"
+
+# B-S11: nested cwd under spacey repo → allow
+assert_no_wrong_root_block "B-S11. Nested cwd under spacey repo" \
+  "$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR_NESTED")"
+
+# B-S12: non-git JSON cwd, target=non-canonical with spaces → BLOCK
+assert_blocked_with_reason "B-S12. Non-git JSON cwd, target non-canonical" \
+  "$(mock_json_cwd 'Bash' "rm \"/tmp/no-repo/.checkpoints/.pre-checkpoint-done\"" "/tmp")" \
+  "/tmp/no-repo/.checkpoints/.pre-checkpoint-done" \
+  "/tmp/.checkpoints/.pre-checkpoint-done"
+
+# B-S13: subprocess wrong-cwd inheritance — binds to JSON cwd, not process cwd
+B_S13_JSON="$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR")"
+B_S13_OUT=$(echo "$B_S13_JSON" | run_hook_from_cwd "/tmp" 2>/dev/null)
+if echo "$B_S13_OUT" | grep -qE 'non-canonical path|Relative marker reference'; then
+  echo "  ✗ B-S13. Subprocess wrong-cwd inheritance (wrong-root falsely fired): $B_S13_OUT"
+  ((failed++))
+else
+  echo "  ✓ B-S13. Subprocess wrong-cwd inheritance (binds to JSON cwd)"
+  ((passed++))
+fi
+
+# B-S14: bash -c "touch /no-space/.checkpoints/.X" non-canonical → BLOCK (Pass B)
+assert_blocked_with_reason "B-S14. bash -c non-canonical no-space" \
+  "$(mock_json_cwd 'Bash' 'bash -c "touch /tmp/no-space/.checkpoints/.pre-checkpoint-done"' "$SPACE_DIR")" \
+  "/tmp/no-space/.checkpoints/.pre-checkpoint-done" \
+  "$SPACE_DIR/.checkpoints/.pre-checkpoint-done"
+
+# B-S15: sh -c "rm /no-space/.checkpoints/.X" → BLOCK
+assert_blocked_with_reason "B-S15. sh -c non-canonical no-space" \
+  "$(mock_json_cwd 'Bash' 'sh -c "rm /tmp/other-non-canon/.checkpoints/.post-checkpoint-done"' "$SPACE_DIR")" \
+  "/tmp/other-non-canon/.checkpoints/.post-checkpoint-done" \
+  "$SPACE_DIR/.checkpoints/.post-checkpoint-done"
+
+# B-S16: bash -c canonical (no-space cwd) → allow (Pass B canonical equality)
+assert_no_wrong_root_block "B-S16. bash -c canonical no-space" \
+  "$(mock_json_cwd 'Bash' "bash -c \"touch $CLEAN_DIR/.checkpoints/.pre-checkpoint-done\"" "$CLEAN_DIR")"
+
+# B-S17: dd of="<canonical spacey>" → allow (Pass A')
+assert_no_wrong_root_block "B-S17. dd of= canonical spacey" \
+  "$(mock_json_cwd 'Bash' "dd if=/dev/null of=\"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR")"
+
+# B-S18: dd of="/tmp/wrong path/.X" non-canonical with spaces → BLOCK with full attempted
+assert_blocked_with_reason "B-S18. dd of= non-canonical spacey" \
+  "$(mock_json_cwd 'Bash' "dd if=/dev/null of=\"/tmp/wrong path/.checkpoints/.pre-checkpoint-done\"" "$SPACE_DIR")" \
+  "/tmp/wrong path/.checkpoints/.pre-checkpoint-done" \
+  "$SPACE_DIR/.checkpoints/.pre-checkpoint-done"
+
+# B-S19: --output= non-canonical spacey → BLOCK
+assert_blocked_with_reason "B-S19. --output= non-canonical spacey" \
+  "$(mock_json_cwd 'Bash' "tool --output=\"/sp path/.checkpoints/.plan-approval-pending\"" "$SPACE_DIR")" \
+  "/sp path/.checkpoints/.plan-approval-pending" \
+  "$SPACE_DIR/.checkpoints/.plan-approval-pending"
+
+# B-S20: --output= canonical spacey → allow
+assert_no_wrong_root_block "B-S20. --output= canonical spacey" \
+  "$(mock_json_cwd 'Bash' "tool --output=\"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR")"
+
+# B-S21: P2 relative-token disambiguation inside bash -c payload from main cwd
+assert_no_wrong_root_block "B-S21. P2 relative-token disambiguation" \
+  "$(mock_json_cwd 'Bash' "bash -c \"echo ./tmp/.checkpoints/.pre-checkpoint-done >/dev/null\"" "$SPACE_DIR")"
+
+# B-S22: P1 canonical short-circuit (whole-token Pass A) — verifies that
+# Pass B does NOT then false-positive on the same token by truncating spaces.
+assert_no_wrong_root_block "B-S22. P1 canonical short-circuit Pass A" \
+  "$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.plan-approval-pending\"" "$SPACE_DIR")"
+
+# B-S23: P1 canonical short-circuit (Pass A' key=path) — same invariant
+assert_no_wrong_root_block "B-S23. P1 canonical short-circuit Pass A'" \
+  "$(mock_json_cwd 'Bash' "dd if=/dev/null of=\"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR")"
+
+# B-S24: main repo spacey + linked worktree spacey; write MAIN canonical → allow
+assert_no_wrong_root_block "B-S24. Worktree spacey, MAIN canonical target" \
+  "$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR_WT")"
+
+# B-S25: write WORKTREE-LOCAL absolute marker → BLOCK with full attempted+canonical
+assert_blocked_with_reason "B-S25. Worktree spacey, WORKTREE-LOCAL target" \
+  "$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR_WT/.checkpoints/.checkpoint-required\"" "$SPACE_DIR_WT")" \
+  "$SPACE_DIR_WT/.checkpoints/.checkpoint-required" \
+  "$SPACE_DIR/.checkpoints/.checkpoint-required"
+
+# B-S26: paired target + caller disk assertion
+B_S26_CALLER_CWD="$(mktemp -d "${TMPDIR:-/tmp}/em-caller.XXXXXX")"
+B_S26_CALLER_CWD="$(cd -P "$B_S26_CALLER_CWD" && pwd)"
+B_S26_JSON="$(mock_json_cwd 'Bash' "touch \"$SPACE_DIR/.checkpoints/.checkpoint-required\"" "$SPACE_DIR_WT")"
+B_S26_OUT=$(echo "$B_S26_JSON" | run_hook_from_cwd "$B_S26_CALLER_CWD" 2>/dev/null)
+if echo "$B_S26_OUT" | grep -qE 'non-canonical path|Relative marker reference'; then
+  echo "  ✗ B-S26. Disk-paired allow (wrong-root falsely fired): $B_S26_OUT"
+  ((failed++))
+else
+  echo "  ✓ B-S26. Disk-paired allow (no wrong-root block from caller cwd)"
+  ((passed++))
+fi
+assert_disk_artifacts "B-S26. Paired disk artifacts" \
+  "$SPACE_DIR/.checkpoints/.checkpoint-required" \
+  "$B_S26_CALLER_CWD"
+rm -rf "$B_S26_CALLER_CWD"
+
+# ---- B-S cleanup ----
+git -C "$SPACE_DIR" worktree remove --force "$SPACE_DIR_WT" 2>/dev/null
+git -C "$SPACE_DIR" branch -D test-spacey-wt-branch 2>/dev/null
+rm -rf "$SPACE_DIR" "$CLEAN_DIR"
+
+# ============================================================================
 echo ""
 echo "--- Result ---"
 # ============================================================================
