@@ -527,7 +527,14 @@ function shouldArmBp001Checkpoint(activeEntries, now, currentProject) {
 // REPO_ROOT/.checkpoints/ so the project identity used to filter violations
 // must also bind to REPO_ROOT. Letting --project override the arming-time name
 // re-creates the cross-project bleed via a different surface (codex R2 P1).
-function resolveProjectName(projectRoot, { ignoreOverride = false } = {}) {
+//
+// fast:true skips the `git remote get-url` subprocess. The arming call site
+// passes fast:true because (a) SessionStart fires every session and the test
+// contract (test-em-recall-session-start-early-exit.mjs T7) forbids this git
+// invocation during --session-start, and (b) violations record project names
+// matching package.json `name` (the em-store convention), so the git-remote
+// fallback rarely contributes a different match than basename(projectRoot).
+function resolveProjectName(projectRoot, { ignoreOverride = false, fast = false } = {}) {
   if (!ignoreOverride && projectOverride) return projectOverride
 
   try {
@@ -535,15 +542,17 @@ function resolveProjectName(projectRoot, { ignoreOverride = false } = {}) {
     if (pkg.name && pkg.name.trim()) return pkg.name.trim()
   } catch {}
 
-  try {
-    const remoteUrl = execSync('git remote get-url origin', {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    }).trim()
-    const match = remoteUrl.match(/\/([^/]+?)(?:\.git)?$/) || remoteUrl.match(/:([^/]+?)(?:\.git)?$/)
-    if (match) return match[1]
-  } catch {}
+  if (!fast) {
+    try {
+      const remoteUrl = execSync('git remote get-url origin', {
+        cwd: projectRoot,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      }).trim()
+      const match = remoteUrl.match(/\/([^/]+?)(?:\.git)?$/) || remoteUrl.match(/:([^/]+?)(?:\.git)?$/)
+      if (match) return match[1]
+    } catch {}
+  }
 
   return path.basename(projectRoot)
 }
@@ -712,7 +721,7 @@ if (sessionStartFlag) {
 // so the project identity used to scope violations matches the marker write
 // authority root. Closes the cross-project bleed where violations in one
 // project armed checkpoint gates in every other project at SessionStart.
-const armingProject = resolveProjectName(REPO_ROOT, { ignoreOverride: true })
+const armingProject = resolveProjectName(REPO_ROOT, { ignoreOverride: true, fast: true })
 if (shouldArmBp001Checkpoint(activeEntries, new Date(), armingProject)) {
   armCheckpointMarker(REPO_ROOT)
 }
