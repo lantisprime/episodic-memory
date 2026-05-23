@@ -69,6 +69,7 @@ assert_label "T13 empty" "" "read_only"
 assert_label "T14 colon noop" ":" "read_only"
 assert_label "T15 true" "true" "read_only"
 assert_label "T16 node em-search" "node scripts/em-search.mjs --project x" "read_only"
+assert_label "T16b node em-rebuild-index" "node scripts/em-rebuild-index.mjs --scope all" "read_only"
 assert_label "T17 wc -l" "wc -l file.txt" "read_only"
 
 echo ""
