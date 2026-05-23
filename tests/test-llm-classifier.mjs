@@ -539,6 +539,89 @@ test('(codex-R4-BLOCKER-F1-fix) PIPE_BUF guard is byte-counted, not char-counted
   assert.ok(!fs.existsSync(file), 'no override entry should be written when guard rejects')
 })
 
+test('(codex-R5-repro) byte-guard boundary probe — sharp threshold at 4096B', () => {
+  // Adapted from codex R5 reply's boundary probe (episode
+  // 20260523-031659-...-7e00). Codex's exact measurement was N=919 (4094B)
+  // accepted, N=920 (4098B) rejected — but those numbers are sensitive to
+  // the tmp-dir path length (which is embedded in project_root_canonical
+  // inside the serialized tuple). So this test scans for the boundary in
+  // THIS env, then asserts:
+  //   - There IS a sharp boundary (some N accepts, N+1 rejects)
+  //   - At the boundary, the accepted byte count is <= 4096B and the
+  //     rejected count is > 4096B (the guard fires at exactly the right
+  //     threshold regardless of path-length noise)
+  function probe(n) {
+    const project = mkrepo(`byte-boundary-${n}`)
+    const r = spawnSync(process.execPath, [
+      CORRECTION,
+      '--project-root', project,
+      '--caller-cwd', project,
+      '--command', 'é'.repeat(n),
+      '--label', 'read_only',
+      '--reason', 'byte-boundary'
+    ], { cwd: project, env: process.env, encoding: 'utf8' })
+    const file = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
+    const bytes = fs.existsSync(file)
+      ? Buffer.byteLength(fs.readFileSync(file, 'utf8'), 'utf8')
+      : null
+    // Extract the rejection's claimed byte count for cross-checking.
+    const rejectedBytes = r.stderr.match(/size (\d+) bytes/)
+    return {
+      status: r.status,
+      diskBytes: bytes,
+      rejectedBytes: rejectedBytes ? Number(rejectedBytes[1]) : null,
+      stderr: r.stderr.trim()
+    }
+  }
+  // Binary-search the boundary between N=800 (clearly under) and N=1000 (clearly over).
+  let lo = 800, hi = 1000
+  // Sanity: lo must accept, hi must reject.
+  assert.strictEqual(probe(lo).status, 0, 'N=800 must accept (baseline)')
+  assert.strictEqual(probe(hi).status, 1, 'N=1000 must reject (baseline)')
+  while (lo + 1 < hi) {
+    const mid = (lo + hi) >> 1
+    if (probe(mid).status === 0) lo = mid
+    else hi = mid
+  }
+  const acceptedProbe = probe(lo)
+  const rejectedProbe = probe(hi)
+  assert.strictEqual(acceptedProbe.status, 0, `boundary lo=${lo} should accept`)
+  assert.strictEqual(rejectedProbe.status, 1, `boundary hi=${hi} should reject`)
+  // The accepted byte count must be <= 4096B (guard is byte-correct).
+  assert.ok(acceptedProbe.diskBytes <= 4096,
+    `last accepted N=${lo} serialized to ${acceptedProbe.diskBytes}B; expected <= 4096`)
+  // The rejected byte count must be > 4096B (guard fires at the right threshold).
+  assert.ok(rejectedProbe.rejectedBytes > 4096,
+    `first rejected N=${hi} reported ${rejectedProbe.rejectedBytes}B; expected > 4096`)
+  // The gap should be 4 bytes per `é` (one char added).
+  assert.strictEqual(rejectedProbe.rejectedBytes - acceptedProbe.diskBytes, 4,
+    `boundary step should be 4B (one é); got ${rejectedProbe.rejectedBytes - acceptedProbe.diskBytes}`)
+})
+
+test('(codex-R5-repro) artifact-location: caller_cwd != project — override lands under project, not caller', () => {
+  // Adapted from codex R5 reply's caller-cwd-vs-target repro. Run the
+  // correction from project root but with --caller-cwd pointing at a
+  // separate temp dir. Override must land under project's
+  // .episodic-memory/, NOT under the caller dir's.
+  const project = mkrepo('cwd-target')
+  const caller = mktmp('cwd-caller')  // no .episodic-memory here
+  const r = spawnSync(process.execPath, [
+    CORRECTION,
+    '--project-root', project,
+    '--caller-cwd', caller,
+    '--command', 'node ./tool.mjs',
+    '--label', 'read_only'
+  ], { cwd: project, env: process.env, encoding: 'utf8' })
+  assert.strictEqual(r.status, 0, `stderr=${r.stderr}`)
+  const targetFile = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
+  const callerFile = path.join(fs.realpathSync(caller), '.episodic-memory', 'classifier-overrides.jsonl')
+  assert.ok(fs.existsSync(targetFile), `override should land under project: ${targetFile}`)
+  assert.ok(!fs.existsSync(callerFile), `override should NOT leak into caller cwd: ${callerFile}`)
+  // The emitted file path in stdout must match the actual write location.
+  const out = lastJson(r.stdout)
+  assert.strictEqual(out.file, targetFile, 'stdout-reported file path must match disk artifact')
+})
+
 test('(codex-R4-BLOCKER-F1-fix) PIPE_BUF guard permits multibyte entries safely under the limit', () => {
   // Boundary test: the --command appears in the tuple TWICE (as
   // normalized_command and executable_resolved when it parses as a script
