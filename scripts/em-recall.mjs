@@ -498,19 +498,63 @@ function runViolationPreflight(activeEntries, taskType, patterns) {
 // inference returns null. Pure function — testable in isolation and stable
 // for #80's later validator-backed gate to swap.
 // ---------------------------------------------------------------------------
-function shouldArmBp001Checkpoint(activeEntries, now) {
+function shouldArmBp001Checkpoint(activeEntries, now, currentProject) {
+  // Fail-closed: without a resolved project name we cannot scope the match.
+  // The 30-day window arming engine bleeds across projects without this guard.
+  if (!currentProject) return false
   const cutoff = new Date(now)
   cutoff.setDate(cutoff.getDate() - 30)
   const cutoffStr = cutoff.toISOString().slice(0, 10)
   const tag = 'violated:bp-001-implementation-workflow'
   return activeEntries.some(e =>
     e &&
+    e.status !== 'superseded' &&
     e.category === 'violation' &&
+    e.project === currentProject &&
     Array.isArray(e.tags) &&
     e.tags.includes(tag) &&
     typeof e.date === 'string' &&
     e.date >= cutoffStr
   )
+}
+
+// Resolve the project name for ARMING purposes (binds to REPO_ROOT, not cwd).
+// Precedence: --project override (unless ignored) → <projectRoot>/package.json
+// `name` → `git remote get-url origin` basename (subprocess cwd = projectRoot)
+// → path.basename(projectRoot).
+//
+// ignoreOverride:true for the bp-001 arming call site — the marker writes to
+// REPO_ROOT/.checkpoints/ so the project identity used to filter violations
+// must also bind to REPO_ROOT. Letting --project override the arming-time name
+// re-creates the cross-project bleed via a different surface (codex R2 P1).
+//
+// fast:true skips the `git remote get-url` subprocess. The arming call site
+// passes fast:true because (a) SessionStart fires every session and the test
+// contract (test-em-recall-session-start-early-exit.mjs T7) forbids this git
+// invocation during --session-start, and (b) violations record project names
+// matching package.json `name` (the em-store convention), so the git-remote
+// fallback rarely contributes a different match than basename(projectRoot).
+function resolveProjectName(projectRoot, { ignoreOverride = false, fast = false } = {}) {
+  if (!ignoreOverride && projectOverride) return projectOverride
+
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'))
+    if (pkg.name && pkg.name.trim()) return pkg.name.trim()
+  } catch {}
+
+  if (!fast) {
+    try {
+      const remoteUrl = execSync('git remote get-url origin', {
+        cwd: projectRoot,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      }).trim()
+      const match = remoteUrl.match(/\/([^/]+?)(?:\.git)?$/) || remoteUrl.match(/:([^/]+?)(?:\.git)?$/)
+      if (match) return match[1]
+    } catch {}
+  }
+
+  return path.basename(projectRoot)
 }
 
 // ---------------------------------------------------------------------------
@@ -555,31 +599,16 @@ function loadIndex(dataDir, source) {
 function inferContext() {
   const ctx = { project: null, branch_tokens: [], keywords: [], effective_tokens: [] }
 
-  // Always read package.json for keywords (even when project is overridden)
+  // Always read REPO_ROOT/package.json for keywords (independent of project resolution).
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'))
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'))
     if (Array.isArray(pkg.keywords)) ctx.keywords = pkg.keywords.map(k => k.toLowerCase().trim()).filter(Boolean)
-    if (!projectOverride && pkg.name && pkg.name.trim()) ctx.project = pkg.name.trim()
   } catch {}
 
-  // 1. Project name: override → package.json (above) → git remote → basename(cwd)
-  if (projectOverride) {
-    ctx.project = projectOverride
-  } else if (!ctx.project) {
-    // Try git remote
-    try {
-      const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
-      // SSH: git@github.com:org/repo.git → repo
-      // HTTPS: https://github.com/org/repo.git → repo
-      const match = remoteUrl.match(/\/([^/]+?)(?:\.git)?$/) || remoteUrl.match(/:([^/]+?)(?:\.git)?$/)
-      if (match) ctx.project = match[1]
-    } catch {}
-
-    // Fallback to basename(cwd)
-    if (!ctx.project) {
-      ctx.project = path.basename(process.cwd())
-    }
-  }
+  // Project name resolution — root-bound, honors --project override here (recall
+  // output filtering is the intended override contract). Arming path uses
+  // ignoreOverride:true at the dedicated call site.
+  ctx.project = resolveProjectName(REPO_ROOT)
 
   // 2. Branch tokens
   try {
@@ -687,7 +716,13 @@ if (sessionStartFlag) {
 // any session that ends up writing files; checkpoint-gate itself only
 // blocks write tools, so the false-positive surface is bounded.
 // ---------------------------------------------------------------------------
-if (shouldArmBp001Checkpoint(activeEntries, new Date())) {
+// Bind arming-time project name to REPO_ROOT (NOT process.cwd() and NOT the
+// --project override). This pairs with armCheckpointMarker(REPO_ROOT) below
+// so the project identity used to scope violations matches the marker write
+// authority root. Closes the cross-project bleed where violations in one
+// project armed checkpoint gates in every other project at SessionStart.
+const armingProject = resolveProjectName(REPO_ROOT, { ignoreOverride: true, fast: true })
+if (shouldArmBp001Checkpoint(activeEntries, new Date(), armingProject)) {
   armCheckpointMarker(REPO_ROOT)
 }
 

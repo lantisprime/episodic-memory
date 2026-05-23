@@ -61,7 +61,12 @@ function setupRepo() {
   git(root, 'config user.email test@example.com')
   git(root, 'config user.name test')
   fs.writeFileSync(path.join(root, 'README.md'), '# t\n')
-  git(root, 'add README.md')
+  // Pin project name to 'test' so resolveProjectName(root, {ignoreOverride:true})
+  // matches the seeded violations (which use project: 'test'). Without this,
+  // post-Option-E arming binds to basename(root) which is the random mkdtemp
+  // suffix → no project match → no arm → tests that rely on arming fail.
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'test' }, null, 2))
+  git(root, 'add README.md package.json')
   git(root, 'commit -q -m init')
   return root
 }

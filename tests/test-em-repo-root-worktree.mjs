@@ -71,7 +71,11 @@ git(mainRepo, 'init -q -b main')
 git(mainRepo, 'config user.email test@example.com')
 git(mainRepo, 'config user.name test')
 fs.writeFileSync(path.join(mainRepo, 'README.md'), '# test\n')
-git(mainRepo, 'add README.md')
+// package.json with name='test' so resolveProjectName(mainRepo) returns 'test'
+// — the seeded violation also uses --project test, so the per-project arming
+// predicate (post Option E) matches and armCheckpointMarker fires.
+fs.writeFileSync(path.join(mainRepo, 'package.json'), JSON.stringify({ name: 'test' }, null, 2))
+git(mainRepo, 'add README.md package.json')
 git(mainRepo, 'commit -q -m init')
 git(mainRepo, `worktree add -q -b wt-branch ${worktreeRoot}`)
 fs.mkdirSync(nestedDir, { recursive: true })
