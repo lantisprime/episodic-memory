@@ -1,26 +1,61 @@
 #!/usr/bin/env bash
-# episodic-memory-hook-version: 2026-05-23.1
-# llm-classifier.sh — Tier 2/3 classifier wrapper for command-classifier.sh.
+# episodic-memory-hook-version: 2026-05-23.2
+# llm-classifier.sh — Tier 2/3 marker-cache wrapper for command-classifier.sh.
+#
+# REPLACES PR #326's direct-Anthropic-API fetch. The active Claude Code
+# session classifies its own Bash commands using its own reasoning (already
+# paid for via the user's subscription tokens) and records the verdict via
+# `scripts/classifier-marker.mjs --write`. This wrapper just READS the marker.
+#
+# Cost: ZERO new LLM calls in the hot path. Zero new API keys. Zero new
+# billing meters. The marker file IS the cache.
 #
 # Sourced from hooks/lib/command-classifier.sh. Provides one function:
 #
 #   llm_classify_command <command> <repo_root> <caller_cwd>
 #       echoes "<label>\t<source>" on success (exit 0)
-#       echoes "" and returns 1 on no-decision (caller falls back to Tier 1)
+#       echoes "" and returns 1 on no-decision (caller falls back to Tier 1
+#       conservative default OR the hook returns deny-with-hint via the
+#       caller's own emit path)
 #
-# The dispatcher (scripts/llm-classifier-dispatch.mjs) handles:
-#   - cache tuple build + sha256 key
-#   - project-local override > global cache > Tier 3 dispatch
-#   - project_root_used echo verification
-#   - cache write under lock
+# On marker miss, this wrapper does NOT directly emit a deny structure.
+# The caller (command-classifier.sh) gets no-decision and falls through to
+# its conservative default. The hook entry point (checkpoint-gate.sh / the
+# PreToolUse glue) is responsible for translating the "interpreter_other"
+# conservative default into a helpful deny reason when LLM_CLASSIFIER_HINT
+# mode is enabled. See `hooks/lib/llm-classifier-deny-reason.sh`.
 #
-# Cwd binding: dispatcher is invoked inside a (cd "$REPO_ROOT" && ...) subshell
-# so its process.cwd() matches --project-root. The dispatcher re-verifies and
-# rejects mismatches. Defense in depth: shell forces cwd; dispatcher checks.
+# Legacy direct-API dispatch path is retained behind the
+# LLM_CLASSIFIER_LEGACY_TRANSPORT=direct-fetch config field (file-based,
+# NOT env-prefix per PR #271 attack-class lesson). Default: marker-only.
 
-# Resolution: hooks/lib/llm-classifier.sh sits next to command-classifier.sh.
-# Installed scripts live at ~/.episodic-memory/scripts/. Detect both layouts.
-__llm_classifier_resolve_dispatcher() {
+# Resolution: hooks/lib/ sits next to scripts/. Installed scripts live at
+# ~/.episodic-memory/scripts/. Detect both layouts.
+#
+# Codex CR R2 BLOCKER fix: NO env-var override seam. An ambient
+# `CLASSIFIER_MARKER_PATH` pointing at a stub helper could fabricate a
+# `{"status":"hit","label":"read_only",...}` JSON response and bypass the
+# marker artifact entirely. Helper resolution is hard-bound to
+# installed-runtime OR repo-source paths — both authoritative.
+__llm_classifier_resolve_marker_helper() {
+  local global="$HOME/.episodic-memory/scripts/classifier-marker.mjs"
+  if [ -f "$global" ]; then
+    printf '%s' "$global"
+    return 0
+  fi
+  # Repo-source fallback (dev / pre-install).
+  local self_dir
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local repo="$self_dir/../../scripts/classifier-marker.mjs"
+  if [ -f "$repo" ]; then
+    printf '%s' "$repo"
+    return 0
+  fi
+  return 1
+}
+
+# Legacy dispatch (for --legacy-direct-fetch tests / rollback only).
+__llm_classifier_resolve_legacy_dispatcher() {
   if [ -n "${LLM_CLASSIFIER_DISPATCH_PATH:-}" ] && [ -f "$LLM_CLASSIFIER_DISPATCH_PATH" ]; then
     printf '%s' "$LLM_CLASSIFIER_DISPATCH_PATH"
     return 0
@@ -30,7 +65,6 @@ __llm_classifier_resolve_dispatcher() {
     printf '%s' "$global"
     return 0
   fi
-  # Repo-source fallback (dev / pre-install).
   local self_dir
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local repo="$self_dir/../../scripts/llm-classifier-dispatch.mjs"
@@ -39,6 +73,23 @@ __llm_classifier_resolve_dispatcher() {
     return 0
   fi
   return 1
+}
+
+# Read session_id from $CLAUDE_CODE_SESSION_ID (canonical env var name in
+# this repo, set by Claude Code when spawning hook subprocesses; mirrors
+# what scripts/plan-marker.mjs already depends on).
+#
+# Fall back to "unknown" so cache hits still work in test/CI contexts where
+# the session_id env var isn't injected. session_id="unknown" markers can
+# only match other invocations under the same fallback, so test isolation
+# is preserved without breaking unit tests. In production runs under Claude
+# Code, CLAUDE_CODE_SESSION_ID is always set; the fallback never triggers.
+__llm_classifier_session_id() {
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    printf '%s' "$CLAUDE_CODE_SESSION_ID"
+    return 0
+  fi
+  printf '%s' "unknown"
 }
 
 llm_classify_command() {
@@ -50,70 +101,140 @@ llm_classify_command() {
     return 1
   fi
 
-  local dispatcher
-  if ! dispatcher="$(__llm_classifier_resolve_dispatcher)"; then
-    # No dispatcher available — caller falls back to Tier 1.
-    return 1
+  local session_id
+  session_id="$(__llm_classifier_session_id)"
+
+  # --- Marker-cache read (primary path) ---
+  local marker_helper marker_hit=0
+  if marker_helper="$(__llm_classifier_resolve_marker_helper)"; then
+    local out
+    # Subshell cd forces helper's process.cwd() to repo_root regardless of
+    # caller cwd. Helper re-verifies. 2>/dev/null suppresses helper
+    # diagnostics from polluting hook stdout — they're captured in the
+    # helper's JSON reason field when needed.
+    out="$(cd "$repo_root" 2>/dev/null && node "$marker_helper" --read \
+      --project-root "$repo_root" \
+      --caller-cwd "$caller_cwd" \
+      --command "$command" \
+      --session-id "$session_id" 2>/dev/null)"
+    local rc=$?
+    if [ $rc -eq 0 ] && [ -n "$out" ]; then
+      # Parse JSON without jq using a small inline node one-liner. Same
+      # label-allowlist defense as before — unknown labels reach awk only
+      # if they passed the allowlist filter.
+      local parsed
+      parsed="$(printf '%s' "$out" | node -e '
+        const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+        let buf = ""
+        process.stdin.on("data", c => buf += c)
+        process.stdin.on("end", () => {
+          try {
+            const last = buf.trim().split("\n").pop()
+            const j = JSON.parse(last)
+            if (j.status !== "hit") { process.stdout.write(""); return }
+            let label = j.label || ""
+            if (label && !ALLOWED.has(label)) label = ""
+            const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
+            process.stdout.write(`${label}\t${root}`)
+          } catch { process.stdout.write("") }
+        })
+      ' 2>/dev/null)"
+
+      if [ -n "$parsed" ]; then
+        local label root
+        label="$(printf '%s' "$parsed" | awk -F'\t' '{print $1}')"
+        root="$(printf '%s' "$parsed" | awk -F'\t' '{print $2}')"
+        # Re-verify project_root_used echo before applying (defense in depth).
+        if [ -n "$label" ] && [ "$root" = "$repo_root" ]; then
+          printf '%s\t%s\n' "$label" "interpreter_marker_cache_hit"
+          return 0
+        fi
+      fi
+    fi
+    # Marker miss → fall through to legacy check (per codex code-review
+    # MAJOR #3: returning rc=1 here made the rollback path unreachable;
+    # legacy direct-fetch must get a chance to fire even when the marker
+    # helper exists and the marker lookup misses).
   fi
 
-  local out
-  # Subshell cd forces dispatcher's cwd to repo_root regardless of caller cwd.
-  # 2>/dev/null suppresses warnings (e.g. ANTHROPIC_API_KEY missing) from
-  # interfering with hook stdout — they're recorded inside the dispatcher's
-  # reason field instead.
-  out="$(cd "$repo_root" 2>/dev/null && node "$dispatcher" \
-    --project-root "$repo_root" \
-    --caller-cwd "$caller_cwd" \
-    --command "$command" 2>/dev/null)"
-  local rc=$?
-
-  if [ -z "$out" ]; then
-    return 1
+  # --- Legacy direct-fetch fallback (rollback / offline CI only) ---
+  # Activated by config field, NOT env-prefix (PR #271 attack class).
+  # Config lives at <project>/.episodic-memory/classifier-config.json or
+  # ~/.episodic-memory/classifier-config.json with field:
+  #   { "transport": "direct-fetch" }
+  if __llm_classifier_legacy_enabled "$repo_root"; then
+    local dispatcher
+    if dispatcher="$(__llm_classifier_resolve_legacy_dispatcher)"; then
+      __llm_classifier_legacy_log "$repo_root"
+      local out
+      out="$(cd "$repo_root" 2>/dev/null && node "$dispatcher" \
+        --project-root "$repo_root" \
+        --caller-cwd "$caller_cwd" \
+        --command "$command" 2>/dev/null)"
+      if [ -n "$out" ]; then
+        local parsed
+        parsed="$(printf '%s' "$out" | node -e '
+          const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+          let buf = ""
+          process.stdin.on("data", c => buf += c)
+          process.stdin.on("end", () => {
+            try {
+              const last = buf.trim().split("\n").pop()
+              const j = JSON.parse(last)
+              let label = j.label || ""
+              if (label && !ALLOWED.has(label)) label = ""
+              const source = String(j.source || "").replace(/[\t\n\r]/g, "_")
+              const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
+              process.stdout.write(`${label}\t${source}\t${root}`)
+            } catch { process.stdout.write("") }
+          })
+        ' 2>/dev/null)"
+        if [ -n "$parsed" ]; then
+          local label source root
+          label="$(printf '%s' "$parsed" | awk -F'\t' '{print $1}')"
+          source="$(printf '%s' "$parsed" | awk -F'\t' '{print $2}')"
+          root="$(printf '%s' "$parsed" | awk -F'\t' '{print $3}')"
+          if [ -n "$label" ] && [ "$root" = "$repo_root" ]; then
+            printf '%s\tinterpreter_llm_legacy_%s\n' "$label" "$source"
+            return 0
+          fi
+        fi
+      fi
+    fi
   fi
 
-  # Parse JSON without jq — extract label, source, and project_root_used via
-  # a small inline node one-liner (fast; same runtime already loaded).
-  # F9-fix: validate label against allowlist inside the parser so a label
-  # carrying tabs / newlines / unknown values can never reach awk's field
-  # split. Unknown label → empty (caller treats as no-decision).
-  local parsed
-  parsed="$(printf '%s' "$out" | node -e '
-    const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
-    let buf = ""
-    process.stdin.on("data", c => buf += c)
-    process.stdin.on("end", () => {
-      try {
-        const last = buf.trim().split("\n").pop()
-        const j = JSON.parse(last)
-        let label = j.label || ""
-        if (label && !ALLOWED.has(label)) label = ""
-        const source = String(j.source || "").replace(/[\t\n\r]/g, "_")
-        const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
-        process.stdout.write(`${label}\t${source}\t${root}`)
-      } catch { process.stdout.write("") }
-    })
-  ' 2>/dev/null)"
+  return 1
+}
 
-  if [ -z "$parsed" ]; then
-    return 1
+# Check classifier-config.json transport field. Default: marker-only.
+__llm_classifier_legacy_enabled() {
+  local repo_root="$1"
+  local cfg_project="$repo_root/.episodic-memory/classifier-config.json"
+  local cfg_global="$HOME/.episodic-memory/classifier-config.json"
+  local cfg=""
+  if [ -f "$cfg_project" ]; then cfg="$cfg_project"
+  elif [ -f "$cfg_global" ]; then cfg="$cfg_global"
   fi
+  if [ -z "$cfg" ]; then return 1; fi
+  # node -e places user positional args at argv[1+] (no synthetic [eval] entry).
+  node -e '
+    try {
+      const fs = require("fs")
+      const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+      process.exit(j && j.transport === "direct-fetch" ? 0 : 1)
+    } catch { process.exit(1) }
+  ' "$cfg" 2>/dev/null
+}
 
-  local label source root
-  label="$(printf '%s' "$parsed" | awk -F'\t' '{print $1}')"
-  source="$(printf '%s' "$parsed" | awk -F'\t' '{print $2}')"
-  root="$(printf '%s' "$parsed" | awk -F'\t' '{print $3}')"
-
-  # FU-4 shell-side defense: re-verify project_root_used echo before applying.
-  if [ "$root" != "$repo_root" ]; then
-    return 1
-  fi
-
-  # No-label outcome (Tier 3 fallback heuristic, env-prefix, etc.) → caller
-  # falls back to its own Tier 1.
-  if [ -z "$label" ]; then
-    return 1
-  fi
-
-  printf '%s\t%s\n' "$label" "interpreter_llm_${source}"
-  return 0
+# One-line telemetry log of legacy use. Burn-in surface — if no legacy log
+# entries accumulate over a release, the legacy path can be removed.
+__llm_classifier_legacy_log() {
+  local repo_root="$1"
+  local log_dir="$HOME/.episodic-memory"
+  local log_file="$log_dir/legacy-fetch.log.jsonl"
+  if [ ! -d "$log_dir" ]; then mkdir -p "$log_dir" 2>/dev/null || return 0; fi
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"ts":"%s","project_root":"%s","reason":"legacy_direct_fetch_used"}\n' \
+    "$ts" "$repo_root" >> "$log_file" 2>/dev/null || return 0
 }

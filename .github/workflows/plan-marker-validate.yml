@@ -63,6 +63,12 @@ jobs:
       - name: Run command-classifier full regression
         run: bash tests/test-command-classifier.sh
 
+      - name: Run classifier-marker hardening + multi-session/multi-project tests (PR #331)
+        run: node tests/test-classifier-marker.mjs
+
+      - name: Run llm-classifier (shell wrapper + dispatcher + marker hot path) tests (PR #331)
+        run: node tests/test-llm-classifier.mjs
+
       - name: Run stop-gate regression
         run: bash tests/test-stop-gate.sh
 

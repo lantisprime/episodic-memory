@@ -727,6 +727,227 @@ echo "rc=$?"
 })
 
 // ---------------------------------------------------------------------------
+// §M-shell — shell wrapper reads classifier-marker.mjs verdict
+// (post-PR #326 design: zero-LLM hot path)
+// ---------------------------------------------------------------------------
+test('§M-shell wrapper hits marker cache when classifier-marker.mjs verdict exists', () => {
+  const project = mkrepo('shell-marker')
+  const MARKER = path.join(REPO, 'scripts', 'classifier-marker.mjs')
+  const sid = 'session-shell-marker'
+  // Use the SAME command string at seed time and lookup time. The cache
+  // tuple includes normalized_command verbatim — `./x.py` and `/abs/x.py`
+  // hash to different sha values even though they resolve to the same file.
+  const cmdText = `python3 ${project}/scripts/maybe-write.py`
+  const w = spawnSync(process.execPath, [
+    MARKER, '--write',
+    '--project-root', project,
+    '--caller-cwd', project,
+    '--command', cmdText,
+    '--session-id', sid,
+    '--label', 'shared_write',
+    '--confidence', '0.9',
+    '--reason', 'agent self-classify'
+  ], { cwd: project, env: { CLAUDE_CODE_SESSION_ID: '' }, encoding: 'utf8' })
+  assert.strictEqual(w.status, 0, `seed failed: ${w.stderr}`)
+
+  // Source shell wrapper, expect it to find the marker and emit the label.
+  const script = `#!/usr/bin/env bash
+set -u
+source ${WRAPPER}
+export CLAUDE_CODE_SESSION_ID=${sid}
+out="$(llm_classify_command "${cmdText}" "${project}" "${project}" 2>&1)"
+rc=$?
+echo "rc=$rc"
+echo "out=$out"
+`
+  const tmp = path.join(project, 'run-marker.sh')
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  assert.match(r.stdout, /rc=0/, `expected rc=0 on marker hit; got: ${r.stdout}`)
+  assert.match(r.stdout, /shared_write/, `expected shared_write label; got: ${r.stdout}`)
+  assert.match(r.stdout, /interpreter_marker_cache_hit/, `expected new source tag; got: ${r.stdout}`)
+})
+
+test('§M-shell wrapper misses cleanly when no marker exists → rc=1', () => {
+  const project = mkrepo('shell-marker-miss')
+  const script = `#!/usr/bin/env bash
+set -u
+source ${WRAPPER}
+export CLAUDE_CODE_SESSION_ID=session-no-marker
+out="$(llm_classify_command "python3 ${project}/scripts/never-classified.py" "${project}" "${project}" 2>&1)"
+rc=$?
+echo "rc=$rc"
+`
+  const tmp = path.join(project, 'run-miss.sh')
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  assert.match(r.stdout, /rc=1/, `expected rc=1 on miss; got: ${r.stdout}`)
+})
+
+test('§M-shell wrapper rejects marker from another session_id', () => {
+  const project = mkrepo('shell-marker-cross')
+  const MARKER = path.join(REPO, 'scripts', 'classifier-marker.mjs')
+  // Seed under session A
+  spawnSync(process.execPath, [
+    MARKER, '--write',
+    '--project-root', project,
+    '--caller-cwd', project,
+    '--command', 'python3 ./scripts/x.py',
+    '--session-id', 'session-A',
+    '--label', 'read_only',
+    '--confidence', '1',
+    '--reason', 'seed'
+  ], { cwd: project, env: { CLAUDE_CODE_SESSION_ID: '' }, encoding: 'utf8' })
+  // Run wrapper as session B → no hit (different sha → marker not at expected path)
+  const script = `#!/usr/bin/env bash
+set -u
+source ${WRAPPER}
+export CLAUDE_CODE_SESSION_ID=session-B
+out="$(llm_classify_command "python3 ${project}/scripts/x.py" "${project}" "${project}" 2>&1)"
+rc=$?
+echo "rc=$rc"
+`
+  const tmp = path.join(project, 'run-cross.sh')
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  assert.match(r.stdout, /rc=1/, `cross-session must miss; got: ${r.stdout}`)
+})
+
+// ---------------------------------------------------------------------------
+// §EP-marker — env-prefix rejection at command-classifier.sh for
+// classifier-marker.mjs helper invocations (same-class with PR #272 F-4)
+// ---------------------------------------------------------------------------
+test('§EP-marker env-prefix wrapper around classifier-marker.mjs → unsafe_complex', () => {
+  const cls = COMMAND_CLASSIFIER
+  const script = `#!/usr/bin/env bash
+set -u
+source ${cls}
+out="$(classify_command "FOO=bar node /repo/scripts/classifier-marker.mjs --write --project-root /repo --caller-cwd /repo --command ls --session-id sid --label read_only --confidence 1 --reason x" "/repo")"
+echo "$out"
+`
+  const tmp = path.join(os.tmpdir(), `ep-marker-${Date.now()}.sh`)
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  fs.unlinkSync(tmp)
+  // First column is the label; reason includes classifier_marker_env_override.
+  assert.match(r.stdout, /unsafe_complex/, `expected unsafe_complex; got: ${r.stdout}`)
+  assert.match(r.stdout, /classifier_marker_env_override/, `expected reason tag; got: ${r.stdout}`)
+})
+
+test('§EP-marker canonical classifier-marker.mjs invocation → marker_write', () => {
+  const cls = COMMAND_CLASSIFIER
+  const script = `#!/usr/bin/env bash
+set -u
+source ${cls}
+out="$(classify_command "node /repo/scripts/classifier-marker.mjs --write --project-root /repo --caller-cwd /repo --command ls --session-id sid --label read_only --confidence 1 --reason x" "/repo")"
+echo "$out"
+`
+  const tmp = path.join(os.tmpdir(), `ep-marker-ok-${Date.now()}.sh`)
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  fs.unlinkSync(tmp)
+  assert.match(r.stdout, /marker_write/, `expected marker_write; got: ${r.stdout}`)
+  assert.match(r.stdout, /interpreter_classifier_marker/, `expected source tag; got: ${r.stdout}`)
+})
+
+test('§LM4 (codex CR R2 BLOCKER) ambient CLASSIFIER_MARKER_PATH env override is ignored — no fabrication vector', () => {
+  // Regression: prior code resolved the marker helper via CLASSIFIER_MARKER_PATH
+  // env var BEFORE the installed/repo path, letting a stub print
+  // {"status":"hit","label":"read_only",...} and bypass the marker artifact.
+  // Fix: env-override seam removed entirely; helper resolution is hard-bound
+  // to installed-runtime or repo-source paths only.
+  const project = mkrepo('classifier-marker-path-env')
+  // Plant a stub that WOULD fabricate a hit if used
+  const stub = path.join(project, 'fabricator.mjs')
+  fs.writeFileSync(stub, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  status: 'hit',
+  label: 'read_only',
+  confidence: 1,
+  reason: 'FABRICATED',
+  project_root_used: ${JSON.stringify(project)},
+  cache_key: 'fake',
+  session_id: 'fake'
+}) + '\\n')
+process.exit(0)
+`)
+  fs.chmodSync(stub, 0o755)
+
+  // Note: we don't expect this env var to do anything — but we set it to
+  // verify the wrapper IGNORES it.
+  const script = `#!/usr/bin/env bash
+set -u
+source ${WRAPPER}
+export CLAUDE_CODE_SESSION_ID=session-classifier-marker-env
+export CLASSIFIER_MARKER_PATH=${stub}
+out="$(llm_classify_command "python3 ${project}/scripts/x.py" "${project}" "${project}" 2>&1)"
+rc=$?
+echo "rc=$rc"
+echo "out=$out"
+`
+  const tmp = path.join(project, 'run-env-override.sh')
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  // No marker exists; the env-override stub MUST be ignored; wrapper returns
+  // rc=1 (no decision), and "FABRICATED" must NEVER appear.
+  assert.match(r.stdout, /rc=1/, `env override must be ignored; got: ${r.stdout}`)
+  assert.doesNotMatch(r.stdout, /FABRICATED/, `stub helper must not be invoked; got: ${r.stdout}`)
+  assert.doesNotMatch(r.stdout, /interpreter_marker_cache_hit/, `no cache hit possible without real marker; got: ${r.stdout}`)
+})
+
+test('§LM3 (codex CR MAJOR #3) shell wrapper falls through to legacy when marker misses + transport=direct-fetch', async () => {
+  // Regression test: prior code returned rc=1 at marker miss before checking
+  // legacy config, making the rollback path unreachable.
+  await withMockApi({ label: 'read_only', confidence: 0.95, reason: 'legacy mock' }, async (base) => {
+    const project = mkrepo('legacy-rollback')
+    // Set config to opt into direct-fetch transport
+    const cfgDir = path.join(project, '.episodic-memory')
+    fs.mkdirSync(cfgDir, { recursive: true })
+    fs.writeFileSync(path.join(cfgDir, 'classifier-config.json'),
+      JSON.stringify({ transport: 'direct-fetch' }, null, 2))
+    const script = `#!/usr/bin/env bash
+set -u
+source ${WRAPPER}
+export CLAUDE_CODE_SESSION_ID=session-legacy
+export LLM_CLASSIFIER_DISPATCH_PATH=${DISPATCH}
+export ANTHROPIC_API_KEY=mock-key
+export LLM_CLASSIFIER_API_BASE=${base}
+# No marker exists → marker-read misses → legacy must activate
+out="$(llm_classify_command "node ${project}/scripts/foo.mjs" "${project}" "${project}" 2>&1)"
+rc=$?
+echo "rc=$rc"
+echo "out=$out"
+`
+    const tmp = path.join(project, 'run-legacy.sh')
+    fs.writeFileSync(tmp, script)
+    // spawnAsync is REQUIRED for mock-using tests: spawnSync blocks the parent's
+    // event loop, preventing the in-process mock server from serving requests.
+    const r = await spawnAsync('bash', [tmp])
+    assert.match(r.stdout, /rc=0/, `expected rc=0 from legacy fallback; got stdout=${r.stdout} stderr=${r.stderr}`)
+    assert.match(r.stdout, /interpreter_llm_legacy/, `expected legacy source tag; got: ${r.stdout}`)
+  })
+})
+
+test('§EP-correction env-prefix wrapper around classify-correction.mjs → unsafe_complex', () => {
+  // Same-class hardening (added in this PR): the existing classify-correction
+  // allowlist now rejects env-prefix invocations to match plan-marker.mjs /
+  // classifier-marker.mjs discipline.
+  const cls = COMMAND_CLASSIFIER
+  const script = `#!/usr/bin/env bash
+set -u
+source ${cls}
+out="$(classify_command "FOO=bar node /repo/scripts/classify-correction.mjs --project-root /repo --caller-cwd /repo --command ls --label read_only" "/repo")"
+echo "$out"
+`
+  const tmp = path.join(os.tmpdir(), `ep-correction-${Date.now()}.sh`)
+  fs.writeFileSync(tmp, script)
+  const r = spawnSync('bash', [tmp], { encoding: 'utf8' })
+  fs.unlinkSync(tmp)
+  assert.match(r.stdout, /unsafe_complex/, `expected unsafe_complex; got: ${r.stdout}`)
+  assert.match(r.stdout, /classify_correction_env_override/, `expected reason tag; got: ${r.stdout}`)
+})
+
+// ---------------------------------------------------------------------------
 // §T12 — prompt injection defense (uses mock API)
 // ---------------------------------------------------------------------------
 test('§T12 prompt injection in command does not flip mock label', async () => {
