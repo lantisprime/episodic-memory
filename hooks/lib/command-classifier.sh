@@ -1474,10 +1474,12 @@ _classify_segment() {
     node|python|python3|ruby|perl)
       # Interpreters: classify by script name if it's a known em-* read script
       local script="${TOKS[$((idx+1))]:-}"
-      case "$(basename "$script" 2>/dev/null)" in
+      local script_base
+      script_base="$(basename "$script" 2>/dev/null)"
+      case "$script_base" in
         em-search.mjs|em-list.mjs|em-watch-codex.mjs|em-pattern-health.mjs|em-check-stale.mjs|em-rebuild-index.mjs)
           # em-rebuild-index touches index.jsonl — treat as shared_write
-          if [ "$(basename "$script")" = "em-rebuild-index.mjs" ]; then
+          if [ "$script_base" = "em-rebuild-index.mjs" ]; then
             printf '%s\t\t%s\n' "shared_write" "interpreter_em_rebuild"
             return 0
           fi
@@ -1488,7 +1490,59 @@ _classify_segment() {
           printf '%s\t\t%s\n' "shared_write" "interpreter_em_write"
           return 0
           ;;
+        classify-correction.mjs)
+          # FU-6: LLM-classifier correction helper. Writes only inside
+          # <project>/.episodic-memory/classifier-overrides.jsonl AFTER the
+          # helper validates --project-root == resolveRepoRoot(process.cwd()).
+          # Same gate-treatment as em-search (label=read_only, reason carries
+          # the helper-write nature).
+          printf '%s\t\t%s\n' "read_only" "interpreter_classify_correction"
+          return 0
+          ;;
       esac
+
+      # Tier 2/3 LLM classifier dispatch (replaces the "interpreter_other"
+      # blanket shared_write fallback). Cache-hit path is fast; cache-miss
+      # dispatches Tier 3 (Anthropic API) when ANTHROPIC_API_KEY is set and
+      # LLM_CLASSIFIER_ENABLED != false. No-decision (no key, dispatcher
+      # absent, low-confidence, project_root_used mismatch) falls through to
+      # the Tier 1 default below.
+      if [ -z "${__LLM_CLASSIFIER_SOURCED:-}" ]; then
+        local __llm_lib_path
+        __llm_lib_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/llm-classifier.sh"
+        if [ -f "$__llm_lib_path" ]; then
+          # shellcheck disable=SC1091
+          source "$__llm_lib_path"
+          __LLM_CLASSIFIER_SOURCED=1
+        else
+          __LLM_CLASSIFIER_SOURCED=0
+        fi
+      fi
+      if [ "${__LLM_CLASSIFIER_SOURCED:-0}" = "1" ]; then
+        # Reconstruct command text from tokens (already shell-unquoted; the
+        # dispatcher collapses whitespace and re-normalizes anyway).
+        local __cmd_text=""
+        local __ti
+        for __ti in ${TOKS[@]+"${TOKS[@]}"}; do
+          if [ -z "$__cmd_text" ]; then
+            __cmd_text="$__ti"
+          else
+            __cmd_text="$__cmd_text $__ti"
+          fi
+        done
+        local __llm_out __llm_label __llm_reason
+        if __llm_out="$(llm_classify_command "$__cmd_text" "$target_root" "$PWD" 2>/dev/null)"; then
+          __llm_label="${__llm_out%%	*}"
+          __llm_reason="${__llm_out#*	}"
+          __llm_reason="${__llm_reason%$'\n'}"
+          if [ -n "$__llm_label" ]; then
+            printf '%s\t\t%s\n' "$__llm_label" "$__llm_reason"
+            return 0
+          fi
+        fi
+      fi
+
+      # Tier 1 fallback (no LLM available, no decision, or dispatcher absent).
       printf '%s\t\t%s\n' "shared_write" "interpreter_other"
       return 0
       ;;
