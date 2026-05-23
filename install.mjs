@@ -263,6 +263,29 @@ function copyDirRecursive(src, dst) {
 
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
 
+// 1a. Seed default LLM-classifier config if absent. Idempotent — existing
+// project/global configs win via the loader's env > project > global > defaults
+// precedence chain. We only write the global default when the file does not
+// already exist, so a user-customized config is never overwritten.
+const classifierCfgPath = path.join(GLOBAL_DIR, 'classifier-config.json')
+if (!fs.existsSync(classifierCfgPath)) {
+  const defaultCfg = {
+    model: 'claude-haiku-4-5-20251001',
+    enabled: true,
+    fail_mode: 'heuristic',
+    timeout_ms: 5000,
+    max_tokens: 200,
+    temperature: 0,
+    confidence_threshold: 0.7,
+    api_base: 'https://api.anthropic.com',
+    api_version: '2023-06-01'
+  }
+  const tmp = `${classifierCfgPath}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(defaultCfg, null, 2) + '\n')
+  fs.renameSync(tmp, classifierCfgPath)
+  console.log(`Seeded default LLM classifier config at ${classifierCfgPath}`)
+}
+
 // 1b. Copy patterns/_index.json for global pattern validation
 const globalPatternsDir = path.join(GLOBAL_DIR, 'patterns')
 const repoPatternsIndex = path.join(REPO_DIR, 'patterns', '_index.json')
@@ -761,6 +784,19 @@ for (const t of tools) {
         path.join(skillDir, 'SKILL.md')
       )
       console.log(`Installed Claude Code skill to ${skillDir}/SKILL.md`)
+
+      // Also install the classify-correction skill so users can record
+      // per-project LLM-classifier corrections via the Claude skill surface.
+      // F11-fix: use installOwnedFile so a user-customized SKILL.md is not
+      // silently overwritten on re-install.
+      const correctionSrc = path.join(REPO_DIR, 'skills', 'classify-correction', 'SKILL.md')
+      if (fs.existsSync(correctionSrc)) {
+        installOwnedFile({
+          src: correctionSrc,
+          dst: path.join(projectDir, '.claude', 'skills', 'classify-correction', 'SKILL.md'),
+          label: 'Claude Code classify-correction skill'
+        })
+      }
       break
     }
     case 'cursor': {
