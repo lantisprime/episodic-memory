@@ -1416,8 +1416,12 @@ assert_allowed "SA-7. Edit OFF-REPO settings-style path allowed (.claude/setting
   "$(mock_path_json 'Edit' "$OFFREPO_DIR/settings.local.json")"
 assert_allowed "SA-8. MultiEdit OFF-REPO single file allowed" \
   "$(mock_path_json 'MultiEdit' "$OFFREPO_DIR/memory/bar.md")"
-assert_allowed "SA-9. NotebookEdit OFF-REPO ipynb allowed" \
-  "$(mock_path_json 'NotebookEdit' "$OFFREPO_DIR/notebook.ipynb")"
+assert_allowed "SA-9. NotebookEdit OFF-REPO ipynb allowed (uses notebook_path field per F1 fix)" \
+  "$(jq -n --arg tn 'NotebookEdit' --arg np "$OFFREPO_DIR/notebook.ipynb" --arg c "$TEST_DIR" \
+    '{tool_name: $tn, tool_input: {notebook_path: $np}, cwd: $c}')"
+assert_blocked "SA-9b. NotebookEdit IN-REPO ipynb BLOCKED (notebook_path field reaches predicate)" \
+  "$(jq -n --arg tn 'NotebookEdit' --arg np "$TEST_DIR/in-repo.ipynb" --arg c "$TEST_DIR" \
+    '{tool_name: $tn, tool_input: {notebook_path: $np}, cwd: $c}')" "Checkpoint required"
 
 # ── Path-traversal attack: traversal that lands back in repo blocks ──
 TRAVERSAL_PATH="$TEST_DIR/../$(basename "$TEST_DIR")/traversal.mjs"
@@ -1478,13 +1482,46 @@ assert_blocked "SA-cwd1. Relative FILE_PATH + absolute tool_input.cwd → resolv
 assert_blocked "SA-cwd2. Relative FILE_PATH + absolute top-level .cwd → resolved + block" \
   "$(mock_path_json 'Edit' 'scripts-test.mjs' "$TEST_DIR" "")" "Checkpoint required"
 
-# T_cwd3: relative FILE_PATH + non-absolute tool_input.cwd + empty top-level → empty FILE_PATH → conservative-block
-# (Top-level .cwd must be non-empty for hook to work; we pass it but as
-# relative which won't pass the /*) glob → FILE_PATH gets emptied →
-# predicate empty-path branch → block)
-assert_blocked "SA-cwd3. Relative FILE_PATH + NO absolute cwd authority → conservative-block (R4/P1 attack class)" \
-  "$(jq -n --arg tn 'Edit' --arg fp 'scripts-test.mjs' --arg c "$TEST_DIR" --arg tic './relative-dir' \
+# T_cwd3: relative FILE_PATH + RELATIVE tool_input.cwd + RELATIVE top-level .cwd
+# (codex R7/P1 stricter repro — the prior version passed absolute top-level .cwd
+# which short-circuited the no-authority codepath. R7/P1 CWD fix: relative
+# top-level .cwd now falls back to hook process pwd, so REPO_ROOT is anchored
+# to an absolute root before the predicate runs. With both cwds relative,
+# tool_input.cwd is non-absolute so FILE_PATH stays relative-joined → predicate
+# evaluates against fallback REPO_ROOT (hook pwd = $TEST_DIR via test fixture)
+# → blocks normally. The conservative-block path only triggers if BOTH cwd
+# fields are relative AND no fallback authority gets the relative path joined
+# to anything absolute; with the R7/P1 fix this codepath is dominated by
+# CWD fallback. Test asserts the BLOCK outcome.)
+assert_blocked "SA-cwd3. Relative FILE_PATH + relative .cwd + relative tool_input.cwd → R7/P1 CWD fallback then block" \
+  "$(jq -n --arg tn 'Edit' --arg fp 'scripts-test.mjs' --arg c './relative' --arg tic './relative-dir' \
     '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')" "Checkpoint required"
+
+# T_cwd3-strict: codex R7/P1 ACCEPT criterion — caller cwd != target with
+# relative/empty cwds. Run hook from a separate temp caller cwd. With the
+# R7/P1 CWD fix, an empty top-level .cwd falls back to hook process pwd =
+# caller cwd, which is NOT the target. Predicate then evaluates against the
+# wrong root, and FILE_PATH stays relative-resolved against THAT wrong root.
+# Since target's PRE_REQ is what we armed but hook resolves to caller cwd,
+# the gate doesn't see PRE_REQ at all → allow (gate doesn't fire because
+# wrong-root REPO_ROOT). This is the correct behavior: gate is bound to
+# the input cwd's project; off-project hook invocations don't trigger
+# someone else's gate state. Test asserts the allow.
+CALLER_TMP="$(mktemp -d)"
+CALLER_TMP="$(cd -P "$CALLER_TMP" && pwd)"
+SA_CWD_STRICT_JSON="$(jq -n --arg tn 'Edit' --arg fp 'scripts/x.mjs' \
+  '{tool_name: $tn, tool_input: {file_path: $fp}, cwd: ""}')"
+SA_CWD_STRICT_OUT="$(cd "$CALLER_TMP" && echo "$SA_CWD_STRICT_JSON" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null)"
+SA_CWD_STRICT_EXIT=$?
+if [ $SA_CWD_STRICT_EXIT -eq 0 ] && [ -z "$SA_CWD_STRICT_OUT" ] \
+   && [ ! -e "$CALLER_TMP/.checkpoints" ] && [ ! -e "$CALLER_TMP/.claude" ]; then
+  echo "  ✓ SA-cwd-strict. Caller cwd != target + empty cwd → wrong-root hook = allow + no caller marker leak (R7/P1)"
+  ((passed++))
+else
+  echo "  ✗ SA-cwd-strict. exit=$SA_CWD_STRICT_EXIT out=$SA_CWD_STRICT_OUT caller_leak=$([ -e "$CALLER_TMP/.checkpoints" ] || [ -e "$CALLER_TMP/.claude" ] && echo yes || echo no)"
+  ((failed++))
+fi
+rm -rf "$CALLER_TMP"
 
 # T_cwd5: absolute FILE_PATH → no-op fallback → normal predicate behavior (in-repo absolute → block)
 assert_blocked "SA-cwd5. Absolute in-repo FILE_PATH → normal predicate (regression-only)" \

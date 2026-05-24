@@ -47,7 +47,16 @@ INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)"
-[ -z "$CWD" ] && CWD="$(pwd)"
+# Smart-arming PR R7/P1 fix: empty OR relative .cwd falls back to hook
+# process cwd. Codex R7 found relative .cwd would otherwise propagate
+# through resolve_repo_root → wrong REPO_ROOT → smart-arming predicate
+# evaluates against bogus root and allows in-repo writes. Both empty AND
+# non-absolute trigger the fallback to ensure REPO_ROOT downstream is
+# always anchored to a valid absolute path.
+case "$CWD" in
+  /*) ;;  # absolute → use as-is
+  *)  CWD="$(pwd)" ;;  # empty OR relative → fallback to hook process cwd
+esac
 
 # Source classifier + repo-root resolver + shared marker paths + session-id.
 # Use BASH_SOURCE for symlink safety.
@@ -771,7 +780,13 @@ fi
 case "$TOOL_NAME" in
   Edit|Write|MultiEdit|NotebookEdit)
     # classify_path for Write/Edit/MultiEdit/NotebookEdit
-    FILE_PATH="$(echo "$INPUT" | jq -r '.tool_input.file_path // ""')"
+    # Smart-arming PR negative-scenario-reviewer F1 fix: NotebookEdit
+    # puts the path in tool_input.notebook_path, not file_path. Without
+    # this fallback, real off-repo NotebookEdit would still block
+    # (conservative direction — no data loss — but the smart-arming
+    # intent is violated). Per hooks/lib/command-classifier.sh:2790
+    # NotebookEdit's canonical field is notebook_path.
+    FILE_PATH="$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""')"
 
     # ── R4/P1 cwd-binding defense (smart-arming PR) ──
     # _resolve_marker_path in command-classifier.sh:2106 unconditionally joins
