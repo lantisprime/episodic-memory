@@ -43,13 +43,15 @@ function setupRoot() {
 }
 
 function runSessionEnd(root, sid) {
-  try {
-    execSync(`node "${SESSION_END}"`, {
-      input: JSON.stringify({ session_id: sid, cwd: root, hook_event_name: 'SessionEnd' }),
-      stdio: ['pipe', 'pipe', 'ignore'],
-      env: { ...process.env, HOME: root },
-    })
-  } catch { /* SessionEnd may not have all stdout setup; ignore */ }
+  // Per codex C7 R1 P2: do NOT swallow execSync failures. SessionEnd is
+  // expected to exit 0 with the JSON prompt template on stdout. Throwing
+  // surfaces regressions that would otherwise be masked by partial-cleanup
+  // shape.
+  execSync(`node "${SESSION_END}"`, {
+    input: JSON.stringify({ session_id: sid, cwd: root, hook_event_name: 'SessionEnd' }),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, HOME: root },
+  })
 }
 
 // ---------------------------------------------------------------------------
