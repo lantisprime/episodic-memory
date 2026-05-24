@@ -38,6 +38,11 @@ import { execFileSync, spawnSync } from 'node:child_process'
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const HOOK = path.join(REPO_ROOT, 'hooks', 'second-opinion-gate.mjs')
 const RUNBOOK_SRC = path.join(REPO_ROOT, 'hooks', 'runbooks', 'second-opinion-harness.md')
+// Orphan-install fixtures below copy HOOK alone; the gate's harness branch
+// now also dynamic-imports lib/so-timeout-floor.mjs, so fixtures must
+// colocate it or they fail-closed with so-timeout-floor-load-failed before
+// the local-dir layer this suite is testing.
+const TIMEOUT_FLOOR_SRC = path.join(REPO_ROOT, 'hooks', 'lib', 'so-timeout-floor.mjs')
 
 let passed = 0
 let failed = 0
@@ -89,7 +94,15 @@ function computeSha8(content) {
 }
 
 function runHook({ toolName, toolInput, cwd, env = {} }) {
-  const input = JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd })
+  // Default timeout to TIMEOUT_FLOOR_MS for Bash so the timeout-floor layer
+  // doesn't preempt the runbook-layer behavior under test here. Tests that
+  // specifically exercise timeout-floor behavior live in
+  // test-so-gate-timeout-floor-integration.mjs.
+  const filled =
+    toolName === 'Bash' && toolInput && typeof toolInput.timeout === 'undefined'
+      ? { ...toolInput, timeout: 600000 }
+      : toolInput
+  const input = JSON.stringify({ tool_name: toolName, tool_input: filled, cwd })
   const result = spawnSync('node', [HOOK], {
     input,
     encoding: 'utf8',
@@ -416,6 +429,7 @@ test('malformed local-dir.mjs → block runbook-canonicalize-failed (not silent 
   fs.mkdirSync(orphanLib, { recursive: true })
   // Copy the hook so its import.meta.url resolves to <orphan>/.claude/hooks/...
   fs.copyFileSync(HOOK, path.join(orphanHooks, 'second-opinion-gate.mjs'))
+  fs.copyFileSync(TIMEOUT_FLOOR_SRC, path.join(orphanLib, 'so-timeout-floor.mjs'))
   // Write a syntactically broken local-dir.mjs
   fs.writeFileSync(path.join(orphanLib, 'local-dir.mjs'), 'export function resolveRepoRoot( {{{ INVALID')
 
@@ -451,6 +465,7 @@ test('transitive ERR_MODULE_NOT_FOUND in local-dir.mjs → block (PR-level P1-1)
   const orphanLib = path.join(orphanHooks, 'lib')
   fs.mkdirSync(orphanLib, { recursive: true })
   fs.copyFileSync(HOOK, path.join(orphanHooks, 'second-opinion-gate.mjs'))
+  fs.copyFileSync(TIMEOUT_FLOOR_SRC, path.join(orphanLib, 'so-timeout-floor.mjs'))
   // local-dir.mjs exists but imports a missing transitive dep
   fs.writeFileSync(path.join(orphanLib, 'local-dir.mjs'),
     "import './nonexistent-dep.mjs'\nexport function resolveRepoRoot(cwd) { return cwd }\n")
@@ -485,8 +500,10 @@ test('missing local-dir.mjs → cwd fallback (silent, plan v4.1 accepted)', () =
   const orphan = fs.mkdtempSync(path.join(os.tmpdir(), 'so-missing-lib-'))
   tmpDirs.push(orphan)
   const orphanHooks = path.join(orphan, '.claude', 'hooks')
-  fs.mkdirSync(orphanHooks, { recursive: true })
+  const orphanLib = path.join(orphanHooks, 'lib')
+  fs.mkdirSync(orphanLib, { recursive: true })
   fs.copyFileSync(HOOK, path.join(orphanHooks, 'second-opinion-gate.mjs'))
+  fs.copyFileSync(TIMEOUT_FLOOR_SRC, path.join(orphanLib, 'so-timeout-floor.mjs'))
   // Deliberately do NOT create lib/local-dir.mjs
 
   const r = spawnSync('node', [path.join(orphanHooks, 'second-opinion-gate.mjs')], {
