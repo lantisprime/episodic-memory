@@ -71,16 +71,19 @@ REPO_ROOT="$(resolve_repo_root "$CWD")"
 # Canonical WRITE paths (always primary). Used in block-message paths so the
 # agent knows where to write the checkpoint block.
 #
-# Rank-2: when MY_SID is valid, emit suffixed paths so the agent writes
-# `.X.<sid>` per per-session contract. When sid is invalid/empty, fall back
-# to legacy literal (graceful degrade — preserves pre-rank-2 behavior).
-if validate_session_id "$MY_SID"; then
-  PRE_DONE_W="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .pre-checkpoint-done "$MY_SID")")"
-  POST_DONE_W="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-done "$MY_SID")")"
-else
-  PRE_DONE_W="$(write_marker_path "$REPO_ROOT" .pre-checkpoint-done)"
-  POST_DONE_W="$(write_marker_path "$REPO_ROOT" .post-checkpoint-done)"
-fi
+# Rank-2 — codex C4 R1 P1 ratification: PRE_DONE_W / POST_DONE_W stay as
+# legacy literal paths in C4. The suffixed emit (`.X.<sid>`) requires
+# classifier recognition for the `.pre-checkpoint-done.*` /
+# `.post-checkpoint-done.*` basenames; that lands in C6 alongside the
+# classifier case-arm extensions. Atomic-slice constraint: emit and
+# classifier-accept must ship together to avoid self-deadlock.
+#
+# Until then, agent-written checkpoint blocks land at the legacy literal
+# at primary root. checkpoint_marker_nonempty_for_session ALREADY reads
+# legacy literal (it's part of the own-session-or-legacy semantic), so
+# the gate sees the agent's write and unblocks correctly.
+PRE_DONE_W="$(write_marker_path "$REPO_ROOT" .pre-checkpoint-done)"
+POST_DONE_W="$(write_marker_path "$REPO_ROOT" .post-checkpoint-done)"
 PLAN_PENDING_W="$(write_marker_path "$REPO_ROOT" .plan-approval-pending)"
 
 PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
