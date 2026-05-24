@@ -1553,6 +1553,191 @@ fi
 # Cleanup off-repo scratch.
 rm -rf "$OFFREPO_DIR"
 
+# ============================================================================
+echo ""
+echo "--- PR-A P1.2: classifier-marker bootstrap carve-out under armed checkpoint ---"
+# ============================================================================
+# Codex R1 plan-tier P1: classifier-marker.mjs invocations were blocked when
+# .checkpoint-required is armed (empty TARGET → fell through marker_write
+# branch → pre-gate blocked). With the carve-out, valid classifier-marker
+# invocations exit 0; shimmed/relative paths fall through to normal flow.
+
+# Set up canonical helper locations the validator accepts.
+GLOBAL_HELPER_DIR="$TEST_HOME/.episodic-memory/scripts"
+mkdir -p "$GLOBAL_HELPER_DIR"
+touch "$GLOBAL_HELPER_DIR/classifier-marker.mjs"
+GLOBAL_HELPER="$GLOBAL_HELPER_DIR/classifier-marker.mjs"
+
+REPO_HELPER_DIR="$TEST_DIR/scripts"
+mkdir -p "$REPO_HELPER_DIR"
+touch "$REPO_HELPER_DIR/classifier-marker.mjs"
+REPO_HELPER="$REPO_HELPER_DIR/classifier-marker.mjs"
+
+SHIMMED_HELPER_DIR="$(mktemp -d)"
+SHIMMED_HELPER_DIR="$(cd -P "$SHIMMED_HELPER_DIR" && pwd)"
+touch "$SHIMMED_HELPER_DIR/classifier-marker.mjs"
+SHIMMED_HELPER="$SHIMMED_HELPER_DIR/classifier-marker.mjs"
+
+reset_state
+touch "$PRE_REQ"  # arm — pre-gate would block any non-allowed write
+
+# ── Valid global helper path → allowed (key fix) ──
+assert_allowed "NC-1. node ~/.episodic-memory/scripts/classifier-marker.mjs --write allowed under armed .checkpoint-required" \
+  "$(mock_json 'Bash' "node $GLOBAL_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
+
+# ── Valid repo-source helper path → allowed ──
+assert_allowed "NC-2. node <repo>/scripts/classifier-marker.mjs --write allowed (repo-source path parity)" \
+  "$(mock_json 'Bash' "node $REPO_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
+
+# ── Shimmed binary at /tmp → BLOCKED (helper-identity validation) ──
+assert_blocked "NC-3. Shimmed binary (node /tmp/.../classifier-marker.mjs) BLOCKED under armed checkpoint" \
+  "$(mock_json 'Bash' "node $SHIMMED_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Checkpoint required"
+
+# ── Relative path (./classifier-marker.mjs) → BLOCKED (absolute-path requirement) ──
+assert_blocked "NC-4. Relative ./classifier-marker.mjs path BLOCKED (carve-out requires absolute path)" \
+  "$(mock_json 'Bash' "node ./classifier-marker.mjs --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Checkpoint required"
+
+# ── Bare basename → BLOCKED (no PATH lookup allowed) ──
+assert_blocked "NC-5. Bare 'classifier-marker.mjs' (no path) BLOCKED" \
+  "$(mock_json 'Bash' "node classifier-marker.mjs --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Checkpoint required"
+
+# ── Env-prefix attempt → BLOCKED (classifier-tier rejection, returns unsafe_complex) ──
+# This already worked pre-PR-A; this test verifies the layering is unchanged.
+assert_blocked "NC-6. Env-prefix BYPASS=1 form BLOCKED (classifier returns unsafe_complex, not marker_write)" \
+  "$(mock_json 'Bash' "BYPASS=1 node $GLOBAL_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
+
+# ── Symlink to allowed location → allowed (canonicalization resolves) ──
+SYMLINK_HELPER_DIR="$(mktemp -d)"
+SYMLINK_HELPER_DIR="$(cd -P "$SYMLINK_HELPER_DIR" && pwd)"
+SYMLINK_HELPER="$SYMLINK_HELPER_DIR/classifier-marker.mjs"
+ln -sf "$GLOBAL_HELPER" "$SYMLINK_HELPER"
+assert_allowed "NC-7. Symlink → allowed canonical path allowed (canonicalize follows symlink)" \
+  "$(mock_json 'Bash' "node $SYMLINK_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
+
+# ── Symlink to shimmed location → BLOCKED (canonicalize resolves to wrong target) ──
+SYMLINK_TO_EVIL="$SYMLINK_HELPER_DIR/classifier-marker-evil.mjs"
+ln -sf "$SHIMMED_HELPER" "$SYMLINK_TO_EVIL"
+assert_blocked "NC-8. Symlink → shimmed binary BLOCKED (canonicalize unmasks symlink target)" \
+  "$(mock_json 'Bash' "node $SYMLINK_TO_EVIL --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Checkpoint required"
+
+# ── Plan-pending invariant preserved: classifier-marker BLOCKED while plan-pending ──
+# (Even with carve-out, plan-pending check fires earlier and blocks marker_write.)
+reset_state
+touch "$MARKER_DIR/.plan-approval-pending"
+assert_blocked "NC-9. classifier-marker BLOCKED while .plan-approval-pending exists (plan-pending invariant > bootstrap carve-out)" \
+  "$(mock_json 'Bash' "node $GLOBAL_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Plan approval pending"
+
+# ── Read-only mode (no --write flag) also covered by carve-out ──
+reset_state
+touch "$PRE_REQ"
+assert_allowed "NC-10. classifier-marker --read (no --write) also allowed under armed checkpoint" \
+  "$(mock_json 'Bash' "node $GLOBAL_HELPER --read --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc")"
+
+# Cleanup
+rm -rf "$SHIMMED_HELPER_DIR" "$SYMLINK_HELPER_DIR"
+
+# ============================================================================
+echo ""
+echo "--- PR-A P1.1: authority-root threading (caller_cwd != hook \$PWD) ---"
+# ============================================================================
+# Codex R1 plan-tier P1: command-classifier.sh:1762 passed \$PWD as caller_cwd
+# into llm_classify_command instead of the parsed JSON .cwd. Marker written
+# under nested cwd was a miss when classify_command subprocess \$PWD diverged
+# from the .cwd authority. Fix: thread parsed .cwd through classify_command +
+# _classify_segment to both Tier 0 (line 1547) and Tier 2/3 (line 1762).
+
+# Skip if the real classifier-marker.mjs isn't reachable from this repo
+# (e.g., extracted fixture). The integration test needs the real helper.
+REAL_HELPER="$(cd "$(dirname "$HOOK")/.." 2>/dev/null && pwd)/scripts/classifier-marker.mjs"
+if [ -f "$REAL_HELPER" ]; then
+  P11_REPO="$(mktemp -d)"
+  P11_REPO="$(cd -P "$P11_REPO" && pwd)"
+  git -C "$P11_REPO" init -q 2>/dev/null
+  P11_REPO_MARKER_DIR="$P11_REPO/.checkpoints"
+  P11_REPO_PRE_REQ="$P11_REPO_MARKER_DIR/.checkpoint-required"
+  P11_REPO_PRE_DONE="$P11_REPO_MARKER_DIR/.pre-checkpoint-done"
+  mkdir -p "$P11_REPO_MARKER_DIR"
+
+  # Fresh per-test home so classifier-cache.json starts clean.
+  P11_HOME="$(mktemp -d)"
+  P11_HOME="$(cd -P "$P11_HOME" && pwd)"
+
+  # Pre-classify a novel `node /tmp/p11-novel.mjs --inspect` command as
+  # read_only, with caller_cwd = repo root. Need a session id (matches
+  # CLAUDE_CODE_SESSION_ID env semantics).
+  P11_SID="$(uuidgen 2>/dev/null || echo "p11-test-session-$$")"
+  P11_CMD="node /tmp/p11-novel.mjs --inspect"
+
+  # Helper requires process.cwd() == --project-root (§M6) and env
+  # CLAUDE_CODE_SESSION_ID == --session-id (§M4) for honest single-session
+  # write. Drop helper diagnostics to stderr-only so the test stays quiet.
+  P11_WRITE_OUT="$( (cd "$P11_REPO" && CLAUDE_CODE_SESSION_ID="$P11_SID" node "$REAL_HELPER" --write \
+    --project-root "$P11_REPO" \
+    --caller-cwd "$P11_REPO" \
+    --command "$P11_CMD" \
+    --session-id "$P11_SID" \
+    --label read_only \
+    --confidence 0.95 \
+    --reason "P1.1 integration test") 2>&1 )"
+
+  # Marker exists?
+  if ls "$P11_REPO_MARKER_DIR/classify/"*.json >/dev/null 2>&1; then
+    # Arm pre-checkpoint to prove the marker-hit path is allowed under the
+    # exact condition (.checkpoint-required armed) that codex R1 P1 reported.
+    # Without P1.1 threading, marker would miss (hook $PWD != caller_cwd),
+    # classifier would fall through to interpreter_other shared_write, the
+    # pre-gate would block on missing pre-checkpoint marker.
+    touch "$P11_REPO_PRE_REQ"
+
+    # Invoke the hook with cwd=$P11_REPO (.cwd authority) but hook process
+    # pwd != P11_REPO (i.e., simulate launchd / cross-cwd dispatch). Use
+    # a subshell `(cd /tmp && ...)` to force hook $PWD = /tmp.
+    P11_JSON="$(jq -n --arg tn 'Bash' --arg cmd "$P11_CMD" --arg cwd "$P11_REPO" --arg sid "$P11_SID" \
+      '{tool_name: $tn, tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}')"
+    P11_OUTPUT="$( (cd /tmp && echo "$P11_JSON" | HOME="$P11_HOME" CLAUDE_CODE_SESSION_ID="$P11_SID" bash "$HOOK") 2>/dev/null )"
+    P11_EXIT=$?
+
+    # Expected: gate allows (exit 0, empty output) because marker hit
+    # surfaces read_only label → checkpoint-gate.sh exits early on read_only.
+    if [ $P11_EXIT -eq 0 ] && [ -z "$P11_OUTPUT" ]; then
+      echo "  ✓ AR-1. P1.1 round-trip: marker written under repo cwd, hit when hook \$PWD=/tmp but .cwd=repo (read_only allows under armed checkpoint)"
+      ((passed++))
+    else
+      echo "  ✗ AR-1. P1.1 round-trip failed (exit=$P11_EXIT, output=$P11_OUTPUT)"
+      ((failed++))
+    fi
+
+    # Negative control: same command but caller_cwd differs from the written
+    # marker's caller_cwd → marker SHA differs (cache key = project + caller_cwd
+    # + command per classifier-marker.mjs:140) → miss → interpreter_other →
+    # shared_write → pre-gate blocks. This proves the threading is honored:
+    # different .cwd → different classification outcome (impossible without
+    # P1.1 — pre-fix code used hook $PWD as caller_cwd regardless of .cwd).
+    mkdir -p "$P11_REPO/sub"
+    P11_JSON_NEG="$(jq -n --arg tn 'Bash' --arg cmd "$P11_CMD" --arg cwd "$P11_REPO/sub" --arg sid "$P11_SID" \
+      '{tool_name: $tn, tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}')"
+    P11_OUTPUT_NEG="$( (cd /tmp && echo "$P11_JSON_NEG" | HOME="$P11_HOME" CLAUDE_CODE_SESSION_ID="$P11_SID" bash "$HOOK") 2>/dev/null )"
+    if echo "$P11_OUTPUT_NEG" | grep -q '"decision".*"block"'; then
+      echo "  ✓ AR-2. P1.1 threading-sensitivity: different .cwd → miss → blocked (proves .cwd is threaded, not ignored)"
+      ((passed++))
+    else
+      echo "  ✗ AR-2. P1.1 threading-sensitivity expected block (output=$P11_OUTPUT_NEG)"
+      ((failed++))
+    fi
+  else
+    echo "  ⊘ AR-1/AR-2 skipped: classifier-marker.mjs write did not produce marker (sandboxed env or helper rejected)"
+  fi
+
+  rm -rf "$P11_REPO" "$P11_HOME"
+else
+  echo "  ⊘ AR-1/AR-2 skipped: real classifier-marker.mjs not reachable at $REAL_HELPER"
+fi
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"

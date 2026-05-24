@@ -953,7 +953,15 @@ _detect_helper_invocation() {
 
 _classify_segment() {
   local target_root="$1"  # repo root for marker resolution
-  shift
+  # PR-A P1.1: authoritative caller cwd threaded from classify_command. The
+  # hook's authoritative cwd is parsed JSON .cwd in checkpoint-gate.sh:48 /
+  # plan-gate.sh:37, NOT the hook process $PWD. Tier 0 dispatch (line ~1547)
+  # and Tier 2/3 LLM dispatch (line ~1762) previously used $PWD as
+  # caller_cwd — codex R1 P1 reproduced a marker miss when the .cwd differs
+  # from the hook process cwd (subprocess/process $PWD divergence). Fall
+  # back to $PWD only when caller doesn't thread (tests, CLI use).
+  local caller_cwd_authoritative="${2:-$PWD}"
+  shift 2
 
   # Read all token + redirect records into arrays
   local -a TOKS=()
@@ -1538,13 +1546,17 @@ _classify_segment() {
       # --project-root` cross-repo refusal succeeds. 2>/dev/null swallows
       # helper diagnostics — they don't belong in the hook's stdout JSON.
       #
-      # Codex P1 (file 6/8 R1 REJECT): capture $PWD BEFORE the subshell.
+      # Codex P1 (file 6/8 R1 REJECT): capture caller cwd BEFORE the subshell.
       # Inside the `cd "$target_root" && ...` command substitution, $PWD
       # is the target root, NOT the original caller cwd — passing $PWD
       # there would compute the tuple under the wrong caller_cwd and miss
       # any override staged for the actual caller cwd. Tuple symmetry
       # with classify-correction's write requires the un-subshelled cwd.
-      local __t0_caller_cwd="$PWD"
+      #
+      # PR-A P1.1: use threaded caller_cwd_authoritative (parsed .cwd from
+      # hook stdin) instead of $PWD. Hook process $PWD ≠ tool .cwd in
+      # general; codex R1 P1 reproduced marker miss for that divergence.
+      local __t0_caller_cwd="$caller_cwd_authoritative"
       local __t0_out
       __t0_out="$(cd "$target_root" 2>/dev/null && node "$__t0_helper" \
         --project-root "$target_root" \
@@ -1759,7 +1771,11 @@ _classify_segment() {
           fi
         done
         local __llm_out __llm_label __llm_reason
-        if __llm_out="$(llm_classify_command "$__cmd_text" "$target_root" "$PWD" 2>/dev/null)"; then
+        # PR-A P1.1: pass caller_cwd_authoritative (parsed .cwd from hook
+        # stdin) instead of hook process $PWD. Codex R1 P1: marker written
+        # under nested cwd was a miss when classify_command subprocess
+        # $PWD differs from the .cwd authority.
+        if __llm_out="$(llm_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
           __llm_label="${__llm_out%%	*}"
           __llm_reason="${__llm_out#*	}"
           __llm_reason="${__llm_reason%$'\n'}"
@@ -2158,11 +2174,19 @@ _resolve_marker_path() {
 # Args:
 #   $1  command string
 #   $2  repo root (for marker resolution); optional, defaults to cwd
+#   $3  caller cwd authoritative (PR-A P1.1); optional, defaults to $PWD.
+#       Production callers (checkpoint-gate.sh:662, plan-gate.sh:129) thread
+#       the parsed JSON .cwd from hook stdin (the tool-caller's actual cwd).
+#       Tier 0 + Tier 2/3 dispatch previously used hook process $PWD which
+#       diverges from .cwd when the agent invokes a Bash tool from a nested
+#       cwd or a worktree. Codex R1 P1 reproduced marker miss for that
+#       divergence.
 #
 # Output: LABEL\tTARGET\tREASON
 classify_command() {
   local cmd="$1"
   local repo_root="${2:-$(pwd)}"
+  local caller_cwd_authoritative="${3:-$PWD}"
 
   # Run tokenizer
   local stream
@@ -2208,7 +2232,7 @@ classify_command() {
         # End segment, classify
         if [ -n "$seg_lines" ]; then
           local result
-          result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root")"
+          result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root" "$caller_cwd_authoritative")"
           local lbl="${result%%	*}"
           local rest="${result#*	}"
           local tgt="${rest%%	*}"
@@ -2230,7 +2254,7 @@ classify_command() {
   # Final segment
   if [ -n "$seg_lines" ]; then
     local result
-    result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root")"
+    result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root" "$caller_cwd_authoritative")"
     local lbl="${result%%	*}"
     local rest="${result#*	}"
     local tgt="${rest%%	*}"
