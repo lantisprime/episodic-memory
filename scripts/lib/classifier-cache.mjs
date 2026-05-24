@@ -406,13 +406,30 @@ export function readOverridesHardened(validated) {
   return parseJsonlContent(content)
 }
 
+// Lookup precedence:
+//   1. ANY user-correction entry for the key wins, regardless of file order.
+//   2. Otherwise, the LAST matching entry wins (autopersist last-write-wins).
+//
+// Codex PR-level R1 P1 (file 5/8 follow-up): the prior whole-file rewrite
+// "retract" path raced with concurrent appends — between the post-rescan
+// read and the temp+rename, a new user-correction could land and be
+// clobbered by the rename. Replacing the retract with this precedence rule
+// closes the same hazard WITHOUT any rewrite — user-correction always wins
+// at READ time regardless of ordering in the JSONL.
+//
+// Multiple user-corrections for the same key: last user-correction wins
+// (loop overwrites). User can re-correct to update a stale entry.
 export function lookupProjectOverride(projectRoot, key, die) {
   const v = validateStoreDir(projectRoot, { allowCreate: false, missingIsMiss: true }, die)
   if (v.missing) return null
   const rows = readOverridesHardened(v)
-  let hit = null
+  let userCorrection = null
+  let latest = null
   for (const r of rows) {
-    if (r && r.cache_key === key) hit = r
+    if (r && r.cache_key === key) {
+      latest = r
+      if (r.created_by === 'user-correction') userCorrection = r
+    }
   }
-  return hit
+  return userCorrection || latest
 }

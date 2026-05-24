@@ -194,6 +194,16 @@ function main() {
   }
 
   // (8) Append.
+  //
+  // Race note (codex PR-level R1 P1): a concurrent classify-correction
+  // append landing between step-(7) pre-scan and this append is no longer
+  // mitigated by a post-append rewrite (that approach raced with OTHER
+  // appends and could clobber unrelated user-corrections). Instead,
+  // user-correction precedence is enforced at READ time in
+  // lookupProjectOverride: any user-correction entry for a key beats any
+  // autopersist entry for the same key, regardless of file order. So a
+  // user-correction landing after our append still wins for all future
+  // lookups — no rewrite needed.
   const entry = {
     schema: 1,
     cache_key: key,
@@ -205,59 +215,6 @@ function main() {
     created_by: sourceTag
   }
   appendLine(validated, entry, die)
-
-  // (9) Post-append rescan + retract. Closes the F-1 race surfaced by the
-  // negative-scenario-reviewer on the full diff: a concurrent classify-
-  // correction WRITE landing between our step-(6)/(7) scan and our step-(8)
-  // append would otherwise let our autopersist entry shadow the user-
-  // correction (last-write-wins, and pre-append scan saw no
-  // user-correction).
-  //
-  // Fix: after our append, rescan the JSONL. If a user-correction entry
-  // exists for the same cache_key, our autopersist entry MUST retract —
-  // user authorship always beats auto-derived telemetry. Retract by
-  // rewriting the JSONL with our entry filtered out, via atomic
-  // temp+rename. Best-effort under multiple concurrent retracts (last
-  // rename wins), but the primary race (user vs single autopersist) is
-  // closed deterministically.
-  const postRows = readOverridesHardened(validated)
-  const userCorrectionExists = postRows.some(r =>
-    r && r.cache_key === key && r.created_by === 'user-correction'
-  )
-  if (userCorrectionExists) {
-    // Build the survivor set: every row EXCEPT this autopersist entry.
-    // Match by exact cache_key + created_at + created_by (created_at is
-    // ms-precision ISO so collision with another autopersist for the same
-    // key would require sub-ms timing AND identical Date.now() — vanishing).
-    const survivors = postRows.filter(r => !(
-      r &&
-      r.cache_key === entry.cache_key &&
-      r.created_at === entry.created_at &&
-      r.created_by === entry.created_by
-    ))
-    // Atomic rewrite via temp+rename. The temp lives in the same dir so
-    // rename(2) is atomic on the same filesystem.
-    const target = path.join(validated.storeDir, 'classifier-overrides.jsonl')
-    const tmp = path.join(validated.storeDir,
-      `.classifier-overrides.jsonl.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`)
-    const body = survivors.map(r => JSON.stringify(r)).join('\n') + (survivors.length ? '\n' : '')
-    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW
-    let fd
-    try { fd = fs.openSync(tmp, flags, 0o644) }
-    catch {
-      // Concurrent retract racer won OR symlink leaf — leave the file
-      // alone; the survivors set converges last-write-wins. Silent.
-      process.exit(0)
-    }
-    try { fs.writeSync(fd, body) } finally { fs.closeSync(fd) }
-    try { fs.renameSync(tmp, target) }
-    catch {
-      try { fs.unlinkSync(tmp) } catch {}
-      // Best-effort: rename failure leaves the appended entry in place;
-      // the user-correction still wins because last-write-wins and the
-      // user-correction landed AFTER our append. Acceptable.
-    }
-  }
 
   // Silent success.
   process.exit(0)

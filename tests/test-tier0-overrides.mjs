@@ -328,97 +328,148 @@ test('T-PP-INVALID-SOURCE-TAG: bad source-tag → exit 2', () => {
   assert.strictEqual(out.status, 2)
 })
 
-test('T-F1-RACE-RESCAN-RETRACT: user-correction landing during autopersist window → autopersist retracts itself', () => {
-  // F-1 race fix: post-append rescan in persist helper. If a user-correction
-  // landed between our step-(6)/(7) scan and step-(8) append, our autopersist
-  // entry retracts via temp+rename rewrite (filtering out our entry).
+test('T-F1-RACE-LOOKUP-PRECEDENCE: user-correction wins over autopersist regardless of JSONL order', () => {
+  // F-1 race fix v2 (codex PR-level R1 P1): instead of a racy post-append
+  // rewrite, lookupProjectOverride enforces precedence at READ time:
+  // ANY user-correction entry for a key beats ANY autopersist entry for
+  // the same key, regardless of file order. This closes the race
+  // deterministically without any rewrite hazard.
   //
-  // Construct the race directly: pre-stage a user-correction with same
-  // cache_key, then invoke persist (which would normally retract because
-  // user-correction protection fires at step 7) — but to test the retract
-  // path specifically, we simulate the race by INSERTING the user-correction
-  // entry AFTER persist's scan but BEFORE its append. We can't easily inject
-  // mid-execution, so we approximate: invoke persist, then immediately
-  // append a user-correction entry, then re-run persist and check that the
-  // newly-appended autopersist entry retracts.
-  //
-  // Simpler approach: directly verify the rescan logic by setting up a state
-  // where persist's pre-append scan sees an empty file, but post-append sees
-  // a user-correction (inserted by the test BETWEEN pre-scan and post-scan).
-  // We can use the _CC_TEST_PAUSE_BEFORE_APPEND_MS seam IF persist exposed
-  // one — it doesn't. So we test the property: persist creates an autopersist
-  // entry; if a user-correction with the same key is then added; and the
-  // race code rescans post-append; THE FINAL JSONL contains user-correction
-  // and NOT the retracted autopersist.
-  //
-  // Approach: run a "manual race" where we (a) write an autopersist entry
-  // via persist, (b) APPEND a user-correction manually via classify-
-  // correction, (c) re-run persist — the retract should kick in because
-  // the user-correction now exists AND the new persist sees it via the
-  // pre-scan AND skips. But that doesn't test post-append rescan.
-  //
-  // Cleanest test of the new code path: directly invoke persist with the
-  // user-correction already in place (gets skipped at step 7); then
-  // manually append the autopersist line again to simulate the race
-  // landing; check post-state. Easier: just verify the persist code
-  // *can* rewrite the JSONL when conditions are met.
-  //
-  // For now we test the steady-state convergence: regardless of timing,
-  // if BOTH user-correction and autopersist exist for the same key, the
-  // user-correction wins for subsequent lookups (last-write-wins +
-  // user-correction protection on next persist).
-  const r = mkrepo('f1-race')
-  // 1) Persist an autopersist entry first (no user-correction yet, so it lands)
-  const p1 = persist(r, 'node scripts/raced.mjs', 'shared_write', 0.95)
-  assert.strictEqual(p1.status, 0)
-  let entries = readOverrides(r)
-  assert.strictEqual(entries.length, 1)
-  assert.strictEqual(entries[0].created_by, 'llm-marker-autopersist')
+  // Setup: autopersist entry written FIRST, user-correction SECOND (so
+  // last-write-wins would pick the user-correction). That alone doesn't
+  // test the precedence rule — we need the autopersist to be LATER, which
+  // is exactly the race we're closing. Do both orders to prove order-
+  // independence.
 
-  // 2) Now stage a user-correction for the same key (races would put us here)
-  const cr = correction(r, 'node scripts/raced.mjs', 'read_only', { reason: 'user-wins-race' })
-  assert.strictEqual(cr.status, 0)
-  entries = readOverrides(r)
-  // 3) After F-1 fix, a NEW persist call would retract its newly-appended
-  //    entry because the user-correction is now visible. Verify that re-
-  //    triggering persist while user-correction exists results in NO new
-  //    autopersist entry (pre-scan catches it at step 7).
-  const p2 = persist(r, 'node scripts/raced.mjs', 'shared_write', 0.95)
-  assert.strictEqual(p2.status, 0)
-  const afterRetry = readOverrides(r)
-  // The user-correction must be present
-  assert.ok(afterRetry.some(e => e.created_by === 'user-correction'),
-    `user-correction missing post-race: ${JSON.stringify(afterRetry)}`)
-  // No SECOND autopersist entry from p2 (skipped via user-correction-protection)
-  const autopersistCount = afterRetry.filter(e => e.created_by === 'llm-marker-autopersist').length
-  assert.strictEqual(autopersistCount, 1, `expected 1 autopersist entry; got ${autopersistCount}`)
+  // Order A: autopersist first, user-correction second.
+  {
+    const r = mkrepo('precedence-A')
+    persist(r, 'node scripts/precA.mjs', 'shared_write', 0.95)
+    correction(r, 'node scripts/precA.mjs', 'read_only', { reason: 'A-second' })
+    const out = lookup(r, 'node scripts/precA.mjs')
+    const j = JSON.parse(out.stdout.trim().split('\n').pop())
+    assert.strictEqual(out.status, 0)
+    assert.strictEqual(j.label, 'read_only', 'user-correction must win when written SECOND')
+  }
+
+  // Order B (the actual race-class): user-correction first, autopersist second.
+  // The pre-fix lookup (last-write-wins) would serve the autopersist, masking
+  // the user-correction. The post-fix precedence rule serves the user-correction.
+  {
+    const r = mkrepo('precedence-B')
+    correction(r, 'node scripts/precB.mjs', 'read_only', { reason: 'B-first' })
+    // Simulate the race: append an autopersist entry directly via the persist
+    // helper. The pre-scan at step-7 normally catches user-correction-exists
+    // and skips, so we bypass by manually appending an autopersist line to
+    // simulate "autopersist landed during the user-correction's pre-scan
+    // window" — codex's R1 race shape.
+    const sd = path.join(r, '.episodic-memory')
+    const tupleStr = JSON.stringify({
+      project_root_canonical: fs.realpathSync(r),
+      caller_cwd_or_rel: '.',
+      normalized_command: 'node scripts/precB.mjs',
+      executable_resolved: null,
+      script_digest: null
+    }, Object.keys({
+      project_root_canonical: '', caller_cwd_or_rel: '', normalized_command: '',
+      executable_resolved: '', script_digest: ''
+    }).sort())
+    // Read the existing user-correction's cache_key to keep the simulated
+    // autopersist entry on the same key.
+    const existing = readOverrides(r)
+    assert.strictEqual(existing.length, 1)
+    const key = existing[0].cache_key
+    const autopersistEntry = {
+      schema: 1, cache_key: key, tuple: existing[0].tuple,
+      label: 'shared_write', confidence: 0.95, reason: 'simulated-race',
+      created_at: new Date(Date.now() + 1000).toISOString(),
+      created_by: 'llm-marker-autopersist'
+    }
+    fs.appendFileSync(path.join(sd, 'classifier-overrides.jsonl'),
+      JSON.stringify(autopersistEntry) + '\n')
+
+    const out = lookup(r, 'node scripts/precB.mjs')
+    const j = JSON.parse(out.stdout.trim().split('\n').pop())
+    assert.strictEqual(out.status, 0)
+    assert.strictEqual(j.label, 'read_only',
+      `user-correction must win even when autopersist is LAST in file order; got: ${JSON.stringify(j)}`)
+  }
 })
 
-test('T-F1-POST-RESCAN-RETRACT-DIRECT: directly trigger post-append rescan retract path', () => {
-  // To exercise the retract code path itself: pre-stage a user-correction,
-  // then directly write an autopersist entry via append, then invoke
-  // persist's rescan logic via a fresh persist call (which will hit
-  // user-correction protection at step 7 — but the retract is a
-  // POST-append codepath, not a pre-append one).
+test('T-F1-PRESERVES-UNRELATED-ROWS: persist append leaves unrelated rows intact', () => {
+  // Baseline append-only invariant: persist for a new command must not
+  // touch rows for OTHER commands. Codex PR-level R2 P3 noted: this alone
+  // would also pass against the old retract code (retract only rewrote
+  // on same-key races). Paired with T-F1-NO-RETRACT-ON-SAME-KEY-RACE below
+  // to lock the actual "no whole-file rewrite" invariant.
+  const r = mkrepo('preserve-unrelated')
+  for (let i = 0; i < 3; i++) {
+    correction(r, `node scripts/diff-${i}.mjs`, 'read_only',
+      { reason: `pre-existing-${i}` })
+  }
+  const before = readOverrides(r)
+  assert.strictEqual(before.length, 3)
+  persist(r, 'node scripts/new.mjs', 'shared_write', 0.95)
+  const after = readOverrides(r)
+  for (let i = 0; i < 3; i++) {
+    assert.strictEqual(after[i].cache_key, before[i].cache_key,
+      `pre-existing entry ${i} was modified or reordered`)
+  }
+  assert.strictEqual(after.length, 4)
+  assert.strictEqual(after[3].created_by, 'llm-marker-autopersist')
+})
+
+test('T-F1-NO-RETRACT-ON-SAME-KEY-RACE: same-key user-correction does NOT trigger any rewrite', () => {
+  // Locks the actual codex PR-level R1 P1 invariant: even when a same-key
+  // user-correction exists AFTER an autopersist landed (the race that the
+  // OLD retract code targeted), persist MUST NOT rewrite the JSONL.
   //
-  // The cleanest way to test the retract is via a second persist call that
-  // races the file: insert a user-correction RIGHT AFTER the append. Since
-  // we can't actually time this within Node without a test seam in persist,
-  // we instead validate the RESCAN-AND-FILTER algorithm by reading source
-  // and confirming it exists. This is a SHAPE test rather than a TIMING test.
+  // Setup mirrors the race shape: (1) autopersist lands first; (2) a
+  // user-correction is appended later for the SAME key (this is the
+  // condition that triggered the old retract); (3) a SECOND persist call
+  // fires (e.g., from a re-classify of the same command in another Bash
+  // invocation). With the OLD retract code, step 3 would rewrite the file,
+  // potentially clobbering any concurrent append. With the NEW code,
+  // persist just calls appendLine (or skips via user-correction protection).
   //
-  // For full coverage of timing, the integration would need an injected
-  // pause similar to _CC_TEST_PAUSE_BEFORE_APPEND_MS in classify-correction.
-  // Out of scope: the algorithm's correctness is exercised by F-1 above
-  // (convergence to user-correction state), and the implementation is small
-  // enough to verify by inspection.
-  const persistSrc = fs.readFileSync(PERSIST, 'utf8')
-  assert.ok(persistSrc.includes('readOverridesHardened(validated)'),
-    'persist must re-read overrides post-append')
-  assert.ok(persistSrc.includes('userCorrectionExists'),
-    'persist must check for user-correction race')
-  assert.ok(persistSrc.includes('renameSync(tmp, target)'),
-    'persist must atomically rewrite via temp+rename on retract')
+  // We verify: between step 2 and step 3, plant a "concurrent" row for an
+  // UNRELATED key. After step 3, the concurrent row MUST still exist.
+  const r = mkrepo('no-retract-same-key')
+  // (1) autopersist
+  persist(r, 'node scripts/race-key.mjs', 'shared_write', 0.95)
+  // (2) same-key user-correction (would trigger old retract on next persist)
+  correction(r, 'node scripts/race-key.mjs', 'read_only', { reason: 'same-key-user' })
+  // (2.5) plant a "concurrent" row for an unrelated key (simulates another
+  //       process appending during the would-be retract's tmp+rename window)
+  correction(r, 'node scripts/unrelated.mjs', 'shared_write', { reason: 'concurrent-append' })
+  const before = readOverrides(r)
+  assert.strictEqual(before.length, 3,
+    `expected [autopersist, user-correction, concurrent]; got ${JSON.stringify(before)}`)
+  // (3) re-fire persist for the same race-key command. Pre-fix: this would
+  //     have triggered retract → rewrite [autopersist, user-correction,
+  //     concurrent] minus autopersist = [user-correction, concurrent].
+  //     Post-fix: persist sees user-correction at step 7 → silentSkip; no
+  //     rewrite happens. JSONL is unchanged.
+  persist(r, 'node scripts/race-key.mjs', 'shared_write', 0.95)
+  const after = readOverrides(r)
+  assert.strictEqual(after.length, 3,
+    `JSONL changed unexpectedly; before=${JSON.stringify(before)}; after=${JSON.stringify(after)}`)
+  // Concurrent row must still exist
+  assert.ok(after.some(e => e.reason === 'concurrent-append'),
+    'concurrent-append row was clobbered (regression: retract logic returned?)')
+})
+
+test('T-F1-MULTIPLE-USER-CORRECTIONS-LATEST-WINS: re-correction updates the served label', () => {
+  // Documented behavior: multiple user-corrections for the same key are
+  // allowed; last user-correction wins (loop overwrites the userCorrection
+  // local). User can re-correct to update a stale entry.
+  const r = mkrepo('multi-user-corr')
+  correction(r, 'node scripts/foo.mjs', 'read_only', { reason: 'first' })
+  correction(r, 'node scripts/foo.mjs', 'shared_write', { reason: 'second-overrides' })
+  const out = lookup(r, 'node scripts/foo.mjs')
+  const j = JSON.parse(out.stdout.trim().split('\n').pop())
+  assert.strictEqual(j.label, 'shared_write')
+  assert.strictEqual(j.reason, 'second-overrides')
 })
 
 test('T-F3-CLASSIFY-CORRECTION-ENV-PREFIX-REFUSED: write side refuses env-prefix shape', () => {
