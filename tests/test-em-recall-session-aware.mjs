@@ -128,6 +128,64 @@ function setMarkerWithMtime(p, mtimeMs) {
 }
 
 // ---------------------------------------------------------------------------
+// X3: Same-ms race — own marker and baseline land in the same wall-clock ms.
+// Carve-out check is `marker.mtime > baselineMtime` (strict-greater), so
+// same-mtime → no block → allow stop. Verifies the per-session reader is
+// stable under the empirical 2026-05-23 ~15:55 same-ms scenario.
+// ---------------------------------------------------------------------------
+{
+  const root = makeFixtureRoot()
+  const sidB = 'bbbb-bbbb-bbbb'
+
+  // Same-ms race: marker AND baseline at exactly the same mtime.
+  const sameT = Date.now() - 2000
+  const bReq = path.join(root, '.checkpoints', `.checkpoint-required.${sidB}`)
+  setMarkerWithMtime(bReq, sameT)
+  // setBaselineAfter adds +100ms; use a direct utime to match exactly.
+  const baseline = path.join(root, '.checkpoints', '.session-baseline')
+  fs.writeFileSync(baseline, '')
+  const t = sameT / 1000
+  fs.utimesSync(baseline, t, t)
+
+  const r = runGateStop(root, sidB)
+  // No .checkpoint-required readable → preReqPath null → early return → allow.
+  // Wait: there IS .checkpoint-required.<sidB>. Resolution: own primary →
+  // exists → preReqPath set. postDonePath null (no post-done). preReqPath set
+  // + postDoneSize=0 → carve-out check. marker.mtime === baselineMtime →
+  // NOT > → loop continues → returns true → allow stop.
+  assert('X3 same-ms own-marker + baseline → allow stop',
+    r.code === 0 && r.stdout === '',
+    { stdout: r.stdout, stderr: r.stderr })
+
+  fs.rmSync(root, { recursive: true, force: true })
+}
+
+// ---------------------------------------------------------------------------
+// X4: Own-session carve-out applies — B has own checkpoint-required with
+// mtime <= baseline (B armed BEFORE its baseline; e.g. mid-session-restart).
+// Carve-out evaluates: marker.mtime <= baseline → continue → return true →
+// allow stop. Demonstrates that own-session reads + baseline dominance work
+// together for the carve-out.
+// ---------------------------------------------------------------------------
+{
+  const root = makeFixtureRoot()
+  const sidB = 'bbbb-bbbb-bbbb'
+
+  // B's marker is older than B's baseline (force-monotonic dominates it).
+  const markerT = Date.now() - 10000
+  const bReq = path.join(root, '.checkpoints', `.checkpoint-required.${sidB}`)
+  setMarkerWithMtime(bReq, markerT)
+  setBaselineAfter(root, markerT)  // baseline > marker by 100ms
+
+  const r = runGateStop(root, sidB)
+  assert('X4 own-marker dominated by baseline → carve-out allows stop',
+    r.code === 0 && r.stdout === '',
+    { stdout: r.stdout, stderr: r.stderr })
+
+  fs.rmSync(root, { recursive: true, force: true })
+}
+
+// ---------------------------------------------------------------------------
 // X5: Cross-session bleed scenario — B has NO own quartet markers; A has
 // `.checkpoint-required.<sidA>` that pre-dates B's baseline (force-monotonic
 // has dominated it). B's own-session carve-out should see nothing for itself
