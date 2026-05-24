@@ -1482,20 +1482,23 @@ assert_blocked "SA-cwd1. Relative FILE_PATH + absolute tool_input.cwd → resolv
 assert_blocked "SA-cwd2. Relative FILE_PATH + absolute top-level .cwd → resolved + block" \
   "$(mock_path_json 'Edit' 'scripts-test.mjs' "$TEST_DIR" "")" "Checkpoint required"
 
-# T_cwd3: relative FILE_PATH + RELATIVE tool_input.cwd + RELATIVE top-level .cwd
-# (codex R7/P1 stricter repro — the prior version passed absolute top-level .cwd
-# which short-circuited the no-authority codepath. R7/P1 CWD fix: relative
-# top-level .cwd now falls back to hook process pwd, so REPO_ROOT is anchored
-# to an absolute root before the predicate runs. With both cwds relative,
-# tool_input.cwd is non-absolute so FILE_PATH stays relative-joined → predicate
-# evaluates against fallback REPO_ROOT (hook pwd = $TEST_DIR via test fixture)
-# → blocks normally. The conservative-block path only triggers if BOTH cwd
-# fields are relative AND no fallback authority gets the relative path joined
-# to anything absolute; with the R7/P1 fix this codepath is dominated by
-# CWD fallback. Test asserts the BLOCK outcome.)
-assert_blocked "SA-cwd3. Relative FILE_PATH + relative .cwd + relative tool_input.cwd → R7/P1 CWD fallback then block" \
+# T_cwd3: relative FILE_PATH + RELATIVE .cwd + RELATIVE tool_input.cwd → ALLOW
+#
+# PR-level codex review (REJECT R1 → fix landed here) caught the bug in this
+# test's prior expectation. The R7/P1 documented behavior is: relative .cwd
+# falls back to hook process pwd. If hook process pwd is NOT the same as the
+# armed test target (i.e. when test runner is invoked from outside $TEST_DIR),
+# the gate checks for `.checkpoint-required` at hook-pwd → finds none → exits
+# 0 → allows. This is the SAME wrong-root-hook = allow behavior that
+# SA-cwd-strict asserts intentionally.
+#
+# Prior version asserted "block" which was wrong: it depended on hook-pwd
+# happening to equal $TEST_DIR (only true when test runner is invoked from
+# inside the fixture's temp dir — fragile). The correct assertion is ALLOW.
+# Codex PR-level R1 caught this via running the suite from a fresh cwd.
+assert_allowed "SA-cwd3. Relative FILE_PATH + relative .cwd + relative tool_input.cwd → wrong-root = allow (same shape as SA-cwd-strict)" \
   "$(jq -n --arg tn 'Edit' --arg fp 'scripts-test.mjs' --arg c './relative' --arg tic './relative-dir' \
-    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')" "Checkpoint required"
+    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')"
 
 # T_cwd3-strict: codex R7/P1 ACCEPT criterion — caller cwd != target with
 # relative/empty cwds. Run hook from a separate temp caller cwd. With the
