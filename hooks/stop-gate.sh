@@ -71,14 +71,31 @@ if ! cd "$CWD" 2>/dev/null; then
   exit 0
 fi
 
+# Rank-2: parse stdin .session_id and pass --session-id to em-recall so
+# the stop-gate carve-out can resolve own-session quartet markers. Without
+# this plumbing, the carve-out falls back to legacy-literal-only mode
+# (graceful degrade per em-recall codex R2 Q3 — pre-rank-2 behavior
+# preserved for old hook installs).
+#
+# Validation: em-recall.mjs does the format check + warn-on-invalid. We
+# do a basic empty/non-empty check here to avoid spamming with empty values.
+MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")"
+
 # Invoke core decision logic. Capture stdout; fail-loud envelope on error.
 # Repo-root resolution in em-recall.mjs (resolveRepoRoot module-load) now
 # resolves from the cwd we just cd'd to — i.e., the project the hook input
 # named, not the hook process's inherited cwd.
-DECISION="$(node "$EM_RECALL" --gate stop 2>/dev/null)" || {
-  echo '{"decision": "block", "reason": "stop-gate.sh: em-recall --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
-  exit 0
-}
+if [ -n "$MY_SID" ]; then
+  DECISION="$(node "$EM_RECALL" --gate stop --session-id "$MY_SID" 2>/dev/null)" || {
+    echo '{"decision": "block", "reason": "stop-gate.sh: em-recall --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
+    exit 0
+  }
+else
+  DECISION="$(node "$EM_RECALL" --gate stop 2>/dev/null)" || {
+    echo '{"decision": "block", "reason": "stop-gate.sh: em-recall --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
+    exit 0
+  }
+fi
 
 # Pass core's JSON through verbatim. Empty stdout = no decision = allow.
 if [ -n "$DECISION" ]; then
