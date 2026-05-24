@@ -64,7 +64,6 @@ import {
   primaryMarkerPath,
   legacyMarkerPath,
   namespacedMarkerBasenameForSession,
-  anyNamespacedMarkerExists,
   CHECKPOINT_QUARTET,
   PRIMARY_MARKER_DIR,
 } from './lib/marker-paths.mjs'
@@ -175,11 +174,31 @@ function atomicWriteEmpty(canonicalRoot, basename) {
   return finalPath
 }
 
+function ownSessionOrLegacyMarkerExists(canonicalRoot, target, sid) {
+  // Per-codex C2 R1 P1: arm-if-missing must NOT no-op when ANOTHER
+  // session's suffixed marker exists — that would recreate the
+  // cross-session bleed. Acceptable no-op states:
+  //   1. Bare legacy literal <target> at primary or legacy root.
+  //   2. Own-session <target>.<sid> at primary or legacy root.
+  // OTHER sessions' <target>.<other-sid> must NOT suppress this session's
+  // marker.
+  const ownBasename = namespacedMarkerBasenameForSession(target, sid)
+  for (const p of [
+    primaryMarkerPath(canonicalRoot, target),         // bare legacy at primary
+    legacyMarkerPath(canonicalRoot, target),          // bare legacy at legacy
+    primaryMarkerPath(canonicalRoot, ownBasename),    // own-session at primary
+    legacyMarkerPath(canonicalRoot, ownBasename),     // own-session at legacy
+  ]) {
+    if (fs.existsSync(p)) return true
+  }
+  return false
+}
+
 function actionArmIfMissing(canonicalRoot, target, sid) {
-  // No-op if any form of the target marker exists (own-session suffixed OR
-  // legacy literal, at either root). Mirrors em-recall.mjs armCheckpointMarker
-  // semantics — idempotent, best-effort, doesn't overwrite live state.
-  if (anyNamespacedMarkerExists(canonicalRoot, target)) {
+  // No-op if own-session marker OR bare legacy literal exists at either
+  // root. Other sessions' suffixed markers do NOT block this arming —
+  // each session arms its own per-session marker (codex C2 R1 P1).
+  if (ownSessionOrLegacyMarkerExists(canonicalRoot, target, sid)) {
     process.stdout.write(JSON.stringify({
       status: 'ok',
       action: 'arm-if-missing',

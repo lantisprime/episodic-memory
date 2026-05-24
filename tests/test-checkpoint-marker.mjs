@@ -265,6 +265,52 @@ for (const target of QUARTET) {
 }
 
 // ---------------------------------------------------------------------------
+// XS1-XS4 — cross-session non-interference (codex C2 R1 P1 regression)
+//
+// Required invariant per codex 20260524-055434-...-a24a:
+//   arm-if-missing must NOT no-op when another session's suffixed marker
+//   exists. Each session arms its own per-session marker. Other sessions'
+//   markers must not suppress this session's arming.
+// ---------------------------------------------------------------------------
+for (const target of QUARTET.slice(0, 1)) {
+  const root = makeFixtureRoot()
+  const sidA = 'sid-a'
+  const sidB = 'sid-b'
+  fs.mkdirSync(path.join(root, '.checkpoints'), { recursive: true })
+  fs.mkdirSync(path.join(root, '.claude'), { recursive: true })
+
+  // Setup: session A has its own marker; session B has none.
+  const markerA = path.join(root, '.checkpoints', `${target}.${sidA}`)
+  const markerB = path.join(root, '.checkpoints', `${target}.${sidB}`)
+  fs.writeFileSync(markerA, '')
+
+  // Session B arm-if-missing: must NOT no-op; must create markerB.
+  const callerCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'rank2-caller-cwd-'))
+  const r = spawnSync('node', [HELPER,
+    '--target', target,
+    '--action', 'arm-if-missing',
+    '--root', root,
+  ], {
+    env: { ...process.env, CLAUDE_CODE_SESSION_ID: sidB },
+    cwd: callerCwd,
+    encoding: 'utf8',
+  })
+  const json = parseJson(r.stdout)
+  assert('XS1 B exit 0', r.status === 0)
+  assert('XS2 B noop=false (other-session marker does NOT suppress)',
+    json && json.noop === false)
+  assert('XS3 B markerB created at target root', fs.existsSync(markerB))
+  assert('XS4 caller cwd has no marker artifacts',
+    !fs.existsSync(path.join(callerCwd, '.checkpoints')))
+
+  // Verify A's marker still untouched.
+  assert("XS5 A's marker preserved", fs.existsSync(markerA))
+
+  fs.rmSync(callerCwd, { recursive: true, force: true })
+  fs.rmSync(root, { recursive: true, force: true })
+}
+
+// ---------------------------------------------------------------------------
 // F1-F3 — F3 legacy-literal-read-only invariant
 // ---------------------------------------------------------------------------
 for (const target of QUARTET.slice(0, 1)) {
