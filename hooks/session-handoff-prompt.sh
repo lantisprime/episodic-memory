@@ -103,8 +103,11 @@ fi
 #   3. Canonical (even if empty; reads will ENOENT cleanly)
 # ---------------------------------------------------------------------------
 
-# Canonical sanitization (matches user-preferences hook's '/' and '.' → '-').
-_canonical="$(printf '%s' "${REPO_ROOT}" | sed 's|/|-|g; s|\.|-|g')"
+# Canonical sanitization (matches Claude Code's project-dir encoder: '/',
+# '.', and ' ' → '-'). Spaces were previously dropped, sending projects
+# with spaces in their path (e.g. "Home Network Improvement") to an empty
+# memory dir → always-tier batch-Read silently no-ops.
+_canonical="$(printf '%s' "${REPO_ROOT}" | sed 's|/|-|g; s|\.|-|g; s| |-|g')"
 CANONICAL_MEM="${HOME}/.claude/projects/${_canonical}/memory"
 
 # Sanitization variants observed on this machine. If new variants surface,
