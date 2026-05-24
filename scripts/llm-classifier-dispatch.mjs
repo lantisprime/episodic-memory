@@ -30,9 +30,16 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { loadConfig } from './classifier-config-loader.mjs'
+import {
+  realpathOrSame,
+  hasEnvPrefix,
+  buildTuple,
+  cacheKey,
+  checkOverridableShape,
+  lookupProjectOverride
+} from './lib/classifier-cache.mjs'
 
 function flag(argv, name) {
   const i = argv.indexOf(name)
@@ -45,115 +52,8 @@ function die(code, msg) {
   process.exit(code)
 }
 
-function realpathOrSame(p) {
-  try { return fs.realpathSync(p) } catch { return p }
-}
-
-function isUnder(child, parent) {
-  return child === parent || child.startsWith(parent + path.sep)
-}
-
-const INTERPRETERS = new Set(['node', 'python', 'python3', 'ruby', 'perl'])
-
-function resolveExeAgainstCwd(command, callerCwd) {
-  const toks = command.trim().split(/\s+/)
-  for (let i = 0; i < toks.length; i++) {
-    if (INTERPRETERS.has(path.basename(toks[i]))) {
-      const script = toks[i + 1]
-      if (script && !script.startsWith('-')) {
-        return path.resolve(callerCwd, script)
-      }
-      return null
-    }
-  }
-  if (toks[0]) {
-    if (toks[0].startsWith('/') || toks[0].startsWith('./') || toks[0].startsWith('../')) {
-      return path.resolve(callerCwd, toks[0])
-    }
-    return toks[0]
-  }
-  return null
-}
-
-function sha256File(p) {
-  try {
-    const buf = fs.readFileSync(p)
-    return crypto.createHash('sha256').update(buf).digest('hex')
-  } catch {
-    return null
-  }
-}
-
-function normalizeCommand(raw) {
-  return String(raw).replace(/#.*$/, '').replace(/\s+/g, ' ').trim()
-}
-
-// R1-F2 (env-prefix wrapper): reject `FOO=bar python3 ...` shape — caller
-// should route those to default classification, not Tier 2/3.
-function hasEnvPrefix(command) {
-  const first = command.trim().split(/\s+/)[0] || ''
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(first)
-}
-
-function buildTuple({ command, projectRoot, callerCwd }) {
-  const cwdCanon = realpathOrSame(callerCwd)
-  const callerCwdRelOrAbs = isUnder(cwdCanon, projectRoot)
-    ? (path.relative(projectRoot, cwdCanon) || '.')
-    : cwdCanon
-  const exeResolved = resolveExeAgainstCwd(command, cwdCanon)
-  let exeAbs = null
-  let digest = null
-  if (exeResolved && exeResolved.startsWith('/')) {
-    try {
-      if (fs.statSync(exeResolved).isFile()) {
-        exeAbs = realpathOrSame(exeResolved)
-        if (isUnder(exeAbs, projectRoot)) {
-          digest = sha256File(exeAbs)
-        }
-      }
-    } catch {}
-  }
-  return {
-    project_root_canonical: projectRoot,
-    caller_cwd_or_rel: callerCwdRelOrAbs,
-    normalized_command: normalizeCommand(command),
-    executable_resolved: exeAbs || exeResolved,
-    script_digest: digest
-  }
-}
-
-function canonicalTupleString(tuple) {
-  // Sort keys lexicographically; nested values are primitives so this suffices.
-  const sorted = {}
-  for (const k of Object.keys(tuple).sort()) sorted[k] = tuple[k]
-  return JSON.stringify(sorted)
-}
-
-function cacheKey(tuple) {
-  return crypto.createHash('sha256').update(canonicalTupleString(tuple)).digest('hex')
-}
-
 function readJsonOrEmpty(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')) } catch { return {} }
-}
-
-function readJsonlOrEmpty(p) {
-  try {
-    return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => {
-      try { return JSON.parse(l) } catch { return null }
-    }).filter(Boolean)
-  } catch { return [] }
-}
-
-function lookupProjectOverride(projectRoot, key) {
-  const file = path.join(projectRoot, '.episodic-memory', 'classifier-overrides.jsonl')
-  const rows = readJsonlOrEmpty(file)
-  // Last write wins per key.
-  let hit = null
-  for (const r of rows) {
-    if (r && r.cache_key === key) hit = r
-  }
-  return hit
 }
 
 function lookupGlobalCache(homeDir, key) {
@@ -254,8 +154,18 @@ function main() {
   const tuple = buildTuple({ command, projectRoot, callerCwd })
   const key = cacheKey(tuple)
 
-  // Tier 2a: project-local override (highest priority).
-  const override = lookupProjectOverride(projectRoot, key)
+  // Tier 2a: project-local override (highest priority). PR #336:
+  //   1. The shared module's lookup applies validateStoreDir +
+  //      reValidateParent for symlink and parent-swap TOCTOU defense; pass
+  //      `die` so hard validation failures route through this dispatcher's
+  //      stderr prefix + exit 2.
+  //   2. checkOverridableShape gates the lookup so flag-prefixed interpreter
+  //      forms (e.g. `node --require ./noop.js scripts/em-store.mjs`) cannot
+  //      use overrides to hide a real mutator after a --require value.
+  //      Codex REJECT on file 4/8 R1 caught this bypass; mitigation is
+  //      centralized at the shared module so this dispatcher also benefits.
+  const shape = checkOverridableShape(command)
+  const override = shape.overridable ? lookupProjectOverride(projectRoot, key, die) : null
   if (override) {
     emit({
       label: override.label,

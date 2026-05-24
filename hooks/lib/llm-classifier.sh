@@ -54,6 +54,70 @@ __llm_classifier_resolve_marker_helper() {
   return 1
 }
 
+# PR #336 — Tier 0 auto-persist helper resolution. Resolves to installed
+# runtime first, repo-source fallback. NO env-var override seam (PR #271
+# attack class — ambient env paths can be hijacked).
+__llm_classifier_resolve_persist_helper() {
+  local global="$HOME/.episodic-memory/scripts/classifier-override-persist.mjs"
+  if [ -f "$global" ]; then
+    printf '%s' "$global"
+    return 0
+  fi
+  local self_dir
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local repo="$self_dir/../../scripts/classifier-override-persist.mjs"
+  if [ -f "$repo" ]; then
+    printf '%s' "$repo"
+    return 0
+  fi
+  return 1
+}
+
+# PR #336 — Fire-and-forget auto-persist invocation. Backgrounds the
+# persist helper with redirected I/O so it never pollutes the hook's
+# classification stream. Silent on success (helper enforces); silent on
+# any failure (the redirect swallows stderr).
+#
+# Why fire-and-forget: the hook returns the label immediately; the
+# next-time-this-command-runs benefit of Tier 0 doesn't gate the current
+# classification. Backgrounding the persist write keeps the hot path
+# latency unchanged from pre-#336.
+#
+# Why subshell `cd "$repo_root"`: persist helper's
+# `realpath(resolveRepoRoot(process.cwd())) === --project-root` cross-repo
+# check requires its process.cwd() to canonicalize to $repo_root.
+__llm_classifier_autopersist() {
+  local repo_root="$1" caller_cwd="$2" command="$3" label="$4" confidence="$5" source_tag="$6"
+  if [ -z "$repo_root" ] || [ -z "$caller_cwd" ] || [ -z "$command" ] || \
+     [ -z "$label" ] || [ -z "$confidence" ] || [ -z "$source_tag" ]; then
+    return 1
+  fi
+  local persist_helper
+  if ! persist_helper="$(__llm_classifier_resolve_persist_helper)"; then
+    return 1
+  fi
+  # Background subshell: cd binds cwd, helper writes silently. Disown via
+  # `&` so the parent shell does not block on the child.
+  #
+  # F-4 (negative-scenario-reviewer ACCEPT-with-FU): silent cd-failure is
+  # ACCEPTABLE here. If `cd "$repo_root"` fails (parent moved, FS removed
+  # mid-Bash-invocation), the `&&` short-circuits and node never runs.
+  # No persist happens; the classification was already emitted; the next
+  # Bash invocation will simply hit the marker cache again and fire
+  # another autopersist attempt. Fire-and-forget contract is "best effort,
+  # no guarantee" — silent failure preserves that. The redirect to
+  # /dev/null is the contract that swallows stderr; surfacing a warning
+  # would require a separate log file, out of scope.
+  ( cd "$repo_root" 2>/dev/null && node "$persist_helper" \
+      --project-root "$repo_root" \
+      --caller-cwd "$caller_cwd" \
+      --command "$command" \
+      --label "$label" \
+      --confidence "$confidence" \
+      --source-tag "$source_tag" >/dev/null 2>&1 ) &
+  return 0
+}
+
 # Legacy dispatch (for --legacy-direct-fetch tests / rollback only).
 __llm_classifier_resolve_legacy_dispatcher() {
   if [ -n "${LLM_CLASSIFIER_DISPATCH_PATH:-}" ] && [ -f "$LLM_CLASSIFIER_DISPATCH_PATH" ]; then
@@ -122,6 +186,10 @@ llm_classify_command() {
       # Parse JSON without jq using a small inline node one-liner. Same
       # label-allowlist defense as before — unknown labels reach awk only
       # if they passed the allowlist filter.
+      # PR #336: extend parser to capture confidence. The marker JSON
+      # includes a `confidence` field (number in [0,1]) emitted by
+      # classifier-marker.mjs. Confidence is needed by the auto-persist
+      # helper's threshold gate (default 0.7).
       local parsed
       parsed="$(printf '%s' "$out" | node -e '
         const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
@@ -135,17 +203,36 @@ llm_classify_command() {
             let label = j.label || ""
             if (label && !ALLOWED.has(label)) label = ""
             const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
-            process.stdout.write(`${label}\t${root}`)
+            // Confidence — number in [0,1] or "" if absent/invalid.
+            let conf = ""
+            if (typeof j.confidence === "number" && Number.isFinite(j.confidence) && j.confidence >= 0 && j.confidence <= 1) {
+              conf = String(j.confidence)
+            }
+            process.stdout.write(`${label}\t${root}\t${conf}`)
           } catch { process.stdout.write("") }
         })
       ' 2>/dev/null)"
 
       if [ -n "$parsed" ]; then
-        local label root
+        local label root confidence
         label="$(printf '%s' "$parsed" | awk -F'\t' '{print $1}')"
         root="$(printf '%s' "$parsed" | awk -F'\t' '{print $2}')"
-        # Re-verify project_root_used echo before applying (defense in depth).
-        if [ -n "$label" ] && [ "$root" = "$repo_root" ]; then
+        confidence="$(printf '%s' "$parsed" | awk -F'\t' '{print $3}')"
+        # Re-verify project_root_used echo before applying. PR #336 (carried
+        # over from file 6/8 R1 lesson): the helper canonicalizes via
+        # realpathOrSame; macOS /var → /private/var would otherwise mismatch.
+        # Use `pwd -P` of repo_root for canonical physical-dir equality.
+        local _repo_root_canon
+        _repo_root_canon="$(cd "$repo_root" 2>/dev/null && pwd -P)"
+        if [ -n "$label" ] && [ "$root" = "$_repo_root_canon" ]; then
+          # PR #336: auto-persist this verdict as a Tier 0 override (fire-
+          # and-forget; helper applies confidence + carve-out + dedup gates
+          # and is silent on success). Skip if confidence is missing
+          # (older marker schema without the field).
+          if [ -n "$confidence" ]; then
+            __llm_classifier_autopersist "$repo_root" "$caller_cwd" "$command" \
+              "$label" "$confidence" "llm-marker-autopersist"
+          fi
           printf '%s\t%s\n' "$label" "interpreter_marker_cache_hit"
           return 0
         fi
@@ -172,6 +259,8 @@ llm_classify_command() {
         --caller-cwd "$caller_cwd" \
         --command "$command" 2>/dev/null)"
       if [ -n "$out" ]; then
+        # PR #336: extend parser to capture confidence (same rationale as
+        # marker-cache parser above).
         local parsed
         parsed="$(printf '%s' "$out" | node -e '
           const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
@@ -185,16 +274,30 @@ llm_classify_command() {
               if (label && !ALLOWED.has(label)) label = ""
               const source = String(j.source || "").replace(/[\t\n\r]/g, "_")
               const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
-              process.stdout.write(`${label}\t${source}\t${root}`)
+              let conf = ""
+              if (typeof j.confidence === "number" && Number.isFinite(j.confidence) && j.confidence >= 0 && j.confidence <= 1) {
+                conf = String(j.confidence)
+              }
+              process.stdout.write(`${label}\t${source}\t${root}\t${conf}`)
             } catch { process.stdout.write("") }
           })
         ' 2>/dev/null)"
         if [ -n "$parsed" ]; then
-          local label source root
+          local label source root confidence
           label="$(printf '%s' "$parsed" | awk -F'\t' '{print $1}')"
           source="$(printf '%s' "$parsed" | awk -F'\t' '{print $2}')"
           root="$(printf '%s' "$parsed" | awk -F'\t' '{print $3}')"
-          if [ -n "$label" ] && [ "$root" = "$repo_root" ]; then
+          confidence="$(printf '%s' "$parsed" | awk -F'\t' '{print $4}')"
+          # Same canonicalization as marker-cache hit (PR #336 file 6/8 lesson).
+          local _legacy_root_canon
+          _legacy_root_canon="$(cd "$repo_root" 2>/dev/null && pwd -P)"
+          if [ -n "$label" ] && [ "$root" = "$_legacy_root_canon" ]; then
+            # PR #336: auto-persist after legacy-dispatcher hit (same
+            # fire-and-forget pattern as marker-cache hit).
+            if [ -n "$confidence" ]; then
+              __llm_classifier_autopersist "$repo_root" "$caller_cwd" "$command" \
+                "$label" "$confidence" "llm-legacy-autopersist"
+            fi
             printf '%s\tinterpreter_llm_legacy_%s\n' "$label" "$source"
             return 0
           fi
