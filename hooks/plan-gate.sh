@@ -36,7 +36,16 @@ INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)"
-[ -z "$CWD" ] && CWD="$(pwd)"
+# PR-A P1.1: empty OR relative .cwd falls back to hook process cwd. Parity
+# with checkpoint-gate.sh:56-59 PR #347 R7/P1 cwd-binding defense — relative
+# .cwd would otherwise propagate through resolve_repo_root → wrong REPO_ROOT,
+# and downstream classify_command's caller-cwd-authoritative would be
+# non-absolute (breaking marker-cache lookups). Both empty AND non-absolute
+# trigger the fallback.
+case "$CWD" in
+  /*) ;;
+  *)  CWD="$(pwd)" ;;
+esac
 
 # Source classifier + repo-root resolver + marker paths + session-id.
 # Use BASH_SOURCE so symlinked hook invocations resolve correctly.
@@ -126,7 +135,9 @@ fi
 # Classifier-driven Bash gating
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  RESULT="$(classify_command "$COMMAND" "$REPO_ROOT")"
+  # PR-A P1.1: thread parsed .cwd (absolute-normalized above) as authoritative
+  # caller cwd. See checkpoint-gate.sh:662 for rationale + codex R1 P1 evidence.
+  RESULT="$(classify_command "$COMMAND" "$REPO_ROOT" "$CWD")"
   LABEL="${RESULT%%	*}"
   REST="${RESULT#*	}"
   TARGET="${REST%%	*}"

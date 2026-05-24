@@ -652,6 +652,68 @@ _tool_call_targets_repo_source() {
   return 1
 }
 
+# PR-A P1.2: validate that `node <path>/classifier-marker.mjs ...` resolves
+# to a known canonical location. Defense against shimmed binaries
+# (`node /tmp/evil-classifier-marker.mjs --write ...` would otherwise be
+# labeled marker_write/interpreter_classifier_marker by the classifier
+# since the case-arm only matches on basename).
+#
+# Returns 0 if script path resolves to:
+#   - ~/.episodic-memory/scripts/classifier-marker.mjs (installed runtime)
+#   - <repo>/scripts/classifier-marker.mjs (repo-source)
+# Returns 1 otherwise. Caller falls through to normal gate flow (which
+# will typically block under armed checkpoint).
+#
+# Security: requires absolute path (relative paths would resolve via PATH/cwd
+# to who-knows-where). Uses _canonicalize_possibly_nonexistent which handles
+# symlinks (32-hop chain), macOS /var → /private/var, and nonexistent
+# ancestors via existence-walk. Env-prefix attack class is already rejected
+# at classifier-tier (command-classifier.sh:1718 returns unsafe_complex);
+# this helper only sees the LABEL=marker_write/REASON=interpreter_classifier_marker
+# case where env-prefix has been filtered upstream.
+_validate_classifier_marker_helper() {
+  local cmd="$1"
+  local repo_root="$2"
+  # Extract script path: first token after node|python|python3|ruby|perl.
+  # Extraction is positional — node CLI flags before the script (e.g.
+  # `node --inspect-brk script.mjs`) are NOT supported. This is symmetric
+  # with the upstream classifier dispatch at command-classifier.sh:1641
+  # which takes `${TOKS[$((idx+1))]}` as the script directly, so any node-
+  # flag-prefixed form misses both the classifier case-arm AND this
+  # validator (benign consistent miss). Basename `classifier-marker.mjs` is
+  # also exact-match — `.cjs` / `.js` variants would need extending both
+  # sites (per negative-scenario-reviewer B3 audit).
+  local script_path
+  script_path="$(printf '%s' "$cmd" | awk '{
+    for (i=1; i<=NF; i++) {
+      if ($i == "node" || $i == "python" || $i == "python3" || $i == "ruby" || $i == "perl") {
+        if (i+1 <= NF) print $(i+1)
+        exit
+      }
+    }
+  }')"
+  [ -z "$script_path" ] && return 1
+  # Require absolute path. Bare basename / ./relative could resolve to
+  # anywhere; refuse rather than disambiguate.
+  case "$script_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  local script_canon
+  script_canon="$(_canonicalize_possibly_nonexistent "$script_path")"
+  [ -z "$script_canon" ] && return 1
+  local allowed_global allowed_repo
+  allowed_global="$(_canonicalize_possibly_nonexistent "$HOME/.episodic-memory/scripts/classifier-marker.mjs")"
+  allowed_repo="$(_canonicalize_possibly_nonexistent "$repo_root/scripts/classifier-marker.mjs")"
+  if [ -n "$allowed_global" ] && [ "$script_canon" = "$allowed_global" ]; then
+    return 0
+  fi
+  if [ -n "$allowed_repo" ] && [ "$script_canon" = "$allowed_repo" ]; then
+    return 0
+  fi
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Bash classification — compute label up front for downstream gates.
 # ---------------------------------------------------------------------------
@@ -659,10 +721,25 @@ LABEL=""
 TARGET=""
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
-  RESULT="$(classify_command "$COMMAND" "$REPO_ROOT")"
+  # PR-A P1.1: thread parsed .cwd as authoritative caller cwd. $CWD is
+  # already absolute-normalized at top of file (relative/empty → $(pwd)
+  # fallback per PR #347 R7/P1). Without threading, classify_command's
+  # Tier 0 + Tier 2/3 dispatch use hook process $PWD which diverges from
+  # tool .cwd — codex R1 P1 reproduced marker miss.
+  RESULT="$(classify_command "$COMMAND" "$REPO_ROOT" "$CWD")"
   LABEL="${RESULT%%	*}"
   REST="${RESULT#*	}"
   TARGET="${REST%%	*}"
+  # PR-A P1.2: extract REASON (3rd field) for bootstrap carve-out routing.
+  # classifier-marker.mjs invocations emit `marker_write\t\tinterpreter_classifier_marker`
+  # — empty TARGET but distinguishable REASON.
+  REASON="${REST#*	}"
+  # Belt-and-suspenders trailing-newline strip. `RESULT="$(classify_command ...)"`
+  # already strips trailing newlines via bash command substitution semantics
+  # so this is a no-op on well-formed classifier output (all classifier
+  # printf calls use \n only — no CR source). Per negative-scenario-reviewer
+  # C1 audit: kept as defense against future classifier output drift.
+  REASON="${REASON%$'\n'}"
 
   # Read-only Bash → allow immediately (closes #89).
   if [ "$LABEL" = "read_only" ]; then
@@ -769,6 +846,31 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         exit 0
         ;;
     esac
+
+    # PR-A P1.2: classifier-marker.mjs bootstrap carve-out. The classifier
+    # labels `node <path>/classifier-marker.mjs --write ...` as
+    # marker_write/interpreter_classifier_marker, but the command has empty
+    # TARGET (it's not a path-writing shell verb), so the quartet checks
+    # above can't match. Without this carve-out, the deny-with-hint
+    # mechanism in PR-B would direct the agent to run classifier-marker.mjs,
+    # which would then be blocked by the pre-gate when .checkpoint-required
+    # is armed — making the hint unactionable. Codex R1 P1 reproduced this
+    # empirically (pasted marker command blocked with "Checkpoint required").
+    #
+    # Security layering:
+    #   - Env-prefix already rejected upstream (command-classifier.sh:1718
+    #     returns unsafe_complex for env-prefixed classifier-marker forms).
+    #   - Plan-pending invariant still applies (above this branch); plan-
+    #     pending blocks classifier-marker just like any other marker_write.
+    #   - Helper-identity validation here (_validate_classifier_marker_helper)
+    #     requires absolute script path resolving to canonical installed
+    #     runtime or repo-source location; shimmed `node /tmp/evil...` rejected.
+    if [ "$REASON" = "interpreter_classifier_marker" ]; then
+      if _validate_classifier_marker_helper "$COMMAND" "$REPO_ROOT"; then
+        exit 0
+      fi
+    fi
+
     # Did not satisfy a prerequisite — fall through to pre-gate as a normal
     # write. Pre-gate will block if PRE_REQ armed and PRE_DONE empty.
   fi
