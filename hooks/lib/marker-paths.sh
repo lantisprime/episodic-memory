@@ -277,3 +277,90 @@ any_preflight_marker_exists() {
   done
   return 1
 }
+
+# ---------------------------------------------------------------------------
+# Rank-2 (PR for checkpoint-quartet) — generic per-session marker contract
+# (shell parity for scripts/lib/marker-paths.mjs namespaced* helpers).
+#
+# Generic shape: given a `legacyBasename` (e.g. .checkpoint-required), the
+# per-session form is `<legacyBasename>.<sid>` where sid matches the
+# shared SUFFIX_CHARCLASS + SUFFIX_MAXLEN.
+#
+# PLAN_MARKER_* and PREFLIGHT_MARKER_* shell constants retained verbatim.
+# ---------------------------------------------------------------------------
+
+readonly NAMESPACED_MARKER_SUFFIX_CHARCLASS='A-Za-z0-9_-'
+readonly NAMESPACED_MARKER_SUFFIX_MAXLEN=128
+
+# namespaced_marker_basename_matches <legacy-basename> <candidate-basename>
+# Strict match — accepts <legacy>, <legacy>.<sid> only. Same rules as
+# plan_marker_basename_matches / preflight_marker_basename_matches but
+# parameterized over the legacy basename.
+namespaced_marker_basename_matches() {
+  local legacy="$1" basename="$2"
+  [ "$basename" = "$legacy" ] && return 0
+  case "$basename" in
+    "$legacy".*)
+      local suffix="${basename#"$legacy".}"
+      [ -z "$suffix" ] && return 1
+      [ "${#suffix}" -gt "$NAMESPACED_MARKER_SUFFIX_MAXLEN" ] && return 1
+      case "$suffix" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# namespaced_marker_basename_for_session <legacy-basename> <sid>
+# Compose <legacy>.<sid>. Caller MUST validate_session_id before calling.
+namespaced_marker_basename_for_session() {
+  printf '%s.%s' "$1" "$2"
+}
+
+# any_namespaced_marker_exists <repo-root> <legacy-basename>
+# True if <legacy> OR any <legacy>.<sid> exists at either primary or
+# legacy root. Mirrors any_plan_marker_exists / any_preflight_marker_exists.
+any_namespaced_marker_exists() {
+  local root="$1" legacy="$2"
+  [ -e "$root/$PRIMARY_MARKER_DIR/$legacy" ] && return 0
+  [ -e "$root/$LEGACY_MARKER_DIR/$legacy" ] && return 0
+  local p
+  for p in "$root/$PRIMARY_MARKER_DIR"/"$legacy".*; do
+    [ -e "$p" ] || continue
+    local bn="${p##*/}"
+    namespaced_marker_basename_matches "$legacy" "$bn" && return 0
+  done
+  for p in "$root/$LEGACY_MARKER_DIR"/"$legacy".*; do
+    [ -e "$p" ] || continue
+    local bn="${p##*/}"
+    namespaced_marker_basename_matches "$legacy" "$bn" && return 0
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Rank-2 — checkpoint quartet constants (shell parity).
+#
+# The 4 markers whose cross-session bleed motivated this PR.
+# Diagnosis: 20260523-080453-diagnosis-multi-session-checkpoint-marke-08ec
+# ---------------------------------------------------------------------------
+
+CHECKPOINT_QUARTET=(
+  ".checkpoint-required"
+  ".post-checkpoint-required"
+  ".pre-checkpoint-done"
+  ".post-checkpoint-done"
+)
+
+# is_checkpoint_quartet_basename <basename>
+# True iff $basename is one of the 4 quartet markers in legacy or
+# per-session form. O(N) over the 4-member array (cheap).
+is_checkpoint_quartet_basename() {
+  local basename="$1" m
+  for m in "${CHECKPOINT_QUARTET[@]}"; do
+    namespaced_marker_basename_matches "$m" "$basename" && return 0
+  done
+  return 1
+}

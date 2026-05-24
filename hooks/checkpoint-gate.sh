@@ -68,10 +68,24 @@ source "$LIB_DIR/session-id.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 
-# Canonical WRITE paths (always primary). Used in block-message paths so the
-# agent knows where to write the checkpoint block.
-PRE_DONE_W="$(write_marker_path "$REPO_ROOT" .pre-checkpoint-done)"
-POST_DONE_W="$(write_marker_path "$REPO_ROOT" .post-checkpoint-done)"
+# Canonical WRITE paths. Used in block-message paths so the agent knows
+# where to write the checkpoint block.
+#
+# Rank-2 C6 (atomic with classifier extensions): when MY_SID is valid,
+# emit suffixed paths `.X.<sid>` so each session writes to its own marker.
+# The classifier now recognizes `.pre-checkpoint-done.*` and
+# `.post-checkpoint-done.*` as marker_write in redirect/rm/tee/touch/
+# classify_path case-arms — atomic-slice contract satisfied.
+#
+# When sid is invalid/empty, fall back to legacy literal (graceful
+# degrade — preserves pre-rank-2 behavior for old hook installs).
+if validate_session_id "$MY_SID"; then
+  PRE_DONE_W="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .pre-checkpoint-done "$MY_SID")")"
+  POST_DONE_W="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-done "$MY_SID")")"
+else
+  PRE_DONE_W="$(write_marker_path "$REPO_ROOT" .pre-checkpoint-done)"
+  POST_DONE_W="$(write_marker_path "$REPO_ROOT" .post-checkpoint-done)"
+fi
 PLAN_PENDING_W="$(write_marker_path "$REPO_ROOT" .plan-approval-pending)"
 
 PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
@@ -88,6 +102,45 @@ marker_exists() {
 # marker_nonempty <basename> — true if either root's copy is non-empty.
 marker_nonempty() {
   [ -s "$PRIMARY_DIR/$1" ] || [ -s "$LEGACY_DIR/$1" ]
+}
+
+# Rank-2 (PR for checkpoint-quartet) — session-aware sibling of marker_exists.
+# Returns 0 (true) if the marker exists at any of:
+#   <root>/.checkpoints/<legacy>.<sid>          (own session, primary)
+#   <root>/.claude/<legacy>.<sid>               (own session, legacy)
+#   <root>/.checkpoints/<legacy>                (legacy literal, primary)
+#   <root>/.claude/<legacy>                     (legacy literal, legacy root)
+# Cross-session suffixed markers (`<legacy>.<OTHER_SID>`) are IGNORED.
+# Invalid/empty sid → only legacy literal forms are checked.
+#
+# Pair with marker_nonempty_for_session() for `.X-done` size-based checks.
+checkpoint_marker_exists_for_session() {
+  local legacy="$1" sid="$2"
+  [ -e "$PRIMARY_DIR/$legacy" ] && return 0
+  [ -e "$LEGACY_DIR/$legacy" ] && return 0
+  if validate_session_id "$sid"; then
+    local basename
+    basename="$(namespaced_marker_basename_for_session "$legacy" "$sid")"
+    [ -e "$PRIMARY_DIR/$basename" ] && return 0
+    [ -e "$LEGACY_DIR/$basename" ] && return 0
+  fi
+  return 1
+}
+
+# Rank-2 — session-aware sibling of marker_nonempty. Tests own-session-or-
+# legacy-literal forms for non-empty size. Other sessions' suffixed
+# markers IGNORED.
+checkpoint_marker_nonempty_for_session() {
+  local legacy="$1" sid="$2"
+  [ -s "$PRIMARY_DIR/$legacy" ] && return 0
+  [ -s "$LEGACY_DIR/$legacy" ] && return 0
+  if validate_session_id "$sid"; then
+    local basename
+    basename="$(namespaced_marker_basename_for_session "$legacy" "$sid")"
+    [ -s "$PRIMARY_DIR/$basename" ] && return 0
+    [ -s "$LEGACY_DIR/$basename" ] && return 0
+  fi
+  return 1
 }
 # marker_basename_for_target <abs-path> — echoes the basename if the TARGET
 # matches an EXACT authoritative marker path at either root (primary or
@@ -113,6 +166,26 @@ marker_basename_for_target() {
   case "$target_basename" in
     .plan-approval-pending.*)
       if plan_marker_basename_matches "$target_basename"; then
+        if [ "$target_dir" = "$PRIMARY_DIR" ] || [ "$target_dir" = "$LEGACY_DIR" ]; then
+          printf '%s' "$target_basename"
+          return 0
+        fi
+      fi
+      ;;
+    # Rank-2: per-session checkpoint quartet basenames at either root.
+    # Strict-validate via namespaced_marker_basename_matches per quartet
+    # member (rejects path traversal / oversize / invalid chars). The
+    # narrower allow-target set here is intentionally limited to
+    # .pre/.post-checkpoint-done (the two CONTENT-bearing markers an
+    # agent writes); .checkpoint-required / .post-checkpoint-required are
+    # gate-armed only, not agent-written.
+    .pre-checkpoint-done.*|.post-checkpoint-done.*)
+      local legacy_basename
+      case "$target_basename" in
+        .pre-checkpoint-done.*)  legacy_basename=.pre-checkpoint-done ;;
+        .post-checkpoint-done.*) legacy_basename=.post-checkpoint-done ;;
+      esac
+      if namespaced_marker_basename_matches "$legacy_basename" "$target_basename"; then
         if [ "$target_dir" = "$PRIMARY_DIR" ] || [ "$target_dir" = "$LEGACY_DIR" ]; then
           printf '%s' "$target_basename"
           return 0
@@ -192,6 +265,13 @@ _marker_basename_in_set() {
     # Sibling of plan-approval-pending; loose glob, strict validation
     # via preflight_marker_basename_matches happens at gate layer.
     .preflight-done.*) return 0 ;;
+    # Rank-2 (closes #341): per-session checkpoint quartet basenames.
+    # Same parity as plan-marker/preflight-marker. Needed for the
+    # wrong-root detection path (_command_first_absolute_noncanonical_marker)
+    # to fire `_block_wrong_root_marker` on `mv`/`cp`/`install`/`dd of=`
+    # to a non-canonical absolute path with suffixed quartet basename.
+    # Reviewer: rank-2 negative-scenario-reviewer F1.
+    .pre-checkpoint-done.*|.post-checkpoint-done.*|.checkpoint-required.*|.post-checkpoint-required.*) return 0 ;;
   esac
   return 1
 }
@@ -263,7 +343,7 @@ _escape_bash_glob() {
 _command_has_relative_marker_path() {
   local cmd_stripped
   cmd_stripped="$(_strip_shell_quotes "$1")"
-  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
+  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done(\.[A-Za-z0-9_-]{1,128})?|\.post-checkpoint-done(\.[A-Za-z0-9_-]{1,128})?|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required(\.[A-Za-z0-9_-]{1,128})?|\.post-checkpoint-required(\.[A-Za-z0-9_-]{1,128})?|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
 }
 
 # Absolute-non-canonical detection: for Bash commands where the classifier
@@ -523,18 +603,30 @@ if [ "$TOOL_NAME" = "Bash" ]; then
       fi
       _block_plan_pending
     fi
+    # Rank-2: quartet pre-requisite checks are session-aware. Marker
+    # existence/non-empty for the 4 quartet members uses own-session-or-
+    # legacy reads — other sessions' suffixed markers don't satisfy this
+    # session's prerequisite. (Plan-marker case unchanged — uses its own
+    # session-aware predicate plan_pending_blocks_this_session above.)
+    #
+    # The strict-suffix recognition in marker_basename_for_target maps
+    # `.X.<sid>` to its legacy form for case routing here; the existence
+    # check then re-uses checkpoint_marker_exists_for_session which
+    # handles both own-suffixed AND legacy literal forms.
     case "$TARGET_BN" in
-      .pre-checkpoint-done)
-        if marker_exists .checkpoint-required && ! marker_nonempty .pre-checkpoint-done; then
+      .pre-checkpoint-done|.pre-checkpoint-done.*)
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
           exit 0
         fi
         ;;
-      .post-checkpoint-done)
-        if marker_exists .post-checkpoint-required && ! marker_nonempty .post-checkpoint-done; then
+      .post-checkpoint-done|.post-checkpoint-done.*)
+        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+           && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
           exit 0
         fi
         ;;
-      .plan-approval-pending)
+      .plan-approval-pending|.plan-approval-pending.*)
         exit 0
         ;;
     esac
@@ -584,18 +676,22 @@ case "$TOOL_NAME" in
            && [ "$TARGET_BN" != "$own_session_basename" ]; then
           _block_plan_pending
         fi
+        # Rank-2: session-aware quartet prerequisite check (Edit/Write
+        # branch — same logic as the Bash branch above).
         case "$TARGET_BN" in
-          .pre-checkpoint-done)
-            if marker_exists .checkpoint-required && ! marker_nonempty .pre-checkpoint-done; then
+          .pre-checkpoint-done|.pre-checkpoint-done.*)
+            if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+               && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
               exit 0
             fi
             ;;
-          .post-checkpoint-done)
-            if marker_exists .post-checkpoint-required && ! marker_nonempty .post-checkpoint-done; then
+          .post-checkpoint-done|.post-checkpoint-done.*)
+            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+               && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
               exit 0
             fi
             ;;
-          .plan-approval-pending)
+          .plan-approval-pending|.plan-approval-pending.*)
             exit 0
             ;;
         esac
@@ -604,7 +700,10 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-if marker_exists .checkpoint-required && ! marker_nonempty .pre-checkpoint-done; then
+# Rank-2: pre-gate read is session-aware. Own-session marker OR legacy
+# literal triggers the block; other sessions' suffixed markers do not.
+if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+   && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
   _block_pre
 fi
 
@@ -612,7 +711,9 @@ fi
 # Push-gate: only fires for Bash classified as push_or_pr_create.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
-  if marker_exists .post-checkpoint-required && ! marker_nonempty .post-checkpoint-done; then
+  # Rank-2: session-aware post-checkpoint check.
+  if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+     && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
     _block_post
   fi
   # Audit P1: marker cleanup is gated on plan-gate not pending. PreToolUse
@@ -629,8 +730,18 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   # #268 fix E17: session-aware check — only cleanup if THIS session has
   # no plan-pending. Other sessions' suffixed markers do not block cleanup.
   if ! plan_pending_blocks_this_session "$MY_SID"; then
+    # Rank-2: sweep BOTH legacy literal AND ALL suffixed forms `<X>.<*>` at
+    # both roots. push is the convergence moment — all sessions' progress
+    # rolls up. Cross-session orphans from crashed sessions also get
+    # cleared here.
     for _m in "${CHECKPOINT_CLEANUP_MARKERS[@]}"; do
+      # Legacy literal at both roots.
       rm -f "$PRIMARY_DIR/$_m" "$LEGACY_DIR/$_m" 2>/dev/null || true
+      # Suffixed forms `<X>.<*>` at both roots.
+      # shellcheck disable=SC2086
+      rm -f "$PRIMARY_DIR"/$_m.* 2>/dev/null || true
+      # shellcheck disable=SC2086
+      rm -f "$LEGACY_DIR"/$_m.* 2>/dev/null || true
     done
     unset _m
   fi
@@ -644,9 +755,34 @@ fi
 # ---------------------------------------------------------------------------
 case "$TOOL_NAME" in
   Edit|Write|MultiEdit|Bash|NotebookEdit)
-    if marker_exists .checkpoint-required && marker_nonempty .pre-checkpoint-done; then
+    # Rank-2: session-aware existence/nonempty checks for the post-write
+    # arming. Per codex plan-tier R2 P2: helper invocation is best-effort
+    # (|| true), pre-validated sid; non-zero exit must NOT abort the hook
+    # under set -e. Falls back to legacy direct touch when sid is invalid
+    # (graceful degrade — preserves pre-rank-2 behavior for back-compat).
+    if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+       && checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
       ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
-      touch "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)" 2>/dev/null || true
+      if validate_session_id "$MY_SID"; then
+        # Prefer helper for unified marker_write classification + atomic write.
+        # CLAUDE_CODE_SESSION_ID is exported to the helper subprocess via the
+        # hook's inherited env (claude code sets it for all hooks).
+        HELPER_CKM="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+        if [ -f "$HELPER_CKM" ]; then
+          CLAUDE_CODE_SESSION_ID="$MY_SID" node "$HELPER_CKM" \
+            --target .post-checkpoint-required \
+            --action arm-if-missing \
+            --root "$REPO_ROOT" >/dev/null 2>&1 || true
+        else
+          # Fallback: direct write when helper not installed.
+          touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")" 2>/dev/null || true
+        fi
+      else
+        # Invalid/empty sid: legacy direct touch (preserves pre-rank-2
+        # behavior; gate inactive for own-session checks but legacy literal
+        # still works for old hooks).
+        touch "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)" 2>/dev/null || true
+      fi
     fi
     ;;
 esac

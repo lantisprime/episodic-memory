@@ -237,6 +237,129 @@ export function preflightMarkerBasenameForSession(sid) {
 }
 
 // ---------------------------------------------------------------------------
+// Rank-2 (PR for checkpoint-quartet) — generic per-session marker contract.
+//
+// Third sibling of PLAN_MARKER_* (#268 / PR #271) and PREFLIGHT_MARKER_*
+// (#279 / sibling PR). Codex DP-1 (plan v4): factor the namespaced-marker
+// helpers instead of a fourth copy-paste of the per-marker block.
+//
+// Generic contract — given a `legacyBasename` (e.g. `.checkpoint-required`),
+// the per-session form is `<legacyBasename>.<sid>` where sid matches the
+// shared SUFFIX_CHARCLASS + SUFFIX_MAXLEN.
+//
+// PLAN_MARKER_* and PREFLIGHT_MARKER_* retained verbatim for back-compat
+// with their existing callers and validator registry; new markers should
+// use these generic helpers.
+// ---------------------------------------------------------------------------
+
+export const NAMESPACED_MARKER_SUFFIX_CHARCLASS = 'A-Za-z0-9_-'
+export const NAMESPACED_MARKER_SUFFIX_MAXLEN = 128
+
+/**
+ * Strict match for namespaced marker basenames. Accepts ONLY:
+ *   <legacyBasename>                                (legacy suffix-less)
+ *   <legacyBasename>.<sid>                          (sid matches char-class + length)
+ * Rejects:
+ *   <legacyBasename>-extra                          (suffix without dot separator)
+ *   <legacyBasename>.                               (empty suffix)
+ *   <legacyBasename>./traversal                     (slash in suffix)
+ *   <legacyBasename>..                              (dot in suffix)
+ *   <legacyBasename>.<129-char>                     (oversize suffix)
+ *
+ * Mirrors the strict-match shape of planMarkerBasenameMatches() and
+ * preflightMarkerBasenameMatches(); generalizes by accepting the legacy
+ * basename as a parameter.
+ *
+ * @param {string} legacyBasename — the unsuffixed marker name (e.g. '.checkpoint-required')
+ * @param {string} candidate — the basename to test
+ * @returns {boolean}
+ */
+export function namespacedMarkerBasenameMatches(legacyBasename, candidate) {
+  if (typeof candidate !== 'string' || typeof legacyBasename !== 'string') return false
+  if (candidate === legacyBasename) return true
+  const prefix = `${legacyBasename}.`
+  if (!candidate.startsWith(prefix)) return false
+  const suffix = candidate.slice(prefix.length)
+  if (suffix.length === 0) return false
+  if (suffix.length > NAMESPACED_MARKER_SUFFIX_MAXLEN) return false
+  const re = new RegExp(`^[${NAMESPACED_MARKER_SUFFIX_CHARCLASS}]+$`)
+  return re.test(suffix)
+}
+
+/**
+ * Compose the per-session marker basename for a given legacy basename + sid.
+ * Caller MUST validateSessionId(sid) first; this helper does not re-validate.
+ *
+ * @param {string} legacyBasename — the unsuffixed marker name
+ * @param {string} sid — valid session-id
+ * @returns {string} `<legacyBasename>.<sid>`
+ */
+export function namespacedMarkerBasenameForSession(legacyBasename, sid) {
+  return `${legacyBasename}.${sid}`
+}
+
+/**
+ * True if ANY namespaced marker for the given legacy basename exists at
+ * either primary or legacy marker dir under <repoRoot>. Accepts both:
+ *   <root>/<.checkpoints|.claude>/<legacyBasename>            (legacy literal)
+ *   <root>/<.checkpoints|.claude>/<legacyBasename>.<sid>      (any sid)
+ *
+ * Mirrors anyPlanMarkerExists / any_preflight_marker_exists semantics for
+ * an arbitrary legacy basename.
+ *
+ * @param {string} repoRoot
+ * @param {string} legacyBasename
+ * @returns {boolean}
+ */
+export function anyNamespacedMarkerExists(repoRoot, legacyBasename) {
+  if (fs.existsSync(path.join(repoRoot, PRIMARY_MARKER_DIR, legacyBasename))) return true
+  if (fs.existsSync(path.join(repoRoot, LEGACY_MARKER_DIR, legacyBasename))) return true
+  const prefix = `${legacyBasename}.`
+  for (const dir of [path.join(repoRoot, PRIMARY_MARKER_DIR), path.join(repoRoot, LEGACY_MARKER_DIR)]) {
+    let entries
+    try { entries = fs.readdirSync(dir) } catch { continue }
+    for (const name of entries) {
+      if (!name.startsWith(prefix)) continue
+      if (namespacedMarkerBasenameMatches(legacyBasename, name)) return true
+    }
+  }
+  return false
+}
+
+// ---------------------------------------------------------------------------
+// Rank-2 — checkpoint quartet constants.
+//
+// The 4 markers whose cross-session bleed motivated this PR. Per-session
+// namespaced via the generic helpers above.
+//
+// Diagnosis episode: 20260523-080453-diagnosis-multi-session-checkpoint-marke-08ec
+// Plan: scratch/rank2-checkpoint-quartet-plan-v4.md (codex R4 ACCEPT).
+// ---------------------------------------------------------------------------
+
+export const CHECKPOINT_QUARTET = Object.freeze([
+  '.checkpoint-required',
+  '.post-checkpoint-required',
+  '.pre-checkpoint-done',
+  '.post-checkpoint-done',
+])
+
+// Strict regex spanning all 4 quartet members with optional .<sid> suffix.
+// Used by the classifier + validator to match any quartet marker basename
+// in a single test. Anchored; no traversal characters in the sid class.
+export const CHECKPOINT_QUARTET_RE = /^\.(checkpoint-required|post-checkpoint-required|pre-checkpoint-done|post-checkpoint-done)(\.[A-Za-z0-9_-]{1,128})?$/
+
+/**
+ * True iff `basename` is one of the 4 quartet marker basenames in legacy
+ * or per-session form.
+ *
+ * @param {string} basename
+ * @returns {boolean}
+ */
+export function isCheckpointQuartetBasename(basename) {
+  return typeof basename === 'string' && CHECKPOINT_QUARTET_RE.test(basename)
+}
+
+// ---------------------------------------------------------------------------
 // Enforcement-site registry — single source of truth for the validator.
 //
 // Every place in the codebase that recognizes, gates, iterates, or otherwise

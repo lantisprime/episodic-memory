@@ -31,11 +31,14 @@ import {
   resolveMarkerRead,
   writeMarkerPath,
   ensurePrimaryDir,
-  bothMarkerPaths
+  bothMarkerPaths,
+  namespacedMarkerBasenameForSession,
+  CHECKPOINT_QUARTET,
 } from './lib/marker-paths.mjs'
 import {
   _maxMtimeAcrossRootsStrict,
   _maxMtimeAcrossRootsForPlanMarkerStrict,
+  _maxMtimeAcrossRootsForCheckpointMarkerOwnSessionStrict,
 } from './lib/stop-gate-helpers.mjs'
 import { validateSessionId } from './lib/session-id.mjs'
 
@@ -66,18 +69,18 @@ const gateFlag = flag('--gate')
 const sessionStartFlag = argv.includes('--session-start')
 
 // --session-id <sid> — bound from SessionStart stdin `.session_id` via the
-// hook wrapper (em-recall-sessionstart.sh). Logging-only in v6 sweep: NOT
-// used to gate any sweep decision. Reserved for forward-compat with future
-// operator-cleanup tooling. Validation: per codex R2 Q3, missing/invalid
-// emits stderr warning, does NOT exit non-zero (hook reliability outweighs
-// strict contract).
+// hook wrapper (em-recall-sessionstart.sh) AND from stop-gate.sh wrapper
+// (rank-2 C5). Used to scope stop-gate carve-out and the per-session
+// quartet arming. Validation: missing/invalid emits stderr warning and
+// falls back to legacy-literal-only mode (hook reliability outweighs
+// strict contract per codex R2 Q3).
 const sessionIdFlag = flag('--session-id')
 let mySid = null
 if (sessionIdFlag !== undefined) {
   if (sessionIdFlag !== '' && validateSessionId(sessionIdFlag)) {
     mySid = sessionIdFlag
   } else if (sessionIdFlag !== '') {
-    process.stderr.write(`em-recall: warn — --session-id "${sessionIdFlag}" failed validateSessionId; treating as missing (no functional impact in v6 sweep)\n`)
+    process.stderr.write(`em-recall: warn — --session-id "${sessionIdFlag}" failed validateSessionId; legacy-literal-only mode\n`)
   }
 }
 
@@ -225,17 +228,60 @@ function _maxMtimeAcrossRootsForPlanMarker(repoRoot) {
   return { mtime, hadSymlink, anyExisted }
 }
 
-function stopGateCarveOutApplies(repoRoot) {
+// Rank-2: resolve a session-aware marker read. Resolution order:
+//   1. <root>/.checkpoints/<legacy>.<sid>     (own-session, primary)
+//   2. <root>/.claude/<legacy>.<sid>          (own-session, legacy root)
+//   3. <root>/.checkpoints/<legacy>           (legacy literal, primary)
+//   4. <root>/.claude/<legacy>                (legacy literal, legacy root)
+//
+// Returns the first existing path or null. Other sessions' suffixed
+// markers are intentionally NOT probed — own-session semantic per
+// rank-2 plan §3 trust model.
+//
+// When sid is null/empty, only steps 3-4 are tried (legacy-literal-only
+// fallback for invalid/missing sid). Symlink-aware via fs.existsSync
+// (which follows links); callers needing symlink-fail-closed must
+// re-check with lstatSync.
+function resolveOwnSessionMarkerRead(repoRoot, legacyBasename, sid) {
+  if (sid) {
+    const ownBasename = namespacedMarkerBasenameForSession(legacyBasename, sid)
+    const ownPrimary = primaryMarkerPath(repoRoot, ownBasename)
+    if (fs.existsSync(ownPrimary)) return ownPrimary
+    const ownLegacy = legacyMarkerPath(repoRoot, ownBasename)
+    if (fs.existsSync(ownLegacy)) return ownLegacy
+  }
+  const litPrimary = primaryMarkerPath(repoRoot, legacyBasename)
+  if (fs.existsSync(litPrimary)) return litPrimary
+  const litLegacy = legacyMarkerPath(repoRoot, legacyBasename)
+  if (fs.existsSync(litLegacy)) return litLegacy
+  return null
+}
+
+function stopGateCarveOutApplies(repoRoot, sid) {
   const base = _maxMtimeAcrossRoots(repoRoot, BASELINE_NAME)
   if (base.hadSymlink) return false
   if (!base.anyExisted) return false
   const baselineMtime = base.mtime
 
   for (const name of TASK_SIGNAL_MARKERS) {
-    // #268 fix E19: plan-marker member glob-expands suffixed forms.
-    const m = (name === PLAN_MARKER_LEGACY_BASENAME)
-      ? _maxMtimeAcrossRootsForPlanMarker(repoRoot)
-      : _maxMtimeAcrossRoots(repoRoot, name)
+    let m
+    if (name === PLAN_MARKER_LEGACY_BASENAME) {
+      // #268 fix E19: plan-marker member glob-expands suffixed forms
+      // (cross-session — plan-pending deferral is global-by-design).
+      m = _maxMtimeAcrossRootsForPlanMarker(repoRoot)
+    } else if (CHECKPOINT_QUARTET.includes(name)) {
+      // Rank-2 (codex R2 P1-B + R4 ACCEPT): quartet carve-out is
+      // OWN-SESSION-ONLY — read own `<name>.<sid>` + legacy literal,
+      // NEVER other sessions' suffixed forms. Cross-session safety is
+      // delegated to SessionStart's force-monotonic baseline probe.
+      // Strict catch (R2 P2): non-ENOENT errors fail closed.
+      const strict = _maxMtimeAcrossRootsForCheckpointMarkerOwnSessionStrict(
+        repoRoot, name, sid)
+      if (strict.hadOtherError) return false
+      m = strict
+    } else {
+      m = _maxMtimeAcrossRoots(repoRoot, name)
+    }
     // Symlink at either root → fail closed.
     if (m.hadSymlink) return false
     // Marker absent at both roots → no signal; skip.
@@ -290,19 +336,31 @@ if (gateFlag === 'stop') {
     process.exit(0)
   }
 
-  // Dual-root .checkpoints/ migration: PRE_REQ existence is checked at
-  // EITHER root (resolveMarkerRead returns the path of whichever exists,
-  // primary preferred). POST_DONE non-empty check uses the resolved path.
-  // The carve-out helper handles both roots internally.
-  const preReqPath = resolveMarkerRead(REPO_ROOT, '.checkpoint-required')
-  const postDonePath = resolveMarkerRead(REPO_ROOT, '.post-checkpoint-done')
+  // Rank-2: session-aware reads. Resolution order for each quartet member:
+  //   1. <root>/.checkpoints/<name>.<mySid>
+  //   2. <root>/.claude/<name>.<mySid>
+  //   3. <root>/.checkpoints/<name>      (legacy literal, burn-in)
+  //   4. <root>/.claude/<name>           (legacy literal, burn-in)
+  //
+  // When mySid is null (invalid/missing sid), only steps 3-4 are checked
+  // (graceful degrade per codex R2 Q3: hook reliability outweighs strict
+  // contract). Other sessions' suffixed markers are intentionally NOT
+  // probed — own-session carve-out semantic.
+  const preReqPath = resolveOwnSessionMarkerRead(REPO_ROOT, '.checkpoint-required', mySid)
+  const postDonePath = resolveOwnSessionMarkerRead(REPO_ROOT, '.post-checkpoint-done', mySid)
   let postDoneSize = 0
   if (postDonePath) {
     try { postDoneSize = fs.statSync(postDonePath).size } catch {}
   }
   if (preReqPath && postDoneSize === 0) {
-    if (!stopGateCarveOutApplies(REPO_ROOT)) {
-      const writePath = writeMarkerPath(REPO_ROOT, '.post-checkpoint-done')
+    if (!stopGateCarveOutApplies(REPO_ROOT, mySid)) {
+      // Block-message path: emit suffixed write path when sid is valid;
+      // legacy literal otherwise. Agent's block-write goes to the suffixed
+      // path via checkpoint-marker.mjs helper or direct Write.
+      const writeBasename = mySid
+        ? namespacedMarkerBasenameForSession('.post-checkpoint-done', mySid)
+        : '.post-checkpoint-done'
+      const writePath = writeMarkerPath(REPO_ROOT, writeBasename)
       const reason = `Post-implementation checkpoint required. Write the Rule 18 post-implementation checkpoint block to ${writePath} (must be non-empty), then end your turn again. Hook: stop-gate.sh.`
       console.log(JSON.stringify({ decision: 'block', reason }))
     }
@@ -565,12 +623,31 @@ function resolveProjectName(projectRoot, { ignoreOverride = false, fast = false 
 // at .claude/, it's still honored by readers via resolveMarkerRead during
 // burn-in. So "armed" here is satisfied if EITHER root has the marker.
 // ---------------------------------------------------------------------------
-function armCheckpointMarker(repoRoot) {
+// Rank-2: per-session arming. Writes `.checkpoint-required.<sid>` if
+// neither own-session nor legacy literal exists at either root. Sid is
+// REQUIRED — when missing/invalid, this falls back to legacy-literal-
+// only write at the primary root (preserves pre-rank-2 behavior for
+// graceful degrade per codex R2 Q3).
+//
+// Mirrors checkpoint-marker.mjs actionArmIfMissing semantics: no-op when
+// own-session OR legacy exists; never suppresses on OTHER sessions'
+// suffixed markers (codex C2 R1 P1 fix).
+function armCheckpointMarkerForSession(repoRoot, sid) {
   try {
-    // Already armed at either root → no-op.
-    if (resolveMarkerRead(repoRoot, '.checkpoint-required')) return
+    // Build the no-op-acceptable set: own-session (if sid) + legacy literal.
+    if (sid) {
+      const ownBasename = namespacedMarkerBasenameForSession('.checkpoint-required', sid)
+      if (fs.existsSync(primaryMarkerPath(repoRoot, ownBasename))) return
+      if (fs.existsSync(legacyMarkerPath(repoRoot, ownBasename))) return
+    }
+    if (fs.existsSync(primaryMarkerPath(repoRoot, '.checkpoint-required'))) return
+    if (fs.existsSync(legacyMarkerPath(repoRoot, '.checkpoint-required'))) return
+
     ensurePrimaryDir(repoRoot)
-    fs.writeFileSync(writeMarkerPath(repoRoot, '.checkpoint-required'), '')
+    const writeBasename = sid
+      ? namespacedMarkerBasenameForSession('.checkpoint-required', sid)
+      : '.checkpoint-required'
+    fs.writeFileSync(writeMarkerPath(repoRoot, writeBasename), '')
   } catch {
     // Best-effort: marker creation failure leaves Phase 3b gate inactive
     // for this session.
@@ -717,13 +794,13 @@ if (sessionStartFlag) {
 // blocks write tools, so the false-positive surface is bounded.
 // ---------------------------------------------------------------------------
 // Bind arming-time project name to REPO_ROOT (NOT process.cwd() and NOT the
-// --project override). This pairs with armCheckpointMarker(REPO_ROOT) below
-// so the project identity used to scope violations matches the marker write
+// --project override). This pairs with armCheckpointMarkerForSession(REPO_ROOT, mySid)
+// below so the project identity used to scope violations matches the marker write
 // authority root. Closes the cross-project bleed where violations in one
 // project armed checkpoint gates in every other project at SessionStart.
 const armingProject = resolveProjectName(REPO_ROOT, { ignoreOverride: true, fast: true })
 if (shouldArmBp001Checkpoint(activeEntries, new Date(), armingProject)) {
-  armCheckpointMarker(REPO_ROOT)
+  armCheckpointMarkerForSession(REPO_ROOT, mySid)
 }
 
 // ---------------------------------------------------------------------------
@@ -761,10 +838,19 @@ if (sessionStartFlag) {
   try {
     ensurePrimaryDir(REPO_ROOT)
 
-    // Probe checkpoint marker mtimes across BOTH roots (dual-root burn-in).
-    // Plan-marker excluded — PR #314 contract handles plan-approval lifecycle.
+    // Probe checkpoint task-signal marker mtimes across BOTH roots
+    // (dual-root burn-in). Plan-marker excluded — PR #314 contract handles
+    // plan-approval lifecycle.
+    //
+    // Rank-2: glob-expand suffixed forms `.X.<*>` CROSS-SESSION. The
+    // baseline must dominate all sessions' suffixed markers so any
+    // session's stop-gate carve-out + push-gate cleanup remains valid.
+    // This is the cross-session safety mechanism for the quartet
+    // (own-session reads handle the rest at stop-gate time).
     let maxCheckpointMarkerMs = 0
-    for (const name of ['.checkpoint-required', '.post-checkpoint-required']) {
+    const taskSignalQuartet = ['.checkpoint-required', '.post-checkpoint-required']
+    for (const name of taskSignalQuartet) {
+      // Legacy literal at both roots.
       for (const p of bothMarkerPaths(REPO_ROOT, name)) {
         try {
           const st = fs.lstatSync(p)
@@ -775,6 +861,32 @@ if (sessionStartFlag) {
         } catch (e) {
           if (e.code !== 'ENOENT') {
             process.stderr.write(`em-recall: baseline-monotonic-probe skipped ${p}: ${e.code || e.message}\n`)
+          }
+        }
+      }
+      // Cross-session glob-expand `<name>.<*>` at both roots.
+      const prefix = `${name}.`
+      for (const dir of [path.join(REPO_ROOT, PRIMARY_MARKER_DIR), path.join(REPO_ROOT, LEGACY_MARKER_DIR)]) {
+        let entries
+        try { entries = fs.readdirSync(dir) } catch (e) {
+          if (e.code !== 'ENOENT') {
+            process.stderr.write(`em-recall: baseline-monotonic-probe readdir skipped ${dir}: ${e.code || e.message}\n`)
+          }
+          continue
+        }
+        for (const ent of entries) {
+          if (!ent.startsWith(prefix)) continue
+          const p = path.join(dir, ent)
+          try {
+            const st = fs.lstatSync(p)
+            if (st.isSymbolicLink()) continue
+            if (st.mtimeMs > maxCheckpointMarkerMs) {
+              maxCheckpointMarkerMs = st.mtimeMs
+            }
+          } catch (e) {
+            if (e.code !== 'ENOENT') {
+              process.stderr.write(`em-recall: baseline-monotonic-probe skipped ${p}: ${e.code || e.message}\n`)
+            }
           }
         }
       }

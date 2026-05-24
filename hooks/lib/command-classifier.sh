@@ -1075,6 +1075,26 @@ _classify_segment() {
         printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
         return 0
         ;;
+      # Rank-2: per-session checkpoint-done markers via redirect. Siblings
+      # of the .plan-approval-pending.* / .preflight-done.* arms above.
+      # Loose glob; strict validation via namespaced_marker_basename_matches
+      # at gate layer (checkpoint-gate.sh marker_basename_for_target).
+      .pre-checkpoint-done.*|.post-checkpoint-done.*)
+        local abs_target
+        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
+        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
+        return 0
+        ;;
+      # Rank-2: per-session checkpoint-required markers via redirect (hook
+      # arming surface; agents do not write these directly under normal
+      # flow, but classifying as marker_write lets the helper-invocation
+      # path go through the same gate validation).
+      .checkpoint-required.*|.post-checkpoint-required.*)
+        local abs_target
+        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
+        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
+        return 0
+        ;;
       .so-runbook-shown.*)
         # Runbook UX-marker (second-opinion-gate). Same-class with the
         # other marker write surfaces; classifies as marker_write so the
@@ -1297,6 +1317,14 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
           return 0
           ;;
+        # Rank-2: per-session checkpoint quartet markers via rm. SessionEnd
+        # cleanup + push-gate sweep use rm at canonical root for these.
+        .pre-checkpoint-done.*|.post-checkpoint-done.*|.checkpoint-required.*|.post-checkpoint-required.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "rm_marker"
+          return 0
+          ;;
         .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
@@ -1356,6 +1384,13 @@ _classify_segment() {
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
           return 0
           ;;
+        # Rank-2: per-session checkpoint quartet markers via tee.
+        .pre-checkpoint-done.*|.post-checkpoint-done.*|.checkpoint-required.*|.post-checkpoint-required.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "tee_marker"
+          return 0
+          ;;
         .last-user-prompt.*.json)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
@@ -1405,6 +1440,13 @@ _classify_segment() {
           ;;
         # #279 fix: per-session preflight-marker via touch.
         .preflight-done.*)
+          local abs_target
+          abs_target="$(_resolve_marker_path "$t" "$target_root")"
+          printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
+          return 0
+          ;;
+        # Rank-2: per-session checkpoint quartet markers via touch.
+        .pre-checkpoint-done.*|.post-checkpoint-done.*|.checkpoint-required.*|.post-checkpoint-required.*)
           local abs_target
           abs_target="$(_resolve_marker_path "$t" "$target_root")"
           printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "touch_marker"
@@ -2197,6 +2239,17 @@ classify_path() {
       ;;
     # #268 fix E5: per-session plan-marker via classify_path (Write/Edit).
     .plan-approval-pending.*)
+      local abs
+      abs="$(_resolve_marker_path "$p" "$repo_root")"
+      printf '%s\t%s\t%s\n' "marker_write" "$abs" "path_marker"
+      return 0
+      ;;
+    # Rank-2: per-session checkpoint-done markers via classify_path. Narrow
+    # to .pre/.post-checkpoint-done (content-bearing agent-writable markers
+    # only — .checkpoint-required / .post-checkpoint-required are gate-armed
+    # via Bash touch, not Write/Edit, so they don't need classify_path
+    # recognition).
+    .pre-checkpoint-done.*|.post-checkpoint-done.*)
       local abs
       abs="$(_resolve_marker_path "$p" "$repo_root")"
       printf '%s\t%s\t%s\n' "marker_write" "$abs" "path_marker"
