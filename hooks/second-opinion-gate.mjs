@@ -351,12 +351,16 @@ async function main() {
       const mod = await import(new URL('./lib/so-timeout-floor.mjs', import.meta.url).href)
       checkTimeoutFloor = mod.checkTimeoutFloor
     } catch (e) {
+      // emitBlock exits process; defensive return keeps next-reader from
+      // assuming checkTimeoutFloor is defined below if emitBlock ever
+      // changes to non-fatal (negative-scenario-reviewer NIT-1).
       emitBlock(
         `second-opinion-gate: cannot load timeout-floor at ./lib/so-timeout-floor.mjs ` +
         `(detail: ${e.message}). Run: node install.mjs --tool claude-code --install-second-opinion ` +
         `to reinstall the colocated timeout-floor lib.`,
         { code: 'so-timeout-floor-load-failed', detail: e.message }
       )
+      return
     }
     const decision = checkTimeoutFloor(toolInput)
     if (decision.block) emitBlock(decision.reason, decision.extra)

@@ -99,10 +99,12 @@ export function tokenizeCommand(cmd) {
 
 /**
  * splitTopLevelSegments — split command string at unquoted shell control
- * operators (`;`, `&&`, `||`, `|`, `&`). Returns the literal substrings so
- * each segment can be re-tokenized independently. Quoted regions are opaque
- * (a `;` inside `"..."` does not split). Command substitution `$(...)` and
- * backticks are NOT recognized; they fall under axis A38 (documented DEFER).
+ * operators (`;`, `&&`, `||`, `|`, `&`, `\n`, `\r`). Returns the literal
+ * substrings so each segment can be re-tokenized independently. Quoted
+ * regions are opaque (a `;` inside `"..."` does not split). Command
+ * substitution `$(...)` and backticks are NOT recognized; they fall under
+ * axis A38 (documented DEFER). Newline is a top-level separator (axis A39)
+ * — honest agents legitimately write multi-line `tool_input.command`.
  */
 export function splitTopLevelSegments(cmd) {
   const segments = []
@@ -110,6 +112,10 @@ export function splitTopLevelSegments(cmd) {
   let inSingle = false
   let inDouble = false
   let i = 0
+  // Backslash-escaped newline is a line-continuation in shell — preserve as
+  // joining, not splitting. We model this by skipping the escape and the
+  // newline together (handled by the existing `\\` lookahead in the bare
+  // walk below, since `\` + any char = consume both as part of the segment).
   while (i < cmd.length) {
     const c = cmd[i]
     if (inSingle) {
@@ -139,7 +145,7 @@ export function splitTopLevelSegments(cmd) {
       start = i
       continue
     }
-    if (c === ';' || c === '|' || c === '&') {
+    if (c === ';' || c === '|' || c === '&' || c === '\n' || c === '\r') {
       segments.push(cmd.slice(start, i))
       i += 1
       start = i
@@ -149,6 +155,37 @@ export function splitTopLevelSegments(cmd) {
   }
   segments.push(cmd.slice(start))
   return segments
+}
+
+/**
+ * unwrapExecPayload — if tokens look like `[env? bash|sh|zsh|dash|ksh, -c,
+ * '<payload>', ...]` (with optional `VAR=val` env prefixes before the exec),
+ * return the payload string. Otherwise null.
+ *
+ * Closes axis A40 (negative-scenario-reviewer MAJOR-2): honest agents
+ * legitimately wrap long commands in `bash -c '...'` to control quoting.
+ * tokenizeCommand returns the wrapped command as ONE quoted token, so a
+ * per-segment token walk would miss the `--dispatch` inside. Recurse into
+ * the payload by splitting + re-evaluating it.
+ */
+const EXEC_WRAPPERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash'])
+
+function unwrapExecPayload(tokens) {
+  let i = 0
+  // Skip env-prefix VAR=val tokens (positional shell env-prefix, e.g. `FOO=bar bash -c ...`).
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++
+  if (i >= tokens.length) return null
+  const exec = tokens[i]
+  // Strip leading path: /usr/bin/bash → bash.
+  const execName = exec.split('/').pop()
+  if (!EXEC_WRAPPERS.has(execName)) return null
+  // Look ahead for -c (must be the next token; intervening flags like
+  // `bash -l -c` are rare and intentionally not unwrapped — false-negative
+  // tradeoff over false-positive).
+  if (i + 1 >= tokens.length) return null
+  if (tokens[i + 1] !== '-c') return null
+  if (i + 2 >= tokens.length) return null
+  return tokens[i + 2]
 }
 
 /**
@@ -180,10 +217,45 @@ function isHarnessSegment(tokens) {
  *   - segment has `--dispatch` OR `--consensus` as a token
  *   - first `--provider` token (mirrors harness first-match parser) is NOT `stub`
  *   - tool_input.timeout (default 120000 per Claude Code Bash tool) < TIMEOUT_FLOOR_MS
+ *
+ * Recursion: if the segment is an exec-wrapper (`bash -c '<payload>'`),
+ * the payload is split + re-evaluated. Depth-limited to prevent runaway
+ * nested wrappers.
+ *
+ * Argv-semantics mirror: this function tracks the harness's
+ * `argv.indexOf('--provider')` first-match parser (scripts/second-opinion.mjs:50).
+ * Notable mirrored quirks: `--provider=codex` equals-form is NOT honored by
+ * either parser (extra.provider will be null, outcome is conservatively to
+ * block since null !== 'stub'). If the harness ever switches to honoring
+ * equals-form, this function must change in lockstep.
+ *
+ * Registry-default coupling: this function does NOT read the provider
+ * registry's `defaults.provider`. If that default ever becomes `stub`, this
+ * function will continue to block missing-provider invocations whereas the
+ * harness would dispatch to stub. Acceptable mismatch direction (over-block
+ * is safe); the inverse would be a bypass.
  */
-function evaluateSegment(segment, toolInput) {
+const MAX_UNWRAP_DEPTH = 3
+
+function evaluateSegment(segment, toolInput, depth = 0) {
   const tokens = tokenizeCommand(segment)
   if (tokens.length === 0) return { block: false }
+
+  // Exec-wrapper recursion (axis A40): if this segment is `bash -c '<payload>'`,
+  // re-split and re-evaluate the payload. Depth-limited.
+  if (depth < MAX_UNWRAP_DEPTH) {
+    const payload = unwrapExecPayload(tokens)
+    if (payload !== null) {
+      const inner = splitTopLevelSegments(payload)
+      for (const seg of inner) {
+        const r = evaluateSegment(seg, toolInput, depth + 1)
+        if (r.block) return r
+      }
+      // Wrapper not harness itself + no inner segment blocks → allow.
+      return { block: false }
+    }
+  }
+
   if (!isHarnessSegment(tokens)) return { block: false }
 
   const hasDispatch = tokens.indexOf('--dispatch') !== -1

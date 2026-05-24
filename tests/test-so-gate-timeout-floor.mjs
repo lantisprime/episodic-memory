@@ -328,6 +328,82 @@ assertBlock('A36: consensus with --max-rounds blocks below floor',
 assertAllow('A37: stub --consensus allowed',
   { command: 'node scripts/second-opinion.mjs request --provider stub --consensus --max-rounds 3 --body x', timeout: 100 })
 
+// A39: newline as top-level separator (negative-scenario-reviewer MAJOR-1)
+// Honest agents legitimately write multi-line tool_input.command. Bash treats
+// literal \n as a command separator. Splitter must split on \n so the codex
+// segment is evaluated independently of an earlier stub segment.
+assertBlock('A39: newline separator — codex segment after stub blocks',
+  { command:
+      'node scripts/second-opinion.mjs request --provider stub --body x\n' +
+      'node scripts/second-opinion.mjs request --provider codex --dispatch --body y',
+    timeout: 120000,
+  },
+  'so-timeout-below-floor')
+
+// A39b: CRLF / \r\n separator (Windows-style or pasted-from-doc)
+assertBlock('A39b: CRLF separator — codex segment after stub blocks',
+  { command:
+      'node scripts/second-opinion.mjs request --provider stub --body x\r\n' +
+      'node scripts/second-opinion.mjs request --provider codex --dispatch --body y',
+    timeout: 120000,
+  },
+  'so-timeout-below-floor')
+
+// A40: bash -c / sh -c exec-wrapper (negative-scenario-reviewer MAJOR-2)
+// Honest agents legitimately use bash -c '<payload>' to control quoting.
+// The harness invocation lives inside the -c argument as a single token;
+// must recurse into the -c value to detect dispatch.
+assertBlock('A40: bash -c wrapping codex dispatch blocks',
+  { command: "bash -c 'node scripts/second-opinion.mjs request --provider codex --dispatch --body x'",
+    timeout: 120000,
+  },
+  'so-timeout-below-floor')
+
+assertBlock('A40b: sh -c wrapping codex dispatch blocks',
+  { command: "sh -c 'node scripts/second-opinion.mjs request --provider codex --dispatch --body x'",
+    timeout: 120000,
+  },
+  'so-timeout-below-floor')
+
+assertBlock('A40c: zsh -c wrapping codex dispatch blocks',
+  { command: 'zsh -c "node scripts/second-opinion.mjs request --provider codex --dispatch --body x"',
+    timeout: 120000,
+  },
+  'so-timeout-below-floor')
+
+// A40d: bash -c wrapping stub is still allowed (carve-out preserved through recursion)
+assertAllow('A40d: bash -c wrapping stub dispatch allowed',
+  { command: "bash -c 'node scripts/second-opinion.mjs request --provider stub --dispatch --body x'",
+    timeout: 100,
+  })
+
+// A40e: env VAR=x bash -c '<payload>' (env-prefix before exec wrapper)
+assertBlock('A40e: env VAR=x bash -c wrapping codex dispatch blocks',
+  { command: "FOO=bar bash -c 'node scripts/second-opinion.mjs request --provider codex --dispatch --body x'",
+    timeout: 120000,
+  },
+  'so-timeout-below-floor')
+
+// A41: --provider=codex equals-form (negative-scenario-reviewer MINOR-1)
+// Tokenizer doesn't split equals-form; tokens.indexOf('--provider') = -1 →
+// firstProvider=null → not 'stub' → conservatively blocks. Outcome is safe;
+// extra.provider will be null (documented limitation).
+{
+  const r = checkTimeoutFloor({
+    command: 'node scripts/second-opinion.mjs request --provider=codex --dispatch --body x',
+    timeout: 100,
+  })
+  if (!r.block) {
+    failures++
+    console.error(`FAIL A41 expected block (equals-form), got ${JSON.stringify(r)}`)
+  } else if (r.extra?.provider !== null) {
+    failures++
+    console.error(`FAIL A41 expected extra.provider=null (documented limitation), got ${r.extra?.provider}`)
+  } else {
+    passes++
+  }
+}
+
 // A38: DEFER — quoted command substitution hides --dispatch token (documented limitation)
 {
   // The whole "$(...)" is one quoted token; --dispatch is not a top-level token.
