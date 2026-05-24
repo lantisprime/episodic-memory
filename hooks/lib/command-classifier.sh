@@ -1446,6 +1446,114 @@ _classify_segment() {
     return 0
   fi
 
+  # ---- Tier 0: project-local override (PR #336) ----
+  # Placement: AFTER all structural fail-closed lanes (shell keywords,
+  # wrappers, plan-marker helper, bash/sh/zsh -c, eval/source/exec,
+  # rm/tee/touch of markers, git, gh), BEFORE the read-only allowlist +
+  # interpreter case-arm. By construction, Tier 0 cannot demote safety-
+  # critical structural lanes.
+  #
+  # Helper-level defense-in-depth carve-out enforced in
+  # scripts/classifier-override-lookup.mjs (codex R4 ACCEPT-with-FU on plan
+  # review; codex R2 ACCEPT-with-FU on file 4/8): refuses override for
+  # known hardcoded mutators (em-store/em-revise/em-prune/em-violation/
+  # em-recall), helpers with own env-prefix discipline (classifier-marker,
+  # classify-correction, plan-marker), and flag-prefixed interpreter
+  # invocations (interpreter-flag-present — closes the
+  # `node --require ./x scripts/em-store.mjs` bypass class).
+  #
+  # Shell-level gates: env_prefix_count == 0 (env-prefix is a cross-session
+  # attack vector — never serve overrides for that shape) AND the
+  # overrides file must exist (fast no-op when no project has staged any
+  # overrides — zero cost in the common path).
+  if [ $env_prefix_count -eq 0 ] && [ -f "$target_root/.episodic-memory/classifier-overrides.jsonl" ]; then
+    # Resolve helper path (installed-runtime preferred, repo-source fallback).
+    local __t0_helper=""
+    local __t0_global="$HOME/.episodic-memory/scripts/classifier-override-lookup.mjs"
+    if [ -f "$__t0_global" ]; then
+      __t0_helper="$__t0_global"
+    else
+      local __t0_self_dir
+      __t0_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+      local __t0_repo="$__t0_self_dir/../../scripts/classifier-override-lookup.mjs"
+      if [ -f "$__t0_repo" ]; then
+        __t0_helper="$__t0_repo"
+      fi
+    fi
+    if [ -n "$__t0_helper" ]; then
+      # Reconstruct command text from tokens (same shape Tier 2/3 dispatch uses).
+      local __t0_cmd_text=""
+      local __t0_ti
+      for __t0_ti in ${TOKS[@]+"${TOKS[@]}"}; do
+        if [ -z "$__t0_cmd_text" ]; then
+          __t0_cmd_text="$__t0_ti"
+        else
+          __t0_cmd_text="$__t0_cmd_text $__t0_ti"
+        fi
+      done
+      # Subshell `cd "$target_root"` forces helper's process.cwd() to the
+      # target so the helper's `resolveRepoRoot(process.cwd()) ===
+      # --project-root` cross-repo refusal succeeds. 2>/dev/null swallows
+      # helper diagnostics — they don't belong in the hook's stdout JSON.
+      #
+      # Codex P1 (file 6/8 R1 REJECT): capture $PWD BEFORE the subshell.
+      # Inside the `cd "$target_root" && ...` command substitution, $PWD
+      # is the target root, NOT the original caller cwd — passing $PWD
+      # there would compute the tuple under the wrong caller_cwd and miss
+      # any override staged for the actual caller cwd. Tuple symmetry
+      # with classify-correction's write requires the un-subshelled cwd.
+      local __t0_caller_cwd="$PWD"
+      local __t0_out
+      __t0_out="$(cd "$target_root" 2>/dev/null && node "$__t0_helper" \
+        --project-root "$target_root" \
+        --caller-cwd "$__t0_caller_cwd" \
+        --command "$__t0_cmd_text" 2>/dev/null)"
+      local __t0_rc=$?
+      if [ $__t0_rc -eq 0 ] && [ -n "$__t0_out" ]; then
+        # Parse helper's hit JSON via inline node parser. Same label
+        # allowlist defense as llm-classifier.sh's marker-hit parser
+        # (PR #271/#272 class) — unknown labels are rejected before the
+        # awk extraction stage.
+        local __t0_parsed
+        __t0_parsed="$(printf '%s' "$__t0_out" | node -e '
+          const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+          let buf = ""
+          process.stdin.on("data", c => buf += c)
+          process.stdin.on("end", () => {
+            try {
+              const last = buf.trim().split("\n").pop()
+              const j = JSON.parse(last)
+              if (j.status !== "hit") { process.stdout.write(""); return }
+              let label = j.label || ""
+              if (label && !ALLOWED.has(label)) label = ""
+              const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
+              process.stdout.write(`${label}\t${root}`)
+            } catch { process.stdout.write("") }
+          })
+        ' 2>/dev/null)"
+        if [ -n "$__t0_parsed" ]; then
+          local __t0_label __t0_root
+          __t0_label="$(printf '%s' "$__t0_parsed" | awk -F'\t' '{print $1}')"
+          __t0_root="$(printf '%s' "$__t0_parsed" | awk -F'\t' '{print $2}')"
+          # Defense in depth: re-verify project_root_used echo before
+          # applying. The helper canonicalizes via realpathOrSame, so the
+          # echo MAY include macOS /var → /private/var resolution that
+          # target_root doesn't have. Compare against `pwd -P` of
+          # target_root (canonical physical dir) for stable equality.
+          local __t0_target_canon
+          __t0_target_canon="$(cd "$target_root" 2>/dev/null && pwd -P)"
+          if [ -n "$__t0_label" ] && [ "$__t0_root" = "$__t0_target_canon" ]; then
+            printf '%s\t\t%s\n' "$__t0_label" "tier0_project_override"
+            return 0
+          fi
+        fi
+      fi
+    fi
+    # Tier 0 miss / not-overridable / helper absent → fall through to
+    # existing classification flow (read-only allowlist, interpreter case-
+    # arm, LLM dispatch, Tier 1 default).
+  fi
+
   # ---- Read-only command allowlist ----
   case "$first" in
     ls|cat|head|tail|grep|egrep|fgrep|rg|find|wc|awk|sed|tr|cut|sort|uniq|file|stat|du|df|pwd|whoami|hostname|date|printenv|which|tree|less|more|jq|yq|cmp|diff|column)
@@ -1477,16 +1585,22 @@ _classify_segment() {
       local script_base
       script_base="$(basename "$script" 2>/dev/null)"
       case "$script_base" in
-        em-search.mjs|em-list.mjs|em-watch-codex.mjs|em-pattern-health.mjs|em-check-stale.mjs|em-rebuild-index.mjs)
+        em-search.mjs|em-list.mjs|em-watch-codex.mjs|em-pattern-health.mjs|em-check-stale.mjs|em-rebuild-index.mjs|em-workflow-validate.mjs)
           # em-rebuild-index writes index.jsonl but the operation is metadata
           # sync derived deterministically from episode files (idempotent,
           # atomic-rename, no partial-corruption window). Same gate-class as
           # em-search (which also writes — access_count). Treating as
           # read_only so the gate stops false-positive-blocking metadata sync.
+          #
+          # PR #336 bundled relabel: em-workflow-validate.mjs moved from the
+          # shared_write basket (was below at "interpreter_em_write") to
+          # here. Self-documented as a pure validator: "does NOT modify
+          # episodes, write markers, or call hooks." Was wrongly grouped with
+          # em-store/em-revise/etc. mutators.
           printf '%s\t\t%s\n' "read_only" "interpreter_em_read"
           return 0
           ;;
-        em-store.mjs|em-revise.mjs|em-prune.mjs|em-violation.mjs|em-recall.mjs|em-workflow-validate.mjs)
+        em-store.mjs|em-revise.mjs|em-prune.mjs|em-violation.mjs|em-recall.mjs)
           printf '%s\t\t%s\n' "shared_write" "interpreter_em_write"
           return 0
           ;;

@@ -532,7 +532,12 @@ test('(codex-R4-BLOCKER-F1-fix) PIPE_BUF guard is byte-counted, not char-counted
     '--label', 'read_only',
     '--reason', 'multibyte byte-guard test'
   ], { cwd: project, env: process.env, encoding: 'utf8' })
-  assert.strictEqual(r.status, 1, `expected guard rejection (exit 1); got ${r.status} stderr=${r.stderr}`)
+  // PR #336: unified _fail(die, 2, ...) routes ALL shared-module fail-closed
+  // cases through exit code 2 (validation/safety class). Pre-#336 oversize
+  // entries threw → outer catch → die(1, ...) → exit 1. The unification was
+  // accepted by codex R3 in the shared-module review series; behavior change
+  // is exit-code-only, rejection semantics unchanged.
+  assert.strictEqual(r.status, 2, `expected guard rejection (exit 2 per PR #336 _fail contract); got ${r.status} stderr=${r.stderr}`)
   assert.match(r.stderr, /bytes exceeds PIPE_BUF/, `expected byte-guard error message; got: ${r.stderr}`)
   // No partial write landed on disk.
   const file = path.join(project, '.episodic-memory', 'classifier-overrides.jsonl')
@@ -577,7 +582,7 @@ test('(codex-R5-repro) byte-guard boundary probe — sharp threshold at 4096B', 
   let lo = 800, hi = 1000
   // Sanity: lo must accept, hi must reject.
   assert.strictEqual(probe(lo).status, 0, 'N=800 must accept (baseline)')
-  assert.strictEqual(probe(hi).status, 1, 'N=1000 must reject (baseline)')
+  assert.strictEqual(probe(hi).status, 2, 'N=1000 must reject (baseline; exit 2 per PR #336 _fail contract)')
   while (lo + 1 < hi) {
     const mid = (lo + hi) >> 1
     if (probe(mid).status === 0) lo = mid
@@ -586,7 +591,7 @@ test('(codex-R5-repro) byte-guard boundary probe — sharp threshold at 4096B', 
   const acceptedProbe = probe(lo)
   const rejectedProbe = probe(hi)
   assert.strictEqual(acceptedProbe.status, 0, `boundary lo=${lo} should accept`)
-  assert.strictEqual(rejectedProbe.status, 1, `boundary hi=${hi} should reject`)
+  assert.strictEqual(rejectedProbe.status, 2, `boundary hi=${hi} should reject (exit 2 per PR #336 _fail contract)`)
   // The accepted byte count must be <= 4096B (guard is byte-correct).
   assert.ok(acceptedProbe.diskBytes <= 4096,
     `last accepted N=${lo} serialized to ${acceptedProbe.diskBytes}B; expected <= 4096`)
