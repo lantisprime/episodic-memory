@@ -103,3 +103,53 @@ export function _maxMtimeAcrossRootsForPlanMarkerStrict(repoRoot) {
 
   return { mtime, hadSymlink, anyExisted, hadOtherError }
 }
+
+// Rank-2 (PR for checkpoint-quartet) — own-session strict helper for the
+// 4 checkpoint quartet markers. Per codex plan-tier R2 P1-B + R4 ACCEPT:
+// the quartet carve-out is OWN-SESSION-ONLY, NOT cross-session glob like
+// the plan-marker. Cross-session safety for the quartet is delegated to
+// SessionStart's force-monotonic baseline probe (em-recall.mjs); the
+// stop-gate carve-out at turn-end reads only this session's own marker
+// (plus legacy literal during burn-in).
+//
+// Strict catch (R2 P2): non-ENOENT lstat errors → hadOtherError → caller
+// fails closed. Sibling of _maxMtimeAcrossRootsStrict.
+//
+// @param {string} repoRoot
+// @param {string} legacyBasename — one of CHECKPOINT_QUARTET members
+// @param {string|null} sid — own session id, or null/empty → legacy-only mode
+// @returns {{mtime, hadSymlink, anyExisted, hadOtherError}}
+export function _maxMtimeAcrossRootsForCheckpointMarkerOwnSessionStrict(
+  repoRoot, legacyBasename, sid
+) {
+  let mtime = -Infinity
+  let hadSymlink = false
+  let anyExisted = false
+  let hadOtherError = false
+
+  // Build paths to probe — own-session suffixed AND legacy literal, each
+  // at both roots. Other sessions' suffixed markers NOT included —
+  // that's the point of the rank-2 fix.
+  const paths = [
+    primaryMarkerPath(repoRoot, legacyBasename),
+    legacyMarkerPath(repoRoot, legacyBasename),
+  ]
+  if (sid) {
+    const ownBasename = `${legacyBasename}.${sid}`
+    paths.push(primaryMarkerPath(repoRoot, ownBasename))
+    paths.push(legacyMarkerPath(repoRoot, ownBasename))
+  }
+
+  for (const p of paths) {
+    try {
+      const st = fs.lstatSync(p)
+      if (st.isSymbolicLink()) { hadSymlink = true; continue }
+      anyExisted = true
+      if (st.mtimeMs > mtime) mtime = st.mtimeMs
+    } catch (e) {
+      if (e && e.code !== 'ENOENT') hadOtherError = true
+    }
+  }
+
+  return { mtime, hadSymlink, anyExisted, hadOtherError }
+}
