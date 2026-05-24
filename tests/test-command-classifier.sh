@@ -755,7 +755,7 @@ assert_label "HV23 -h with arg" "node /tmp/foo.mjs -h some-topic" "shared_write"
 
 # NOT allowed: redirect demotes to fallthrough (existing has_nonmarker_redirect rule)
 assert_label "HV30 node --help with redirect" "node /tmp/foo.mjs --help > /tmp/out.txt" "shared_write"
-assert_label "HV31 node --version | head" "node /tmp/foo.mjs --version" "read_only"  # pipe is not a redirect
+assert_label "HV31 node --version | head (pipe is not a redirect)" "node /tmp/foo.mjs --version | head" "read_only"
 
 # Env-prefix demotes: carve-out's env_prefix_count check ensures
 # `FOO=bar node X --help` does NOT ride the read_only carve-out.
