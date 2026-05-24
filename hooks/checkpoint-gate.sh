@@ -265,6 +265,13 @@ _marker_basename_in_set() {
     # Sibling of plan-approval-pending; loose glob, strict validation
     # via preflight_marker_basename_matches happens at gate layer.
     .preflight-done.*) return 0 ;;
+    # Rank-2 (closes #341): per-session checkpoint quartet basenames.
+    # Same parity as plan-marker/preflight-marker. Needed for the
+    # wrong-root detection path (_command_first_absolute_noncanonical_marker)
+    # to fire `_block_wrong_root_marker` on `mv`/`cp`/`install`/`dd of=`
+    # to a non-canonical absolute path with suffixed quartet basename.
+    # Reviewer: rank-2 negative-scenario-reviewer F1.
+    .pre-checkpoint-done.*|.post-checkpoint-done.*|.checkpoint-required.*|.post-checkpoint-required.*) return 0 ;;
   esac
   return 1
 }
@@ -336,7 +343,7 @@ _escape_bash_glob() {
 _command_has_relative_marker_path() {
   local cmd_stripped
   cmd_stripped="$(_strip_shell_quotes "$1")"
-  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done|\.post-checkpoint-done|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required|\.post-checkpoint-required|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
+  printf '%s' "$cmd_stripped" | grep -qE '(^|[^/])(\./)*\.(checkpoints|claude)/(\.pre-checkpoint-done(\.[A-Za-z0-9_-]{1,128})?|\.post-checkpoint-done(\.[A-Za-z0-9_-]{1,128})?|\.plan-approval-pending(\.[A-Za-z0-9_-]{1,128})?|\.checkpoint-required(\.[A-Za-z0-9_-]{1,128})?|\.post-checkpoint-required(\.[A-Za-z0-9_-]{1,128})?|\.preflight-done(\.[A-Za-z0-9_-]{1,128})?|\.last-user-prompt(\.[A-Za-z0-9_-]+)?\.json|\.so-runbook-shown\.[A-Za-z0-9_-]+)'
 }
 
 # Absolute-non-canonical detection: for Bash commands where the classifier
