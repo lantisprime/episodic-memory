@@ -514,6 +514,136 @@ _block_plan_pending() {
 }
 
 # ---------------------------------------------------------------------------
+# Smart-arming helpers (PR fix/checkpoint-gate-smart-arming, 2026-05-24)
+#
+# Purpose: stop checkpoint-gate from firing on off-repo tool calls (memory
+# writes under ~/.claude/projects/**, skill writes under ~/.claude/skills/**,
+# settings edits at ~/.claude/settings*.json, etc.) while preserving Rule 18
+# enforcement for actual project source edits.
+#
+# Bash branch unchanged in scope (codex R1 6b): ALL non-marker_write Bash
+# blocks while armed. Smart-arming relieves Edit/Write/MultiEdit/NotebookEdit
+# whose FILE_PATH is outside REPO_ROOT.
+#
+# Codex round trace: R1 HOLD (path/Bash/stop-gate/MultiEdit/empirical),
+# R2 HOLD (symlink axis 2), R3 ACCEPT-with-FU (symlink axis 1 + cwd-binding),
+# R4 HOLD (cwd-binding sub-case), R5 HOLD (fix not landed), R6 ACCEPT-with-FU
+# (methodology negotiation, recommended land-then-review per shape (b)).
+# ---------------------------------------------------------------------------
+
+# Canonicalize a path that may not exist, may be a broken symlink, or may
+# have symlinked ancestors. macOS- and Linux-safe.
+#
+# Codex R2/P1: existing file/symlink-file targets must canonicalize via
+# parent-pwd-P + readlink loop, not walk-up-only.
+# Codex R3/P1: broken symlink leaves [ -e ] false, so we also accept [ -L ]
+# as "existing surface to resolve."
+_canonicalize_possibly_nonexistent() {
+  local p="$1"
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+
+  if [ -e "$p" ] || [ -L "$p" ]; then
+    if [ -d "$p" ]; then
+      (cd "$p" 2>/dev/null && pwd -P) || printf '%s' "$p"
+      return
+    fi
+    local parent leaf parent_canon resolved hops=0
+    parent="$(dirname "$p")"
+    leaf="$(basename "$p")"
+    parent_canon="$( (cd "$parent" 2>/dev/null && pwd -P) || printf '%s' "$parent" )"
+    resolved="$parent_canon/$leaf"
+    while [ -L "$resolved" ] && [ $hops -lt 32 ]; do
+      local target rp_parent rp_leaf rp_parent_canon
+      target="$(readlink "$resolved")" || break
+      case "$target" in
+        /*) resolved="$target" ;;
+        *) resolved="$(dirname "$resolved")/$target" ;;
+      esac
+      hops=$((hops+1))
+      rp_parent="$(dirname "$resolved")"
+      rp_leaf="$(basename "$resolved")"
+      rp_parent_canon="$( (cd "$rp_parent" 2>/dev/null && pwd -P) || printf '%s' "$rp_parent" )"
+      resolved="$rp_parent_canon/$rp_leaf"
+    done
+    printf '%s' "$resolved"
+    return
+  fi
+
+  # Nonexistent and not a symlink: walk up to nearest existing ancestor.
+  local tail="" cur="$p"
+  while [ -n "$cur" ] && [ ! -e "$cur" ] && [ ! -L "$cur" ]; do
+    tail="/$(basename "$cur")${tail}"
+    local up
+    up="$(dirname "$cur")"
+    [ "$up" = "$cur" ] && break
+    cur="$up"
+  done
+  if [ -e "$cur" ] || [ -L "$cur" ]; then
+    if [ -d "$cur" ]; then
+      local cur_canon
+      cur_canon="$( (cd "$cur" 2>/dev/null && pwd -P) || printf '%s' "$cur" )"
+      printf '%s%s' "$cur_canon" "$tail"
+    else
+      # Non-directory ancestor (file or broken symlink) — recurse on $cur.
+      # Bounded: recursive call hits the first branch immediately (depth ≤ 1).
+      local cur_canon
+      cur_canon="$(_canonicalize_possibly_nonexistent "$cur")"
+      printf '%s%s' "$cur_canon" "$tail"
+    fi
+  else
+    printf '%s' "$p"
+  fi
+}
+
+# Decide whether the current tool call targets project source. Returns 0
+# (yes, repo-touching, block as normal) or 1 (no, off-repo, allow).
+#
+# Bash (codex R1 6b): all non-marker_write Bash returns 0. Smart-arming
+# does NOT relieve Bash friction — that's a separate classifier PR.
+# Edit/Write/MultiEdit/NotebookEdit: compare FILE_PATH against REPO_ROOT
+# via both raw-prefix (catches symlink-out author intent) AND canonical-
+# prefix (catches symlink-in / traversal / nonexistent paths).
+_tool_call_targets_repo_source() {
+  local repo_root="$1" tool="$2" file_path="$3" label="$4"
+
+  if [ "$tool" = "Bash" ]; then
+    # Legitimate marker_write allowances exit 0 in the upstream Bash branch
+    # BEFORE reaching the pre-block site, so any Bash that falls through to
+    # the predicate is by construction "needs the pre-block." Including
+    # marker_write that wasn't approved upstream (e.g. POST_DONE write when
+    # POST_REQ not armed — test 17 regression class).
+    case "$label" in
+      read_only) return 1 ;;
+      *)         return 0 ;;
+    esac
+  fi
+
+  # Edit/Write/MultiEdit/NotebookEdit branch.
+  # Empty path = defensive conservative-block (per R4/P1 fix: relative path
+  # with no absolute cwd authority sets FILE_PATH="" upstream).
+  if [ -z "$file_path" ]; then
+    return 0
+  fi
+
+  local repo_canon
+  repo_canon="$( (cd "$repo_root" 2>/dev/null && pwd -P) || printf '%s' "$repo_root" )"
+
+  # Raw-prefix match (codex R1 attack class 3 — symlink-out author intent).
+  case "$file_path" in
+    "$repo_root"/*|"$repo_root") return 0 ;;
+  esac
+
+  # Canonical-prefix match (handles symlink-in, traversal, nonexistent leaf).
+  local fp_canon
+  fp_canon="$(_canonicalize_possibly_nonexistent "$file_path")"
+  case "$fp_canon" in
+    "$repo_canon"/*|"$repo_canon") return 0 ;;
+  esac
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Bash classification — compute label up front for downstream gates.
 # ---------------------------------------------------------------------------
 LABEL=""
@@ -642,6 +772,37 @@ case "$TOOL_NAME" in
   Edit|Write|MultiEdit|NotebookEdit)
     # classify_path for Write/Edit/MultiEdit/NotebookEdit
     FILE_PATH="$(echo "$INPUT" | jq -r '.tool_input.file_path // ""')"
+
+    # ── R4/P1 cwd-binding defense (smart-arming PR) ──
+    # _resolve_marker_path in command-classifier.sh:2106 unconditionally joins
+    # relative paths under $repo_root — which can fabricate a marker_write
+    # classification from a non-absolute input. Defense: ensure FILE_PATH is
+    # absolute before classify_path runs.
+    #   - Absolute → use as-is.
+    #   - Relative + absolute tool_input.cwd → join (narrower authority preferred).
+    #   - Relative + absolute top-level .cwd → join (broader authority fallback).
+    #   - Relative + neither absolute → empty FILE_PATH, forcing predicate's
+    #     defensive empty-path branch (conservative-block).
+    if [ -n "$FILE_PATH" ]; then
+      case "$FILE_PATH" in
+        /*) ;;  # absolute → no-op
+        *)
+          _ti_cwd="$(echo "$INPUT" | jq -r '.tool_input.cwd // ""')"
+          _top_cwd="$(echo "$INPUT" | jq -r '.cwd // ""')"
+          _resolved=""
+          case "$_ti_cwd"  in /*) _resolved="$_ti_cwd" ;; esac
+          if [ -z "$_resolved" ]; then
+            case "$_top_cwd" in /*) _resolved="$_top_cwd" ;; esac
+          fi
+          if [ -n "$_resolved" ]; then
+            FILE_PATH="$_resolved/$FILE_PATH"
+          else
+            FILE_PATH=""
+          fi
+          ;;
+      esac
+    fi
+
     if [ -n "$FILE_PATH" ]; then
       RESULT="$(classify_path "$FILE_PATH" "$REPO_ROOT")"
       LABEL="${RESULT%%	*}"
@@ -702,9 +863,19 @@ esac
 
 # Rank-2: pre-gate read is session-aware. Own-session marker OR legacy
 # literal triggers the block; other sessions' suffixed markers do not.
+#
+# Smart-arming (2026-05-24): the pre-block fires only if the current tool
+# call targets project source. Off-repo Edit/Write (memory writes under
+# ~/.claude/projects/**, skill writes, settings edits) silently allowed.
+# Bash side stays strict (codex R1 6b — all non-marker_write Bash blocks).
+# Stop-gate symmetry preserved transitively: pre-checkpoint stays unwritten,
+# so the post-required arming at lines below also doesn't fire, so em-recall
+# carve-out continues to apply.
 if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
    && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
-  _block_pre
+  if _tool_call_targets_repo_source "$REPO_ROOT" "$TOOL_NAME" "$FILE_PATH" "$LABEL"; then
+    _block_pre
+  fi
 fi
 
 # ---------------------------------------------------------------------------
