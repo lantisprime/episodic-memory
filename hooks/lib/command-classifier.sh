@@ -1626,6 +1626,46 @@ _classify_segment() {
       local script="${TOKS[$((idx+1))]:-}"
       local script_base
       script_base="$(basename "$script" 2>/dev/null)"
+
+      # ── --help / --version carve-out (smart-arming PR bundle) ──
+      # If the interpreter+script invocation has ONLY -h/--help/-V/--version
+      # as trailing args (no other operations, no redirects), classify as
+      # read_only. CLI convention: help/version flags are universally
+      # side-effect-free; any script violating this convention is broken.
+      #
+      # Placement BEFORE the script-name dispatch: even known em-* writes
+      # (em-store.mjs --help, etc.) classify as read_only when only help/
+      # version flags are present. Justified by CLI convention.
+      #
+      # Defense-in-depth:
+      #   - has_nonmarker_redirect demotes to fallthrough (read-only allowlist
+      #     pattern, command-classifier.sh:1608).
+      #   - At least one help/version flag must be present (bare `node X.mjs`
+      #     stays subject to normal classification).
+      #   - env_prefix_count > 0 demotes (cross-session attack class per
+      #     PR #271 — env-prefix on ANY allowlist lane is suspect).
+      #   - Loop scans all args, not just trailing; mixed `--help foo` →
+      #     foo isn't help/version → carve-out doesn't fire → falls through.
+      if [ "$has_nonmarker_redirect" != "1" ] && [ $env_prefix_count -eq 0 ]; then
+        local _hv_all=1 _hv_any=0 _hv_i=$((idx+2)) _hv_n=${#TOKS[@]}
+        while [ $_hv_i -lt $_hv_n ]; do
+          case "${TOKS[$_hv_i]}" in
+            --help|--version|-h|-V|--help=*|--version=*)
+              _hv_any=1
+              ;;
+            *)
+              _hv_all=0
+              break
+              ;;
+          esac
+          _hv_i=$((_hv_i+1))
+        done
+        if [ $_hv_all -eq 1 ] && [ $_hv_any -eq 1 ]; then
+          printf '%s\t\t%s\n' "read_only" "interpreter_help_or_version_flag"
+          return 0
+        fi
+      fi
+
       case "$script_base" in
         em-search.mjs|em-list.mjs|em-watch-codex.mjs|em-pattern-health.mjs|em-check-stale.mjs|em-rebuild-index.mjs|em-workflow-validate.mjs)
           # em-rebuild-index writes index.jsonl but the operation is metadata

@@ -724,6 +724,50 @@ assert_preflight_tool "QT12 Read ungated" "Read" '{"file_path":"/anything"}' "no
 assert_preflight_tool "QT13 Grep ungated" "Grep" '{"pattern":"foo"}' "none"
 
 echo ""
+echo "--- --help / --version carve-out (smart-arming companion) ---"
+# CLI convention: help/version flags are universally side-effect-free.
+# Carve-out at command-classifier.sh interpreter case-arm classifies
+# any `node|python|...` invocation with ONLY help/version flags as read_only,
+# regardless of which script is being invoked.
+
+# Allowed (read_only): interpreter + script + only help/version flags
+assert_label "HV01 node --help" "node /tmp/foo.mjs --help" "read_only"
+assert_label "HV02 node --version" "node /tmp/foo.mjs --version" "read_only"
+assert_label "HV03 node -h" "node /tmp/foo.mjs -h" "read_only"
+assert_label "HV04 node -V" "node /tmp/foo.mjs -V" "read_only"
+assert_label "HV05 python3 --help" "python3 /tmp/script.py --help" "read_only"
+assert_label "HV06 python script --version" "python /tmp/x.py --version" "read_only"
+assert_label "HV07 ruby --help" "ruby /tmp/x.rb --help" "read_only"
+assert_label "HV08 perl -V" "perl /tmp/x.pl -V" "read_only"
+assert_label "HV09 --help=topic" "node /tmp/foo.mjs --help=usage" "read_only"
+assert_label "HV10 multiple help flags" "node /tmp/foo.mjs --help -h" "read_only"
+
+# Carve-out wins over em-* write case-arms (user's exact frustration case)
+assert_label "HV11 node em-store.mjs --help" "node em-store.mjs --help" "read_only"
+assert_label "HV12 node em-revise.mjs --version" "node em-revise.mjs --version" "read_only"
+assert_label "HV13 node second-opinion.mjs --help" "node /Users/me/scripts/second-opinion.mjs --help" "read_only"
+
+# NOT allowed: missing help/version (bare invocation)
+assert_label "HV20 bare node script (no flags)" "node /tmp/foo.mjs" "shared_write"
+assert_label "HV21 node script with non-help arg" "node /tmp/foo.mjs --do-stuff" "shared_write"
+assert_label "HV22 mixed --help + other arg" "node /tmp/foo.mjs --help foo" "shared_write"
+assert_label "HV23 -h with arg" "node /tmp/foo.mjs -h some-topic" "shared_write"
+
+# NOT allowed: redirect demotes to fallthrough (existing has_nonmarker_redirect rule)
+assert_label "HV30 node --help with redirect" "node /tmp/foo.mjs --help > /tmp/out.txt" "shared_write"
+assert_label "HV31 node --version | head (pipe is not a redirect)" "node /tmp/foo.mjs --version | head" "read_only"
+
+# Env-prefix demotes: carve-out's env_prefix_count check ensures
+# `FOO=bar node X --help` does NOT ride the read_only carve-out.
+# Falls through to interpreter classifier → LLM dispatch (no decision in
+# tests; no marker, no direct-fetch transport) → Tier 1 default
+# `interpreter_other` (shared_write). Net: env-prefix attempts to bypass
+# via --help still get gated. The security invariant holds: env-prefix
+# never rides the read_only allowlist (PR #271 attack class).
+assert_label "HV40 env-prefix node --help (carve-out skipped, falls to shared_write)" \
+  "FOO=bar node /tmp/foo.mjs --help" "shared_write"
+
+echo ""
 echo "=================================================="
 echo "Results: $passed passed, $failed failed"
 echo "=================================================="

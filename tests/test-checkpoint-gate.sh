@@ -1367,6 +1367,192 @@ rm -rf "$SPACE_DIR" "$CLEAN_DIR"
 echo ""
 echo "--- Result ---"
 # ============================================================================
+# ============================================================================
+echo ""
+echo "--- Smart-arming (off-repo Edit/Write allow, codex R1-R6 consensus) ---"
+# ============================================================================
+# PR fix/checkpoint-gate-smart-arming. Stops checkpoint-gate from firing on
+# off-repo Edit/Write/MultiEdit/NotebookEdit while preserving Rule 18
+# enforcement for in-repo edits. Bash side stays strict (codex R1 6b).
+
+# Helper: emit mock JSON for Edit/Write with explicit file_path and optional
+# cwd variations. Existing mock_json hardcodes .cwd=TEST_DIR — for cwd-binding
+# tests we need cwd permutations.
+mock_path_json() {
+  local tool_name="$1" file_path="$2" top_cwd="${3:-$TEST_DIR}" ti_cwd="${4:-}"
+  if [ -n "$ti_cwd" ]; then
+    jq -n --arg tn "$tool_name" --arg fp "$file_path" --arg c "$top_cwd" --arg tic "$ti_cwd" \
+      '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}'
+  else
+    jq -n --arg tn "$tool_name" --arg fp "$file_path" --arg c "$top_cwd" \
+      '{tool_name: $tn, tool_input: {file_path: $fp}, cwd: $c}'
+  fi
+}
+
+# Smart-arming test scratch dirs (off-repo paths that mimic the user's
+# real-world ~/.claude/projects/** and ~/.claude/skills/** layout).
+OFFREPO_DIR="$(mktemp -d)"
+OFFREPO_DIR="$(cd -P "$OFFREPO_DIR" && pwd)"
+
+reset_state
+touch "$PRE_REQ"  # arm — pre-block fires unless predicate allows
+
+# ── In-repo edits still block ──
+assert_blocked "SA-1. Edit IN-REPO existing file BLOCKED (smart-arming preserves Rule 18)" \
+  "$(mock_path_json 'Edit' "$TEST_DIR/scripts-test.mjs")" "Checkpoint required"
+assert_blocked "SA-2. Write IN-REPO NONEXISTENT new file BLOCKED (R2/P1 nonexistent-path)" \
+  "$(mock_path_json 'Write' "$TEST_DIR/new-scripts/new.mjs")" "Checkpoint required"
+assert_blocked "SA-3. Write IN-REPO deep nonexistent ancestor chain BLOCKED" \
+  "$(mock_path_json 'Write' "$TEST_DIR/new-dir/sub/deep.mjs")" "Checkpoint required"
+assert_blocked "SA-4. MultiEdit IN-REPO file BLOCKED (single file_path, R1/P2 shape)" \
+  "$(mock_path_json 'MultiEdit' "$TEST_DIR/existing.txt")" "Checkpoint required"
+
+# ── Off-repo edits now allowed ──
+assert_allowed "SA-5. Edit OFF-REPO memory-style path allowed (.claude/projects)" \
+  "$(mock_path_json 'Edit' "$OFFREPO_DIR/memory/foo.md")"
+assert_allowed "SA-6. Write OFF-REPO skill-style path allowed (.claude/skills)" \
+  "$(mock_path_json 'Write' "$OFFREPO_DIR/skills/foo/SKILL.md")"
+assert_allowed "SA-7. Edit OFF-REPO settings-style path allowed (.claude/settings.local.json)" \
+  "$(mock_path_json 'Edit' "$OFFREPO_DIR/settings.local.json")"
+assert_allowed "SA-8. MultiEdit OFF-REPO single file allowed" \
+  "$(mock_path_json 'MultiEdit' "$OFFREPO_DIR/memory/bar.md")"
+assert_allowed "SA-9. NotebookEdit OFF-REPO ipynb allowed (uses notebook_path field per F1 fix)" \
+  "$(jq -n --arg tn 'NotebookEdit' --arg np "$OFFREPO_DIR/notebook.ipynb" --arg c "$TEST_DIR" \
+    '{tool_name: $tn, tool_input: {notebook_path: $np}, cwd: $c}')"
+assert_blocked "SA-9b. NotebookEdit IN-REPO ipynb BLOCKED (notebook_path field reaches predicate)" \
+  "$(jq -n --arg tn 'NotebookEdit' --arg np "$TEST_DIR/in-repo.ipynb" --arg c "$TEST_DIR" \
+    '{tool_name: $tn, tool_input: {notebook_path: $np}, cwd: $c}')" "Checkpoint required"
+
+# ── Path-traversal attack: traversal that lands back in repo blocks ──
+TRAVERSAL_PATH="$TEST_DIR/../$(basename "$TEST_DIR")/traversal.mjs"
+assert_blocked "SA-10. Edit via traversal back into repo BLOCKED (canonicalize handles)" \
+  "$(mock_path_json 'Edit' "$TRAVERSAL_PATH")" "Checkpoint required"
+
+# ── Symlink axis tests (codex R1-R6 driven) ──
+# Axis 2 (R2/P1): external symlink FILE → existing repo file
+echo "in-repo content" > "$TEST_DIR/existing.txt"
+SYM_FILE_TO_REPO="$OFFREPO_DIR/link-to-repo-file"
+ln -sf "$TEST_DIR/existing.txt" "$SYM_FILE_TO_REPO"
+assert_blocked "SA-sym2. External symlink FILE → existing repo file BLOCKED (axis 2)" \
+  "$(mock_path_json 'Edit' "$SYM_FILE_TO_REPO")" "Checkpoint required"
+
+# Axis 3: external symlink DIR → existing repo child
+mkdir -p "$TEST_DIR/scripts-test-dir"
+echo "child content" > "$TEST_DIR/scripts-test-dir/child.mjs"
+SYM_DIR_TO_REPO="$OFFREPO_DIR/link-to-repo-dir"
+ln -sfn "$TEST_DIR/scripts-test-dir" "$SYM_DIR_TO_REPO"
+assert_blocked "SA-sym3. External symlink DIR → existing repo child BLOCKED (axis 3)" \
+  "$(mock_path_json 'Edit' "$SYM_DIR_TO_REPO/child.mjs")" "Checkpoint required"
+
+# Axis 1 (R3/P1): external BROKEN symlink → nonexistent repo target
+SYM_BROKEN_TO_REPO="$OFFREPO_DIR/broken-link-to-repo"
+ln -sf "$TEST_DIR/nonexistent-future.mjs" "$SYM_BROKEN_TO_REPO"
+assert_blocked "SA-sym1. External broken symlink → nonexistent repo target BLOCKED (axis 1, R3/P1)" \
+  "$(mock_path_json 'Edit' "$SYM_BROKEN_TO_REPO")" "Checkpoint required"
+
+# Axis 4: internal symlink → outside repo (symlink-out, raw-path-prefix match)
+SYM_REPO_OUT="$TEST_DIR/link-pointing-out.mjs"
+ln -sf "$OFFREPO_DIR/external-target.mjs" "$SYM_REPO_OUT"
+assert_blocked "SA-sym4. Internal symlink-out: raw repo path BLOCKED (author intent, axis 4)" \
+  "$(mock_path_json 'Edit' "$SYM_REPO_OUT")" "Checkpoint required"
+
+# Axis 5: symlinked ancestor → outside repo with nonexistent leaf → ALLOW
+# (codex R3: "Allow is correct if smart-arming is based on actual artifact
+# location. A raw path under repo that resolves through a symlinked ancestor
+# to outside the repo should not arm repo-source checkpoint state." — but
+# raw-prefix match catches this first because the path starts with TEST_DIR.
+# So actually for this axis to allow, the path must NOT start with raw repo
+# root literally. The axis applies when caller types something that resolves
+# out via a symlinked ancestor. We construct such a path explicitly.)
+mkdir -p "$TEST_DIR/external-target-dir"
+SYM_REPO_LINK_DIR="$TEST_DIR/link-dir-to-external"
+ln -sfn "$OFFREPO_DIR/external-target-dir" "$SYM_REPO_LINK_DIR"
+# This still starts with $TEST_DIR/ so raw-prefix matches → block. Document
+# that axis 5 with raw-path-under-repo is dominated by raw-prefix block,
+# which is the SAFE direction (block on author intent). Test it:
+assert_blocked "SA-sym5. Repo-relative path through symlinked ancestor BLOCKED (raw-prefix wins)" \
+  "$(mock_path_json 'Edit' "$SYM_REPO_LINK_DIR/foo.mjs")" "Checkpoint required"
+
+# ── Cwd-binding tests (R4/P1 + R5 fallback) ──
+# T_cwd1: relative FILE_PATH + absolute tool_input.cwd → resolved + block
+assert_blocked "SA-cwd1. Relative FILE_PATH + absolute tool_input.cwd → resolved + block" \
+  "$(mock_path_json 'Edit' 'scripts-test.mjs' "$TEST_DIR" "$TEST_DIR")" "Checkpoint required"
+
+# T_cwd2: relative FILE_PATH + empty tool_input.cwd + absolute top-level .cwd → resolved + block
+assert_blocked "SA-cwd2. Relative FILE_PATH + absolute top-level .cwd → resolved + block" \
+  "$(mock_path_json 'Edit' 'scripts-test.mjs' "$TEST_DIR" "")" "Checkpoint required"
+
+# T_cwd3: relative FILE_PATH + RELATIVE .cwd + RELATIVE tool_input.cwd → ALLOW
+#
+# PR-level codex review (REJECT R1 → fix landed here) caught the bug in this
+# test's prior expectation. The R7/P1 documented behavior is: relative .cwd
+# falls back to hook process pwd. If hook process pwd is NOT the same as the
+# armed test target (i.e. when test runner is invoked from outside $TEST_DIR),
+# the gate checks for `.checkpoint-required` at hook-pwd → finds none → exits
+# 0 → allows. This is the SAME wrong-root-hook = allow behavior that
+# SA-cwd-strict asserts intentionally.
+#
+# Prior version asserted "block" which was wrong: it depended on hook-pwd
+# happening to equal $TEST_DIR (only true when test runner is invoked from
+# inside the fixture's temp dir — fragile). The correct assertion is ALLOW.
+# Codex PR-level R1 caught this via running the suite from a fresh cwd.
+assert_allowed "SA-cwd3. Relative FILE_PATH + relative .cwd + relative tool_input.cwd → wrong-root = allow (same shape as SA-cwd-strict)" \
+  "$(jq -n --arg tn 'Edit' --arg fp 'scripts-test.mjs' --arg c './relative' --arg tic './relative-dir' \
+    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')"
+
+# T_cwd3-strict: codex R7/P1 ACCEPT criterion — caller cwd != target with
+# relative/empty cwds. Run hook from a separate temp caller cwd. With the
+# R7/P1 CWD fix, an empty top-level .cwd falls back to hook process pwd =
+# caller cwd, which is NOT the target. Predicate then evaluates against the
+# wrong root, and FILE_PATH stays relative-resolved against THAT wrong root.
+# Since target's PRE_REQ is what we armed but hook resolves to caller cwd,
+# the gate doesn't see PRE_REQ at all → allow (gate doesn't fire because
+# wrong-root REPO_ROOT). This is the correct behavior: gate is bound to
+# the input cwd's project; off-project hook invocations don't trigger
+# someone else's gate state. Test asserts the allow.
+CALLER_TMP="$(mktemp -d)"
+CALLER_TMP="$(cd -P "$CALLER_TMP" && pwd)"
+SA_CWD_STRICT_JSON="$(jq -n --arg tn 'Edit' --arg fp 'scripts/x.mjs' \
+  '{tool_name: $tn, tool_input: {file_path: $fp}, cwd: ""}')"
+SA_CWD_STRICT_OUT="$(cd "$CALLER_TMP" && echo "$SA_CWD_STRICT_JSON" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null)"
+SA_CWD_STRICT_EXIT=$?
+if [ $SA_CWD_STRICT_EXIT -eq 0 ] && [ -z "$SA_CWD_STRICT_OUT" ] \
+   && [ ! -e "$CALLER_TMP/.checkpoints" ] && [ ! -e "$CALLER_TMP/.claude" ]; then
+  echo "  ✓ SA-cwd-strict. Caller cwd != target + empty cwd → wrong-root hook = allow + no caller marker leak (R7/P1)"
+  ((passed++))
+else
+  echo "  ✗ SA-cwd-strict. exit=$SA_CWD_STRICT_EXIT out=$SA_CWD_STRICT_OUT caller_leak=$([ -e "$CALLER_TMP/.checkpoints" ] || [ -e "$CALLER_TMP/.claude" ] && echo yes || echo no)"
+  ((failed++))
+fi
+rm -rf "$CALLER_TMP"
+
+# T_cwd5: absolute FILE_PATH → no-op fallback → normal predicate behavior (in-repo absolute → block)
+assert_blocked "SA-cwd5. Absolute in-repo FILE_PATH → normal predicate (regression-only)" \
+  "$(mock_path_json 'Edit' "$TEST_DIR/foo.mjs")" "Checkpoint required"
+
+# ── Artifact-location check (codex R6 R7 ACCEPT criteria) ──
+# When smart-arming allows off-repo Edit, confirm NO pre-checkpoint marker
+# was written under TEST_DIR. The off-repo allow path returns silently and
+# does NOT touch markers. (Note: the hook itself doesn't write markers in
+# the off-repo case; only the agent's own Write/Edit follow-up does. We
+# verify the hook's null side-effect.)
+reset_state
+touch "$PRE_REQ"
+PRE_REQ_MTIME_BEFORE="$(stat -f %m "$PRE_REQ" 2>/dev/null || stat -c %Y "$PRE_REQ" 2>/dev/null)"
+echo "$(mock_path_json 'Edit' "$OFFREPO_DIR/memory/x.md")" | run_hook >/dev/null 2>&1
+PRE_REQ_MTIME_AFTER="$(stat -f %m "$PRE_REQ" 2>/dev/null || stat -c %Y "$PRE_REQ" 2>/dev/null)"
+if [ "$PRE_REQ_MTIME_BEFORE" = "$PRE_REQ_MTIME_AFTER" ] \
+   && [ ! -e "$PRE_DONE" ] && [ ! -e "$POST_REQ" ] && [ ! -e "$POST_DONE" ]; then
+  echo "  ✓ SA-disk. Off-repo Edit while armed: no marker artifacts touched (R6 R7 criterion)"
+  ((passed++))
+else
+  echo "  ✗ SA-disk. Off-repo Edit while armed: marker artifacts changed unexpectedly"
+  ((failed++))
+fi
+
+# Cleanup off-repo scratch.
+rm -rf "$OFFREPO_DIR"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"
