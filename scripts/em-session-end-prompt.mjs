@@ -23,6 +23,8 @@ import {
   planMarkerBasenameForSession,
   primaryMarkerPath,
   legacyMarkerPath,
+  namespacedMarkerBasenameForSession,
+  CHECKPOINT_QUARTET,
 } from './lib/marker-paths.mjs'
 import { validateSessionId } from './lib/session-id.mjs'
 
@@ -137,8 +139,22 @@ for (const marker of ALL_MIGRATED_MARKERS) {
     // sid invalid → skip plan-marker cleanup entirely; orphan-sweep handles it.
     continue
   }
+  // Rank-2 C7: for quartet members, delete legacy literal (orphan cleanup
+  // for pre-rank-2 sessions that wrote bare names) AND own-session suffixed
+  // form. NEVER delete other sessions' suffixed forms (cross-session
+  // safety — concurrent session A's quartet markers preserved at B's
+  // SessionEnd, mirrors plan-marker F12 cross-session contract).
   for (const p of bothMarkerPaths(repoRoot, marker)) {
     try { fs.unlinkSync(p) } catch {}
+  }
+  if (CHECKPOINT_QUARTET.includes(marker) && validateSessionId(sessionEndSid)) {
+    const ownBasename = namespacedMarkerBasenameForSession(marker, sessionEndSid)
+    for (const p of [
+      primaryMarkerPath(repoRoot, ownBasename),
+      legacyMarkerPath(repoRoot, ownBasename),
+    ]) {
+      try { fs.unlinkSync(p) } catch {}
+    }
   }
 }
 
