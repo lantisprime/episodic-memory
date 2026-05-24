@@ -668,7 +668,7 @@ _tool_call_targets_repo_source() {
 # to who-knows-where). Uses _canonicalize_possibly_nonexistent which handles
 # symlinks (32-hop chain), macOS /var → /private/var, and nonexistent
 # ancestors via existence-walk. Env-prefix attack class is already rejected
-# at classifier-tier (command-classifier.sh:1718 returns unsafe_complex);
+# at classifier-tier (command-classifier.sh:1730 returns unsafe_complex);
 # this helper only sees the LABEL=marker_write/REASON=interpreter_classifier_marker
 # case where env-prefix has been filtered upstream.
 _validate_classifier_marker_helper() {
@@ -858,7 +858,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # empirically (pasted marker command blocked with "Checkpoint required").
     #
     # Security layering:
-    #   - Env-prefix already rejected upstream (command-classifier.sh:1718
+    #   - Env-prefix already rejected upstream (command-classifier.sh:1730
     #     returns unsafe_complex for env-prefixed classifier-marker forms).
     #   - Plan-pending invariant still applies (above this branch); plan-
     #     pending blocks classifier-marker just like any other marker_write.
