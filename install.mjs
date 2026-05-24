@@ -1367,16 +1367,18 @@ if (installSecondOpinion) {
   // partial install. Quickref derivation is the most failure-prone step
   // (section sentinel must be present + size-bounded); run it first so
   // we fail fast before any copy is attempted.
-  const repoGateSrc       = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
-  const repoValidatorSrc  = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
-  const repoLocalDirSrc   = path.join(REPO_DIR, 'scripts', 'lib', 'local-dir.mjs')
-  const repoRunbookSrc    = path.join(REPO_HOOKS, 'runbooks', 'second-opinion-harness.md')
+  const repoGateSrc         = path.join(REPO_HOOKS, 'second-opinion-gate.mjs')
+  const repoValidatorSrc    = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
+  const repoLocalDirSrc     = path.join(REPO_DIR, 'scripts', 'lib', 'local-dir.mjs')
+  const repoTimeoutFloorSrc = path.join(REPO_HOOKS, 'lib', 'so-timeout-floor.mjs')
+  const repoRunbookSrc      = path.join(REPO_HOOKS, 'runbooks', 'second-opinion-harness.md')
 
-  const userGateDst       = path.join(userHooksDir, 'second-opinion-gate.mjs')
-  const userValidatorDst  = path.join(userHooksLibDir, 'registry-validator.mjs')
-  const userLocalDirDst   = path.join(userHooksLibDir, 'local-dir.mjs')
-  const userRunbookDst    = path.join(userRunbooksDir, 'second-opinion-harness.md')
-  const userQuickrefDst   = path.join(userRunbooksDir, 'second-opinion-harness.quickref.md')
+  const userGateDst         = path.join(userHooksDir, 'second-opinion-gate.mjs')
+  const userValidatorDst    = path.join(userHooksLibDir, 'registry-validator.mjs')
+  const userLocalDirDst     = path.join(userHooksLibDir, 'local-dir.mjs')
+  const userTimeoutFloorDst = path.join(userHooksLibDir, 'so-timeout-floor.mjs')
+  const userRunbookDst      = path.join(userRunbooksDir, 'second-opinion-harness.md')
+  const userQuickrefDst     = path.join(userRunbooksDir, 'second-opinion-harness.quickref.md')
 
   // deriveQuickref: extract the "Self-trigger checklist" section from the
   // full runbook. Fail-closed if the section is missing or out of range.
@@ -1415,7 +1417,7 @@ if (installSecondOpinion) {
 
   // Pre-flight all source existence checks.
   const preflightMissing = []
-  for (const src of [repoGateSrc, repoValidatorSrc, repoLocalDirSrc, repoRunbookSrc]) {
+  for (const src of [repoGateSrc, repoValidatorSrc, repoLocalDirSrc, repoTimeoutFloorSrc, repoRunbookSrc]) {
     if (!fs.existsSync(src)) preflightMissing.push(src)
   }
   if (preflightMissing.length > 0) {
@@ -1534,6 +1536,7 @@ if (installSecondOpinion) {
   safeCopy('second-opinion gate hook', repoGateSrc, userGateDst, 0o755)
   safeCopy('second-opinion validator lib', repoValidatorSrc, userValidatorDst)
   safeCopy('second-opinion local-dir lib', repoLocalDirSrc, userLocalDirDst)
+  safeCopy('second-opinion timeout-floor lib', repoTimeoutFloorSrc, userTimeoutFloorDst)
   safeCopy('runbook', repoRunbookSrc, userRunbookDst)
   if (!installFailed && derivedQuickref) {
     safeWrite(`quickref (${derivedQuickref.length} chars)`, userQuickrefDst, derivedQuickref)

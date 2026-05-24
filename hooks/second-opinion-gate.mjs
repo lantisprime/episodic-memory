@@ -339,10 +339,27 @@ async function main() {
   const toolInput = input.tool_input || {}
   const cwd = input.cwd || process.cwd()
 
-  // ─── Runbook gate fires BEFORE validator/snapshot work. ───────────────
+  // ─── Timeout-floor + runbook gate fire BEFORE validator/snapshot work. ─
   // Codex r2 P1: validator import failure / snapshot errors MUST NOT
   // preempt the runbook block on harness invocations.
+  // Timeout-floor fires FIRST so insufficient-timeout callers get one
+  // clear retry instruction instead of being routed through runbook ack
+  // and then SIGTERM'd anyway.
   if (toolName === 'Bash' && isHarnessRequest(toolInput.command || '')) {
+    let checkTimeoutFloor
+    try {
+      const mod = await import(new URL('./lib/so-timeout-floor.mjs', import.meta.url).href)
+      checkTimeoutFloor = mod.checkTimeoutFloor
+    } catch (e) {
+      emitBlock(
+        `second-opinion-gate: cannot load timeout-floor at ./lib/so-timeout-floor.mjs ` +
+        `(detail: ${e.message}). Run: node install.mjs --tool claude-code --install-second-opinion ` +
+        `to reinstall the colocated timeout-floor lib.`,
+        { code: 'so-timeout-floor-load-failed', detail: e.message }
+      )
+    }
+    const decision = checkTimeoutFloor(toolInput)
+    if (decision.block) emitBlock(decision.reason, decision.extra)
     await checkRunbookGate(input)
     return
   }
