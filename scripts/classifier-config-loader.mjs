@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
- * classifier-config-loader.mjs — Resolve LLM-classifier config.
+ * classifier-config-loader.mjs — Resolve agent-classifier config.
  *
  * Precedence: env > project > global > defaults.
- *   env:     LLM_CLASSIFIER_{MODEL,ENABLED,FAIL_MODE,TIMEOUT_MS,MAX_TOKENS,TEMPERATURE,CONFIDENCE_THRESHOLD,API_BASE,API_VERSION}
+ *   env:     AGENT_CLASSIFIER_{MODEL,ENABLED,FAIL_MODE,TIMEOUT_MS,MAX_TOKENS,TEMPERATURE,CONFIDENCE_THRESHOLD,API_BASE,API_VERSION}
+ *            (PR-B rename; LLM_CLASSIFIER_* retained as backward-compat aliases,
+ *             new name wins if both are set, deprecation note emitted on stderr.)
  *   project: <projectRoot>/.episodic-memory/classifier-config.json
  *   global:  ~/.episodic-memory/classifier-config.json
  *
@@ -73,17 +75,31 @@ function coerceStr(v) {
   return s.length ? s : undefined
 }
 
-function fromEnv(env) {
+// PR-B env rename: AGENT_CLASSIFIER_* is primary; LLM_CLASSIFIER_* is a
+// backward-compat alias. New name wins if both are set. When ONLY the old name
+// is present, the old key is recorded in `deprecatedAliases` (if provided) so
+// the caller can emit a one-line deprecation note. Never throws.
+function fromEnv(env, deprecatedAliases) {
+  const pick = (name) => {
+    const newKey = `AGENT_CLASSIFIER_${name}`
+    const oldKey = `LLM_CLASSIFIER_${name}`
+    if (env[newKey] !== undefined) return env[newKey]
+    if (env[oldKey] !== undefined) {
+      if (deprecatedAliases) deprecatedAliases.add(oldKey)
+      return env[oldKey]
+    }
+    return undefined
+  }
   return {
-    model: coerceStr(env.LLM_CLASSIFIER_MODEL),
-    enabled: coerceBool(env.LLM_CLASSIFIER_ENABLED),
-    fail_mode: coerceStr(env.LLM_CLASSIFIER_FAIL_MODE),
-    timeout_ms: coerceNum(env.LLM_CLASSIFIER_TIMEOUT_MS),
-    max_tokens: coerceNum(env.LLM_CLASSIFIER_MAX_TOKENS),
-    temperature: coerceNum(env.LLM_CLASSIFIER_TEMPERATURE),
-    confidence_threshold: coerceNum(env.LLM_CLASSIFIER_CONFIDENCE_THRESHOLD),
-    api_base: coerceStr(env.LLM_CLASSIFIER_API_BASE),
-    api_version: coerceStr(env.LLM_CLASSIFIER_API_VERSION)
+    model: coerceStr(pick('MODEL')),
+    enabled: coerceBool(pick('ENABLED')),
+    fail_mode: coerceStr(pick('FAIL_MODE')),
+    timeout_ms: coerceNum(pick('TIMEOUT_MS')),
+    max_tokens: coerceNum(pick('MAX_TOKENS')),
+    temperature: coerceNum(pick('TEMPERATURE')),
+    confidence_threshold: coerceNum(pick('CONFIDENCE_THRESHOLD')),
+    api_base: coerceStr(pick('API_BASE')),
+    api_version: coerceStr(pick('API_VERSION'))
   }
 }
 
@@ -153,12 +169,22 @@ export function loadConfig({ projectRoot, env = process.env, homeDir = os.homedi
   }
   cfg._global_config_path = globalPath
 
-  merge(cfg, fromEnv(env))
+  // Compute the env layer ONCE (avoids double-reading env + double-counting
+  // deprecation aliases). Reused for both the merge and _sources_seen.
+  const deprecatedAliases = new Set()
+  const envLayer = fromEnv(env, deprecatedAliases)
+  merge(cfg, envLayer)
   validate(cfg, warnings)
+
+  for (const oldKey of deprecatedAliases) {
+    const newKey = oldKey.replace(/^LLM_CLASSIFIER_/, 'AGENT_CLASSIFIER_')
+    warnings.push(`env var ${oldKey} is a deprecated alias; prefer ${newKey}`)
+  }
 
   cfg._warnings = warnings
   cfg._sources_seen = {
-    env: Object.entries(fromEnv(env)).filter(([, v]) => v !== undefined).map(([k]) => k),
+    env: Object.entries(envLayer).filter(([, v]) => v !== undefined).map(([k]) => k),
+    env_deprecated_aliases: [...deprecatedAliases],
     project: fs.existsSync(cfg._project_config_path || '') ? cfg._project_config_path : null,
     global: fs.existsSync(globalPath) ? globalPath : null
   }

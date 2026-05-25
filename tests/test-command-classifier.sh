@@ -164,6 +164,18 @@ assert_label "T55 quoted body containing marker name" \
   "echo 'this is .pre-checkpoint-done text'" "read_only"
 
 echo ""
+echo "--- PR-B content-write commands (cmd_content_write → arms F1 pre-checkpoint) ---"
+# tee/cp/mv/dd write file content into a path — same bypass class as `echo >`.
+# Non-marker targets classify shared_write (reason cmd_content_write); the gate's
+# Bash arm keys on that reason. (Marker-target tee remains marker_write above.)
+assert_label "T56a tee non-marker file → shared_write" "tee scripts/foo.mjs" "shared_write"
+assert_label "T56b cp into repo → shared_write" "cp a.txt scripts/foo.mjs" "shared_write"
+assert_label "T56c mv into repo → shared_write" "mv a.txt scripts/foo.mjs" "shared_write"
+assert_label "T56d dd of= → shared_write" "dd if=/dev/zero of=scripts/foo.mjs" "shared_write"
+# Tier-0 read-only allowlist neighbors must remain read_only (no over-capture).
+assert_label "T56e sed (no -i detect) stays read_only" "sed s/a/b/ scripts/foo.mjs" "read_only"
+
+echo ""
 echo "--- Unsafe complex ---"
 assert_label "T60 bash -c" "bash -c 'rm -rf /'" "unsafe_complex"
 assert_label "T61 sh -c" "sh -c 'echo'" "unsafe_complex"

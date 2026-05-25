@@ -1169,6 +1169,39 @@ if (installHooks) {
       }
     }
 
+    // 5a-pre. PR-B orphan sweep for renamed files (llm-classifier →
+    // agent-classifier). User directive "delete stale/orphan": the glob copies
+    // above add the new names but never remove old installed copies. Delete the
+    // old names ONLY when the new replacements are current in THIS run — never
+    // delete an orphan that a still-divergent command-classifier.sh might still
+    // source (codex R1 P2: install.mjs may skip-divergent a locally-edited lib).
+    // Explicit basename list (never glob-delete); auditable / CI-checkable.
+    const RENAMED_REMOVED = [
+      { oldPath: path.join(userHooksLibDir, 'llm-classifier.sh'),
+        reason: 'renamed → agent-classifier.sh (PR-B)' },
+      { oldPath: path.join(SCRIPTS_DIR, 'llm-classifier-dispatch.mjs'),
+        reason: 'renamed → agent-classifier-dispatch.mjs (PR-B)' }
+    ]
+    const agentClassifierCurrent =
+      ['copied', 'unchanged', 'forced'].includes(libResults['agent-classifier.sh'])
+    const commandClassifierSafe =
+      libResults['command-classifier.sh'] !== 'skipped-divergent'
+    if (agentClassifierCurrent && commandClassifierSafe) {
+      for (const { oldPath, reason } of RENAMED_REMOVED) {
+        if (fs.existsSync(oldPath)) {
+          fs.rmSync(oldPath, { force: true })
+          console.log(`Removed stale renamed file: ${oldPath} (${reason})`)
+          touched.hookLib.push(`removed:${oldPath}`)
+        }
+      }
+    } else {
+      console.log(
+        'Skipped orphan sweep of old llm-classifier.sh — new agent-classifier.sh ' +
+        'not fully installed (divergent local edit on command-classifier.sh?); ' +
+        're-run with --install-hooks-force'
+      )
+    }
+
     // 5a. Hook specs imported from scripts/lib/install-manifest.mjs (single
     // source of truth shared with tools/migration-cutover.mjs). Closes
     // Codex round-2 implementation attention point: avoid a second

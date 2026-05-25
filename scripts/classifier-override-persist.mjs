@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * classifier-override-persist.mjs — Auto-persist an LLM classification as
+ * classifier-override-persist.mjs — Auto-persist an agent-classifier verdict as
  * a project-local override so subsequent invocations of the same command
  * shape hit Tier 0 without re-running the LLM.
  *
- * Invoked fire-and-forget by hooks/lib/llm-classifier.sh after a marker-cache
+ * Invoked fire-and-forget by hooks/lib/agent-classifier.sh after a marker-cache
  * hit OR a legacy-dispatcher hit (per PR #336 plan v4-final). Silent on
  * success — no stdout output that could pollute the hook's classification
  * stream. Hard validation failures go to stderr + exit 2.
@@ -16,7 +16,7 @@
  *     --command     "<command text>" \
  *     --label       <read_only|shared_write|marker_write|push_or_pr_create|unsafe_complex> \
  *     --confidence  <0..1> \
- *     --source-tag  <llm-marker-autopersist|llm-legacy-autopersist>
+ *     --source-tag  <agent-marker-autopersist|agent-legacy-autopersist>
  *     [--reason     "<note>"]
  *
  * # Persist policy (in order)
@@ -75,7 +75,12 @@ import {
 import { resolveRepoRoot } from './lib/local-dir.mjs'
 import { loadConfig } from './classifier-config-loader.mjs'
 
-const VALID_SOURCE_TAGS = new Set(['llm-marker-autopersist', 'llm-legacy-autopersist'])
+// PR-B rename: agent-* are the current tags; llm-* retained as backward-compat
+// aliases so in-flight markers written by an older wrapper still validate.
+const VALID_SOURCE_TAGS = new Set([
+  'agent-marker-autopersist', 'agent-legacy-autopersist',
+  'llm-marker-autopersist', 'llm-legacy-autopersist'
+])
 
 function flag(argv, name) {
   const i = argv.indexOf(name)

@@ -6,7 +6,7 @@
  *   - scripts/classify-correction.mjs        (user-correction write, Tier 0 source)
  *   - scripts/classifier-override-lookup.mjs (Tier 0 read, shell-side wrapper)
  *   - scripts/classifier-override-persist.mjs (auto-persist write after LLM hit)
- *   - scripts/llm-classifier-dispatch.mjs    (legacy Tier 2/3 dispatcher)
+ *   - scripts/agent-classifier-dispatch.mjs    (legacy Tier 2/3 dispatcher)
  *
  * scripts/classifier-marker.mjs intentionally does NOT consume this module —
  * its tuple shape extends with session_id + policy versions and its store
@@ -35,7 +35,7 @@ export const LABELS = new Set([
 export const INTERPRETERS = new Set(['node', 'python', 'python3', 'ruby', 'perl'])
 
 // Carve-out lists for the Tier 0 override path (PR #336). Centralized here
-// so both classifier-override-lookup.mjs and llm-classifier-dispatch.mjs
+// so both classifier-override-lookup.mjs and agent-classifier-dispatch.mjs
 // apply the same shape check (codex REJECT on file 4/8 R1: a flag-prefixed
 // interpreter command like `node --require ./noop.js scripts/em-store.mjs`
 // otherwise hides a real mutator after the --require value, bypassing the

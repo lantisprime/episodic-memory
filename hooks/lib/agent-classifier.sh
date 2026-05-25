@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # episodic-memory-hook-version: 2026-05-23.2
-# llm-classifier.sh — Tier 2/3 marker-cache wrapper for command-classifier.sh.
+# agent-classifier.sh — Tier 2/3 marker-cache wrapper for command-classifier.sh.
+# (Historically llm-classifier.sh; renamed in PR-B — the mechanism is the
+# active agent self-classifying its own Bash commands, not a live LLM API.)
 #
 # REPLACES PR #326's direct-Anthropic-API fetch. The active Claude Code
 # session classifies its own Bash commands using its own reasoning (already
@@ -12,7 +14,7 @@
 #
 # Sourced from hooks/lib/command-classifier.sh. Provides one function:
 #
-#   llm_classify_command <command> <repo_root> <caller_cwd>
+#   agent_classify_command <command> <repo_root> <caller_cwd>
 #       echoes "<label>\t<source>" on success (exit 0)
 #       echoes "" and returns 1 on no-decision (caller falls back to Tier 1
 #       conservative default OR the hook returns deny-with-hint via the
@@ -22,11 +24,11 @@
 # The caller (command-classifier.sh) gets no-decision and falls through to
 # its conservative default. The hook entry point (checkpoint-gate.sh / the
 # PreToolUse glue) is responsible for translating the "interpreter_other"
-# conservative default into a helpful deny reason when LLM_CLASSIFIER_HINT
-# mode is enabled. See `hooks/lib/llm-classifier-deny-reason.sh`.
+# conservative default into a helpful deny reason when the deny-hint is
+# enabled. See `hooks/lib/agent-classifier-deny-reason.sh`.
 #
 # Legacy direct-API dispatch path is retained behind the
-# LLM_CLASSIFIER_LEGACY_TRANSPORT=direct-fetch config field (file-based,
+# classifier-config.json transport=direct-fetch config field (file-based,
 # NOT env-prefix per PR #271 attack-class lesson). Default: marker-only.
 
 # Resolution: hooks/lib/ sits next to scripts/. Installed scripts live at
@@ -37,7 +39,7 @@
 # `{"status":"hit","label":"read_only",...}` JSON response and bypass the
 # marker artifact entirely. Helper resolution is hard-bound to
 # installed-runtime OR repo-source paths — both authoritative.
-__llm_classifier_resolve_marker_helper() {
+__agent_classifier_resolve_marker_helper() {
   local global="$HOME/.episodic-memory/scripts/classifier-marker.mjs"
   if [ -f "$global" ]; then
     printf '%s' "$global"
@@ -57,7 +59,7 @@ __llm_classifier_resolve_marker_helper() {
 # PR #336 — Tier 0 auto-persist helper resolution. Resolves to installed
 # runtime first, repo-source fallback. NO env-var override seam (PR #271
 # attack class — ambient env paths can be hijacked).
-__llm_classifier_resolve_persist_helper() {
+__agent_classifier_resolve_persist_helper() {
   local global="$HOME/.episodic-memory/scripts/classifier-override-persist.mjs"
   if [ -f "$global" ]; then
     printf '%s' "$global"
@@ -86,14 +88,14 @@ __llm_classifier_resolve_persist_helper() {
 # Why subshell `cd "$repo_root"`: persist helper's
 # `realpath(resolveRepoRoot(process.cwd())) === --project-root` cross-repo
 # check requires its process.cwd() to canonicalize to $repo_root.
-__llm_classifier_autopersist() {
+__agent_classifier_autopersist() {
   local repo_root="$1" caller_cwd="$2" command="$3" label="$4" confidence="$5" source_tag="$6"
   if [ -z "$repo_root" ] || [ -z "$caller_cwd" ] || [ -z "$command" ] || \
      [ -z "$label" ] || [ -z "$confidence" ] || [ -z "$source_tag" ]; then
     return 1
   fi
   local persist_helper
-  if ! persist_helper="$(__llm_classifier_resolve_persist_helper)"; then
+  if ! persist_helper="$(__agent_classifier_resolve_persist_helper)"; then
     return 1
   fi
   # Background subshell: cd binds cwd, helper writes silently. Disown via
@@ -119,19 +121,22 @@ __llm_classifier_autopersist() {
 }
 
 # Legacy dispatch (for --legacy-direct-fetch tests / rollback only).
-__llm_classifier_resolve_legacy_dispatcher() {
-  if [ -n "${LLM_CLASSIFIER_DISPATCH_PATH:-}" ] && [ -f "$LLM_CLASSIFIER_DISPATCH_PATH" ]; then
-    printf '%s' "$LLM_CLASSIFIER_DISPATCH_PATH"
+__agent_classifier_resolve_legacy_dispatcher() {
+  # Env alias (PR-B): AGENT_CLASSIFIER_DISPATCH_PATH preferred; LLM_CLASSIFIER_DISPATCH_PATH
+  # retained as backward-compat alias (new name wins if both set).
+  local _dispatch_path="${AGENT_CLASSIFIER_DISPATCH_PATH:-${LLM_CLASSIFIER_DISPATCH_PATH:-}}"
+  if [ -n "$_dispatch_path" ] && [ -f "$_dispatch_path" ]; then
+    printf '%s' "$_dispatch_path"
     return 0
   fi
-  local global="$HOME/.episodic-memory/scripts/llm-classifier-dispatch.mjs"
+  local global="$HOME/.episodic-memory/scripts/agent-classifier-dispatch.mjs"
   if [ -f "$global" ]; then
     printf '%s' "$global"
     return 0
   fi
   local self_dir
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local repo="$self_dir/../../scripts/llm-classifier-dispatch.mjs"
+  local repo="$self_dir/../../scripts/agent-classifier-dispatch.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"
     return 0
@@ -148,7 +153,7 @@ __llm_classifier_resolve_legacy_dispatcher() {
 # only match other invocations under the same fallback, so test isolation
 # is preserved without breaking unit tests. In production runs under Claude
 # Code, CLAUDE_CODE_SESSION_ID is always set; the fallback never triggers.
-__llm_classifier_session_id() {
+__agent_classifier_session_id() {
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     printf '%s' "$CLAUDE_CODE_SESSION_ID"
     return 0
@@ -156,7 +161,7 @@ __llm_classifier_session_id() {
   printf '%s' "unknown"
 }
 
-llm_classify_command() {
+agent_classify_command() {
   local command="$1"
   local repo_root="$2"
   local caller_cwd="$3"
@@ -166,11 +171,11 @@ llm_classify_command() {
   fi
 
   local session_id
-  session_id="$(__llm_classifier_session_id)"
+  session_id="$(__agent_classifier_session_id)"
 
   # --- Marker-cache read (primary path) ---
   local marker_helper marker_hit=0
-  if marker_helper="$(__llm_classifier_resolve_marker_helper)"; then
+  if marker_helper="$(__agent_classifier_resolve_marker_helper)"; then
     local out
     # Subshell cd forces helper's process.cwd() to repo_root regardless of
     # caller cwd. Helper re-verifies. 2>/dev/null suppresses helper
@@ -230,8 +235,8 @@ llm_classify_command() {
           # and is silent on success). Skip if confidence is missing
           # (older marker schema without the field).
           if [ -n "$confidence" ]; then
-            __llm_classifier_autopersist "$repo_root" "$caller_cwd" "$command" \
-              "$label" "$confidence" "llm-marker-autopersist"
+            __agent_classifier_autopersist "$repo_root" "$caller_cwd" "$command" \
+              "$label" "$confidence" "agent-marker-autopersist"
           fi
           printf '%s\t%s\n' "$label" "interpreter_marker_cache_hit"
           return 0
@@ -249,10 +254,10 @@ llm_classify_command() {
   # Config lives at <project>/.episodic-memory/classifier-config.json or
   # ~/.episodic-memory/classifier-config.json with field:
   #   { "transport": "direct-fetch" }
-  if __llm_classifier_legacy_enabled "$repo_root"; then
+  if __agent_classifier_legacy_enabled "$repo_root"; then
     local dispatcher
-    if dispatcher="$(__llm_classifier_resolve_legacy_dispatcher)"; then
-      __llm_classifier_legacy_log "$repo_root"
+    if dispatcher="$(__agent_classifier_resolve_legacy_dispatcher)"; then
+      __agent_classifier_legacy_log "$repo_root"
       local out
       out="$(cd "$repo_root" 2>/dev/null && node "$dispatcher" \
         --project-root "$repo_root" \
@@ -295,8 +300,8 @@ llm_classify_command() {
             # PR #336: auto-persist after legacy-dispatcher hit (same
             # fire-and-forget pattern as marker-cache hit).
             if [ -n "$confidence" ]; then
-              __llm_classifier_autopersist "$repo_root" "$caller_cwd" "$command" \
-                "$label" "$confidence" "llm-legacy-autopersist"
+              __agent_classifier_autopersist "$repo_root" "$caller_cwd" "$command" \
+                "$label" "$confidence" "agent-legacy-autopersist"
             fi
             printf '%s\tinterpreter_llm_legacy_%s\n' "$label" "$source"
             return 0
@@ -310,7 +315,7 @@ llm_classify_command() {
 }
 
 # Check classifier-config.json transport field. Default: marker-only.
-__llm_classifier_legacy_enabled() {
+__agent_classifier_legacy_enabled() {
   local repo_root="$1"
   local cfg_project="$repo_root/.episodic-memory/classifier-config.json"
   local cfg_global="$HOME/.episodic-memory/classifier-config.json"
@@ -331,7 +336,7 @@ __llm_classifier_legacy_enabled() {
 
 # One-line telemetry log of legacy use. Burn-in surface — if no legacy log
 # entries accumulate over a release, the legacy path can be removed.
-__llm_classifier_legacy_log() {
+__agent_classifier_legacy_log() {
   local repo_root="$1"
   local log_dir="$HOME/.episodic-memory"
   local log_file="$log_dir/legacy-fetch.log.jsonl"

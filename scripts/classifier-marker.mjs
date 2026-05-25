@@ -90,6 +90,34 @@ function flag(argv, name) {
   return argv[i + 1]
 }
 
+const COMMAND_FILE_MAX = 64 * 1024 // 64 KiB cap on --command-file content
+
+// Resolve command text from either --command <text> or --command-file <path>.
+// Exactly one must be supplied. --command-file reads the file as UTF-8 verbatim
+// (no shell re-parse) so commands with quotes/spaces/newlines round-trip; the
+// content is OPAQUE TEXT, never executed or resolved as a path. Returns the
+// command string, undefined if neither flag is present, or die(2) on misuse.
+function resolveCommandArg(argv) {
+  const inline = flag(argv, '--command')
+  const filePath = flag(argv, '--command-file')
+  if (inline !== undefined && filePath !== undefined) {
+    die(2, '--command and --command-file are mutually exclusive')
+  }
+  if (filePath !== undefined) {
+    let buf
+    try {
+      buf = fs.readFileSync(filePath)
+    } catch (e) {
+      die(2, `cannot read --command-file ${filePath}: ${e.message}`)
+    }
+    if (buf.length > COMMAND_FILE_MAX) {
+      die(2, `--command-file ${filePath} exceeds ${COMMAND_FILE_MAX} bytes (${buf.length})`)
+    }
+    return buf.toString('utf8')
+  }
+  return inline
+}
+
 function die(code, msg) {
   process.stderr.write(`classifier-marker: ${msg}\n`)
   process.exit(code)
@@ -383,7 +411,12 @@ function vacuumMarkers(projectRootCanon, maxAgeDays) {
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
   let removed = 0, scanned = 0
   for (const entry of fs.readdirSync(classifyDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    // Reap stale .json markers AND `pending-*.cmd` deny-hint scratch files
+    // (PR-B: the deny-hint's --command-file fallback writes these here so they
+    // live inside project_root and get swept by the same TTL).
+    const isReapable = entry.isFile() &&
+      (entry.name.endsWith('.json') || /^pending-.*\.cmd$/.test(entry.name))
+    if (!isReapable) continue
     scanned++
     const p = path.join(classifyDir, entry.name)
     try {
@@ -407,12 +440,12 @@ function emit(obj) {
 function mainRead(argv) {
   const projectRootArg = flag(argv, '--project-root')
   const callerCwd = flag(argv, '--caller-cwd')
-  const command = flag(argv, '--command')
+  const command = resolveCommandArg(argv)
   const sessionId = flag(argv, '--session-id')
 
   if (!projectRootArg) die(2, '--project-root required')
   if (!callerCwd) die(2, '--caller-cwd required')
-  if (command === undefined) die(2, '--command required')
+  if (command === undefined) die(2, '--command or --command-file required')
   if (!sessionId) die(2, '--session-id required')
   if (!SESSION_ID_RE.test(sessionId)) die(2, `--session-id "${sessionId}" does not match ${SESSION_ID_RE}`)
 
@@ -458,7 +491,7 @@ function mainRead(argv) {
 function mainWrite(argv) {
   const projectRootArg = flag(argv, '--project-root')
   const callerCwd = flag(argv, '--caller-cwd')
-  const command = flag(argv, '--command')
+  const command = resolveCommandArg(argv)
   const sessionId = flag(argv, '--session-id')
   const label = flag(argv, '--label')
   const confidenceStr = flag(argv, '--confidence')
@@ -466,7 +499,7 @@ function mainWrite(argv) {
 
   if (!projectRootArg) die(2, '--project-root required')
   if (!callerCwd) die(2, '--caller-cwd required')
-  if (command === undefined) die(2, '--command required')
+  if (command === undefined) die(2, '--command or --command-file required')
   if (!sessionId) die(2, '--session-id required')
   if (!label) die(2, '--label required')
   if (!LABELS.has(label)) die(2, `invalid --label "${label}" (allowed: ${[...LABELS].join(', ')})`)

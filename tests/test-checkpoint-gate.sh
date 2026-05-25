@@ -169,8 +169,12 @@ assert_blocked "13. MultiEdit blocked by pre-gate" "$(mock_json 'MultiEdit')" "C
 # implementation bypasses the checkpoint; closure tracked via PR-B). The
 # classifier's read_only/shared_write boundary is still exercised in
 # tests/test-command-classifier.sh.
-assert_allowed "14. Bash shared_write now allowed during pre-gate (Bash ungated)" \
-  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')"
+# PR-B F1 NARROW: a redirect that writes a real file (echo_redirected) now arms +
+# blocks the pre-checkpoint. External target (/tmp) arms conservatively (the
+# classifier carries no target); the deny-hint is the classify-read_only escape.
+assert_blocked "14. F1 narrow: echo redirect to real file arms+blocks pre-checkpoint" \
+  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')" \
+  "Checkpoint required"
 assert_allowed "14b. Bash read-only echo allowed (#89)" \
   "$(mock_json 'Bash' 'echo hello')"
 # gh pr checkout mutates the local working tree (shared_write); with Bash
@@ -230,8 +234,11 @@ assert_allowed "18i. &>>/dev/null allowed" \
 # fd-dup vs real-file-redirect classifier boundary is owned by FD20-FD24 in
 # tests/test-command-classifier.sh; one representative kept here as a gate
 # regression guard.
-assert_allowed "18j. real file redirect (2>file) now allowed (shared_write, Bash ungated)" \
-  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')"
+# PR-B F1 NARROW: stderr redirect to a real file (readonly_cmd_redirected) arms.
+# /dev/null redirects stay read_only (classifier) so the common case is unaffected.
+assert_blocked "18j. F1 narrow: stderr redirect to real file arms+blocks pre-checkpoint" \
+  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')" \
+  "Checkpoint required"
 # fd-dup followed by push: classifier reduces to push_or_pr_create, but the
 # push-gate is inactive without POST_REQ (only PRE_REQ armed here) → allowed.
 # Chained-push blocking under POST_REQ is covered by tests 68 / 77-80.
@@ -441,8 +448,11 @@ touch "$PRE_REQ"
 heredoc_bypass='cat > readme.md <<EOF
 echo > .pre-checkpoint-done
 EOF'
-assert_allowed "54. Heredoc to readme.md allowed (shared_write; body-mention is not a marker write)" \
-  "$(mock_json 'Bash' "$heredoc_bypass")"
+# PR-B F1 NARROW: heredoc redirect writing a repo file is the core pure-Bash
+# implementation bypass — now arms + blocks the pre-checkpoint.
+assert_blocked "54. F1 narrow: heredoc redirect to repo file arms+blocks pre-checkpoint" \
+  "$(mock_json 'Bash' "$heredoc_bypass")" \
+  "Checkpoint required"
 
 # Legitimate heredoc TO the marker: redirect target is in pre-<< portion → allow.
 heredoc_legit='cat > '"$PRE_DONE"' <<EOF
@@ -460,8 +470,10 @@ assert_blocked "56. Here-string to POST_DONE BLOCKED (POST_REQ not armed)" \
 # Here-string writes to readme.md (shared_write); body merely mentions the
 # marker. Planning-passive: shared_write Bash is ungated → now allowed.
 herestring_bypass='cat > readme.md <<<"echo > .pre-checkpoint-done"'
-assert_allowed "57. Here-string to readme.md allowed (shared_write, Bash ungated)" \
-  "$(mock_json 'Bash' "$herestring_bypass")"
+# PR-B F1 NARROW: here-string redirect writing a repo file arms + blocks.
+assert_blocked "57. F1 narrow: here-string redirect to repo file arms+blocks pre-checkpoint" \
+  "$(mock_json 'Bash' "$herestring_bypass")" \
+  "Checkpoint required"
 
 # ============================================================================
 echo ""
@@ -508,8 +520,12 @@ assert_allowed "65. marker-write THEN && chained shared_write — allowed" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")"
 assert_allowed "66. marker-write THEN || chained shared_write — allowed" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")"
-assert_allowed "67. marker-write THEN | piped shared_write — allowed" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")"
+# PR-B F1: the piped `tee /tmp/log` is a content-write (cmd_content_write) → the
+# whole command reduces to that and arms (external /tmp target over-arms, same as
+# redirect /tmp; escapable via deny-hint). 64/65/66/67b use rm (not a content
+# write) and stay allowed.
+assert_blocked "67. marker-write THEN | piped tee content-write — arms+blocks (F1)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")" "Checkpoint required"
 assert_allowed "67b. marker-write THEN newline + ; chained shared_write — allowed (#72)" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE
 ; rm -rf /tmp/IMPORTANT")"
@@ -1857,6 +1873,120 @@ assert_marker_exists "PP-15. edit in repo A armed A's .checkpoint-required.<sidA
 assert_marker_absent "PP-16. edit in repo A did NOT arm repo B's .checkpoint-required.<sidA>" \
   "$PP_REPO_B/.checkpoints/.checkpoint-required.$PP_SID_A"
 rm -rf "$PP_REPO_B" "$PP_REPO"
+
+# ============================================================================
+# F1-NARROW (PR-B #351): mutating-Bash re-gate + .review-store/ carve-out.
+#   - A redirect that writes a REAL file content (echo_redirected /
+#     readonly_cmd_redirected) arms + blocks the pre-checkpoint, WITH the
+#     deny-hint (#333).
+#   - interpreter_other (review/node dispatch) + process-mutations (git/npm) +
+#     read_only stay FREE and never arm (PR #352 planning-passive preserved).
+#   - A satisfied pre-checkpoint unblocks subsequent redirect-writes.
+#   - .review-store/ writes never arm; a symlink under .review-store/ that
+#     ESCAPES to a repo source file still arms (canonical-checked carve-out).
+# ============================================================================
+F1_REPO="$(mktemp -d)"; F1_REPO="$(cd -P "$F1_REPO" && pwd)"
+git -C "$F1_REPO" init -q 2>/dev/null
+F1_MD="$F1_REPO/.checkpoints"; mkdir -p "$F1_MD"
+mkdir -p "$F1_REPO/scripts" "$F1_REPO/.review-store"
+F1_SID="33333333-cccc-4ccc-8ccc-333333333333"
+mock_f1_bash() { jq -n --arg cmd "$1" --arg cwd "$F1_REPO" --arg sid "$F1_SID" \
+  '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, session_id:$sid}'; }
+mock_f1_edit() { jq -n --arg fp "$1" --arg cwd "$F1_REPO" --arg sid "$F1_SID" \
+  '{tool_name:"Edit", tool_input:{file_path:$fp}, cwd:$cwd, session_id:$sid}'; }
+reset_f1() { rm -rf "$F1_MD"; mkdir -p "$F1_MD"; }
+
+# F1-1: repo redirect-write arms + blocks (the core pure-Bash bypass)
+reset_f1
+assert_blocked "F1-1. echo redirect to repo file arms+blocks pre-checkpoint" \
+  "$(mock_f1_bash 'echo x > scripts/foo.mjs')" "Checkpoint required"
+assert_marker_exists "F1-2. redirect-write lazily armed .checkpoint-required.<sid>" \
+  "$F1_MD/.checkpoint-required.$F1_SID"
+# F1-3: the block carries the #333 deny-hint, framed checkpoint-FIRST with the
+# read_only escape scoped to non-repo-source writes + a misclassification warning
+# (negative-scenario-reviewer MAJOR: never lead with "classify read_only").
+reset_f1
+assert_blocked "F1-3. redirect-write block carries deny-hint with read_only escape" \
+  "$(mock_f1_bash 'echo x > scripts/foo.mjs')" "label read_only"
+reset_f1
+assert_blocked "F1-3b. deny-hint warns against mislabeling a real repo write" \
+  "$(mock_f1_bash 'echo x > scripts/foo.mjs')" "Do NOT classify a real repo-source write"
+
+# F1-4..6: review-dispatch + process-mutations + read-only stay FREE, never arm
+reset_f1
+assert_allowed "F1-4. node review dispatch (interpreter_other) stays free" \
+  "$(mock_f1_bash 'node scripts/second-opinion.mjs request --provider codex --dispatch')"
+assert_allowed "F1-5. git commit (process-mutation) stays free" \
+  "$(mock_f1_bash 'git commit -m wip')"
+assert_allowed "F1-6. read-only cat stays free" \
+  "$(mock_f1_bash 'cat readme.md')"
+assert_marker_absent "F1-7. none of F1-4..6 armed .checkpoint-required.<sid>" \
+  "$F1_MD/.checkpoint-required.$F1_SID"
+
+# F1-8: a satisfied pre-checkpoint unblocks subsequent redirect-writes
+reset_f1
+echo "Rule 18 pre-checkpoint" > "$F1_MD/.pre-checkpoint-done.$F1_SID"
+assert_allowed "F1-8. redirect-write allowed once pre-checkpoint written" \
+  "$(mock_f1_bash 'echo x > scripts/foo.mjs')"
+
+# F1-9: .review-store/ write is NOT repo-source — allowed, never arms
+reset_f1
+assert_allowed "F1-9. .review-store/ write allowed (carve-out)" \
+  "$(mock_f1_edit "$F1_REPO/.review-store/plan-r1.md")"
+assert_marker_absent "F1-10. .review-store/ write did NOT arm .checkpoint-required.<sid>" \
+  "$F1_MD/.checkpoint-required.$F1_SID"
+
+# F1-11: a symlink UNDER .review-store/ that escapes to a repo source file must
+# still arm — the carve-out is canonical-checked, not raw-prefix only.
+reset_f1
+echo "x" > "$F1_REPO/scripts/target.mjs"   # ensure symlink target exists → canonical resolves through
+ln -sf "$F1_REPO/scripts/target.mjs" "$F1_REPO/.review-store/escape.mjs"
+assert_blocked "F1-11. .review-store/ symlink escaping to repo source still arms" \
+  "$(mock_f1_edit "$F1_REPO/.review-store/escape.mjs")" "Checkpoint required"
+rm -f "$F1_REPO/.review-store/escape.mjs"
+
+# F1-13: content-writing commands (tee/cp/mv/dd → cmd_content_write) arm + block,
+# same as redirects (negative-scenario-reviewer BLOCKER: tee/cp/mv/dd bypass).
+reset_f1
+assert_blocked "F1-13a. tee to repo file arms+blocks pre-checkpoint" \
+  "$(mock_f1_bash 'tee scripts/foo.mjs')" "Checkpoint required"
+reset_f1
+assert_blocked "F1-13b. cp into repo arms+blocks pre-checkpoint" \
+  "$(mock_f1_bash 'cp a.txt scripts/foo.mjs')" "Checkpoint required"
+reset_f1
+assert_blocked "F1-13c. mv into repo arms+blocks pre-checkpoint" \
+  "$(mock_f1_bash 'mv a.txt scripts/foo.mjs')" "Checkpoint required"
+reset_f1
+assert_marker_absent "F1-13d-pre nothing armed yet" "$F1_MD/.checkpoint-required.$F1_SID"
+echo "$(mock_f1_bash 'tee scripts/foo.mjs')" | run_hook >/dev/null 2>&1
+assert_marker_exists "F1-13d. tee armed .checkpoint-required.<sid>" \
+  "$F1_MD/.checkpoint-required.$F1_SID"
+# rm (deletion, not content-write) stays FREE — documented residual.
+reset_f1
+assert_allowed "F1-13e. rm (deletion, not content-write) stays free" \
+  "$(mock_f1_bash 'rm scripts/foo.mjs')"
+rm -rf "$F1_REPO"
+
+# F1-12 (#349): a classifier-marker.mjs invocation whose path contains SPACES is
+# extracted via the de-quoting _tokenize tokenizer (not whitespace-split awk), so
+# the gate processes it cleanly — no tokenizer error leaks, marker write allowed.
+# (Pre-fix the awk split produced a broken `'/My` fragment; deep extraction
+# coverage rides on the 361-test _tokenize suite in test-command-classifier.sh.)
+F1_SPACE_BASE="$(mktemp -d)"
+F1_SPACE_REPO="$F1_SPACE_BASE/My Repo Dir"
+mkdir -p "$F1_SPACE_REPO/scripts" "$F1_SPACE_REPO/.checkpoints"
+git -C "$F1_SPACE_REPO" init -q 2>/dev/null
+echo "// marker helper" > "$F1_SPACE_REPO/scripts/classifier-marker.mjs"
+f1_space_out="$(jq -n \
+  --arg cmd "node '$F1_SPACE_REPO/scripts/classifier-marker.mjs' --write --project-root '$F1_SPACE_REPO' --caller-cwd '$F1_SPACE_REPO' --command x --label read_only --confidence 0.9 --session-id 33333333-cccc-4ccc-8ccc-333333333333" \
+  --arg cwd "$F1_SPACE_REPO" --arg sid "33333333-cccc-4ccc-8ccc-333333333333" \
+  '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, session_id:$sid}' | run_hook 2>&1 || true)"
+if echo "$f1_space_out" | grep -q "tokenize"; then
+  echo "  ✗ F1-12. spaced classifier-marker path leaked a tokenizer error: $f1_space_out"; ((failed++))
+else
+  echo "  ✓ F1-12. spaced classifier-marker path processed cleanly (#349 de-quote extraction)"; ((passed++))
+fi
+rm -rf "$F1_SPACE_BASE"
 
 echo ""
 echo "Passed: $passed"

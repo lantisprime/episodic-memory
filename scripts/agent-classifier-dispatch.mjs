@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * llm-classifier-dispatch.mjs — Tier 2/3 orchestrator for command-classifier.sh.
+ * agent-classifier-dispatch.mjs — Tier 2/3 orchestrator for command-classifier.sh.
  *
  * Flow:
  *   1. Build cache tuple (symmetric across tiers; resolves script args against
@@ -48,7 +48,7 @@ function flag(argv, name) {
 }
 
 function die(code, msg) {
-  process.stderr.write(`llm-classifier-dispatch: ${msg}\n`)
+  process.stderr.write(`agent-classifier-dispatch: ${msg}\n`)
   process.exit(code)
 }
 
@@ -199,7 +199,7 @@ function main() {
       process.exit(0)
     } else {
       process.stderr.write(
-        `llm-classifier-dispatch: cache entry rejected — tamper indicator ` +
+        `agent-classifier-dispatch: cache entry rejected — tamper indicator ` +
         `(claimed root="${cached._project_root_canonical}" key="${cached._cache_key}", ` +
         `lookup root="${projectRoot}" key="${key}")\n`
       )
@@ -327,7 +327,7 @@ function main() {
     recordGlobalCache(os.homedir(), key, entry)
   } catch (err) {
     // Cache write failure is non-fatal — label is still good.
-    process.stderr.write(`llm-classifier-dispatch: cache write failed: ${err.message}\n`)
+    process.stderr.write(`agent-classifier-dispatch: cache write failed: ${err.message}\n`)
   }
   emit({
     ...entry,
