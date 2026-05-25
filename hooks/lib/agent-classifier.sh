@@ -22,10 +22,9 @@
 #
 # On marker miss, this wrapper does NOT directly emit a deny structure.
 # The caller (command-classifier.sh) gets no-decision and falls through to
-# its conservative default. The hook entry point (checkpoint-gate.sh / the
-# PreToolUse glue) is responsible for translating the "interpreter_other"
-# conservative default into a helpful deny reason when the deny-hint is
-# enabled. See `hooks/lib/agent-classifier-deny-reason.sh`.
+# its conservative default. A deny-with-hint UX that translates the
+# conservative default into an actionable "classify this command" reason is a
+# PR-B2 follow-up (#333), coupled to the F1 Bash pre-checkpoint arm (#351).
 #
 # Legacy direct-API dispatch path is retained behind the
 # classifier-config.json transport=direct-fetch config field (file-based,

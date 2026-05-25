@@ -411,12 +411,7 @@ function vacuumMarkers(projectRootCanon, maxAgeDays) {
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
   let removed = 0, scanned = 0
   for (const entry of fs.readdirSync(classifyDir, { withFileTypes: true })) {
-    // Reap stale .json markers AND `pending-*.cmd` deny-hint scratch files
-    // (PR-B: the deny-hint's --command-file fallback writes these here so they
-    // live inside project_root and get swept by the same TTL).
-    const isReapable = entry.isFile() &&
-      (entry.name.endsWith('.json') || /^pending-.*\.cmd$/.test(entry.name))
-    if (!isReapable) continue
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
     scanned++
     const p = path.join(classifyDir, entry.name)
     try {

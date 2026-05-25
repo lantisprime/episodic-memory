@@ -44,42 +44,26 @@ set -e
 # independently enforce.
 #
 # ---------------------------------------------------------------------------
-# Planning-passive redesign (2026-05-25) + F1 CLOSED (PR-B, 2026-05-25)
+# Planning-passive redesign (2026-05-25) + F1 RESIDUAL
 # ---------------------------------------------------------------------------
 # The pre-checkpoint gate no longer arms at SessionStart (em-recall emits an
 # advisory instead). Nothing is armed during planning / discovery / exploration
 # / code review. The pre-checkpoint requirement materializes at the
 # IMPLEMENTATION boundary: the first repo-source Edit/Write/MultiEdit/
-# NotebookEdit — OR the first MUTATING Bash command (PR-B) — lazily arms
-# .checkpoint-required and blocks.
+# NotebookEdit lazily arms .checkpoint-required and blocks. Bash is intentionally
+# NOT pre-checkpoint-gated — reviews/inspections/dispatch never block.
 #
-# F1 CLOSED — NARROW (PR-B, #351, user-chosen 2026-05-25): a Bash command writing
-# FILE CONTENT via redirection (echo_redirected / readonly_cmd_redirected — i.e.
-# `echo x > src.mjs`, `cat > src.mjs`, `printf … > f`, `<<< … > f`) now arms +
-# blocks the pre-checkpoint via _bash_reason_arms_pre_checkpoint. This closes the
-# core pure-Bash implementation bypass. Deliberately NARROW to preserve the
-# PR #352 planning-passive win:
-#   - interpreter_other (`node second-opinion.mjs` review dispatch, `node x.mjs`)
-#     stays FREE — review/dispatch/exploration never block.
-#   - process-mutations (git/npm/mkdir/rm/mv/touch/tee/gh-pr-checkout) stay FREE.
-#   - read_only / marker_write / push_or_pr_create never arm here.
-# Blocks carry the #333 deny-hint: for a real `echo > src.mjs` the agent writes
-# the pre-checkpoint; for a benign EXTERNAL redirect (`cat > /tmp/x`, which arms
-# because the classifier carries no write target) the hint is the one-time
-# classify-read_only escape.
-#
-# RESIDUALS (accepted — PROGRAM-INTERNAL writers, infeasible to detect without
-# parsing the program): a command that writes file content through its OWN
-# program/script syntax rather than a shell redirect or a named-target writer
-# binary is NOT caught — `node writer.mjs`, `python -c 'open(...,"w")'`,
-# `awk 'BEGIN{print > "f"}'`, `sed -i`, `ed`/`ex` script writes, and
-# chained/unsafe_complex Bash (interpreter_other / readonly_cmd / unsafe_complex
-# stay free). The ENUMERATED direct content-write surface that DOES arm: shell
-# redirects to a real file (echo_redirected/readonly_cmd_redirected, incl. the
-# `:`/`true`/`false` truncate form) + named-target writer binaries
-# (tee/cp/mv/dd/install/truncate → cmd_content_write). The push-gate +
-# post-checkpoint + stop-gate lifecycle still fire for the residuals, so the
-# end-of-task discipline holds (an unverified push is still blocked).
+# F1 RESIDUAL (documented + user-accepted): because Bash is ungated by the
+# pre-checkpoint gate, a PURE-Bash implementation (`sed -i`, `cat > file`,
+# `git commit`, `node script-that-writes.mjs`) can mutate repo source WITHOUT
+# ever arming .checkpoint-required, bypassing the Rule 18 pre-checkpoint. This
+# is a deliberate trade: gating all shared_write Bash reintroduced the exact
+# planning-time friction this redesign removes (read-only `node`/inspection
+# commands mis-blocked). Clean closure DEPENDS on a PR-B2 agent-classifier
+# verdict (`nonsrc_write`) so only repo-source writes arm — enumeration of writer
+# binaries proved unboundedly leaky (codex PR-level R1/R2). Tracked as #351
+# (PR-B2 agent-classifier dependency). The push-gate + post-checkpoint +
+# stop-gate lifecycle remain fully enforced.
 
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
@@ -549,34 +533,6 @@ _block_pre() {
     '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
-# Pre-block variant that appends the agent-classifier deny-hint (#333). Used by
-# the Part-5 Bash arm for content-write classifications (echo_redirected /
-# readonly_cmd_redirected / cmd_content_write): the message leads checkpoint-first
-# (write the Rule 18 pre-checkpoint), then the hint offers a scoped read_only
-# escape ONLY for non-repo-source writes (e.g. redirect to /tmp). The deny-reason
-# lib is sourced lazily; if it's unavailable or emits nothing, fall back to the
-# plain _block_pre message (never fail the gate).
-_block_pre_with_hint() {
-  local hint=""
-  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
-    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
-      # shellcheck disable=SC1091
-      source "$LIB_DIR/agent-classifier-deny-reason.sh"
-      __AGENT_DENY_REASON_SOURCED=1
-    else
-      __AGENT_DENY_REASON_SOURCED=0
-    fi
-  fi
-  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ]; then
-    hint="$(agent_classifier_deny_hint "$COMMAND" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
-  fi
-  if [ -n "$hint" ]; then
-    jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
-      '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
-    exit 0
-  fi
-  _block_pre
-}
 _block_post() {
   jq -nc --arg path "$POST_DONE_W" \
     '{decision: "block", reason: ("Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to " + $path + " (must be non-empty) before pushing. Hook: checkpoint-gate.sh.")}'
@@ -750,25 +706,6 @@ _tool_call_targets_repo_source() {
   local repo_canon
   repo_canon="$( (cd "$repo_root" 2>/dev/null && pwd -P) || printf '%s' "$repo_root" )"
 
-  # PR-B .review-store/ carve-out: the second-opinion harness's review/scratch
-  # dir. Review artifacts must NOT arm the pre-checkpoint (planning-passive
-  # intent — writing a plan/review doc is not the implementation boundary).
-  # Require BOTH the raw author-intent path AND the canonical path to be under
-  # <repo>/.review-store/, so an internal symlink `.review-store/link -> ../src.mjs`
-  # that escapes the dir still arms (canonical leaves the carve-out → falls
-  # through to repo-source detection). Symlink-IN from outside never matches the
-  # raw prefix. Explicit raw-path carve-out, not a broad gitignored predicate
-  # (codex R2).
-  case "$file_path" in
-    "$repo_root"/.review-store/*)
-      local rs_canon
-      rs_canon="$(_canonicalize_possibly_nonexistent "$file_path")"
-      case "$rs_canon" in
-        "$repo_canon"/.review-store/*) return 1 ;;
-      esac
-      ;;
-  esac
-
   # Raw-prefix match (codex R1 attack class 3 — symlink-out author intent).
   case "$file_path" in
     "$repo_root"/*|"$repo_root") return 0 ;;
@@ -782,32 +719,6 @@ _tool_call_targets_repo_source() {
   esac
 
   return 1
-}
-
-# F1 #351 (NARROW closure, user-chosen 2026-05-25): which classifier REASON codes
-# represent a Bash command writing FILE CONTENT — the pure-Bash implementation
-# bypass. Two families: redirects (`echo x > src.mjs`, `cat > src.mjs`,
-# `printf … > f`, here-string `<<< … > f` → echo_redirected/readonly_cmd_redirected)
-# and content-writing commands (`tee`/`cp`/`mv`/`dd` → cmd_content_write; added
-# per negative-scenario-reviewer BLOCKER — same bypass class). Only these arm the
-# pre-checkpoint. Deliberately NARROW:
-#   - interpreter_other (e.g. `node scripts/second-opinion.mjs` review dispatch,
-#     `node writer.mjs`) stays FREE — review/dispatch/exploration never block,
-#     preserving the PR #352 planning-passive win. (Residual: a `node writer.mjs`
-#     that mutates source is NOT caught here; the push-gate still catches the
-#     eventual push.)
-#   - process-mutations (git_local_write, default_write/npm/mkdir/mv/tee,
-#     rm_non_marker, touch_non_marker, gh_pr_checkout) stay FREE — these are not
-#     repo-source content writes and blocking them is the friction #352 removed.
-#   - read_only + marker_write + push_or_pr_create never reach / never arm here.
-# The classifier surfaces no write TARGET (always empty), so a redirect to an
-# EXTERNAL path (`cat > /tmp/x`) arms too (conservative); the deny-hint is the
-# escape — classify it read_only once and retry.
-_bash_reason_arms_pre_checkpoint() {
-  case "$1" in
-    readonly_cmd_redirected|echo_redirected|cmd_content_write) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 # PR-A P1.2: validate that `node <path>/classifier-marker.mjs ...` resolves
@@ -1222,22 +1133,6 @@ case "$TOOL_NAME" in
         _arm_checkpoint_required_if_missing
       fi
       _block_pre
-    fi
-    ;;
-  Bash)
-    # F1 #351 NARROW closure: a Bash command writing FILE CONTENT via redirection
-    # (echo_redirected / readonly_cmd_redirected) arms + blocks the pre-checkpoint
-    # — the pure-Bash implementation bypass. interpreter_other (review/node
-    # dispatch) + process-mutations (git/npm/mkdir/rm/mv) + read_only stay FREE
-    # (see _bash_reason_arms_pre_checkpoint), preserving PR #352 review-freedom.
-    # Always blocks WITH the deny-hint (#333): for a genuine `echo > src.mjs` the
-    # agent writes the pre-checkpoint; for a benign external redirect (`cat >
-    # /tmp/x`) — which arms because the classifier carries no target — the hint
-    # is the escape (classify read_only once, retry, auto-persists to Tier 0).
-    if _bash_reason_arms_pre_checkpoint "$REASON" \
-       && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
-      _arm_checkpoint_required_if_missing
-      _block_pre_with_hint
     fi
     ;;
 esac
