@@ -154,10 +154,24 @@ fi
 # omit the flag, preserving prior wrapper contract. Validation lives inside
 # em-recall.mjs (warn-on-invalid; no exit-non-zero per codex R2 Q3).
 MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")"
+
+# Planning-passive redesign (2026-05-25): em-recall no longer ARMS the
+# pre-checkpoint marker at session start. When a recent bp-001 violation
+# exists it now emits an ADVISORY on a dedicated `__BP1_ADVISORY__` stderr
+# sentinel (warning, not a block). Capture stderr (stdout still → /dev/null,
+# the recall body stays suppressed per the original #61 rationale) and surface
+# just the advisory line as SessionStart context — matching the plain-stdout
+# pattern warn_hook_freshness already uses.
+EM_ERR=""
 if [ -n "$MY_SID" ]; then
-  node "$EM_RECALL" --limit 5 --session-start --session-id "$MY_SID" >/dev/null 2>&1 || true
+  EM_ERR="$(node "$EM_RECALL" --limit 5 --session-start --session-id "$MY_SID" 2>&1 >/dev/null || true)"
 else
-  node "$EM_RECALL" --limit 5 --session-start >/dev/null 2>&1 || true
+  EM_ERR="$(node "$EM_RECALL" --limit 5 --session-start 2>&1 >/dev/null || true)"
+fi
+
+BP1_ADVISORY="$(printf '%s\n' "$EM_ERR" | grep '^__BP1_ADVISORY__ ' | head -n1 | sed 's/^__BP1_ADVISORY__ //')"
+if [ -n "$BP1_ADVISORY" ]; then
+  echo "episodic-memory: $BP1_ADVISORY"
 fi
 
 exit 0

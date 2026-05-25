@@ -7,8 +7,11 @@
  * Plan: round-2 ACCEPT episode 20260509-082149-...-6ef8.
  *
  * Layered coverage (T1-T11):
- *   T1  recent active bp-001 violation -> .checkpoint-required armed
- *   T2  no recent violation -> NOT armed
+ *   T1  recent active bp-001 violation -> __BP1_ADVISORY__ emitted, NO marker
+ *       armed (planning-passive redesign 2026-05-25: em-recall no longer arms;
+ *       checkpoint-gate.sh lazily arms at first repo write). Root-resolution
+ *       (T8-T11) is proven via the .session-baseline write, which is retained.
+ *   T2  no recent violation -> no advisory, NOT armed
  *   T3  baseline mtime advances (ordering invariant for stop-gate carve-out)
  *   T4  orphan cleanup removes pre-baseline task-signal markers
  *   T5  NON-session-start path: JSON output structure intact (regression)
@@ -39,7 +42,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { execSync } from 'child_process'
+import { execSync, spawnSync } from 'child_process'
 import assert from 'assert'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
@@ -157,21 +160,24 @@ function clearLocalStore() {
 }
 
 // ---------------------------------------------------------------------------
-// T1 — recent active bp-001 violation arms .checkpoint-required
+// T1 — recent active bp-001 violation: emits __BP1_ADVISORY__, does NOT arm
+// (planning-passive redesign). Baseline still written unconditionally.
 // ---------------------------------------------------------------------------
-test('T1: --session-start with recent active bp-001 violation arms .checkpoint-required at PRIMARY', () => {
+test('T1: --session-start with recent active bp-001 violation emits advisory + does NOT arm marker', () => {
   clearMarkers()
   clearLocalStore()
   seedBp001Violation()
   // Pre-condition: fixture dirs exist (defensive for negative assertions).
   assert.ok(fs.existsSync(mainRepoReal), 'pre: mainRepo exists')
 
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
-    cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
+  const r = spawnSync('node', [RECALL, '--session-start', '--scope', 'local', '--project', 'test', '--no-track'], {
+    cwd: mainRepo, encoding: 'utf8',
   })
 
-  assert.ok(fs.existsSync(mainCheckpointMarker),
-    `expected ${mainCheckpointMarker} after --session-start with recent violation`)
+  assert.ok(/__BP1_ADVISORY__/.test(r.stderr || ''),
+    `expected __BP1_ADVISORY__ on stderr with recent violation; got: ${r.stderr}`)
+  assert.ok(!fs.existsSync(mainCheckpointMarker),
+    `em-recall must NOT arm ${mainCheckpointMarker} (planning-passive — lazy-arm moved to checkpoint-gate.sh)`)
   assert.ok(fs.existsSync(mainBaseline),
     `expected ${mainBaseline} after --session-start (always written)`)
 })
@@ -379,8 +385,8 @@ test('T9: direct --session-start from linked worktree writes baseline + marker a
 
   assert.ok(fs.existsSync(mainBaseline),
     `baseline must land at canonical main: ${mainBaseline}`)
-  assert.ok(fs.existsSync(mainCheckpointMarker),
-    `marker must land at canonical main: ${mainCheckpointMarker}`)
+  assert.ok(!fs.existsSync(mainCheckpointMarker),
+    `em-recall must NOT arm ${mainCheckpointMarker} (planning-passive — root-resolution proven by baseline)`)
   // Negative + post-fixture-existence guard: worktree dir is still here, so
   // !exists isn't vacuous.
   assert.ok(fs.existsSync(worktreeRootReal),
@@ -406,7 +412,8 @@ test('T10: direct --session-start from nested cwd writes artifacts at repo root,
   })
 
   assert.ok(fs.existsSync(mainBaseline), 'baseline at repo root')
-  assert.ok(fs.existsSync(mainCheckpointMarker), 'marker at repo root')
+  assert.ok(!fs.existsSync(mainCheckpointMarker),
+    'em-recall must NOT arm marker (planning-passive — root-resolution proven by baseline)')
 
   const nestedCheckpointsDir = path.join(nestedDir, '.checkpoints')
   assert.ok(fs.existsSync(nestedDir),
@@ -479,7 +486,8 @@ test('T8: Hook E2E with callerDir != targetRepo writes artifacts under targetRep
 
   // Positive: artifacts at targetRepo.
   assert.ok(fs.existsSync(mainBaseline), 'baseline at targetRepo')
-  assert.ok(fs.existsSync(mainCheckpointMarker), 'marker at targetRepo')
+  assert.ok(!fs.existsSync(mainCheckpointMarker),
+    'em-recall must NOT arm marker at targetRepo (planning-passive)')
 
   // Negative + post-fixture-existence guard.
   assert.ok(fs.existsSync(callerDirReal),
@@ -506,7 +514,8 @@ test('T11: Hook E2E with HOME containing spaces still writes artifacts correctly
   runHookE2E({ tempHome, targetRepo: mainRepoReal, callerCwd: callerDirReal })
 
   assert.ok(fs.existsSync(mainBaseline), 'baseline at targetRepo (HOME-with-spaces)')
-  assert.ok(fs.existsSync(mainCheckpointMarker), 'marker at targetRepo (HOME-with-spaces)')
+  assert.ok(!fs.existsSync(mainCheckpointMarker),
+    'em-recall must NOT arm marker at targetRepo when HOME has spaces (planning-passive)')
   assert.ok(!fs.existsSync(callerPrimaryDir),
     `caller dir must NOT have .checkpoints/ created when HOME has spaces`)
 })

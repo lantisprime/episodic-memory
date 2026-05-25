@@ -72,6 +72,13 @@ function recall(args = '', cwd = tmpProject) {
   return JSON.parse(result.trim())
 }
 
+// Planning-passive redesign (2026-05-25): the bp-001 signal is now an advisory
+// on stderr (__BP1_ADVISORY__), not a marker write. Capture stderr to assert it.
+function recallStderr(args = '', cwd = tmpProject) {
+  const r = spawnSync('node', [RECALL, ...args.split(/\s+/).filter(Boolean)], { cwd, env, encoding: 'utf8' })
+  return r.stderr || ''
+}
+
 function recallExit(args = '', cwd = tmpProject) {
   try {
     const stdout = execSync(`node "${RECALL}" ${args}`, { encoding: 'utf8', cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -300,13 +307,14 @@ test('T5d. Explicit --task-type overrides branch inference', () => {
   assert.deepStrictEqual(ids, ['bp-006-push-after-verify'])
 })
 
-test('T7a. Recall touches .claude/.checkpoint-required when bp-001 violation surfaces', () => {
+test('T7a. Recall emits __BP1_ADVISORY__ + does NOT arm marker when bp-001 surfaces (planning-passive)', () => {
   clearStore()
   clearMarker()
   for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
   rebuild()
-  recall('--task-type implementation --no-track')
-  assert.ok(fs.existsSync(markerPath), '.checkpoint-required should exist after bp-001 surfaces')
+  const stderr = recallStderr('--task-type implementation --no-track')
+  assert.ok(/__BP1_ADVISORY__/.test(stderr), `advisory should be emitted after bp-001 surfaces; got: ${stderr}`)
+  assert.ok(!fs.existsSync(markerPath), 'em-recall must NOT arm .checkpoint-required (lazy-arm moved to checkpoint-gate.sh)')
 })
 
 test('T7b. No marker when only non-bp-001 violations surface', () => {
@@ -319,18 +327,17 @@ test('T7b. No marker when only non-bp-001 violations surface', () => {
   assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist when bp-001 is not surfaced')
 })
 
-test('T7c. Marker arms when bp-001 violations exist even if task type is unclear', () => {
-  // Phase 3b activation fix: the SessionStart hook does not pass --task-type,
-  // and branch inference can return null. Marker arming is now decoupled from
-  // task_type — bp-001 violations alone are sufficient. Without this, the
-  // gate was inert in real sessions despite being deployed.
+test('T7c. Advisory fires (no marker) when bp-001 violations exist even if task type is unclear', () => {
+  // The advisory is decoupled from task_type — bp-001 violations alone are
+  // sufficient. Planning-passive: it surfaces as a warning, never a marker.
   clearStore()
   clearMarker()
   for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
   rebuild()
   setBranch('main') // no keyword match → inferTaskType returns null
-  recall('--no-track')
-  assert.ok(fs.existsSync(markerPath), '.checkpoint-required must exist when bp-001 violations recent, regardless of task_type')
+  const stderr = recallStderr('--no-track')
+  assert.ok(/__BP1_ADVISORY__/.test(stderr), 'advisory must fire when bp-001 recent, regardless of task_type')
+  assert.ok(!fs.existsSync(markerPath), 'em-recall must NOT arm (planning-passive)')
 })
 
 test('T7c2. No marker when there are no recent bp-001 violations (regardless of task type)', () => {
@@ -355,24 +362,25 @@ test('T7c3. No marker when bp-001 violations are older than 30-day cutoff', () =
   assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist for stale (>30d) violations')
 })
 
-test('T7d. Marker creation is idempotent (re-recall does not error)', () => {
+test('T7d. Advisory emission is idempotent (re-recall does not error, never arms)', () => {
   clearStore()
   clearMarker()
   for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
   rebuild()
-  recall('--task-type implementation --no-track')
-  assert.ok(fs.existsSync(markerPath))
-  // Second recall should not throw
-  recall('--task-type implementation --no-track')
-  assert.ok(fs.existsSync(markerPath))
+  assert.ok(/__BP1_ADVISORY__/.test(recallStderr('--task-type implementation --no-track')), 'advisory on first recall')
+  // Second recall should not throw and should still advise
+  assert.ok(/__BP1_ADVISORY__/.test(recallStderr('--task-type implementation --no-track')), 'advisory on second recall (no error)')
+  assert.ok(!fs.existsSync(markerPath), 'em-recall never arms the marker')
 })
 
 test('T7e. em-session-end-prompt.mjs sweeps the marker at session end', () => {
   clearStore()
   clearMarker()
-  for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
-  rebuild()
-  recall('--task-type implementation --no-track')
+  // Planning-passive: the marker is now armed by checkpoint-gate.sh at the first
+  // repo write, not by em-recall. Create it directly to exercise the SessionEnd
+  // sweep (sweep behavior is unchanged by the redesign).
+  fs.mkdirSync(path.join(tmpProject, '.checkpoints'), { recursive: true })
+  fs.writeFileSync(markerPath, '')
   assert.ok(fs.existsSync(markerPath), 'precondition: marker should exist')
   sessionEnd()
   assert.ok(!fs.existsSync(markerPath), 'marker should be removed by session-end script')
@@ -529,32 +537,41 @@ test('T7j. End-to-end: real SessionStart hook arms marker without --task-type (P
   // at the user's installed em-recall, no --task-type passed. Use spawnSync
   // with input rather than echo+pipe so tmpdir paths containing quotes
   // can't corrupt the JSON.
-  spawnSync('bash', [hookPath], {
+  const r = spawnSync('bash', [hookPath], {
     input: stdin, env: sessionEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
   })
 
-  assert.ok(fs.existsSync(markerOut),
-    '.checkpoint-required must be armed by the real SessionStart hook with no --task-type — Phase 3b activation E2E')
+  // Planning-passive E2E: the real SessionStart hook must SURFACE the bp-001
+  // advisory on stdout (as SessionStart additionalContext) and must NOT arm the
+  // marker — arming moved to checkpoint-gate.sh at the first repo write.
+  assert.ok(/bp-001/i.test(r.stdout || ''),
+    `SessionStart hook must surface the bp-001 advisory on stdout; got: ${r.stdout}`)
+  assert.ok(!fs.existsSync(markerOut),
+    '.checkpoint-required must NOT be armed by the SessionStart hook (planning-passive — lazy-arm moved to the gate)')
+  assert.ok(!fs.existsSync(markerOutLegacy),
+    'legacy .checkpoint-required must NOT be armed by the SessionStart hook')
 
   fs.rmSync(sessionHome, { recursive: true, force: true })
 })
 
-test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next SessionStart re-arms (#128 SessionEnd race tie-breaker)', () => {
-  // Verifies the SessionEnd-race tie-breaker verdict from #128 plan review:
-  // even though SessionEnd unconditionally sweeps all 4 markers, the next
-  // SessionStart re-arms the gate because shouldArmBp001Checkpoint reads
-  // from the EPISODE STORE (persistent), not the marker file. The marker
-  // is just runtime state for the current arming cycle. This test pins the
-  // idempotent-re-arm contract — any future regression that points the
-  // predicate at the marker would silently disarm the gate; this test
-  // catches that.
+test('T7k. Round-trip: advisory → (gate) arm → Stop blocks → SessionEnd sweeps → next SessionStart still advises (#128 episode-store-is-source-of-truth)', () => {
+  // Planning-passive adaptation of the #128 SessionEnd-race tie-breaker. The
+  // durable insight is unchanged: the bp-001 signal derives from the PERSISTENT
+  // episode store, not from marker runtime state — so it survives a SessionEnd
+  // sweep. Pre-redesign this was proven by "SessionStart re-arms the marker";
+  // now SessionStart no longer arms (the gate does, at first repo write), so we
+  // prove it via the ADVISORY: after SessionEnd sweeps all 4 markers, the next
+  // SessionStart STILL emits the bp-001 advisory because shouldArmBp001Checkpoint
+  // reads the episode store. Any regression pointing the predicate at the marker
+  // would silence the advisory; this test catches that.
   //
   // Round-trip:
   //   1. Setup: temp project + seeded bp-001 violation in episode store
-  //   2. SessionStart hook arms .checkpoint-required
+  //   2. SessionStart hook SURFACES advisory (does not arm); simulate the gate
+  //      lazy-arming .checkpoint-required at the first repo write
   //   3. Simulate Stop firing (em-recall --gate stop) → returns block JSON
   //   4. em-session-end-prompt.mjs sweeps all 4 markers
-  //   5. SessionStart hook runs again → .checkpoint-required re-armed
+  //   5. SessionStart hook runs again → still advises (NOT re-armed)
   //   6. Verify the violation episode still exists (source of truth survived)
   const sessionHome = fs.mkdtempSync(path.join(os.tmpdir(), 'em-rfc002-p3-roundtrip-'))
   const sessionProject = path.join(sessionHome, 'project')
@@ -603,12 +620,20 @@ test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next Sessio
   const preDone = path.join(claudeDir, '.pre-checkpoint-done')
   const postDone = path.join(claudeDir, '.post-checkpoint-done')
 
-  // ----- Step 1: First SessionStart arms marker -----
-  spawnSync('bash', [hookPath], {
+  // ----- Step 1: First SessionStart surfaces advisory (does NOT arm) -----
+  const ss1 = spawnSync('bash', [hookPath], {
     input: JSON.stringify({ cwd: sessionProject }),
     env: sessionEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
   })
-  assert.ok(fs.existsSync(preReq), 'step 1: SessionStart should arm .checkpoint-required')
+  assert.ok(/bp-001/i.test(ss1.stdout || ''),
+    'step 1: SessionStart should surface the bp-001 advisory')
+  assert.ok(!fs.existsSync(preReq),
+    'step 1: SessionStart must NOT arm .checkpoint-required (planning-passive)')
+  // Simulate the gate lazy-arming the marker at the first repo-source write,
+  // so the Stop-gate round-trip below has a real task signal to act on.
+  fs.mkdirSync(claudeDir, { recursive: true })
+  fs.writeFileSync(preReq, '')
+  assert.ok(fs.existsSync(preReq), 'step 1: gate-simulated lazy-arm present')
 
   // ----- Step 2: Stop fires; em-recall --gate stop returns block -----
   // Post-#146 (A2 carve-out): SessionStart now writes .session-baseline.
@@ -655,13 +680,15 @@ test('T7k. Round-trip: arm → Stop blocks → SessionEnd sweeps → next Sessio
   assert.ok(!fs.existsSync(postReq), 'step 3: SessionEnd should sweep .post-checkpoint-required')
   assert.ok(!fs.existsSync(postDone), 'step 3: SessionEnd should sweep .post-checkpoint-done')
 
-  // ----- Step 4: Next SessionStart re-arms marker (idempotent contract) -----
-  spawnSync('bash', [hookPath], {
+  // ----- Step 4: Next SessionStart STILL advises (NOT re-armed) -----
+  const ss2 = spawnSync('bash', [hookPath], {
     input: JSON.stringify({ cwd: sessionProject }),
     env: sessionEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
   })
-  assert.ok(fs.existsSync(preReq),
-    'step 4: SECOND SessionStart should re-arm marker — proves shouldArmBp001Checkpoint reads episode store, not marker')
+  assert.ok(/bp-001/i.test(ss2.stdout || ''),
+    'step 4: SECOND SessionStart still surfaces the advisory — proves shouldArmBp001Checkpoint reads the episode store, not the (swept) marker')
+  assert.ok(!fs.existsSync(preReq),
+    'step 4: SessionStart must NOT re-arm the marker (planning-passive — re-arm happens at the gate on next repo write)')
 
   // ----- Step 5: Violation episode still in the store (source of truth survived) -----
   const indexPath = path.join(sessionProject, '.episodic-memory', 'index.jsonl')
