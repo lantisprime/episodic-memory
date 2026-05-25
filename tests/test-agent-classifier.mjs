@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * test-llm-classifier.mjs — Tests for the Tier 2/3 LLM-classifier subsystem.
+ * test-agent-classifier.mjs — Tests for the Tier 2/3 agent-classifier subsystem.
+ * (Formerly test-llm-classifier.mjs; renamed in PR-B.)
  *
  * Covers R3 plan §T1–§T16:
  *   §T1  cwd != project_root — dispatcher binds to --project-root, not cwd
@@ -22,7 +23,7 @@
  *
  * Zero-dep: uses node:test + assert + http + fs + child_process.
  *
- * Usage: node tests/test-llm-classifier.mjs
+ * Usage: node tests/test-agent-classifier.mjs
  */
 
 import fs from 'fs'
@@ -37,9 +38,9 @@ const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const SCRIPTS = path.join(REPO, 'scripts')
 const CONFIG_LOADER = path.join(SCRIPTS, 'classifier-config-loader.mjs')
 const LLM_CLASSIFY = path.join(SCRIPTS, 'llm-classify.mjs')
-const DISPATCH = path.join(SCRIPTS, 'llm-classifier-dispatch.mjs')
+const DISPATCH = path.join(SCRIPTS, 'agent-classifier-dispatch.mjs')
 const CORRECTION = path.join(SCRIPTS, 'classify-correction.mjs')
-const WRAPPER = path.join(REPO, 'hooks', 'lib', 'llm-classifier.sh')
+const WRAPPER = path.join(REPO, 'hooks', 'lib', 'agent-classifier.sh')
 const COMMAND_CLASSIFIER = path.join(REPO, 'hooks', 'lib', 'command-classifier.sh')
 
 let passed = 0
@@ -192,6 +193,40 @@ test('§T5 config: fail_mode=allow is rejected (falls to heuristic)', () => {
   const cfg = fullJson(r.stdout)
   assert.strictEqual(cfg.fail_mode, 'heuristic')
   assert.ok(cfg._warnings.some(w => /allow/.test(w)))
+})
+
+// PR-B env rename: AGENT_CLASSIFIER_* primary, LLM_CLASSIFIER_* backward-compat alias.
+test('§T5-alias: AGENT_CLASSIFIER_* primary env names are honored, no deprecation', () => {
+  const r = runNode([CONFIG_LOADER, '--project-root', '/tmp/nx'], {
+    env: { AGENT_CLASSIFIER_MODEL: 'agent-model', AGENT_CLASSIFIER_ENABLED: 'false' }
+  })
+  const cfg = fullJson(r.stdout)
+  assert.strictEqual(cfg.model, 'agent-model', 'new env name honored')
+  assert.strictEqual(cfg.enabled, false, 'new env name honored (bool)')
+  assert.deepStrictEqual(cfg._sources_seen.env_deprecated_aliases, [],
+    'no deprecated aliases when new names used')
+})
+
+test('§T5-alias: LLM_CLASSIFIER_* still works as alias + emits deprecation note', () => {
+  const r = runNode([CONFIG_LOADER, '--project-root', '/tmp/nx'], {
+    env: { LLM_CLASSIFIER_MODEL: 'legacy-model' }
+  })
+  const cfg = fullJson(r.stdout)
+  assert.strictEqual(cfg.model, 'legacy-model', 'old env name still honored')
+  assert.ok(cfg._sources_seen.env_deprecated_aliases.includes('LLM_CLASSIFIER_MODEL'),
+    'old name recorded as deprecated alias')
+  assert.ok(cfg._warnings.some(w => /LLM_CLASSIFIER_MODEL.*deprecated.*AGENT_CLASSIFIER_MODEL/.test(w)),
+    'deprecation note emitted on stderr/warnings')
+})
+
+test('§T5-alias: both set → AGENT_CLASSIFIER_* (new) wins, old not flagged deprecated', () => {
+  const r = runNode([CONFIG_LOADER, '--project-root', '/tmp/nx'], {
+    env: { AGENT_CLASSIFIER_MODEL: 'new-model', LLM_CLASSIFIER_MODEL: 'old-model' }
+  })
+  const cfg = fullJson(r.stdout)
+  assert.strictEqual(cfg.model, 'new-model', 'new name wins when both set')
+  assert.ok(!cfg._sources_seen.env_deprecated_aliases.includes('LLM_CLASSIFIER_MODEL'),
+    'old name NOT counted deprecated when the new name is present')
 })
 
 // ---------------------------------------------------------------------------
@@ -719,7 +754,7 @@ source ${WRAPPER}
 export LLM_CLASSIFIER_DISPATCH_PATH=${DISPATCH}
 export LLM_CLASSIFIER_ENABLED=false
 export ANTHROPIC_API_KEY=dummy
-llm_classify_command "python3 ${project}/inspect.py" "${project}" "/tmp"
+agent_classify_command "python3 ${project}/inspect.py" "${project}" "/tmp"
 echo "rc=$?"
 `
   const tmp = path.join(project, 'run.sh')
@@ -760,7 +795,7 @@ test('§M-shell wrapper hits marker cache when classifier-marker.mjs verdict exi
 set -u
 source ${WRAPPER}
 export CLAUDE_CODE_SESSION_ID=${sid}
-out="$(llm_classify_command "${cmdText}" "${project}" "${project}" 2>&1)"
+out="$(agent_classify_command "${cmdText}" "${project}" "${project}" 2>&1)"
 rc=$?
 echo "rc=$rc"
 echo "out=$out"
@@ -779,7 +814,7 @@ test('§M-shell wrapper misses cleanly when no marker exists → rc=1', () => {
 set -u
 source ${WRAPPER}
 export CLAUDE_CODE_SESSION_ID=session-no-marker
-out="$(llm_classify_command "python3 ${project}/scripts/never-classified.py" "${project}" "${project}" 2>&1)"
+out="$(agent_classify_command "python3 ${project}/scripts/never-classified.py" "${project}" "${project}" 2>&1)"
 rc=$?
 echo "rc=$rc"
 `
@@ -808,7 +843,7 @@ test('§M-shell wrapper rejects marker from another session_id', () => {
 set -u
 source ${WRAPPER}
 export CLAUDE_CODE_SESSION_ID=session-B
-out="$(llm_classify_command "python3 ${project}/scripts/x.py" "${project}" "${project}" 2>&1)"
+out="$(agent_classify_command "python3 ${project}/scripts/x.py" "${project}" "${project}" 2>&1)"
 rc=$?
 echo "rc=$rc"
 `
@@ -885,7 +920,7 @@ set -u
 source ${WRAPPER}
 export CLAUDE_CODE_SESSION_ID=session-classifier-marker-env
 export CLASSIFIER_MARKER_PATH=${stub}
-out="$(llm_classify_command "python3 ${project}/scripts/x.py" "${project}" "${project}" 2>&1)"
+out="$(agent_classify_command "python3 ${project}/scripts/x.py" "${project}" "${project}" 2>&1)"
 rc=$?
 echo "rc=$rc"
 echo "out=$out"
@@ -918,7 +953,7 @@ export LLM_CLASSIFIER_DISPATCH_PATH=${DISPATCH}
 export ANTHROPIC_API_KEY=mock-key
 export LLM_CLASSIFIER_API_BASE=${base}
 # No marker exists → marker-read misses → legacy must activate
-out="$(llm_classify_command "node ${project}/scripts/foo.mjs" "${project}" "${project}" 2>&1)"
+out="$(agent_classify_command "node ${project}/scripts/foo.mjs" "${project}" "${project}" 2>&1)"
 rc=$?
 echo "rc=$rc"
 echo "out=$out"

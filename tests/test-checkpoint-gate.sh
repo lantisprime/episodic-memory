@@ -1858,6 +1858,28 @@ assert_marker_absent "PP-16. edit in repo A did NOT arm repo B's .checkpoint-req
   "$PP_REPO_B/.checkpoints/.checkpoint-required.$PP_SID_A"
 rm -rf "$PP_REPO_B" "$PP_REPO"
 
+# ============================================================================
+# #349: a classifier-marker.mjs invocation whose path contains SPACES is
+# extracted via the de-quoting _tokenize tokenizer (not whitespace-split awk), so
+# the gate processes it cleanly — no tokenizer error leaks, marker write allowed.
+# (Pre-fix the awk split produced a broken `'/My` fragment; deep extraction
+# coverage rides on the 361-test _tokenize suite in test-command-classifier.sh.)
+F1_SPACE_BASE="$(mktemp -d)"
+F1_SPACE_REPO="$F1_SPACE_BASE/My Repo Dir"
+mkdir -p "$F1_SPACE_REPO/scripts" "$F1_SPACE_REPO/.checkpoints"
+git -C "$F1_SPACE_REPO" init -q 2>/dev/null
+echo "// marker helper" > "$F1_SPACE_REPO/scripts/classifier-marker.mjs"
+f1_space_out="$(jq -n \
+  --arg cmd "node '$F1_SPACE_REPO/scripts/classifier-marker.mjs' --write --project-root '$F1_SPACE_REPO' --caller-cwd '$F1_SPACE_REPO' --command x --label read_only --confidence 0.9 --session-id 33333333-cccc-4ccc-8ccc-333333333333" \
+  --arg cwd "$F1_SPACE_REPO" --arg sid "33333333-cccc-4ccc-8ccc-333333333333" \
+  '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, session_id:$sid}' | run_hook 2>&1 || true)"
+if echo "$f1_space_out" | grep -q "tokenize"; then
+  echo "  ✗ #349. spaced classifier-marker path leaked a tokenizer error: $f1_space_out"; ((failed++))
+else
+  echo "  ✓ #349. spaced classifier-marker path processed cleanly (de-quote extraction)"; ((passed++))
+fi
+rm -rf "$F1_SPACE_BASE"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"

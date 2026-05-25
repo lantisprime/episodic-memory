@@ -567,6 +567,72 @@ test('§M14 vacuum never touches symlinks (even stale by mtime)', () => {
   assert.ok(fs.lstatSync(symlinkPath).isSymbolicLink(), 'vacuum removed symlink — must not')
 })
 
+// ----- PR-B: --command-file flag (#333 deny-hint round-trip support) -----
+test('§CF1 --command-file round-trips to the same cache_key as inline --command', () => {
+  const repo = mkrepo('cf1')
+  const sid = 's_cf1_' + crypto.randomBytes(4).toString('hex')
+  const cmd = "node /My Scripts/inspect.mjs --flag 'a b'"
+  const cmdFile = path.join(repo, 'cmd.txt')
+  fs.writeFileSync(cmdFile, cmd) // verbatim, no trailing newline
+
+  const inline = parseStdout(runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command', cmd, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } }))
+  const viaFile = parseStdout(runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', cmdFile, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } }))
+  assert.ok(inline && viaFile, 'both reads returned JSON')
+  assert.strictEqual(viaFile.cache_key, inline.cache_key,
+    `--command-file must yield the same cache_key as inline --command (got ${viaFile.cache_key} vs ${inline.cache_key})`)
+})
+
+test('§CF2 --command and --command-file are mutually exclusive', () => {
+  const repo = mkrepo('cf2')
+  const cmdFile = path.join(repo, 'cmd.txt')
+  fs.writeFileSync(cmdFile, 'node x.mjs')
+  const r = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command', 'node y.mjs', '--command-file', cmdFile,
+    '--session-id', 'sid_cf2_aaaa'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(r.status, 2, 'expected exit 2')
+  assert.match(r.stderr, /mutually exclusive/, `expected mutual-exclusion error; got: ${r.stderr}`)
+})
+
+test('§CF3 --command-file over the 64 KiB cap → error', () => {
+  const repo = mkrepo('cf3')
+  const cmdFile = path.join(repo, 'big.txt')
+  fs.writeFileSync(cmdFile, 'x'.repeat(64 * 1024 + 1))
+  const r = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', cmdFile, '--session-id', 'sid_cf3_aaaa'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(r.status, 2, 'expected exit 2')
+  assert.match(r.stderr, /exceeds .* bytes/, `expected oversize error; got: ${r.stderr}`)
+})
+
+test('§CF4 --command-file write then inline --read hit (write path honors --command-file)', () => {
+  const repo = mkrepo('cf4')
+  const sid = 's_cf4_' + crypto.randomBytes(4).toString('hex')
+  const cmd = "cat '/My Notes/todo.txt'"
+  const cmdFile = path.join(repo, 'cmd.txt')
+  fs.writeFileSync(cmdFile, cmd)
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', cmdFile, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'via command-file'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  const r = parseStdout(runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command', cmd, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } }))
+  assert.strictEqual(r.status, 'hit', 'inline --read must hit the marker written via --command-file')
+  assert.strictEqual(r.label, 'read_only')
+})
+
 // ----- Runner -----
 async function run() {
   console.log('classifier-marker.mjs tests')

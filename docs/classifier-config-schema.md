@@ -1,6 +1,8 @@
-# LLM Classifier Config Schema
+# Agent Classifier Config Schema
 
-Tier 2/3 LLM classifier configuration. Documented as **operational config**,
+Tier 2/3 agent-classifier configuration. (Formerly "LLM classifier"; renamed in
+PR-B — the active agent classifies its own commands via a marker cache, not a
+live LLM API in the hot path.) Documented as **operational config**,
 not a source contract — model IDs may change without bumping the project
 version; sites that hard-code one are responsible for keeping their pin
 fresh.
@@ -12,7 +14,7 @@ fields fall through.
 
 | Tier | Source | Path |
 |---|---|---|
-| 1 | environment | `LLM_CLASSIFIER_*` env vars |
+| 1 | environment | `AGENT_CLASSIFIER_*` env vars (`LLM_CLASSIFIER_*` deprecated alias) |
 | 2 | project | `<project-root>/.episodic-memory/classifier-config.json` |
 | 3 | global | `~/.episodic-memory/classifier-config.json` |
 | 4 | defaults | hardcoded in `scripts/classifier-config-loader.mjs` |
@@ -33,17 +35,24 @@ fields fall through.
 
 ## Environment variable overrides
 
-Each field has a matching env var with `LLM_CLASSIFIER_` prefix and SCREAMING_SNAKE_CASE:
+Each field has a matching env var with `AGENT_CLASSIFIER_` prefix and SCREAMING_SNAKE_CASE:
 
-- `LLM_CLASSIFIER_MODEL`
-- `LLM_CLASSIFIER_ENABLED` (accepts `true|false|1|0|yes|no|on|off`)
-- `LLM_CLASSIFIER_FAIL_MODE`
-- `LLM_CLASSIFIER_TIMEOUT_MS`
-- `LLM_CLASSIFIER_MAX_TOKENS`
-- `LLM_CLASSIFIER_TEMPERATURE`
-- `LLM_CLASSIFIER_CONFIDENCE_THRESHOLD`
-- `LLM_CLASSIFIER_API_BASE`
-- `LLM_CLASSIFIER_API_VERSION`
+- `AGENT_CLASSIFIER_MODEL`
+- `AGENT_CLASSIFIER_ENABLED` (accepts `true|false|1|0|yes|no|on|off`)
+- `AGENT_CLASSIFIER_FAIL_MODE`
+- `AGENT_CLASSIFIER_TIMEOUT_MS`
+- `AGENT_CLASSIFIER_MAX_TOKENS`
+- `AGENT_CLASSIFIER_TEMPERATURE`
+- `AGENT_CLASSIFIER_CONFIDENCE_THRESHOLD`
+- `AGENT_CLASSIFIER_API_BASE`
+- `AGENT_CLASSIFIER_API_VERSION`
+
+**Backward-compat aliases (deprecated):** the corresponding `LLM_CLASSIFIER_*`
+names are still honored. If both are set, the `AGENT_CLASSIFIER_*` name wins; if
+only the old name is set, the loader emits a one-line deprecation note on stderr
+(`env var LLM_CLASSIFIER_X is a deprecated alias; prefer AGENT_CLASSIFIER_X`).
+The legacy dispatch override `AGENT_CLASSIFIER_DISPATCH_PATH`
+(was `LLM_CLASSIFIER_DISPATCH_PATH`) follows the same alias rule.
 
 ## Project config example
 

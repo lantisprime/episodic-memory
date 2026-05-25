@@ -59,10 +59,11 @@ set -e
 # ever arming .checkpoint-required, bypassing the Rule 18 pre-checkpoint. This
 # is a deliberate trade: gating all shared_write Bash reintroduced the exact
 # planning-time friction this redesign removes (read-only `node`/inspection
-# commands mis-blocked). Clean closure DEPENDS on the agent-classifier (rank-10
-# PR-B) correctly distinguishing read-only from mutating Bash, so only mutating
-# Bash arms. Tracked as follow-up issue #351 (PR-B agent-classifier dependency).
-# The push-gate + post-checkpoint + stop-gate lifecycle remain fully enforced.
+# commands mis-blocked). Clean closure DEPENDS on a PR-B2 agent-classifier
+# verdict (`nonsrc_write`) so only repo-source writes arm — enumeration of writer
+# binaries proved unboundedly leaky (codex PR-level R1/R2). Tracked as #351
+# (PR-B2 agent-classifier dependency). The push-gate + post-checkpoint +
+# stop-gate lifecycle remain fully enforced.
 
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
@@ -743,23 +744,43 @@ _validate_classifier_marker_helper() {
   local cmd="$1"
   local repo_root="$2"
   # Extract script path: first token after node|python|python3|ruby|perl.
-  # Extraction is positional — node CLI flags before the script (e.g.
-  # `node --inspect-brk script.mjs`) are NOT supported. This is symmetric
-  # with the upstream classifier dispatch at command-classifier.sh:1641
-  # which takes `${TOKS[$((idx+1))]}` as the script directly, so any node-
-  # flag-prefixed form misses both the classifier case-arm AND this
-  # validator (benign consistent miss). Basename `classifier-marker.mjs` is
-  # also exact-match — `.cjs` / `.js` variants would need extending both
-  # sites (per negative-scenario-reviewer B3 audit).
-  local script_path
-  script_path="$(printf '%s' "$cmd" | awk '{
-    for (i=1; i<=NF; i++) {
-      if ($i == "node" || $i == "python" || $i == "python3" || $i == "ruby" || $i == "perl") {
-        if (i+1 <= NF) print $(i+1)
-        exit
-      }
-    }
-  }')"
+  # #349 fix: use the shared _tokenize tokenizer (de-quotes single/double
+  # quotes) instead of whitespace-splitting awk, so a quoted helper path with
+  # spaces — `node '/My Scripts/classifier-marker.mjs' --write …` — round-trips
+  # to the de-quoted `/My Scripts/classifier-marker.mjs` rather than the broken
+  # `'/My` fragment. Extraction is positional — node CLI flags before the
+  # script (e.g. `node --inspect-brk script.mjs`) are NOT supported. This is
+  # symmetric with the upstream classifier dispatch (command-classifier.sh
+  # ~1641) which takes `${TOKS[$((idx+1))]}` directly, so any node-flag-prefixed
+  # form misses both the classifier case-arm AND this validator (benign
+  # consistent miss). Interpreter match stays exact (bare name, not /usr/bin/node)
+  # and basename `classifier-marker.mjs` stays exact-match. An unparseable
+  # command (unbalanced quote / command substitution → `E` line) refuses.
+  #
+  # SIGPIPE-safe: capture _tokenize output into a var BEFORE the read loop and
+  # feed via `<<<`, so an early `return` never closes a live producer pipe
+  # (feedback_shell_sigpipe_done_pipe; same idiom as command-classifier.sh:698).
+  local script_path="" _tok_stream _tok_line
+  local -a _mk_toks=()
+  _tok_stream="$(_tokenize "$cmd")"
+  while IFS= read -r _tok_line; do
+    case "$_tok_line" in
+      "T "*) _mk_toks+=("${_tok_line:2}") ;;
+      "E "*) return 1 ;;
+    esac
+  done <<< "$_tok_stream"
+  local _i _next
+  for _i in "${!_mk_toks[@]}"; do
+    case "${_mk_toks[$_i]}" in
+      node|python|python3|ruby|perl)
+        _next=$(( _i + 1 ))
+        if [ "$_next" -lt "${#_mk_toks[@]}" ]; then
+          script_path="${_mk_toks[$_next]}"
+        fi
+        break
+        ;;
+    esac
+  done
   [ -z "$script_path" ] && return 1
   # Require absolute path. Bare basename / ./relative could resolve to
   # anywhere; refuse rather than disambiguate.

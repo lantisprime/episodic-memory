@@ -94,10 +94,14 @@ assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT"
 
 managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
 # 6 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
-# preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 4
+# preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 5
 # hooks/lib/.sh files (command-classifier, repo-root, marker-paths,
-# session-id) = 10.
-assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "10" "$managed_count"
+# session-id, agent-classifier) = 11.
+# NOTE (PR-B): was hardcoded "10" and went stale when PR #331 added the
+# classifier lib (this test runs in no CI workflow). Corrected to 11 (the
+# llm-classifier.sh→agent-classifier.sh rename keeps the lib count at 5) and the
+# test is now wired into CI (plan-marker-validate.yml) to catch future drift.
+assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "11" "$managed_count"
 
 pg_manifest=$(jq -r '.files[] | select(.relative_path == "hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"
@@ -667,6 +671,41 @@ else
   echo "  ✗ T18f standalone path failed (ec=$EC): $out"
   ((failed++))
 fi
+
+# ---------------------------------------------------------------------------
+echo "[T19] PR-B orphan sweep: renamed llm-classifier.* deleted when new files current"
+# ---------------------------------------------------------------------------
+reset_state
+# Pre-seed stale installed copies of the OLD names (as if upgrading from a
+# pre-PR-B install). The repo no longer ships these basenames, so the glob copy
+# won't touch them; the conditional sweep must delete them.
+mkdir -p "$TEST_HOME/.claude/hooks/lib" "$TEST_HOME/.episodic-memory/scripts"
+echo "# stale old wrapper" > "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh"
+echo "// stale old dispatcher" > "$TEST_HOME/.episodic-memory/scripts/llm-classifier-dispatch.mjs"
+output=$(run_installer_capture --install-hooks)
+
+[ -f "$TEST_HOME/.claude/hooks/lib/agent-classifier.sh" ] && r=true || r=false
+assert_eq "T19a new agent-classifier.sh installed" "true" "$r"
+[ -e "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh" ] && r=true || r=false
+assert_eq "T19b stale llm-classifier.sh swept (deleted)" "false" "$r"
+[ -e "$TEST_HOME/.episodic-memory/scripts/llm-classifier-dispatch.mjs" ] && r=true || r=false
+assert_eq "T19c stale llm-classifier-dispatch.mjs swept (deleted)" "false" "$r"
+if echo "$output" | grep -q "Removed stale renamed file.*llm-classifier.sh"; then r=true; else r=false; fi
+assert_eq "T19d sweep logged the removal" "true" "$r"
+
+# T19e: sweep WITHHELD when command-classifier.sh is divergent (skipped) — must
+# not delete an orphan a still-divergent command-classifier.sh might source.
+reset_state
+mkdir -p "$TEST_HOME/.claude/hooks/lib"
+echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
+echo "# user-customized divergent classifier" >> "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
+echo "# stale old wrapper" > "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh"
+output=$(run_installer_capture --install-hooks)
+
+[ -e "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh" ] && r=true || r=false
+assert_eq "T19e stale llm-classifier.sh NOT swept while command-classifier.sh divergent" "true" "$r"
+if echo "$output" | grep -q "Skipped orphan sweep"; then r=true; else r=false; fi
+assert_eq "T19f sweep-withheld message printed on divergent command-classifier" "true" "$r"
 
 # ---------------------------------------------------------------------------
 # Summary

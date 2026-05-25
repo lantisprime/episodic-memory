@@ -1565,7 +1565,7 @@ _classify_segment() {
       local __t0_rc=$?
       if [ $__t0_rc -eq 0 ] && [ -n "$__t0_out" ]; then
         # Parse helper's hit JSON via inline node parser. Same label
-        # allowlist defense as llm-classifier.sh's marker-hit parser
+        # allowlist defense as agent-classifier.sh's marker-hit parser
         # (PR #271/#272 class) — unknown labels are rejected before the
         # awk extraction stage.
         local __t0_parsed
@@ -1741,24 +1741,24 @@ _classify_segment() {
           ;;
       esac
 
-      # Tier 2/3 LLM classifier dispatch (replaces the "interpreter_other"
+      # Tier 2/3 agent-classifier dispatch (replaces the "interpreter_other"
       # blanket shared_write fallback). Cache-hit path is fast; cache-miss
-      # dispatches Tier 3 (Anthropic API) when ANTHROPIC_API_KEY is set and
-      # LLM_CLASSIFIER_ENABLED != false. No-decision (no key, dispatcher
+      # dispatches the legacy Tier 3 path only when transport=direct-fetch and
+      # AGENT_CLASSIFIER_ENABLED != false. No-decision (no key, dispatcher
       # absent, low-confidence, project_root_used mismatch) falls through to
       # the Tier 1 default below.
-      if [ -z "${__LLM_CLASSIFIER_SOURCED:-}" ]; then
-        local __llm_lib_path
-        __llm_lib_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/llm-classifier.sh"
-        if [ -f "$__llm_lib_path" ]; then
+      if [ -z "${__AGENT_CLASSIFIER_SOURCED:-}" ]; then
+        local __agent_lib_path
+        __agent_lib_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/agent-classifier.sh"
+        if [ -f "$__agent_lib_path" ]; then
           # shellcheck disable=SC1091
-          source "$__llm_lib_path"
-          __LLM_CLASSIFIER_SOURCED=1
+          source "$__agent_lib_path"
+          __AGENT_CLASSIFIER_SOURCED=1
         else
-          __LLM_CLASSIFIER_SOURCED=0
+          __AGENT_CLASSIFIER_SOURCED=0
         fi
       fi
-      if [ "${__LLM_CLASSIFIER_SOURCED:-0}" = "1" ]; then
+      if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" = "1" ]; then
         # Reconstruct command text from tokens (already shell-unquoted; the
         # dispatcher collapses whitespace and re-normalizes anyway).
         local __cmd_text=""
@@ -1770,17 +1770,17 @@ _classify_segment() {
             __cmd_text="$__cmd_text $__ti"
           fi
         done
-        local __llm_out __llm_label __llm_reason
+        local __agent_out __agent_label __agent_reason
         # PR-A P1.1: pass caller_cwd_authoritative (parsed .cwd from hook
         # stdin) instead of hook process $PWD. Codex R1 P1: marker written
         # under nested cwd was a miss when classify_command subprocess
         # $PWD differs from the .cwd authority.
-        if __llm_out="$(llm_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
-          __llm_label="${__llm_out%%	*}"
-          __llm_reason="${__llm_out#*	}"
-          __llm_reason="${__llm_reason%$'\n'}"
-          if [ -n "$__llm_label" ]; then
-            printf '%s\t\t%s\n' "$__llm_label" "$__llm_reason"
+        if __agent_out="$(agent_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
+          __agent_label="${__agent_out%%	*}"
+          __agent_reason="${__agent_out#*	}"
+          __agent_reason="${__agent_reason%$'\n'}"
+          if [ -n "$__agent_label" ]; then
+            printf '%s\t\t%s\n' "$__agent_label" "$__agent_reason"
             return 0
           fi
         fi
