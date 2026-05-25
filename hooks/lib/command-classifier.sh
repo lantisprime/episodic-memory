@@ -1158,6 +1158,13 @@ _classify_segment() {
   # ---- Empty / no-op shells ----
   case "$first" in
     :|true|false)
+      # PR-B (codex PR-level P1): `: > scripts/x.mjs` truncates a real file via the
+      # shell redirect — a content write, NOT a no-op. Honor the non-marker
+      # redirect (same as the echo/readonly_cmd arms) so it arms the F1 gate.
+      if [ "${has_nonmarker_redirect:-0}" = "1" ]; then
+        printf '%s\t\t%s\n' "shared_write" "echo_redirected"
+        return 0
+      fi
       printf '%s\t\t%s\n' "read_only" "no_op_builtin"
       return 0
       ;;
@@ -1633,10 +1640,12 @@ _classify_segment() {
       printf '%s\t\t%s\n' "read_only" "echo_or_printf"
       return 0
       ;;
-    tee|cp|mv|dd)
-      # PR-B F1 #351 (negative-scenario-reviewer BLOCKER): content-writing
-      # commands write file content into a path — the SAME repo-source-write
-      # bypass class as `echo >` / `cat >` redirects (which already arm). Emit a
+    tee|cp|mv|dd|install|truncate)
+      # PR-B F1 #351 (negative-scenario-reviewer BLOCKER + codex PR-level P1):
+      # direct content-writing commands write file content into a named path —
+      # the SAME repo-source-write bypass class as `echo >` / `cat >` redirects
+      # (which already arm). install(1)/truncate(1) added in the PR-level round.
+      # Emit a
       # distinct content-write REASON so checkpoint-gate's Bash arm arms the
       # pre-checkpoint, closing the `tee/cp/mv/dd scripts/x.mjs` bypass. (Marker-
       # target tee is handled + returned earlier at the tee-marker block; this is

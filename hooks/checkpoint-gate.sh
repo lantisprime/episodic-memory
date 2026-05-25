@@ -68,10 +68,17 @@ set -e
 # because the classifier carries no write target) the hint is the one-time
 # classify-read_only escape.
 #
-# RESIDUALS (accepted): (1) `node writer.mjs` and chained/unsafe_complex Bash
-# that mutate source are NOT caught (interpreter_other / unsafe_complex stay
-# free); (2) `sed -i file` is classified read_only by the classifier so it never
-# arms. The push-gate + post-checkpoint + stop-gate lifecycle still fire, so the
+# RESIDUALS (accepted — PROGRAM-INTERNAL writers, infeasible to detect without
+# parsing the program): a command that writes file content through its OWN
+# program/script syntax rather than a shell redirect or a named-target writer
+# binary is NOT caught — `node writer.mjs`, `python -c 'open(...,"w")'`,
+# `awk 'BEGIN{print > "f"}'`, `sed -i`, `ed`/`ex` script writes, and
+# chained/unsafe_complex Bash (interpreter_other / readonly_cmd / unsafe_complex
+# stay free). The ENUMERATED direct content-write surface that DOES arm: shell
+# redirects to a real file (echo_redirected/readonly_cmd_redirected, incl. the
+# `:`/`true`/`false` truncate form) + named-target writer binaries
+# (tee/cp/mv/dd/install/truncate → cmd_content_write). The push-gate +
+# post-checkpoint + stop-gate lifecycle still fire for the residuals, so the
 # end-of-task discipline holds (an unverified push is still blocked).
 
 INPUT="$(cat)"

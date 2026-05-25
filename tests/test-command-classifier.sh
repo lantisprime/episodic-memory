@@ -172,8 +172,19 @@ assert_label "T56a tee non-marker file → shared_write" "tee scripts/foo.mjs" "
 assert_label "T56b cp into repo → shared_write" "cp a.txt scripts/foo.mjs" "shared_write"
 assert_label "T56c mv into repo → shared_write" "mv a.txt scripts/foo.mjs" "shared_write"
 assert_label "T56d dd of= → shared_write" "dd if=/dev/zero of=scripts/foo.mjs" "shared_write"
+assert_label "T56f install → shared_write (codex PR-level)" "install -m 644 a.txt scripts/foo.mjs" "shared_write"
+assert_label "T56g truncate → shared_write (codex PR-level)" "truncate -s 0 scripts/foo.mjs" "shared_write"
+# `: > file` / `true > file` truncate via shell redirect → content write (was no_op).
+assert_label "T56h colon-redirect truncate → shared_write (codex PR-level)" ": > scripts/foo.mjs" "shared_write"
+assert_label "T56i true-redirect truncate → shared_write" "true > scripts/foo.mjs" "shared_write"
+# No-op without redirect stays read_only.
+assert_label "T56j bare colon stays read_only" ":" "read_only"
+assert_label "T56k bare true stays read_only" "true" "read_only"
 # Tier-0 read-only allowlist neighbors must remain read_only (no over-capture).
 assert_label "T56e sed (no -i detect) stays read_only" "sed s/a/b/ scripts/foo.mjs" "read_only"
+# Documented residual: program-INTERNAL write (awk's own redirect, quoted so the
+# `>` is not a shell redirect) is NOT detectable → stays read_only (accepted).
+assert_label "T56l awk program-internal write stays read_only (residual)" "awk 'BEGIN{print 1 > \"scripts/foo.mjs\"}'" "read_only"
 
 echo ""
 echo "--- Unsafe complex ---"

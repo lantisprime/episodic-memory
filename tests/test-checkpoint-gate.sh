@@ -1965,6 +1965,23 @@ assert_marker_exists "F1-13d. tee armed .checkpoint-required.<sid>" \
 reset_f1
 assert_allowed "F1-13e. rm (deletion, not content-write) stays free" \
   "$(mock_f1_bash 'rm scripts/foo.mjs')"
+# Codex PR-level P1: install/truncate (named-target writers) + `: > f` (truncate
+# via shell redirect) arm; program-internal awk write stays free (residual).
+reset_f1
+assert_blocked "F1-13f. install into repo arms+blocks (codex PR-level)" \
+  "$(mock_f1_bash 'install -m 644 a.txt scripts/foo.mjs')" "Checkpoint required"
+reset_f1
+assert_blocked "F1-13g. truncate repo file arms+blocks" \
+  "$(mock_f1_bash 'truncate -s 0 scripts/foo.mjs')" "Checkpoint required"
+reset_f1
+assert_blocked "F1-13h. ': > file' truncate-redirect arms+blocks" \
+  "$(mock_f1_bash ': > scripts/foo.mjs')" "Checkpoint required"
+reset_f1
+assert_allowed "F1-13i. bare ':' no-op stays free" \
+  "$(mock_f1_bash ':')"
+reset_f1
+assert_allowed "F1-13j. awk program-internal write stays free (documented residual)" \
+  "$(mock_f1_bash "awk 'BEGIN{print 1 > \"scripts/foo.mjs\"}'")"
 rm -rf "$F1_REPO"
 
 # F1-12 (#349): a classifier-marker.mjs invocation whose path contains SPACES is
