@@ -616,43 +616,14 @@ function resolveProjectName(projectRoot, { ignoreOverride = false, fast = false 
 }
 
 // ---------------------------------------------------------------------------
-// Idempotent marker arming. Best-effort — failures are swallowed so a
-// non-writable .checkpoints/ dir doesn't take down the whole recall.
-//
-// Writes go to PRIMARY (.checkpoints/) only. If the legacy marker exists
-// at .claude/, it's still honored by readers via resolveMarkerRead during
-// burn-in. So "armed" here is satisfied if EITHER root has the marker.
+// NOTE (planning-passive redesign, 2026-05-25): the former
+// armCheckpointMarkerForSession() was removed. em-recall no longer arms the
+// pre-checkpoint gate at SessionStart — a recent bp-001 violation now only
+// emits the __BP1_ADVISORY__ stderr signal (see the call site below). The
+// pre-checkpoint requirement is lazily armed by checkpoint-gate.sh at the first
+// repo-source write (the implementation boundary). shouldArmBp001Checkpoint()
+// is retained as the advisory predicate.
 // ---------------------------------------------------------------------------
-// Rank-2: per-session arming. Writes `.checkpoint-required.<sid>` if
-// neither own-session nor legacy literal exists at either root. Sid is
-// REQUIRED — when missing/invalid, this falls back to legacy-literal-
-// only write at the primary root (preserves pre-rank-2 behavior for
-// graceful degrade per codex R2 Q3).
-//
-// Mirrors checkpoint-marker.mjs actionArmIfMissing semantics: no-op when
-// own-session OR legacy exists; never suppresses on OTHER sessions'
-// suffixed markers (codex C2 R1 P1 fix).
-function armCheckpointMarkerForSession(repoRoot, sid) {
-  try {
-    // Build the no-op-acceptable set: own-session (if sid) + legacy literal.
-    if (sid) {
-      const ownBasename = namespacedMarkerBasenameForSession('.checkpoint-required', sid)
-      if (fs.existsSync(primaryMarkerPath(repoRoot, ownBasename))) return
-      if (fs.existsSync(legacyMarkerPath(repoRoot, ownBasename))) return
-    }
-    if (fs.existsSync(primaryMarkerPath(repoRoot, '.checkpoint-required'))) return
-    if (fs.existsSync(legacyMarkerPath(repoRoot, '.checkpoint-required'))) return
-
-    ensurePrimaryDir(repoRoot)
-    const writeBasename = sid
-      ? namespacedMarkerBasenameForSession('.checkpoint-required', sid)
-      : '.checkpoint-required'
-    fs.writeFileSync(writeMarkerPath(repoRoot, writeBasename), '')
-  } catch {
-    // Best-effort: marker creation failure leaves Phase 3b gate inactive
-    // for this session.
-  }
-}
 
 // ---------------------------------------------------------------------------
 // SYNC: em-search.mjs:loadIndex — update both on change
@@ -784,23 +755,30 @@ if (sessionStartFlag) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3b activation (RFC-002 Phase 3 / T7): arm the checkpoint marker
-// whenever a recent bp-001-implementation-workflow violation exists,
-// regardless of task_type. The SessionStart hook
-// (hooks/em-recall-sessionstart.sh) does not pass --task-type, so a
-// task-type-conditional arming path was inert in real sessions despite
-// Phase 3b being deployed. bp-001 is workflow discipline that applies to
-// any session that ends up writing files; checkpoint-gate itself only
-// blocks write tools, so the false-positive surface is bounded.
+// Phase 3b activation (RFC-002 Phase 3 / T7): historically armed the checkpoint
+// marker whenever a recent bp-001-implementation-workflow violation existed,
+// regardless of task_type. bp-001 is workflow discipline that applies to any
+// session that ends up writing files.
 // ---------------------------------------------------------------------------
-// Bind arming-time project name to REPO_ROOT (NOT process.cwd() and NOT the
-// --project override). This pairs with armCheckpointMarkerForSession(REPO_ROOT, mySid)
-// below so the project identity used to scope violations matches the marker write
-// authority root. Closes the cross-project bleed where violations in one
-// project armed checkpoint gates in every other project at SessionStart.
+// Bind advisory-time project name to REPO_ROOT (NOT process.cwd() and NOT the
+// --project override) so the project identity used to scope violations matches
+// the repo authority root. Closes the cross-project bleed where violations in
+// one project armed checkpoint gates in every other project at SessionStart.
+// Planning-passive redesign (2026-05-25): a recent bp-001 violation NO LONGER
+// arms the pre-checkpoint gate at session start. That blocked planning,
+// discovery, exploration, and code reviews before any implementation began —
+// the core checkpoint friction. The pre-checkpoint requirement is now lazily
+// armed by checkpoint-gate.sh at the IMPLEMENTATION boundary (first repo-source
+// write). Here we only emit an ADVISORY (warning, never a marker/block) on a
+// dedicated stderr sentinel; em-recall-sessionstart.sh surfaces it via
+// SessionStart additionalContext (closes the #61 swallow for this signal).
 const armingProject = resolveProjectName(REPO_ROOT, { ignoreOverride: true, fast: true })
 if (shouldArmBp001Checkpoint(activeEntries, new Date(), armingProject)) {
-  armCheckpointMarkerForSession(REPO_ROOT, mySid)
+  process.stderr.write(
+    '__BP1_ADVISORY__ A recent bp-001-implementation-workflow violation exists in this project. ' +
+    'The pre-implementation checkpoint is NOT armed during planning — it is required only when you ' +
+    'first edit repo source. Advisory only; not blocking.\n'
+  )
 }
 
 // ---------------------------------------------------------------------------

@@ -130,11 +130,23 @@ echo "--- No markers (idle state) ---"
 reset_state
 
 assert_allowed "1.  Read allowed in idle" "$(mock_json 'Read')"
-assert_allowed "2.  Edit allowed in idle" "$(mock_json 'Edit')"
-assert_allowed "3.  Write allowed in idle" "$(mock_json 'Write')"
-assert_allowed "4.  MultiEdit allowed in idle" "$(mock_json 'MultiEdit')"
-assert_allowed "5.  Bash allowed in idle" "$(mock_json 'Bash' 'ls')"
-assert_allowed "6.  git push allowed in idle" "$(mock_json 'Bash' 'git push origin main')"
+# Planning-passive redesign (2026-05-25): no session-start arming. A bare
+# Edit/Write/MultiEdit (no/relative file_path → empty FILE_PATH) cannot be
+# proven off-repo, so the pre-gate conservatively blocks at the implementation
+# boundary. Crucially it does NOT arm .checkpoint-required on the empty-path
+# branch (REPO_ROOT may be a fallback cwd → arming would leak a marker into an
+# unrelated repo; see SA-cwd-strict). Off-repo writes (memory/skills/settings)
+# ARE allowed — see SA-5/6/7.
+assert_blocked "2.  Bare Edit conservatively blocks (empty path, planning-passive)" \
+  "$(mock_json 'Edit')" "Checkpoint required"
+assert_blocked "3.  Bare Write conservatively blocks (empty path)" \
+  "$(mock_json 'Write')" "Checkpoint required"
+assert_blocked "4.  Bare MultiEdit conservatively blocks (empty path)" \
+  "$(mock_json 'MultiEdit')" "Checkpoint required"
+assert_marker_absent "4a. Empty-path conservative block did NOT arm .checkpoint-required (no leak)" "$PRE_REQ"
+assert_allowed "5.  Bash read-only allowed in idle" "$(mock_json 'Bash' 'ls')"
+assert_allowed "6.  git push allowed in idle (push-gate inactive — no POST_REQ)" \
+  "$(mock_json 'Bash' 'git push origin main')"
 assert_marker_absent "7.  post-required NOT armed in idle" "$POST_REQ"
 
 # ============================================================================
@@ -150,17 +162,21 @@ assert_allowed "10. Grep allowed (always)" "$(mock_json 'Grep')"
 assert_blocked "11. Edit blocked by pre-gate" "$(mock_json 'Edit')" "Checkpoint required"
 assert_blocked "12. Write blocked by pre-gate" "$(mock_json 'Write')" "Checkpoint required"
 assert_blocked "13. MultiEdit blocked by pre-gate" "$(mock_json 'MultiEdit')" "Checkpoint required"
-# #89 (Session 1): read-only Bash is now allowed during pre-gate. The shape
-# of test 14 changes from "echo hello" (now read_only / allowed) to a real
-# write that should block.
-assert_blocked "14. Bash write command blocked by pre-gate" \
-  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')" "Checkpoint required"
+# Planning-passive redesign (2026-05-25): Bash is no longer pre-gated. ALL
+# Bash (read_only AND shared_write) passes the pre-gate; only push_or_pr_create
+# (push-gate) and the marker_write allowlist still gate Bash. shared_write Bash
+# that formerly blocked here is now allowed (F1 residual — pure-Bash
+# implementation bypasses the checkpoint; closure tracked via PR-B). The
+# classifier's read_only/shared_write boundary is still exercised in
+# tests/test-command-classifier.sh.
+assert_allowed "14. Bash shared_write now allowed during pre-gate (Bash ungated)" \
+  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')"
 assert_allowed "14b. Bash read-only echo allowed (#89)" \
   "$(mock_json 'Bash' 'echo hello')"
-# Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr checkout mutates local
-# working tree (shared_write), so pre-gate must block it.
-assert_blocked "14c. gh pr checkout blocked by pre-gate (F2 shared_write)" \
-  "$(mock_json 'Bash' 'gh pr checkout 113')" "Checkpoint required"
+# gh pr checkout mutates the local working tree (shared_write); with Bash
+# ungated it is now allowed during the pre-gate (was blocked pre-redesign).
+assert_allowed "14c. gh pr checkout now allowed during pre-gate (Bash ungated)" \
+  "$(mock_json 'Bash' 'gh pr checkout 113')"
 # Negative: read-only PR commands must still pass during pre-gate.
 assert_allowed "14d. gh pr view allowed by pre-gate (read_only)" \
   "$(mock_json 'Bash' 'gh pr view 113')"
@@ -209,21 +225,18 @@ assert_allowed "18h. cat <&5 input-fd-dup allowed" \
 assert_allowed "18i. &>>/dev/null allowed" \
   "$(mock_json 'Bash' 'ls &>>/dev/null')"
 
-# Negative: real file writes via `>&word` MUST still block (codex R4 finding)
-assert_blocked "18j. >&2foo blocks (file redirect, not fd-dup)" \
-  "$(mock_json 'Bash' 'echo hi >&2foo')" "Checkpoint required"
-assert_blocked "18k. >& foo (ws non-digit) blocks" \
-  "$(mock_json 'Bash' 'ls >& foo')" "Checkpoint required"
-assert_blocked "18l. >& \"out.txt\" (quoted file) blocks" \
-  "$(mock_json 'Bash' 'ls >& "/tmp/out.txt"')" "Checkpoint required"
-assert_blocked "18m. 2>file (real file redirect) blocks" \
-  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')" "Checkpoint required"
-assert_blocked "18n. &>>real-file blocks" \
-  "$(mock_json 'Bash' 'ls &>>/tmp/all.log')" "Checkpoint required"
-
-# Most-restrictive across segments: fd-dup-read then push → push wins (blocked)
-assert_blocked "18o. fd-dup then push (compound) blocked by pre-gate" \
-  "$(mock_json 'Bash' 'git status 2>&1 && git push')" "Checkpoint required"
+# Planning-passive: real-file redirects classify as shared_write and — with
+# Bash ungated — are now ALLOWED during the pre-gate (formerly blocked). The
+# fd-dup vs real-file-redirect classifier boundary is owned by FD20-FD24 in
+# tests/test-command-classifier.sh; one representative kept here as a gate
+# regression guard.
+assert_allowed "18j. real file redirect (2>file) now allowed (shared_write, Bash ungated)" \
+  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')"
+# fd-dup followed by push: classifier reduces to push_or_pr_create, but the
+# push-gate is inactive without POST_REQ (only PRE_REQ armed here) → allowed.
+# Chained-push blocking under POST_REQ is covered by tests 68 / 77-80.
+assert_allowed "18o. fd-dup then push allowed (push-gate inactive — no POST_REQ)" \
+  "$(mock_json 'Bash' 'git status 2>&1 && git push')"
 
 # ============================================================================
 echo ""
@@ -351,7 +364,15 @@ echo ""
 echo "--- Edge: missing .claude dir (mkdir -p safety) ---"
 # ============================================================================
 rm -rf "$MARKER_DIR"
-assert_allowed "44. Hook does not crash when .claude/ missing" "$(mock_json 'Edit')"
+# Planning-passive: a concrete in-repo Edit lazily arms .checkpoint-required
+# (ensure_primary_dir mkdir's the missing .checkpoints/) then blocks. The hook
+# must handle the missing marker dir without crashing — assert a clean block
+# plus that the lazy-arm (re)created the dir + marker.
+edit_inrepo_missingdir_json=$(jq -nc --arg fp "$TEST_DIR/src.mjs" --arg cwd "$TEST_DIR" \
+  '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd}')
+assert_blocked "44. Hook handles missing marker dir without crashing (lazy-arm + block)" \
+  "$edit_inrepo_missingdir_json" "Checkpoint required"
+assert_marker_exists "44a. lazy-arm recreated .checkpoint-required under missing .checkpoints/" "$PRE_REQ"
 
 # ============================================================================
 echo ""
@@ -412,14 +433,16 @@ echo "--- #66: heredoc-body bypass blocked (pre-<< check) ---"
 reset_state
 touch "$PRE_REQ"
 
-# Bypass attempt: command writes to readme.md, but heredoc body mentions
-# `> .pre-checkpoint-done`. Pre-fix this would bypass the gate.
-# Post-fix: only the pre-<< portion is checked → no marker redirect → block.
+# Command writes to readme.md (shared_write); the heredoc body merely MENTIONS
+# `> .pre-checkpoint-done`. The classifier correctly does NOT treat the body
+# as a marker write (it stays shared_write, not marker_write). Planning-passive:
+# with Bash ungated, this shared_write is now ALLOWED. The classifier's
+# pre-<<-portion-only parsing is owned by test-command-classifier.sh.
 heredoc_bypass='cat > readme.md <<EOF
 echo > .pre-checkpoint-done
 EOF'
-assert_blocked "54. Heredoc body mentioning marker redirect does NOT bypass" \
-  "$(mock_json 'Bash' "$heredoc_bypass")" "Checkpoint required"
+assert_allowed "54. Heredoc to readme.md allowed (shared_write; body-mention is not a marker write)" \
+  "$(mock_json 'Bash' "$heredoc_bypass")"
 
 # Legitimate heredoc TO the marker: redirect target is in pre-<< portion → allow.
 heredoc_legit='cat > '"$PRE_DONE"' <<EOF
@@ -434,10 +457,11 @@ herestring_legit='tee '"$POST_DONE"' <<<"checkpoint text"'
 assert_blocked "56. Here-string to POST_DONE BLOCKED (POST_REQ not armed)" \
   "$(mock_json 'Bash' "$herestring_legit")" "Checkpoint required"
 
-# Bypass attempt with here-string: < but no redirect to marker in pre-<<<
+# Here-string writes to readme.md (shared_write); body merely mentions the
+# marker. Planning-passive: shared_write Bash is ungated → now allowed.
 herestring_bypass='cat > readme.md <<<"echo > .pre-checkpoint-done"'
-assert_blocked "57. Here-string body mentioning marker does NOT bypass" \
-  "$(mock_json 'Bash' "$herestring_bypass")" "Checkpoint required"
+assert_allowed "57. Here-string to readme.md allowed (shared_write, Bash ungated)" \
+  "$(mock_json 'Bash' "$herestring_bypass")"
 
 # ============================================================================
 echo ""
@@ -464,28 +488,31 @@ assert_blocked "53. Bash with unquoted 'git push' (separate token) IS blocked" \
 
 # ============================================================================
 echo ""
-echo "--- #68 F1: chained marker-write does NOT bypass gate ---"
+echo "--- #68 F1: chained marker-write (planning-passive: shared_write chains now allowed; push-gate + classifier remain) ---"
 # ============================================================================
-# Pre-fix: `echo X > .pre-checkpoint-done; rm -rf /` passed the allowlist
-# because the regex matched the redirect to the marker without anchoring
-# end-of-HEAD. Post-fix: any control operator after the marker filename
-# means no allowlist match → falls through to pre-gate block.
+# Planning-passive (2026-05-25): a marker-write CHAINED with another command
+# reduces (most-restrictive) to shared_write, and with Bash ungated shared_write
+# is ALLOWED. The former "chained command can't bypass the marker allowlist"
+# concern is moot — there is no Bash pre-gate to bypass, and a bare `rm` was
+# already allowed under the F1 residual. Two real boundaries remain and are
+# asserted elsewhere: (1) the push-gate still blocks a chained `git push` when
+# POST_REQ is armed (test 68); (2) the classifier's chain reduction is owned by
+# T70-T76 in test-command-classifier.sh. These chained-write shapes are kept as
+# gate regression guards confirming they now pass.
 reset_state
 touch "$PRE_REQ"
 
-assert_blocked "64. marker-write THEN ; chained command — blocks (no bypass)" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
-assert_blocked "65. marker-write THEN && chained command — blocks" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")" "Checkpoint required"
-assert_blocked "66. marker-write THEN || chained command — blocks" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")" "Checkpoint required"
-assert_blocked "67. marker-write THEN | piped command — blocks" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")" "Checkpoint required"
-# Newline-chained variant (#72): grep -E line-by-line evaluation would
-# otherwise let line 1 (the marker write) match alone.
-assert_blocked "67b. marker-write THEN newline + ; chained — blocks (#72)" \
+assert_allowed "64. marker-write THEN ; chained shared_write — allowed (Bash ungated, F1 residual)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE; rm -rf /tmp/IMPORTANT")"
+assert_allowed "65. marker-write THEN && chained shared_write — allowed" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")"
+assert_allowed "66. marker-write THEN || chained shared_write — allowed" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")"
+assert_allowed "67. marker-write THEN | piped shared_write — allowed" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")"
+assert_allowed "67b. marker-write THEN newline + ; chained shared_write — allowed (#72)" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE
-; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+; rm -rf /tmp/IMPORTANT")"
 
 # Push-gate variant: chained post-marker-write THEN git push must block
 echo "pre done" > "$PRE_DONE"
@@ -541,7 +568,7 @@ assert_blocked "80. 'gh pr create' IS blocked (regression)" \
 
 # ============================================================================
 echo ""
-echo "--- #73: heredoc + post-EOF chained command does NOT bypass ---"
+echo "--- #73: heredoc + post-EOF chain (planning-passive: shared_write chains now allowed) ---"
 # ============================================================================
 # Pre-fix: cat > marker <<EOF\n...\nEOF\nrm -rf / had pre-<< portion that
 # matched allowlist (`cat > marker `), and the post-EOF chained command
@@ -555,15 +582,17 @@ heredoc_chain1="cat > $PRE_DONE <<EOF
 rule18
 EOF
 rm -rf /tmp/IMPORTANT"
-assert_blocked "81. heredoc + post-EOF ; chain — blocks (#73)" \
-  "$(mock_json 'Bash' "$heredoc_chain1")" "Checkpoint required"
+assert_allowed "81. heredoc + post-EOF ; chained shared_write — allowed (Bash ungated, #73)" \
+  "$(mock_json 'Bash' "$heredoc_chain1")"
 
 heredoc_chain2="cat > $PRE_DONE <<EOF
 rule18
 EOF
 && git push origin main"
-assert_blocked "82. heredoc + post-EOF && chain — blocks" \
-  "$(mock_json 'Bash' "$heredoc_chain2")" "Checkpoint required"
+# Chained git push, but push-gate is inactive without POST_REQ (only PRE_REQ
+# armed here) → allowed. Chained-push blocking under POST_REQ is test 68.
+assert_allowed "82. heredoc + post-EOF && git push — allowed (push-gate inactive)" \
+  "$(mock_json 'Bash' "$heredoc_chain2")"
 
 # <<- form (leading tabs allowed on terminator) with post content
 # Session 1: classifier distinguishes chained-command intent. A chained
@@ -578,8 +607,8 @@ assert_allowed "83. <<-EOF + read-only echo chain — allowed (read_only chain)"
 
 # Adversarial dash-EOF with rm chain still blocks (rm is shared_write).
 heredoc_dash_evil=$(printf 'cat > %s <<-EOF\n\tcontent\n\tEOF\nrm -rf /tmp/IMPORTANT' "$PRE_DONE")
-assert_blocked "83b. <<-EOF + rm chain — blocks (shared_write chain)" \
-  "$(mock_json 'Bash' "$heredoc_dash_evil")" "Checkpoint required"
+assert_allowed "83b. <<-EOF + rm chain — allowed (shared_write, Bash ungated)" \
+  "$(mock_json 'Bash' "$heredoc_dash_evil")"
 
 heredoc_quoted="cat > $PRE_DONE <<'EOF'
 literal text
@@ -592,8 +621,8 @@ heredoc_quoted_evil="cat > $PRE_DONE <<'EOF'
 literal text
 EOF
 rm -rf /tmp/IMPORTANT"
-assert_blocked "84b. <<'EOF' + rm chain — blocks (shared_write chain)" \
-  "$(mock_json 'Bash' "$heredoc_quoted_evil")" "Checkpoint required"
+assert_allowed "84b. <<'EOF' + rm chain — allowed (shared_write, Bash ungated)" \
+  "$(mock_json 'Bash' "$heredoc_quoted_evil")"
 
 # Pure heredoc (regression): no post-EOF content → still allowed
 pure_heredoc="cat > $PRE_DONE <<EOF
@@ -613,7 +642,7 @@ assert_allowed "86. Pure heredoc + trailing whitespace — still allowed" \
 
 # ============================================================================
 echo ""
-echo "--- #75: extended terminator forms also caught ---"
+echo "--- #75: extended terminator forms (planning-passive: shared_write chains now allowed) ---"
 # ============================================================================
 # Per Step-6 adversarial probe of #73 fix: <<\EOF (backslash-escaped) and
 # <<123 (digit-start) terminators were valid bash forms my initial sed regex
@@ -625,24 +654,24 @@ heredoc_backslash='cat > '"$PRE_DONE"' <<\EOF
 rule18
 EOF
 rm -rf /tmp/IMPORTANT'
-assert_blocked "87. <<\\EOF backslash-escaped terminator + chain — blocks (#75)" \
-  "$(mock_json 'Bash' "$heredoc_backslash")" "Checkpoint required"
+assert_allowed "87. <<\\EOF backslash-escaped terminator + rm chain — allowed (shared_write, #75)" \
+  "$(mock_json 'Bash' "$heredoc_backslash")"
 
 # <<123 (numeric-only terminator) with post chain
 heredoc_numeric='cat > '"$PRE_DONE"' <<123
 rule18
 123
 rm -rf /tmp/IMPORTANT'
-assert_blocked "88. <<123 numeric-only terminator + chain — blocks (#75)" \
-  "$(mock_json 'Bash' "$heredoc_numeric")" "Checkpoint required"
+assert_allowed "88. <<123 numeric-only terminator + rm chain — allowed (shared_write, #75)" \
+  "$(mock_json 'Bash' "$heredoc_numeric")"
 
 # <<==EOF== (special chars in terminator) — bash valid
 heredoc_special='cat > '"$PRE_DONE"' <<==EOF==
 rule18
 ==EOF==
 rm -rf /tmp/IMPORTANT'
-assert_blocked "89. <<==EOF== special-char terminator + chain — blocks (#75)" \
-  "$(mock_json 'Bash' "$heredoc_special")" "Checkpoint required"
+assert_allowed "89. <<==EOF== special-char terminator + rm chain — allowed (shared_write, #75)" \
+  "$(mock_json 'Bash' "$heredoc_special")"
 
 # Regression: <<\EOF without post-EOF content still allowed
 heredoc_backslash_pure='cat > '"$PRE_DONE"' <<\EOF
@@ -1482,46 +1511,43 @@ assert_blocked "SA-cwd1. Relative FILE_PATH + absolute tool_input.cwd → resolv
 assert_blocked "SA-cwd2. Relative FILE_PATH + absolute top-level .cwd → resolved + block" \
   "$(mock_path_json 'Edit' 'scripts-test.mjs' "$TEST_DIR" "")" "Checkpoint required"
 
-# T_cwd3: relative FILE_PATH + RELATIVE .cwd + RELATIVE tool_input.cwd → ALLOW
+# T_cwd3: relative FILE_PATH + RELATIVE .cwd + RELATIVE tool_input.cwd → BLOCK
 #
-# PR-level codex review (REJECT R1 → fix landed here) caught the bug in this
-# test's prior expectation. The R7/P1 documented behavior is: relative .cwd
-# falls back to hook process pwd. If hook process pwd is NOT the same as the
-# armed test target (i.e. when test runner is invoked from outside $TEST_DIR),
-# the gate checks for `.checkpoint-required` at hook-pwd → finds none → exits
-# 0 → allows. This is the SAME wrong-root-hook = allow behavior that
-# SA-cwd-strict asserts intentionally.
+# Planning-passive redesign (2026-05-25): relative cwds give no absolute
+# authority, so FILE_PATH resolves to "" and the pre-gate conservatively BLOCKS
+# (Rule 18 safe direction). Crucially, the empty-FILE_PATH branch does NOT
+# lazy-arm — so no .checkpoint-required marker is written at the fallback
+# (hook-pwd) root. The no-leak guarantee is asserted explicitly by
+# SA-cwd-strict below; here we assert the conservative block.
 #
-# Prior version asserted "block" which was wrong: it depended on hook-pwd
-# happening to equal $TEST_DIR (only true when test runner is invoked from
-# inside the fixture's temp dir — fragile). The correct assertion is ALLOW.
-# Codex PR-level R1 caught this via running the suite from a fresh cwd.
-assert_allowed "SA-cwd3. Relative FILE_PATH + relative .cwd + relative tool_input.cwd → wrong-root = allow (same shape as SA-cwd-strict)" \
+# (Pre-redesign this asserted ALLOW, because the OLD pre-gate only fired when
+# .checkpoint-required was already armed at the resolved root. With lazy-arm,
+# the empty-path case blocks unconditionally.)
+assert_blocked "SA-cwd3. Relative FILE_PATH + relative cwds → empty path conservatively blocks (no arm)" \
   "$(jq -n --arg tn 'Edit' --arg fp 'scripts-test.mjs' --arg c './relative' --arg tic './relative-dir' \
-    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')"
+    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')" "Checkpoint required"
 
-# T_cwd3-strict: codex R7/P1 ACCEPT criterion — caller cwd != target with
-# relative/empty cwds. Run hook from a separate temp caller cwd. With the
-# R7/P1 CWD fix, an empty top-level .cwd falls back to hook process pwd =
-# caller cwd, which is NOT the target. Predicate then evaluates against the
-# wrong root, and FILE_PATH stays relative-resolved against THAT wrong root.
-# Since target's PRE_REQ is what we armed but hook resolves to caller cwd,
-# the gate doesn't see PRE_REQ at all → allow (gate doesn't fire because
-# wrong-root REPO_ROOT). This is the correct behavior: gate is bound to
-# the input cwd's project; off-project hook invocations don't trigger
-# someone else's gate state. Test asserts the allow.
+# T_cwd3-strict: caller cwd != target with empty cwd. Run hook from a separate
+# temp caller cwd; empty top-level .cwd falls back to hook process pwd =
+# CALLER_TMP. FILE_PATH 'scripts/x.mjs' is relative with no absolute authority
+# → resolves to "" → pre-gate conservatively BLOCKS.
+#
+# CRITICAL invariant (lazy-arm leak regression, 2026-05-25): the empty-FILE_PATH
+# branch must NOT lazy-arm. Before the fix, the block path called
+# _arm_checkpoint_required_if_missing, which wrote .checkpoint-required into
+# CALLER_TMP — leaking a marker into an unrelated repo. Assert a block decision
+# AND zero marker artifacts under CALLER_TMP.
 CALLER_TMP="$(mktemp -d)"
 CALLER_TMP="$(cd -P "$CALLER_TMP" && pwd)"
 SA_CWD_STRICT_JSON="$(jq -n --arg tn 'Edit' --arg fp 'scripts/x.mjs' \
   '{tool_name: $tn, tool_input: {file_path: $fp}, cwd: ""}')"
 SA_CWD_STRICT_OUT="$(cd "$CALLER_TMP" && echo "$SA_CWD_STRICT_JSON" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null)"
-SA_CWD_STRICT_EXIT=$?
-if [ $SA_CWD_STRICT_EXIT -eq 0 ] && [ -z "$SA_CWD_STRICT_OUT" ] \
+if echo "$SA_CWD_STRICT_OUT" | grep -q '"decision".*"block"' \
    && [ ! -e "$CALLER_TMP/.checkpoints" ] && [ ! -e "$CALLER_TMP/.claude" ]; then
-  echo "  ✓ SA-cwd-strict. Caller cwd != target + empty cwd → wrong-root hook = allow + no caller marker leak (R7/P1)"
+  echo "  ✓ SA-cwd-strict. Caller cwd != target + empty cwd → conservative block + NO caller marker leak (lazy-arm leak regression)"
   ((passed++))
 else
-  echo "  ✗ SA-cwd-strict. exit=$SA_CWD_STRICT_EXIT out=$SA_CWD_STRICT_OUT caller_leak=$([ -e "$CALLER_TMP/.checkpoints" ] || [ -e "$CALLER_TMP/.claude" ] && echo yes || echo no)"
+  echo "  ✗ SA-cwd-strict. out=$SA_CWD_STRICT_OUT caller_leak=$([ -e "$CALLER_TMP/.checkpoints" ] || [ -e "$CALLER_TMP/.claude" ] && echo yes || echo no)"
   ((failed++))
 fi
 rm -rf "$CALLER_TMP"
@@ -1560,7 +1586,18 @@ echo "--- PR-A P1.2: classifier-marker bootstrap carve-out under armed checkpoin
 # Codex R1 plan-tier P1: classifier-marker.mjs invocations were blocked when
 # .checkpoint-required is armed (empty TARGET → fell through marker_write
 # branch → pre-gate blocked). With the carve-out, valid classifier-marker
-# invocations exit 0; shimmed/relative paths fall through to normal flow.
+# invocations exit 0.
+#
+# Planning-passive redesign (2026-05-25): the pre-gate no longer gates Bash, so
+# shimmed/relative/bare forms — which fail the carve-out's helper-identity
+# validation and fall through — are now ALLOWED (F1 residual: arbitrary
+# `node <script>` is just shared_write Bash and was always going to run under the
+# freed-Bash design). The validator (_validate_classifier_marker_helper) still
+# rejects them, but its rejection is no longer observable as a block.
+# EXCEPTION: env-prefixed forms (NC-6) are still BLOCKED directly — env-prefix
+# wrapper escape is rejected as a FORM (codex review FU), independent of pre-gating.
+# Other observable boundaries: plan-pending still blocks even shimmed forms
+# (NC-9), and the canonical allow-path still works (NC-1/2/7).
 
 # Set up canonical helper locations the validator accepts.
 GLOBAL_HELPER_DIR="$TEST_HOME/.episodic-memory/scripts"
@@ -1589,25 +1626,26 @@ assert_allowed "NC-1. node ~/.episodic-memory/scripts/classifier-marker.mjs --wr
 assert_allowed "NC-2. node <repo>/scripts/classifier-marker.mjs --write allowed (repo-source path parity)" \
   "$(mock_json 'Bash' "node $REPO_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
-# ── Shimmed binary at /tmp → BLOCKED (helper-identity validation) ──
-assert_blocked "NC-3. Shimmed binary (node /tmp/.../classifier-marker.mjs) BLOCKED under armed checkpoint" \
-  "$(mock_json 'Bash' "node $SHIMMED_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
-  "Checkpoint required"
+# ── Shimmed binary at /tmp → now ALLOWED (Bash ungated; validator still rejects
+#    but rejection is unobservable as a block) ──
+assert_allowed "NC-3. Shimmed binary (node /tmp/.../classifier-marker.mjs) now allowed (Bash ungated, F1 residual)" \
+  "$(mock_json 'Bash' "node $SHIMMED_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
-# ── Relative path (./classifier-marker.mjs) → BLOCKED (absolute-path requirement) ──
-assert_blocked "NC-4. Relative ./classifier-marker.mjs path BLOCKED (carve-out requires absolute path)" \
-  "$(mock_json 'Bash' "node ./classifier-marker.mjs --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
-  "Checkpoint required"
+# ── Relative path (./classifier-marker.mjs) → now ALLOWED (Bash ungated) ──
+assert_allowed "NC-4. Relative ./classifier-marker.mjs path now allowed (Bash ungated)" \
+  "$(mock_json 'Bash' "node ./classifier-marker.mjs --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
-# ── Bare basename → BLOCKED (no PATH lookup allowed) ──
-assert_blocked "NC-5. Bare 'classifier-marker.mjs' (no path) BLOCKED" \
-  "$(mock_json 'Bash' "node classifier-marker.mjs --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
-  "Checkpoint required"
+# ── Bare basename → now ALLOWED (Bash ungated) ──
+assert_allowed "NC-5. Bare 'classifier-marker.mjs' (no path) now allowed (Bash ungated)" \
+  "$(mock_json 'Bash' "node classifier-marker.mjs --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
-# ── Env-prefix attempt → BLOCKED (classifier-tier rejection, returns unsafe_complex) ──
-# This already worked pre-PR-A; this test verifies the layering is unchanged.
-assert_blocked "NC-6. Env-prefix BYPASS=1 form BLOCKED (classifier returns unsafe_complex, not marker_write)" \
-  "$(mock_json 'Bash' "BYPASS=1 node $GLOBAL_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
+# ── Env-prefix attempt → BLOCKED directly (codex review FU). The classifier
+#    flags it unsafe_complex/classifier_marker_env_override; the gate blocks the
+#    FORM regardless of Bash pre-gating, so the planning-passive Bash allowance
+#    can't bless an env-prefix wrapper escape against the classifier cache. ──
+assert_blocked "NC-6. Env-prefix BYPASS=1 form BLOCKED (env-prefix wrapper escape, independent of pre-gate)" \
+  "$(mock_json 'Bash' "BYPASS=1 node $GLOBAL_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Env-prefix wrapper escape"
 
 # ── Symlink to allowed location → allowed (canonicalization resolves) ──
 SYMLINK_HELPER_DIR="$(mktemp -d)"
@@ -1617,12 +1655,12 @@ ln -sf "$GLOBAL_HELPER" "$SYMLINK_HELPER"
 assert_allowed "NC-7. Symlink → allowed canonical path allowed (canonicalize follows symlink)" \
   "$(mock_json 'Bash' "node $SYMLINK_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
-# ── Symlink to shimmed location → BLOCKED (canonicalize resolves to wrong target) ──
+# ── Symlink to shimmed location → now ALLOWED (Bash ungated; canonicalize still
+#    unmasks the target so the validator rejects, but rejection is unobservable) ──
 SYMLINK_TO_EVIL="$SYMLINK_HELPER_DIR/classifier-marker-evil.mjs"
 ln -sf "$SHIMMED_HELPER" "$SYMLINK_TO_EVIL"
-assert_blocked "NC-8. Symlink → shimmed binary BLOCKED (canonicalize unmasks symlink target)" \
-  "$(mock_json 'Bash' "node $SYMLINK_TO_EVIL --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
-  "Checkpoint required"
+assert_allowed "NC-8. Symlink → shimmed binary now allowed (Bash ungated, F1 residual)" \
+  "$(mock_json 'Bash' "node $SYMLINK_TO_EVIL --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
 # ── Plan-pending invariant preserved: classifier-marker BLOCKED while plan-pending ──
 # (Even with carve-out, plan-pending check fires earlier and blocks marker_write.)
@@ -1712,23 +1750,14 @@ if [ -f "$REAL_HELPER" ]; then
       ((failed++))
     fi
 
-    # Negative control: same command but caller_cwd differs from the written
-    # marker's caller_cwd → marker SHA differs (cache key = project + caller_cwd
-    # + command per classifier-marker.mjs:140) → miss → interpreter_other →
-    # shared_write → pre-gate blocks. This proves the threading is honored:
-    # different .cwd → different classification outcome (impossible without
-    # P1.1 — pre-fix code used hook $PWD as caller_cwd regardless of .cwd).
-    mkdir -p "$P11_REPO/sub"
-    P11_JSON_NEG="$(jq -n --arg tn 'Bash' --arg cmd "$P11_CMD" --arg cwd "$P11_REPO/sub" --arg sid "$P11_SID" \
-      '{tool_name: $tn, tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}')"
-    P11_OUTPUT_NEG="$( (cd /tmp && echo "$P11_JSON_NEG" | HOME="$P11_HOME" CLAUDE_CODE_SESSION_ID="$P11_SID" bash "$HOOK") 2>/dev/null )"
-    if echo "$P11_OUTPUT_NEG" | grep -q '"decision".*"block"'; then
-      echo "  ✓ AR-2. P1.1 threading-sensitivity: different .cwd → miss → blocked (proves .cwd is threaded, not ignored)"
-      ((passed++))
-    else
-      echo "  ✗ AR-2. P1.1 threading-sensitivity expected block (output=$P11_OUTPUT_NEG)"
-      ((failed++))
-    fi
+    # AR-2 RETIRED (planning-passive redesign, 2026-05-25): the former negative
+    # control proved threading by relying on a cache MISS → shared_write →
+    # pre-gate BLOCK. With Bash ungated, shared_write no longer blocks, so the
+    # gate can't discriminate hit-vs-miss for a `node` command (both labels
+    # allow). The caller_cwd cache-key sensitivity that this asserted is owned
+    # by tests/test-classifier-marker.mjs §M5 (cross-repo refusal) and §M6
+    # (caller-cwd may differ from project-root), which test the marker layer
+    # directly rather than through the now-label-agnostic gate.
   else
     echo "  ⊘ AR-1/AR-2 skipped: classifier-marker.mjs write did not produce marker (sandboxed env or helper rejected)"
   fi
@@ -1737,6 +1766,97 @@ if [ -f "$REAL_HELPER" ]; then
 else
   echo "  ⊘ AR-1/AR-2 skipped: real classifier-marker.mjs not reachable at $REAL_HELPER"
 fi
+
+# ============================================================================
+echo ""
+echo "--- Planning-passive redesign: nothing armed at rest; first repo write arms (2026-05-25) ---"
+# ============================================================================
+# Core invariants of the planning-passive redesign:
+#   (1) With NOTHING armed, planning/review/exploration never blocks and never
+#       arms — read-only Bash, node inspections, and shared_write review
+#       commands all pass cleanly with zero marker side effects.
+#   (2) The first repo-source Edit/Write lazily arms .checkpoint-required for
+#       the session AND blocks (the implementation boundary).
+#   (3) Off-repo writes (memory/skills/settings) are allowed and never arm.
+#   (4) Arming is per-session and per-repo: sessions and projects don't bleed.
+PP_REPO="$(mktemp -d)"; PP_REPO="$(cd -P "$PP_REPO" && pwd)"
+git -C "$PP_REPO" init -q 2>/dev/null
+PP_MARKER_DIR="$PP_REPO/.checkpoints"
+mkdir -p "$PP_MARKER_DIR"
+PP_SID_A="11111111-aaaa-4aaa-8aaa-111111111111"
+PP_SID_B="22222222-bbbb-4bbb-8bbb-222222222222"
+
+mock_pp_bash() {  # $1=command $2=sid
+  jq -n --arg cmd "$1" --arg cwd "$PP_REPO" --arg sid "$2" \
+    '{tool_name: "Bash", tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}'
+}
+mock_pp_edit() {  # $1=abs file_path $2=sid $3=cwd(optional, default PP_REPO)
+  jq -n --arg fp "$1" --arg cwd "${3:-$PP_REPO}" --arg sid "$2" \
+    '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd, session_id: $sid}'
+}
+reset_pp() { rm -rf "$PP_MARKER_DIR"; mkdir -p "$PP_MARKER_DIR"; }
+
+# (1) Planning-passive — nothing armed, nothing blocks, nothing arms
+reset_pp
+assert_allowed "PP-1. read-only Bash (git status) allowed, nothing armed" \
+  "$(mock_pp_bash 'git status' "$PP_SID_A")"
+assert_allowed "PP-2. node em-search (read_only) allowed, nothing armed" \
+  "$(mock_pp_bash 'node scripts/em-search.mjs --tag x' "$PP_SID_A")"
+assert_allowed "PP-3. shared_write review command (second-opinion dispatch) allowed (Bash ungated)" \
+  "$(mock_pp_bash 'node scripts/second-opinion.mjs request --provider codex --dispatch' "$PP_SID_A")"
+assert_marker_absent "PP-4. planning Bash did NOT arm .checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+assert_marker_absent "PP-4b. planning Bash did NOT arm legacy .checkpoint-required" \
+  "$PP_MARKER_DIR/.checkpoint-required"
+
+# (2) Lazy-arm — first repo-source Edit arms + blocks
+reset_pp
+assert_blocked "PP-5. first in-repo Edit blocks at implementation boundary" \
+  "$(mock_pp_edit "$PP_REPO/scripts/foo.mjs" "$PP_SID_A")" "Checkpoint required"
+assert_marker_exists "PP-6. first in-repo Edit lazily armed .checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+
+# (3) After the session's pre-checkpoint is written → Edit allowed + post armed
+echo "Rule 18 pre-checkpoint" > "$PP_MARKER_DIR/.pre-checkpoint-done.$PP_SID_A"
+assert_allowed "PP-7. in-repo Edit allowed after pre-checkpoint written (session A)" \
+  "$(mock_pp_edit "$PP_REPO/scripts/foo.mjs" "$PP_SID_A")"
+assert_marker_exists "PP-8. allowed Edit armed .post-checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.post-checkpoint-required.$PP_SID_A"
+
+# (4) Off-repo Edit allowed + never arms
+reset_pp
+OFFREPO_PP="$(mktemp -d)"; OFFREPO_PP="$(cd -P "$OFFREPO_PP" && pwd)"
+assert_allowed "PP-9. off-repo Edit allowed (planning-passive smart-arming)" \
+  "$(mock_pp_edit "$OFFREPO_PP/memory/note.md" "$PP_SID_A")"
+assert_marker_absent "PP-10. off-repo Edit did NOT arm .checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+rm -rf "$OFFREPO_PP"
+
+# (5) Multisession — two sids arm independently; one's pre-done doesn't unblock the other
+reset_pp
+echo "$(mock_pp_edit "$PP_REPO/scripts/a.mjs" "$PP_SID_A")" | run_hook >/dev/null 2>&1
+echo "$(mock_pp_edit "$PP_REPO/scripts/b.mjs" "$PP_SID_B")" | run_hook >/dev/null 2>&1
+assert_marker_exists "PP-11. session A armed its own .checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+assert_marker_exists "PP-12. session B armed its own .checkpoint-required.<sidB>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_B"
+echo "pre A" > "$PP_MARKER_DIR/.pre-checkpoint-done.$PP_SID_A"
+assert_allowed "PP-13. session A unblocked by its OWN pre-done" \
+  "$(mock_pp_edit "$PP_REPO/scripts/a.mjs" "$PP_SID_A")"
+assert_blocked "PP-14. session B still blocked (independent pre-done)" \
+  "$(mock_pp_edit "$PP_REPO/scripts/b.mjs" "$PP_SID_B")" "Checkpoint required"
+
+# (6) Multiproject — edit in repo A never arms repo B
+reset_pp
+PP_REPO_B="$(mktemp -d)"; PP_REPO_B="$(cd -P "$PP_REPO_B" && pwd)"
+git -C "$PP_REPO_B" init -q 2>/dev/null
+mkdir -p "$PP_REPO_B/.checkpoints"
+echo "$(mock_pp_edit "$PP_REPO/scripts/x.mjs" "$PP_SID_A")" | run_hook >/dev/null 2>&1
+assert_marker_exists "PP-15. edit in repo A armed A's .checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+assert_marker_absent "PP-16. edit in repo A did NOT arm repo B's .checkpoint-required.<sidA>" \
+  "$PP_REPO_B/.checkpoints/.checkpoint-required.$PP_SID_A"
+rm -rf "$PP_REPO_B" "$PP_REPO"
 
 echo ""
 echo "Passed: $passed"

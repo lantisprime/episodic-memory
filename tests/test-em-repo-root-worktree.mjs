@@ -7,9 +7,11 @@
  *   1. Resolver unit tests — resolveRepoRoot returns the main repo working
  *      tree from main / linked worktree / nested cwd / non-git / submodule.
  *   2. Integration regression tests — em-recall.mjs invoked from a linked
- *      worktree writes .checkpoint-required at <main>/.claude/, not
- *      <worktree>/.claude/. em-session-end-prompt.mjs invoked from a worktree
- *      cleans markers at <main>/.claude/, not <worktree>/.claude/.
+ *      worktree writes its .session-baseline at <main>/.checkpoints/, not
+ *      <worktree>/.checkpoints/ (planning-passive redesign 2026-05-25: em-recall
+ *      no longer arms .checkpoint-required, so the #106 root-resolution invariant
+ *      is observed via the baseline write). em-session-end-prompt.mjs invoked
+ *      from a worktree cleans markers at <main>, not <worktree>.
  *
  * Defensive ordering (per feedback_test_resource_existence_check.md):
  * each integration assertion checks BOTH "marker exists at main" AND
@@ -172,6 +174,13 @@ const mainMarker = path.join(mainPrimaryDir, '.checkpoint-required')
 const mainMarkerLegacy = path.join(mainLegacyDir, '.checkpoint-required')
 const worktreeMarker = path.join(worktreePrimaryDir, '.checkpoint-required')
 const worktreeMarkerLegacy = path.join(worktreeLegacyDir, '.checkpoint-required')
+// Planning-passive redesign (2026-05-25): em-recall no longer ARMS
+// .checkpoint-required (lazy-arm moved to checkpoint-gate.sh). The #106
+// root-resolution invariant (artifacts land at MAIN, not the worktree) is now
+// observed via the .session-baseline write, which em-recall still performs at
+// the resolved root in --session-start mode.
+const mainBaseline = path.join(mainPrimaryDir, '.session-baseline')
+const worktreeBaseline = path.join(worktreePrimaryDir, '.session-baseline')
 
 function clearMarkers() {
   for (const dir of [mainPrimaryDir, mainLegacyDir, worktreePrimaryDir, worktreeLegacyDir]) {
@@ -187,32 +196,35 @@ function clearMarkers() {
   }
 }
 
-test('em-recall from main writes .checkpoint-required at <main>/.claude/', () => {
+test('em-recall from main writes .session-baseline at <main>/.checkpoints/ (no marker armed)', () => {
   clearMarkers()
-  execSync(`node ${RECALL} --scope local --project test --no-track`, {
+  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
-  // Defensive: assert main marker AND verify worktree did not get one too.
-  assert.ok(fs.existsSync(mainMarker), `expected ${mainMarker} after em-recall from main`)
-  assert.ok(!fs.existsSync(worktreeMarker), `unexpected ${worktreeMarker} after em-recall from main`)
+  // Root-resolution observed via baseline; em-recall no longer arms the marker.
+  assert.ok(fs.existsSync(mainBaseline), `expected ${mainBaseline} after em-recall from main`)
+  assert.ok(!fs.existsSync(worktreeBaseline), `unexpected ${worktreeBaseline} after em-recall from main`)
+  assert.ok(!fs.existsSync(mainMarker), `em-recall must NOT arm ${mainMarker} (planning-passive)`)
 })
 
-test('em-recall from linked worktree writes .checkpoint-required at <main>/.claude/, NOT worktree', () => {
+test('em-recall from linked worktree writes .session-baseline at <main>/.checkpoints/, NOT worktree', () => {
   clearMarkers()
-  execSync(`node ${RECALL} --scope local --project test --no-track`, {
+  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
-  // Positive: marker landed at main repo root.
+  // Positive: baseline landed at main repo root.
   assert.ok(
-    fs.existsSync(mainMarker),
-    `expected ${mainMarker} after em-recall from worktree (regressed #106)`,
+    fs.existsSync(mainBaseline),
+    `expected ${mainBaseline} after em-recall from worktree (regressed #106)`,
   )
-  // Negative: marker did NOT land at worktree (the bug-shape assertion).
-  // Defensive ordering: this assertion is the load-bearing one for #106.
+  // Negative: baseline did NOT land at worktree (the #106 bug-shape assertion).
   assert.ok(
-    !fs.existsSync(worktreeMarker),
-    `marker leaked into worktree: ${worktreeMarker} (this is the #106 bug)`,
+    !fs.existsSync(worktreeBaseline),
+    `baseline leaked into worktree: ${worktreeBaseline} (this is the #106 bug)`,
   )
+  // em-recall must not arm the marker anywhere (planning-passive).
+  assert.ok(!fs.existsSync(mainMarker) && !fs.existsSync(worktreeMarker),
+    `em-recall must NOT arm .checkpoint-required (planning-passive)`)
   // Defensive existence check: verify the worktree dir itself wasn't deleted
   // out from under us before the assertion, which would make the negative
   // check vacuously pass.
@@ -222,13 +234,14 @@ test('em-recall from linked worktree writes .checkpoint-required at <main>/.clau
   )
 })
 
-test('em-recall from nested cwd inside worktree still writes marker at <main>/.claude/', () => {
+test('em-recall from nested cwd inside worktree still writes .session-baseline at <main>/.checkpoints/', () => {
   clearMarkers()
-  execSync(`node ${RECALL} --scope local --project test --no-track`, {
+  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
     cwd: nestedDir, stdio: ['ignore', 'ignore', 'ignore'],
   })
-  assert.ok(fs.existsSync(mainMarker))
-  assert.ok(!fs.existsSync(worktreeMarker), `marker leaked into worktree from nested cwd`)
+  assert.ok(fs.existsSync(mainBaseline))
+  assert.ok(!fs.existsSync(worktreeBaseline), `baseline leaked into worktree from nested cwd`)
+  assert.ok(!fs.existsSync(mainMarker), `em-recall must NOT arm marker (planning-passive)`)
 })
 
 test('em-session-end-prompt from worktree cleans markers at <main>, not worktree', () => {
@@ -295,12 +308,14 @@ test('NEG: stale worktree-local marker (pre-fix legacy state) is preserved, not 
   fs.writeFileSync(worktreeMarkerLegacy, 'legacy-from-pre-106')
   assert.ok(fs.existsSync(worktreeMarkerLegacy), 'pre-condition: legacy worktree marker seeded')
 
-  execSync(`node ${RECALL} --scope local --project test --no-track`, {
+  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
-  // New behavior: marker now lives at main, in the PRIMARY (.checkpoints/) dir.
-  assert.ok(fs.existsSync(mainMarker), 'new arming should land at main/.checkpoints/')
+  // New behavior: em-recall writes the .session-baseline at main/.checkpoints/
+  // (and never arms a marker). Root-resolution still lands at main.
+  assert.ok(fs.existsSync(mainBaseline), 'baseline should land at main/.checkpoints/')
+  assert.ok(!fs.existsSync(mainMarker), 'em-recall must NOT arm a marker (planning-passive)')
   // Legacy worktree marker preserved verbatim — we don't read or modify
   // worktree-local state.
   assert.ok(fs.existsSync(worktreeMarkerLegacy), 'legacy worktree marker should be untouched')

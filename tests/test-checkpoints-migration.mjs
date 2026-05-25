@@ -21,7 +21,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { execSync } from 'child_process'
+import { execSync, spawnSync } from 'child_process'
 
 const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts')
 const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
@@ -52,6 +52,9 @@ function assertExists(p, msg) {
 }
 function assertMissing(p, msg) {
   if (fs.existsSync(p)) throw new Error(`${msg || 'expected to be missing'}: ${p}`)
+}
+function assertTrue(cond, msg) {
+  if (!cond) throw new Error(msg || 'expected truthy')
 }
 
 function setupRepo() {
@@ -88,10 +91,18 @@ function gateStop(cwd) {
 }
 
 function sessionStart(cwd) {
-  // --session-start writes baseline + arms checkpoint marker if
-  // bp-001 violation activation predicate fires. For these tests we don't
-  // care about violations — we just want the SessionStart side effects.
+  // --session-start writes the .session-baseline. Planning-passive (2026-05-25):
+  // em-recall no longer arms .checkpoint-required; a bp-001 violation now emits
+  // the __BP1_ADVISORY__ stderr signal instead.
   return runRecall(cwd, ['--session-start'])
+}
+
+// stderr-capturing variant — the bp-001 signal is now an advisory on stderr.
+function sessionStartStderr(cwd, extraEnv = {}) {
+  const r = spawnSync('node', [RECALL, '--session-start'], {
+    cwd, encoding: 'utf8', env: { ...process.env, HOME: cwd, ...extraEnv }
+  })
+  return r.stderr || ''
 }
 
 console.log('SessionStart writes baseline at PRIMARY (.checkpoints/):')
@@ -102,8 +113,8 @@ test('baseline lands at .checkpoints/.session-baseline, NOT .claude/', () => {
   assertMissing(path.join(root, '.claude', '.session-baseline'), 'legacy baseline must not be created')
 })
 
-console.log('\narmCheckpointMarker writes to PRIMARY only:')
-test('writes .checkpoints/.checkpoint-required, never touches .claude/', () => {
+console.log('\nbp-001 signal is an advisory; em-recall never arms a marker (planning-passive):')
+test('em-recall emits __BP1_ADVISORY__ and arms NO .checkpoint-required at either root', () => {
   const root = setupRepo()
   // Force activation by seeding a recent bp-001 violation in local store.
   const localEpisodes = path.join(root, '.episodic-memory', 'episodes')
@@ -135,9 +146,14 @@ test
   })
   fs.writeFileSync(path.join(root, '.episodic-memory', 'index.jsonl'), indexLine + '\n')
 
-  sessionStart(root)
-  assertExists(path.join(root, '.checkpoints', '.checkpoint-required'), 'primary marker')
-  assertMissing(path.join(root, '.claude', '.checkpoint-required'), 'legacy marker must not be created')
+  // Planning-passive: em-recall surfaces the advisory (proving the violation was
+  // seen) but arms NO marker. The migration write-path contract (.checkpoints/,
+  // never .claude/) for .checkpoint-required is now exercised by the gate's
+  // lazy-arm — see test-checkpoint-gate.sh PP-6 / PP-15.
+  const stderr = sessionStartStderr(root)
+  assertTrue(/__BP1_ADVISORY__/.test(stderr), `expected advisory on stderr; got: ${stderr}`)
+  assertMissing(path.join(root, '.checkpoints', '.checkpoint-required'), 'em-recall must not arm primary marker')
+  assertMissing(path.join(root, '.claude', '.checkpoint-required'), 'em-recall must not arm legacy marker')
 })
 
 console.log('\nstop-gate carve-out reads BOTH roots:')

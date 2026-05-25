@@ -42,6 +42,27 @@ set -e
 # Cross-gate invariant (Codex ...3503 P1): checkpoint marker writes are
 # blocked while .plan-approval-pending exists (either root). Both gates
 # independently enforce.
+#
+# ---------------------------------------------------------------------------
+# Planning-passive redesign (2026-05-25) + F1 RESIDUAL
+# ---------------------------------------------------------------------------
+# The pre-checkpoint gate no longer arms at SessionStart (em-recall emits an
+# advisory instead). Nothing is armed during planning / discovery / exploration
+# / code review. The pre-checkpoint requirement materializes at the
+# IMPLEMENTATION boundary: the first repo-source Edit/Write/MultiEdit/
+# NotebookEdit lazily arms .checkpoint-required and blocks. Bash is intentionally
+# NOT pre-checkpoint-gated — reviews/inspections/dispatch never block.
+#
+# F1 RESIDUAL (documented + user-accepted): because Bash is ungated by the
+# pre-checkpoint gate, a PURE-Bash implementation (`sed -i`, `cat > file`,
+# `git commit`, `node script-that-writes.mjs`) can mutate repo source WITHOUT
+# ever arming .checkpoint-required, bypassing the Rule 18 pre-checkpoint. This
+# is a deliberate trade: gating all shared_write Bash reintroduced the exact
+# planning-time friction this redesign removes (read-only `node`/inspection
+# commands mis-blocked). Clean closure DEPENDS on the agent-classifier (rank-10
+# PR-B) correctly distinguishing read-only from mutating Bash, so only mutating
+# Bash arms. Tracked as follow-up issue #351 (PR-B agent-classifier dependency).
+# The push-gate + post-checkpoint + stop-gate lifecycle remain fully enforced.
 
 INPUT="$(cat)"
 TOOL_NAME="$(echo "$INPUT" | jq -r '.tool_name // ""')"
@@ -521,6 +542,53 @@ _block_plan_pending() {
     '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
+# Env-prefix wrapper-escape block (codex review FU, 2026-05-25). The classifier
+# flags `<NAME>=value node ... classifier-marker.mjs ...` as
+# unsafe_complex/classifier_marker_env_override (the helper-invocation grammar
+# refuses ANY env-prefix on the carve-out helper). The planning-passive redesign
+# ungates Bash, so without this the form would be allowed — blessing an
+# env-prefix wrapper escape that can poison the classifier-marker cache the gate
+# itself trusts. Reject the FORM (not the var name), independent of the
+# pre-checkpoint gate.
+_block_env_prefix_marker() {
+  jq -nc '{decision: "block", reason: "Env-prefix wrapper escape rejected. An environment-variable assignment before a classifier-marker.mjs invocation (e.g. BYPASS=1 node ... classifier-marker.mjs --write) is refused: env-prefix wrappers can carry gate-bypass payloads and poison the classifier cache. Re-invoke the helper with NO leading VAR=value prefix. Hook: checkpoint-gate.sh."}'
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Lazy-arm .checkpoint-required (planning-passive redesign, 2026-05-25).
+#
+# Replaces session-start arming (em-recall.mjs no longer arms; a recent bp-001
+# violation is now an advisory warning, never a gate-arm). NOTHING is armed
+# during planning / discovering / exploring / code review. The pre-checkpoint
+# requirement materializes only at the IMPLEMENTATION boundary — the first
+# repo-source file write OR the pre-checkpoint-done write, whichever comes
+# first. Arming here (rather than at session start) keeps the downstream
+# post-checkpoint + stop-gate + push-gate lifecycle intact: those key off
+# .checkpoint-required to know a task is active this session.
+#
+# Idempotent: no-op if the marker already exists (own-session or legacy).
+# Best-effort: never aborts the hook under set -e.
+# ---------------------------------------------------------------------------
+_arm_checkpoint_required_if_missing() {
+  if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
+    return 0
+  fi
+  ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
+  if validate_session_id "$MY_SID"; then
+    local helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+    if [ -f "$helper" ]; then
+      CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
+        --target .checkpoint-required \
+        --action arm-if-missing \
+        --root "$REPO_ROOT" >/dev/null 2>&1 || true
+    else
+      touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
+    fi
+  else
+    touch "$(write_marker_path "$REPO_ROOT" .checkpoint-required)" 2>/dev/null || true
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Smart-arming helpers (PR fix/checkpoint-gate-smart-arming, 2026-05-24)
@@ -746,6 +814,16 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     exit 0
   fi
 
+  # Env-prefix wrapper escape on the classifier-marker helper. The classifier
+  # returns unsafe_complex/classifier_marker_env_override for any env-prefixed
+  # helper invocation. Block it DIRECTLY here — independent of the (removed)
+  # Bash pre-checkpoint gate — so the planning-passive Bash allowance can't
+  # bless an env-prefix wrapper escape against the classifier cache. (Codex
+  # review FU, 2026-05-25.)
+  if [ "$REASON" = "classifier_marker_env_override" ]; then
+    _block_env_prefix_marker
+  fi
+
   # Codex round-4 F12 + round-5 F15 + round-6 F18: verb-agnostic relative-
   # marker precheck. Runs for ALL non-read_only Bash when CWD != REPO_ROOT
   # (linked worktree OR nested cwd inside main repo). Catches touch/mv/cp/
@@ -831,16 +909,27 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # handles both own-suffixed AND legacy literal forms.
     case "$TARGET_BN" in
       .pre-checkpoint-done|.pre-checkpoint-done.*)
-        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
-           && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+        # Planning-passive redesign (2026-05-25): allow the pre-checkpoint
+        # block write whenever it isn't already satisfied, and arm
+        # .checkpoint-required at that moment if missing (the implementation
+        # boundary). No longer depends on a session-start arm.
+        if ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+          _arm_checkpoint_required_if_missing
           exit 0
         fi
         ;;
       .post-checkpoint-done|.post-checkpoint-done.*)
-        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
-           && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
+        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
+          # POST_REQ armed → post-checkpoint phase; allow the write (first
+          # write OR idempotent re-write of an already-satisfied marker).
           exit 0
         fi
+        # POST_REQ NOT armed → writing the post-checkpoint before the
+        # lifecycle has armed it. The planning-passive redesign (2026-05-25)
+        # removed Bash from the pre-gate, so a premature marker_write no
+        # longer falls through to a block. Block DIRECTLY here so this branch
+        # is self-contained (tests 17/49/50/56).
+        _block_pre
         ;;
       .plan-approval-pending|.plan-approval-pending.*)
         exit 0
@@ -958,16 +1047,22 @@ case "$TOOL_NAME" in
         # branch — same logic as the Bash branch above).
         case "$TARGET_BN" in
           .pre-checkpoint-done|.pre-checkpoint-done.*)
-            if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
-               && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+            # Planning-passive redesign (2026-05-25): allow + lazy-arm (see
+            # the Bash-branch counterpart above for rationale).
+            if ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+              _arm_checkpoint_required_if_missing
               exit 0
             fi
             ;;
           .post-checkpoint-done|.post-checkpoint-done.*)
-            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
-               && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
+            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
+              # POST_REQ armed → post-checkpoint phase; allow the write.
               exit 0
             fi
+            # POST_REQ NOT armed → premature post-checkpoint write. marker_write
+            # skips the pre-gate (the `LABEL != marker_write` guard below), so
+            # block DIRECTLY here (planning-passive redesign self-containment).
+            _block_pre
             ;;
           .plan-approval-pending|.plan-approval-pending.*)
             exit 0
@@ -978,22 +1073,48 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-# Rank-2: pre-gate read is session-aware. Own-session marker OR legacy
-# literal triggers the block; other sessions' suffixed markers do not.
+# ---------------------------------------------------------------------------
+# Pre-checkpoint gate — planning-passive + lazy-armed (2026-05-25 redesign).
 #
-# Smart-arming (2026-05-24): the pre-block fires only if the current tool
-# call targets project source. Off-repo Edit/Write (memory writes under
-# ~/.claude/projects/**, skill writes, settings edits) silently allowed.
-# Bash side stays strict (codex R1 6b — all non-marker_write Bash blocks).
-# Stop-gate symmetry preserved transitively: pre-checkpoint stays unwritten,
-# so the post-required arming at lines below also doesn't fire, so em-recall
-# carve-out continues to apply.
-if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
-   && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
-  if _tool_call_targets_repo_source "$REPO_ROOT" "$TOOL_NAME" "$FILE_PATH" "$LABEL"; then
-    _block_pre
-  fi
-fi
+# OLD: em-recall armed .checkpoint-required at SESSION START whenever a bp-001
+# violation existed within 30 days, blocking ALL non-read Bash + repo
+# Edit/Write before any implementation — planning, recall, exploration, and
+# code reviews (codex CLI / second-opinion.mjs) all tripped it. That blocked
+# legitimate pre-implementation work, the core friction users hit.
+#
+# NEW: nothing armed at session start. The pre-checkpoint requirement attaches
+# to the IMPLEMENTATION boundary — the first repo-source file write. Bash is
+# intentionally NOT pre-checkpoint-gated (its safety is the classifier +
+# push-gate + agent-classifier deny-hint), so reviews / inspections /
+# exploration never block and never create a marker.
+#
+# The first repo-source Edit/Write/MultiEdit/NotebookEdit with no
+# .pre-checkpoint-done lazily arms .checkpoint-required (so the post-checkpoint
+# + stop-gate + push-gate lifecycle still tracks the task), then blocks.
+# Off-repo Edit/Write (memory under ~/.claude/projects/**, skills, settings)
+# is silently allowed via _tool_call_targets_repo_source. marker_write writes
+# are handled earlier and skipped here.
+# ---------------------------------------------------------------------------
+case "$TOOL_NAME" in
+  Edit|Write|MultiEdit|NotebookEdit)
+    if [ "$LABEL" != "marker_write" ] \
+       && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID" \
+       && _tool_call_targets_repo_source "$REPO_ROOT" "$TOOL_NAME" "$FILE_PATH" "$LABEL"; then
+      # Lazy-arm ONLY when we have a concrete in-repo FILE_PATH. The empty-
+      # FILE_PATH conservative-block path (relative path with no absolute cwd
+      # authority — _tool_call_targets_repo_source returns 0 defensively) must
+      # NOT write a marker: REPO_ROOT there falls back to the hook process cwd
+      # (off-project invocation), so arming would leak .checkpoint-required
+      # into an unrelated repo. Regression: SA-cwd-strict caller-leak. The
+      # block still fires (Rule 18 conservative direction); only the arm is
+      # withheld until a real in-repo write is seen.
+      if [ -n "$FILE_PATH" ]; then
+        _arm_checkpoint_required_if_missing
+      fi
+      _block_pre
+    fi
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Push-gate: only fires for Bash classified as push_or_pr_create.

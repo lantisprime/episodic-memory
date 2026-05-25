@@ -1,17 +1,23 @@
 #!/usr/bin/env node
 /**
  * test-bp001-per-project-arming.mjs — Per-project scope for the bp-001
- * checkpoint-gate arming engine (`shouldArmBp001Checkpoint`).
+ * checkpoint-gate advisory engine (`shouldArmBp001Checkpoint`).
  *
  * Before: any bp-001 violation in any project armed .checkpoint-required in
  * EVERY project at SessionStart (cross-project bleed).
- * After: arming only fires when the current REPO_ROOT's resolved project name
- * matches the violation's project field.
+ * Planning-passive redesign (2026-05-25): em-recall NO LONGER arms a marker at
+ * SessionStart. When `shouldArmBp001Checkpoint` is true it emits the
+ * `__BP1_ADVISORY__` stderr signal instead (the pre-checkpoint requirement is
+ * now lazily armed by checkpoint-gate.sh at the first repo-source write). The
+ * per-project SCOPING this file guards is unchanged: the advisory fires only
+ * when the current REPO_ROOT's resolved project matches the violation's
+ * project. Each test asserts BOTH (a) em-recall writes NO marker (removed
+ * arming) and (b) the advisory presence matches the scoping rule.
  *
  * Tests run em-recall.mjs as a subprocess with isolated HOME (fake global
- * episode store) and assert marker placement on disk — pure integration.
+ * episode store) and assert advisory emission + null marker side effect.
  *
- * Plan v3 cases A1-A8.
+ * Plan v3 cases A1-A9 (advisory-adapted).
  */
 
 import { execSync, spawnSync } from 'child_process'
@@ -89,34 +95,41 @@ function markerExists(repoRoot) {
   return fs.lstatSync(p).isFile()
 }
 
+// Planning-passive: the per-project gate is now observed via the advisory
+// sentinel on stderr, not a marker write.
+function advisoryEmitted(stderr) {
+  return /__BP1_ADVISORY__/.test(stderr || '')
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 const TESTS = []
 const test = (name, fn) => TESTS.push({ name, fn })
 
-test('A1 cross-project: violation in project-A, SessionStart in project-B → NOT armed (THE FIX)', () => {
+test('A1 cross-project: violation in project-A, SessionStart in project-B → NO advisory (THE FIX)', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a1-projA', 'project-a')
   const projB = mkRepo('a1-projB', 'project-b')
   seedViolation(home, { project: 'project-a' })
   const r = runSessionStart(projB, home)
   if (r.status !== 0) return bad('A1', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (markerExists(projB)) return bad('A1', `project-b marker should NOT exist`)
-  if (markerExists(projA)) return bad('A1', `project-a marker should NOT be touched`)
+  if (advisoryEmitted(r.stderr)) return bad('A1', `project-b run must NOT emit bp-001 advisory`)
+  if (markerExists(projB) || markerExists(projA)) return bad('A1', `em-recall must not arm any marker`)
   ok('A1')
 })
 
-test('A2 same-project: violation in project-A, SessionStart in project-A → armed', () => {
+test('A2 same-project: violation in project-A, SessionStart in project-A → advisory (no marker)', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a2-projA', 'project-a')
   seedViolation(home, { project: 'project-a' })
   const r = runSessionStart(projA, home)
   if (r.status !== 0) return bad('A2', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (!markerExists(projA)) return bad('A2', `project-a marker should be armed but is not`)
+  if (!advisoryEmitted(r.stderr)) return bad('A2', `advisory should be emitted but was not`)
+  if (markerExists(projA)) return bad('A2', `em-recall must not arm a marker (lazy-arm moved to gate)`)
   ok('A2')
 })
 
-test('A3 nested cwd: violation in project-A, SessionStart in project-A/sub → armed at A (REPO_ROOT walks up)', () => {
+test('A3 nested cwd: violation in project-A, SessionStart in project-A/sub → advisory (REPO_ROOT walks up)', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a3-projA', 'project-a')
   const sub = path.join(projA, 'sub')
@@ -124,8 +137,8 @@ test('A3 nested cwd: violation in project-A, SessionStart in project-A/sub → a
   seedViolation(home, { project: 'project-a' })
   const r = runSessionStart(sub, home)
   if (r.status !== 0) return bad('A3', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (!markerExists(projA)) return bad('A3', `project-a marker should be armed`)
-  if (markerExists(sub)) return bad('A3', `sub-level marker should NOT exist`)
+  if (!advisoryEmitted(r.stderr)) return bad('A3', `advisory should be emitted`)
+  if (markerExists(projA) || markerExists(sub)) return bad('A3', `em-recall must not arm any marker`)
   ok('A3')
 })
 
@@ -136,22 +149,23 @@ test('A5 --project override does NOT trick the arming: cwd=project-B + --project
   seedViolation(home, { project: 'project-a' })
   const r = runSessionStart(projB, home, ['--project', 'project-a'])
   if (r.status !== 0) return bad('A5', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (markerExists(projB)) return bad('A5', `project-b marker should NOT exist (override must be ignored for arming)`)
-  if (markerExists(projA)) return bad('A5', `project-a marker should NOT be touched`)
+  if (advisoryEmitted(r.stderr)) return bad('A5', `--project override must NOT trigger advisory in project-b`)
+  if (markerExists(projB) || markerExists(projA)) return bad('A5', `em-recall must not arm any marker`)
   ok('A5')
 })
 
-test('A6 out-of-cutoff: 60-day-old violation in project-A → NOT armed', () => {
+test('A6 out-of-cutoff: 60-day-old violation in project-A → NO advisory', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a6-projA', 'project-a')
   seedViolation(home, { project: 'project-a', daysAgo: 60 })
   const r = runSessionStart(projA, home)
   if (r.status !== 0) return bad('A6', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (markerExists(projA)) return bad('A6', `60-day-old violation should not arm`)
+  if (advisoryEmitted(r.stderr)) return bad('A6', `60-day-old violation should not emit advisory`)
+  if (markerExists(projA)) return bad('A6', `em-recall must not arm a marker`)
   ok('A6')
 })
 
-test('A7 multi-project: violations in A,B,C + SessionStart in A → armed (only A counts)', () => {
+test('A7 multi-project: violations in A,B,C + SessionStart in A → advisory (only A counts)', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a7-projA', 'project-a')
   seedViolation(home, { project: 'project-a' })
@@ -159,26 +173,29 @@ test('A7 multi-project: violations in A,B,C + SessionStart in A → armed (only 
   seedViolation(home, { project: 'project-c' })
   const r = runSessionStart(projA, home)
   if (r.status !== 0) return bad('A7', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (!markerExists(projA)) return bad('A7', `A's own violation should arm`)
+  if (!advisoryEmitted(r.stderr)) return bad('A7', `A's own violation should emit advisory`)
+  if (markerExists(projA)) return bad('A7', `em-recall must not arm a marker`)
   ok('A7')
 })
 
-test('A8 superseded: only-violation-for-A is status:superseded → NOT armed (explicit status filter)', () => {
+test('A8 superseded: only-violation-for-A is status:superseded → NO advisory (explicit status filter)', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a8-projA', 'project-a')
   seedViolation(home, { project: 'project-a', status: 'superseded' })
   const r = runSessionStart(projA, home)
   if (r.status !== 0) return bad('A8', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (markerExists(projA)) return bad('A8', `superseded violation must not arm`)
+  if (advisoryEmitted(r.stderr)) return bad('A8', `superseded violation must not emit advisory`)
+  if (markerExists(projA)) return bad('A8', `em-recall must not arm a marker`)
   ok('A8')
 })
 
-test('A9 no violations anywhere: SessionStart in any project → NOT armed', () => {
+test('A9 no violations anywhere: SessionStart in any project → NO advisory', () => {
   const home = mkFakeHome()
   const projA = mkRepo('a9-projA', 'project-a')
   const r = runSessionStart(projA, home)
   if (r.status !== 0) return bad('A9', `em-recall exited ${r.status}: ${r.stderr}`)
-  if (markerExists(projA)) return bad('A9', `clean store must not arm`)
+  if (advisoryEmitted(r.stderr)) return bad('A9', `clean store must not emit advisory`)
+  if (markerExists(projA)) return bad('A9', `em-recall must not arm a marker`)
   ok('A9')
 })
 
