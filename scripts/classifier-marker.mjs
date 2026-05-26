@@ -67,6 +67,7 @@ import { resolveRepoRoot } from './lib/local-dir.mjs'
 
 const LABELS = new Set([
   'read_only',
+  'nonsrc_write',
   'shared_write',
   'marker_write',
   'push_or_pr_create',
@@ -75,7 +76,10 @@ const LABELS = new Set([
 
 // Path-versioning fields. Bumping either makes ALL existing markers
 // unreachable via their old paths and forces re-classification.
-const CLASSIFIER_POLICY_VERSION = 1
+// Bumped 1→2 (PR-B2, #351): the `nonsrc_write` label is a taxonomy change.
+// Stale markers carrying the old policy version become unreachable and force
+// re-classification (handled at the version-mismatch check ~L380; --vacuum reaps).
+const CLASSIFIER_POLICY_VERSION = 2
 const NORMALIZED_COMMAND_VERSION = 1
 const MARKER_SCHEMA_VERSION = 2
 

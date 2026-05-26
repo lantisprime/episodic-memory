@@ -538,6 +538,34 @@ _block_post() {
     '{decision: "block", reason: ("Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to " + $path + " (must be non-empty) before pushing. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
+# Pre-block variant that appends the 3-way agent-classifier deny-hint (#333,
+# PR-B2). Used by the Bash pre-checkpoint arm for commands that arm the gate
+# (shared_write / unsafe_complex / unknown): the message leads checkpoint-first
+# (write the Rule 18 pre-checkpoint), then offers the read_only / nonsrc_write
+# escape for a genuinely-not-repo-source command. The deny-reason lib is sourced
+# lazily; if unavailable or it emits nothing, fall back to the plain _block_pre
+# message (never fail the gate).
+_block_pre_with_hint() {
+  local hint=""
+  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
+    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier-deny-reason.sh"
+      __AGENT_DENY_REASON_SOURCED=1
+    else
+      __AGENT_DENY_REASON_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ]; then
+    hint="$(agent_classifier_deny_hint "$COMMAND" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
+  fi
+  if [ -n "$hint" ]; then
+    jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
+      '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
+    exit 0
+  fi
+  _block_pre
+}
 _block_plan_pending() {
   jq -nc --arg path "$PLAN_PENDING_W" \
     '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
@@ -589,6 +617,21 @@ _arm_checkpoint_required_if_missing() {
   else
     touch "$(write_marker_path "$REPO_ROOT" .checkpoint-required)" 2>/dev/null || true
   fi
+}
+
+# F1 #351 closure (PR-B2, §4): which classifier LABELS arm the Bash pre-
+# implementation checkpoint. The inversion (vs the abandoned writer-binary
+# REASON-enumeration): arm on the "writes-repo-source / can't-tell" bucket, not
+# an enumerated list. nonsrc_write / read_only / marker_write / push_or_pr_create
+# never arm here. `unknown` arms conservatively — a parsed-but-unrecognized
+# shape must fail closed (codex R1/F3). Complete by construction: anything the
+# classifier can't downgrade to nonsrc_write/read_only arms (friction, not
+# bypass); the agent downgrades it once via the deny-hint verdict.
+_bash_label_arms_pre_checkpoint() {
+  case "$1" in
+    shared_write|unsafe_complex|unknown) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -1138,10 +1181,87 @@ case "$TOOL_NAME" in
 esac
 
 # ---------------------------------------------------------------------------
+# Bash pre-checkpoint gate (PR-B2 #351 — F1 closure via the nonsrc_write
+# inversion). A Bash command whose LABEL is in the "writes-repo-source /
+# can't-tell" bucket (shared_write / unsafe_complex / unknown) arms
+# .checkpoint-required and blocks WITH the 3-way deny-hint (#333). nonsrc_write
+# (git internals, npm install, mkdir/rmdir, em-store, /tmp redirects) and
+# read_only fall through FREE — preserving the PR #352 planning-passive win.
+# read_only already exited at the top; marker_write was handled earlier;
+# push_or_pr_create is the push-gate's job below.
+#
+# The deny-hint offers the per-instance escape: if the command does NOT write
+# repo source, the agent classifies it once (read_only / nonsrc_write) and
+# retries free; if it IS implementation, the agent writes the pre-checkpoint.
+# G1 (#351): command-classifier.sh now consults the per-session marker before
+# the escapable redirect/default_write emits, so a classified command re-
+# classifies to its agent verdict on retry and this gate no longer fires for it.
+# ---------------------------------------------------------------------------
+case "$TOOL_NAME" in
+  Bash)
+    if _bash_label_arms_pre_checkpoint "$LABEL" \
+       && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+      _arm_checkpoint_required_if_missing
+      _block_pre_with_hint
+    fi
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Push-gate: only fires for Bash classified as push_or_pr_create.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
-  # Rank-2: session-aware post-checkpoint check.
+  # B1 (#351, §11b/§15-C3 — D7 backstop): push self-arms .post-checkpoint-required
+  # regardless of pre-checkpoint state, so push is an INDEPENDENT hard gate even
+  # when the pre-checkpoint was escaped via an agent verdict (D7 made the pre-
+  # checkpoint fully agent-discretionary). Without this, escaping the pre-
+  # checkpoint transitively no-ops the whole post/push/stop chain (post-req arms
+  # only if pre was armed+done; push blocks only if post-req exists; stop-gate
+  # fires only if checkpoint armed). Capture arm-if-missing's `noop` signal:
+  # noop:false ⇒ created THIS invocation ⇒ block UNCONDITIONALLY without re-
+  # reading .post-checkpoint-done (a marker created this instant cannot have a
+  # satisfied done-marker; closes the read-after-arm TOCTOU, §15-C3/F2). The
+  # cross-session sweep below is NOT weakened (load-bearing for orphan cleanup).
+  _push_self_arm_created=0
+  if ! checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
+    ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
+    if validate_session_id "$MY_SID"; then
+      HELPER_CKM_PUSH="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+      if [ -f "$HELPER_CKM_PUSH" ]; then
+        # CAPTURE stdout (codex C3: the gate previously discarded it) and parse
+        # the helper's authoritative `noop` field.
+        _push_arm_out="$(CLAUDE_CODE_SESSION_ID="$MY_SID" node "$HELPER_CKM_PUSH" \
+          --target .post-checkpoint-required \
+          --action arm-if-missing \
+          --root "$REPO_ROOT" 2>/dev/null)" || true
+        case "$_push_arm_out" in
+          *'"noop":false'*|*'"noop": false'*) _push_self_arm_created=1 ;;
+        esac
+      else
+        # Fallback (helper not installed): compute existence BEFORE touch so the
+        # created-now signal is race-free (§15-C3 — no read-after-arm window).
+        _push_req_path="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")"
+        if [ ! -e "$_push_req_path" ]; then
+          touch "$_push_req_path" 2>/dev/null || true
+          _push_self_arm_created=1
+        fi
+      fi
+    else
+      # Invalid/empty sid: legacy direct touch, existence-before-touch.
+      _push_req_path="$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
+      if [ ! -e "$_push_req_path" ]; then
+        touch "$_push_req_path" 2>/dev/null || true
+        _push_self_arm_created=1
+      fi
+    fi
+  fi
+  if [ "$_push_self_arm_created" = "1" ]; then
+    # Created THIS invocation → cannot already have a satisfied
+    # .post-checkpoint-done. Block unconditionally without re-reading (TOCTOU-free).
+    _block_post
+  fi
+  # Rank-2: session-aware post-checkpoint check (already-armed path — a prior
+  # invocation or post-write arming armed post-req; block until it's satisfied).
   if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
      && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
     _block_post

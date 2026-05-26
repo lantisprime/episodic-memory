@@ -571,13 +571,17 @@ test('T-E2E-EM-WORKFLOW-VALIDATE-RELABEL: read_only / interpreter_em_read', () =
   assert.ok(out.stdout.includes('interpreter_em_read'), out.stdout)
 })
 
-test('T-E2E-EM-STORE-MUTATOR-INTACT: node scripts/em-store.mjs → shared_write (override carve-out)', () => {
+test('T-E2E-EM-STORE-MUTATOR-INTACT: node scripts/em-store.mjs → nonsrc_write (override carve-out)', () => {
   const r = mkrepo('e2e-em-store')
   correction(r, 'node scripts/em-store.mjs --x', 'read_only')  // should be REFUSED
   const out = spawnSync('bash', ['-c',
     `source "${SHELL_LIB}" && cd "${r}" && classify_command "node scripts/em-store.mjs --x" "${r}"`
   ], { env: process.env, encoding: 'utf8' })
-  assert.ok(out.stdout.includes('shared_write'), `mutator carve-out broken: ${out.stdout}`)
+  // PR-B2 (#351): em-store's hardcoded label moved shared_write → nonsrc_write
+  // (it writes the episode store, not repo source). The CARVE-OUT invariant is
+  // unchanged: the planted read_only override is still REFUSED — the classifier
+  // returns em-store's hardcoded label, not the override's read_only.
+  assert.ok(out.stdout.includes('nonsrc_write'), `mutator carve-out broken: ${out.stdout}`)
   assert.ok(out.stdout.includes('interpreter_em_write'), out.stdout)
 })
 

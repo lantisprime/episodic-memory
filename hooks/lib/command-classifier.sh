@@ -9,9 +9,15 @@
 #   classify_command "$cmd"  → echoes "LABEL\tTARGET\tREASON"
 #   classify_path    "$path" → echoes "LABEL\tTARGET\tREASON" (for Write/Edit)
 #
-# Six labels (per Codex review `...cad2`/`...3503`):
+# Seven labels (per Codex review `...cad2`/`...3503`; nonsrc_write added PR-B2 #351):
 #   read_only           pure observation (ls, cat, git status, gh pr view, …)
-#   shared_write        local side-effect (git commit, npm install, mkdir, …)
+#   nonsrc_write        writes, but definitely NOT repo source — .git internals
+#                         (git commit/add), package installs (npm/yarn install),
+#                         mkdir/rmdir, em-store episode-store writes. FREE: never
+#                         arms the Rule 18 pre-implementation checkpoint (#351).
+#   shared_write        repo-source content write OR can't-tell (redirects to a
+#                         file, non-allowlisted node/python, cp/mv/dd, working-
+#                         tree-mutating git, …). ARMS the pre-checkpoint.
 #   push_or_pr_create   publishes/mutates shared state
 #                         (git push, gh pr create/merge/close/…, gh issue …,
 #                          gh release, gh api -X POST/PUT/PATCH/DELETE, …)
@@ -951,7 +957,95 @@ _detect_helper_invocation() {
 #  10. Otherwise → shared_write (default for write-side commands we don't
 #      explicitly recognize).
 
+# ---------------------------------------------------------------------------
+# G1 (#351, PR-B2, §16/D8): general per-session marker-cache lookup for the
+# escapable content-write emit sites.
+#
+# The interpreter branch (node/python …) already consults the per-session
+# agent-classifier marker via agent_classify_command. The escapable hardcoded
+# shared_write emits — shell redirects (echo_redirected / readonly_cmd_
+# redirected) and the terminal default_write — did NOT, so the agent-verdict
+# escape was INOPERATIVE for the exact pure-Bash content-write class #351
+# targets (codex G1 verified on disk: a marker for `echo x > scripts/x.mjs`
+# left classify_command still returning shared_write echo_redirected). This
+# helper bridges that gap.
+#
+# Contract: call IMMEDIATELY BEFORE an escapable shared_write emit. On a
+# per-session marker hit it echoes "<label>\t\t<reason>" (exit 0); on a miss /
+# env-prefix / dispatcher-absent it echoes nothing and returns 1, so the caller
+# emits its conservative shared_write default.
+#
+# Hard-deny preservation (D8): invoked ONLY at the escapable emit sites. Every
+# structural hard-deny lane — env-prefix classifier-marker override, shell
+# wrappers, marker writes, push_or_pr_create, unsafe_complex, git/gh, rm/tee/
+# touch — classifies and RETURNS earlier in _classify_segment, so it can never
+# reach this helper and can never be downgraded by a planted marker. As
+# defense-in-depth, env_prefix_count>0 additionally short-circuits (mirrors the
+# Tier-0 lookup's env-prefix gate — cross-session attack class, PR #271).
+#
+# Reads _classify_segment locals via dynamic scope (TOKS, target_root,
+# caller_cwd_authoritative, env_prefix_count) — identical to how the
+# interpreter branch reads them.
+# ---------------------------------------------------------------------------
+_try_agent_marker_verdict() {
+  # env-prefix forms never escape (cross-session attack class, PR #271).
+  if [ "${env_prefix_count:-0}" -ne 0 ]; then
+    return 1
+  fi
+  # Lazy-source the agent-classifier wrapper once (same guard + resolution the
+  # interpreter branch uses).
+  if [ -z "${__AGENT_CLASSIFIER_SOURCED:-}" ]; then
+    local __agent_lib_path
+    __agent_lib_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/agent-classifier.sh"
+    if [ -f "$__agent_lib_path" ]; then
+      # shellcheck disable=SC1091
+      source "$__agent_lib_path"
+      __AGENT_CLASSIFIER_SOURCED=1
+    else
+      __AGENT_CLASSIFIER_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" != "1" ]; then
+    return 1
+  fi
+  # Command text for the lookup key. PREFER the raw command threaded from
+  # classify_command (_seg_raw_command via dynamic scope) — it is the EXACT
+  # string the agent invoked and the deny-hint tells the agent to classify, so
+  # normalizeCommand(read) == normalizeCommand(write) exactly, INCLUDING shell
+  # redirects (`echo x > src.mjs`). A token-only reconstruction would DROP the
+  # `> src.mjs` redirect (it's a REDIR record, not a TOK) and miss the marker —
+  # the exact #351 redirect class. Fall back to the token reconstruction only
+  # when the raw command wasn't threaded (e.g. direct _classify_segment unit
+  # tests); that fallback matches for redirect-free commands (cp/node …).
+  local __cmd_text="${_seg_raw_command:-}"
+  if [ -z "$__cmd_text" ]; then
+    local __ti
+    for __ti in ${TOKS[@]+"${TOKS[@]}"}; do
+      if [ -z "$__cmd_text" ]; then
+        __cmd_text="$__ti"
+      else
+        __cmd_text="$__cmd_text $__ti"
+      fi
+    done
+  fi
+  [ -z "$__cmd_text" ] && return 1
+  local __agent_out __agent_label
+  if __agent_out="$(agent_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
+    __agent_label="${__agent_out%%	*}"
+    if [ -n "$__agent_label" ]; then
+      printf '%s\t\t%s\n' "$__agent_label" "bash_marker_cache_hit"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 _classify_segment() {
+  # $3 (optional): the RAW command text threaded from classify_command, used
+  # by _try_agent_marker_verdict for an exact marker-key match (redirects
+  # included). Captured before `shift 2` (which only consumes $1/$2). Empty
+  # when _classify_segment is exercised directly (unit tests).
+  local _seg_raw_command="${3:-}"
   local target_root="$1"  # repo root for marker resolution
   # PR-A P1.1: authoritative caller cwd threaded from classify_command. The
   # hook's authoritative cwd is parsed JSON .cwd in checkpoint-gate.sh:48 /
@@ -1570,7 +1664,7 @@ _classify_segment() {
         # awk extraction stage.
         local __t0_parsed
         __t0_parsed="$(printf '%s' "$__t0_out" | node -e '
-          const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+          const ALLOWED = new Set(["read_only","nonsrc_write","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
           let buf = ""
           process.stdin.on("data", c => buf += c)
           process.stdin.on("end", () => {
@@ -1618,6 +1712,12 @@ _classify_segment() {
       # always writes. Err safe and let those fall through to default
       # shared_write or, where structural risk warrants, unsafe_complex below.
       if [ "$has_nonmarker_redirect" = "1" ]; then
+        # G1 (#351): agent-verdict escape BEFORE the conservative shared_write.
+        local __rd_mv
+        if __rd_mv="$(_try_agent_marker_verdict)"; then
+          printf '%s\n' "$__rd_mv"
+          return 0
+        fi
         printf '%s\t\t%s\n' "shared_write" "readonly_cmd_redirected"
         return 0
       fi
@@ -1627,10 +1727,56 @@ _classify_segment() {
     echo|printf|true|false)
       # echo/printf with output redirect → shared_write; without → read_only.
       if [ "$has_nonmarker_redirect" = "1" ]; then
+        # G1 (#351): agent-verdict escape BEFORE the conservative shared_write.
+        local __ec_mv
+        if __ec_mv="$(_try_agent_marker_verdict)"; then
+          printf '%s\n' "$__ec_mv"
+          return 0
+        fi
         printf '%s\t\t%s\n' "shared_write" "echo_redirected"
         return 0
       fi
       printf '%s\t\t%s\n' "read_only" "echo_or_printf"
+      return 0
+      ;;
+    npm|pnpm|yarn)
+      # PR-B2 (#351, M4): dependency INSTALL only → nonsrc_write (writes
+      # node_modules + lockfile, not working-tree source). `run`/`exec`/publish/
+      # bare/unknown fall through to shared_write — they can execute arbitrary
+      # code that mutates source. `npx` is a separate binary (not matched here)
+      # and also stays shared_write. Detect the first non-flag token as the
+      # subcommand. (Lifecycle scripts on `install` are accepted under the
+      # honest-agent threat model — friction-reduction, not a security boundary.)
+      local _np_sub="" _np_i=$((idx+1)) _np_n=${#TOKS[@]}
+      while [ $_np_i -lt $_np_n ]; do
+        case "${TOKS[$_np_i]}" in
+          -*) _np_i=$((_np_i+1)) ;;
+          *)  _np_sub="${TOKS[$_np_i]}"; break ;;
+        esac
+      done
+      case "$_np_sub" in
+        install|i|ci|add)
+          if [ "$has_nonmarker_redirect" = "1" ]; then
+            printf '%s\t\t%s\n' "shared_write" "pkg_install_redirected"
+            return 0
+          fi
+          printf '%s\t\t%s\n' "nonsrc_write" "pkg_install"
+          return 0
+          ;;
+      esac
+      printf '%s\t\t%s\n' "shared_write" "pkg_other"
+      return 0
+      ;;
+    mkdir|rmdir)
+      # PR-B2 (#351, M4): directory create/remove writes no working-tree source
+      # CONTENT (mkdir makes empty dirs; rmdir removes only empty ones). FREE.
+      # Files later added to the dir classify on their own. A redirect still
+      # demotes to shared_write (the redirect target may be repo source).
+      if [ "$has_nonmarker_redirect" = "1" ]; then
+        printf '%s\t\t%s\n' "shared_write" "dir_cmd_redirected"
+        return 0
+      fi
+      printf '%s\t\t%s\n' "nonsrc_write" "dir_create_remove"
       return 0
       ;;
     node|python|python3|ruby|perl)
@@ -1695,7 +1841,10 @@ _classify_segment() {
           return 0
           ;;
         em-store.mjs|em-revise.mjs|em-prune.mjs|em-violation.mjs|em-recall.mjs)
-          printf '%s\t\t%s\n' "shared_write" "interpreter_em_write"
+          # PR-B2 (#351): em-* writes the episodic-memory episode store
+          # (~/.episodic-memory/ or <project>/.episodic-memory/), NOT working-
+          # tree source. FREE — never arms the pre-checkpoint.
+          printf '%s\t\t%s\n' "nonsrc_write" "interpreter_em_write"
           return 0
           ;;
         classify-correction.mjs)
@@ -1793,6 +1942,15 @@ _classify_segment() {
   esac
 
   # ---- Default ----
+  # G1 (#351): the terminal content-write bucket (cp/mv/dd/rsync/curl/… and any
+  # unrecognized shape). Agent-verdict escape BEFORE the conservative
+  # shared_write — this is the core "don't-know → arm, agent downgrades once"
+  # site. Hard-deny lanes never reach here (they return earlier).
+  local __df_mv
+  if __df_mv="$(_try_agent_marker_verdict)"; then
+    printf '%s\n' "$__df_mv"
+    return 0
+  fi
   printf '%s\t\t%s\n' "shared_write" "default_write"
   return 0
 }
@@ -1831,7 +1989,8 @@ _classify_git() {
   done
 
   if [ -z "$sub" ]; then
-    printf '%s\t\t%s\n' "shared_write" "git_no_subcommand"
+    # PR-B2 (#351): bare `git` prints help — writes nothing.
+    printf '%s\t\t%s\n' "nonsrc_write" "git_no_subcommand"
     return 0
   fi
 
@@ -1873,12 +2032,14 @@ _classify_git() {
         _gj=$((_gj+1))
       done
       if [ $_has_write_flag -eq 1 ]; then
-        printf '%s\t\t%s\n' "shared_write" "git_${sub}_write_flag"
+        # PR-B2 (#351): branch/tag delete/rename/move/track are .git ref ops —
+        # they never touch working-tree source.
+        printf '%s\t\t%s\n' "nonsrc_write" "git_${sub}_write_flag"
         return 0
       fi
       if [ $_free_positional -eq 1 ] && [ $_has_read_flag -eq 0 ]; then
-        # Bare `git branch new-name` or `git tag v1.0` creates.
-        printf '%s\t\t%s\n' "shared_write" "git_${sub}_create"
+        # Bare `git branch new-name` or `git tag v1.0` creates a ref (.git only).
+        printf '%s\t\t%s\n' "nonsrc_write" "git_${sub}_create"
         return 0
       fi
       printf '%s\t\t%s\n' "read_only" "git_${sub}_read"
@@ -1897,7 +2058,8 @@ _classify_git() {
       if [ $_gj -lt ${#T[@]} ]; then
         case "${T[$_gj]}" in
           add|remove|rm|rename|set-url|set-head|set-branches|prune|update)
-            printf '%s\t\t%s\n' "shared_write" "git_remote_${T[$_gj]}"
+            # PR-B2 (#351): remote config writes .git/config, not working-tree source.
+            printf '%s\t\t%s\n' "nonsrc_write" "git_remote_${T[$_gj]}"
             return 0 ;;
         esac
       fi
@@ -1918,7 +2080,12 @@ _classify_git() {
         # them as writes; the inverted-default revision dropped them. Restore.
         case "${T[$_gj]}" in
           add|remove|move|repair|lock|unlock|prune)
-            printf '%s\t\t%s\n' "shared_write" "git_worktree_${T[$_gj]}"
+            # PR-B2 (#351): worktree mgmt is .git metadata. NOTE: `git worktree
+            # add <path>` materializes a NEW checkout at <path> — but that path
+            # is a sibling worktree, not the current repo's tracked source, and
+            # the classifier carries no target to distinguish. Lean-accept per
+            # R1 (flagged in the test matrix). The push-gate still backstops.
+            printf '%s\t\t%s\n' "nonsrc_write" "git_worktree_${T[$_gj]}"
             return 0 ;;
         esac
       fi
@@ -1957,21 +2124,37 @@ _classify_git() {
         _gj=$((_gj+1))
       done
       if [ $_has_write_flag -eq 1 ]; then
-        printf '%s\t\t%s\n' "shared_write" "git_config_write_flag"
+        # PR-B2 (#351): git config writes .git/config (or ~/.gitconfig), not source.
+        printf '%s\t\t%s\n' "nonsrc_write" "git_config_write_flag"
         return 0
       fi
       if [ $_np -ge 2 ] && [ $_has_read_flag -eq 0 ]; then
-        printf '%s\t\t%s\n' "shared_write" "git_config_set"
+        printf '%s\t\t%s\n' "nonsrc_write" "git_config_set"
         return 0
       fi
       printf '%s\t\t%s\n' "read_only" "git_config_read"
       return 0
       ;;
-    commit|add|rm|mv|reset|restore|checkout|switch|merge|rebase|cherry-pick|revert|stash|clean|pull|clone|init|gc|prune|notes|submodule|apply|am|format-patch|bisect|update-index|update-ref|symbolic-ref|hash-object|mktree|read-tree|write-tree|commit-tree|fsck|repack|pack-refs|pack-objects|unpack-objects|prune-packed|rerere|filter-branch|replay|sparse-checkout|maintenance)
+    # PR-B2 (#351, §14-F1): git subcommand as a TOTAL FUNCTION. The git
+    # subcommand set is closed/finite (NOT the leaky open-binary class), so we
+    # carve out ONLY pure .git/index/object/ref ops → nonsrc_write (FREE);
+    # everything working-tree-mutating, creating, or ambiguous stays
+    # shared_write (ARM), and the `*)` default below catches every unlisted
+    # subcommand conservatively. The classifier matches the bare subcommand
+    # token (no arg parsing), so `git rm --cached` is NOT distinguished from
+    # `git rm` → both ARM (conservative; closes the §14-F1 `--cached` gap).
+    commit|add|notes|update-ref|update-index|symbolic-ref|hash-object|mktree|write-tree|commit-tree|gc|repack|pack-refs|pack-objects|unpack-objects|prune|prune-packed|fsck|maintenance|rerere|init)
+      # .git/index/object/ref only — no working-tree source mutation.
+      printf '%s\t\t%s\n' "nonsrc_write" "git_metadata_write"
+      return 0
+      ;;
+    rm|mv|reset|restore|checkout|switch|merge|rebase|cherry-pick|revert|stash|clean|pull|clone|submodule|apply|am|read-tree|format-patch|bisect|sparse-checkout|filter-branch|replay)
+      # Working-tree-mutating / creating / ambiguous → ARM.
       printf '%s\t\t%s\n' "shared_write" "git_local_write"
       return 0
       ;;
     *)
+      # Unlisted subcommand → ARM (complete by construction).
       printf '%s\t\t%s\n' "shared_write" "git_unknown_subcommand"
       return 0
       ;;
@@ -2203,7 +2386,7 @@ classify_command() {
   # Split into segments by control operator
   # Each segment classified, final label = MOST RESTRICTIVE.
   # Restrictiveness order (most → least):
-  #   unsafe_complex > push_or_pr_create > shared_write > marker_write > read_only > unknown
+  #   unsafe_complex > push_or_pr_create > shared_write > marker_write > unknown > nonsrc_write > read_only
   # marker_write is intentionally NOT most-restrictive: a segment chained
   # AFTER a marker write doesn't downgrade the marker write, but a marker
   # write chained AFTER a push_or_pr_create still upgrades to push.
@@ -2232,7 +2415,7 @@ classify_command() {
         # End segment, classify
         if [ -n "$seg_lines" ]; then
           local result
-          result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root" "$caller_cwd_authoritative")"
+          result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root" "$caller_cwd_authoritative" "$cmd")"
           local lbl="${result%%	*}"
           local rest="${result#*	}"
           local tgt="${rest%%	*}"
@@ -2254,7 +2437,7 @@ classify_command() {
   # Final segment
   if [ -n "$seg_lines" ]; then
     local result
-    result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root" "$caller_cwd_authoritative")"
+    result="$(printf '%s\n' "$seg_lines" | _classify_segment "$repo_root" "$caller_cwd_authoritative" "$cmd")"
     local lbl="${result%%	*}"
     local rest="${result#*	}"
     local tgt="${rest%%	*}"
@@ -2272,12 +2455,18 @@ classify_command() {
 
 # Priority for "most restrictive wins" reduction.
 _priority() {
+  # PR-B2 (#351, §14-F3): renumbered to insert nonsrc_write=2 while preserving
+  # the relative order of the existing labels. nonsrc_write ranks ABOVE
+  # read_only (so a `nonsrc_write && read_only` chain stays nonsrc_write, not
+  # downgraded to read_only's gate-allow) and BELOW unknown/marker/shared (so a
+  # chain mixing nonsrc_write with any arming label upgrades conservatively).
   case "$1" in
-    unsafe_complex)     printf '6' ;;
-    push_or_pr_create)  printf '5' ;;
-    shared_write)       printf '4' ;;
-    marker_write)       printf '3' ;;
-    unknown)            printf '2' ;;
+    unsafe_complex)     printf '7' ;;
+    push_or_pr_create)  printf '6' ;;
+    shared_write)       printf '5' ;;
+    marker_write)       printf '4' ;;
+    unknown)            printf '3' ;;
+    nonsrc_write)       printf '2' ;;
     read_only)          printf '1' ;;
     *)                  printf '0' ;;
   esac

@@ -94,14 +94,14 @@ assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT"
 
 managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
 # 6 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
-# preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 5
+# preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 6
 # hooks/lib/.sh files (command-classifier, repo-root, marker-paths,
-# session-id, agent-classifier) = 11.
+# session-id, agent-classifier, agent-classifier-deny-reason) = 12.
 # NOTE (PR-B): was hardcoded "10" and went stale when PR #331 added the
-# classifier lib (this test runs in no CI workflow). Corrected to 11 (the
-# llm-classifier.sh→agent-classifier.sh rename keeps the lib count at 5) and the
-# test is now wired into CI (plan-marker-validate.yml) to catch future drift.
-assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "11" "$managed_count"
+# classifier lib (this test runs in no CI workflow). Corrected to 11, then to 12
+# when PR-B2 (#351) added the 3-way deny-hint lib agent-classifier-deny-reason.sh.
+# The test is wired into CI (plan-marker-validate.yml) to catch future drift.
+assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "12" "$managed_count"
 
 pg_manifest=$(jq -r '.files[] | select(.relative_path == "hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"

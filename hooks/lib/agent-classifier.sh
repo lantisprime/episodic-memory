@@ -196,7 +196,7 @@ agent_classify_command() {
       # helper's threshold gate (default 0.7).
       local parsed
       parsed="$(printf '%s' "$out" | node -e '
-        const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+        const ALLOWED = new Set(["read_only","nonsrc_write","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
         let buf = ""
         process.stdin.on("data", c => buf += c)
         process.stdin.on("end", () => {
@@ -267,7 +267,7 @@ agent_classify_command() {
         # marker-cache parser above).
         local parsed
         parsed="$(printf '%s' "$out" | node -e '
-          const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+          const ALLOWED = new Set(["read_only","nonsrc_write","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
           let buf = ""
           process.stdin.on("data", c => buf += c)
           process.stdin.on("end", () => {

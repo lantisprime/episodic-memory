@@ -26,6 +26,7 @@ import crypto from 'crypto'
 
 export const LABELS = new Set([
   'read_only',
+  'nonsrc_write',
   'shared_write',
   'marker_write',
   'push_or_pr_create',

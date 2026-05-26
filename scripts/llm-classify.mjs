@@ -12,7 +12,7 @@
  *   { label, confidence, reason, project_root_used, model_used,
  *     latency_ms, fail_mode_applied }
  *
- * label ∈ { read_only, shared_write, marker_write, push_or_pr_create,
+ * label ∈ { read_only, nonsrc_write, shared_write, marker_write, push_or_pr_create,
  *           unsafe_complex }
  *
  * Cwd binding: this script MUST be invoked via `(cd "$REPO_ROOT" && node ...)`
@@ -32,6 +32,7 @@ import { loadConfig } from './classifier-config-loader.mjs'
 
 const LABELS = new Set([
   'read_only',
+  'nonsrc_write',
   'shared_write',
   'marker_write',
   'push_or_pr_create',
@@ -71,7 +72,10 @@ async function classifyOnce({ cfg, projectRoot, callerCwd, command, abortSignal 
     '',
     'Allowed labels:',
     ' - read_only: command only reads files / queries state; no writes outside /tmp or stdout.',
-    ' - shared_write: writes/modifies project files, indexes, databases, or shared state.',
+    ' - nonsrc_write: writes, but definitely NOT repo source — .git internals (git commit/add),',
+    '     package installs (npm/yarn install), mkdir/rmdir, episode-store writes, redirect to /tmp.',
+    ' - shared_write: writes/modifies repo-source project files, indexes, databases, or shared state,',
+    '     OR cannot tell whether the target is repo source.',
     ' - marker_write: writes ONLY to .checkpoints/.* or .claude/.* marker paths.',
     ' - push_or_pr_create: git push, gh pr create, or equivalent remote-publish.',
     ' - unsafe_complex: cannot determine safely (variable expansion, dynamic eval, untrusted input).',
