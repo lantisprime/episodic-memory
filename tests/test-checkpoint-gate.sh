@@ -2073,6 +2073,48 @@ assert_allowed "PV-9. .review-store/ target → allowed (carve-out)" \
   "$(pv_edit_json "$TEST_DIR/.review-store/codex/req-123.md")"
 assert_marker_absent "PV-10. .review-store/ did NOT arm" "$PV_PRE_REQ"
 
+# ============================================================================
+echo "--- Non-source write carve-outs (#354 FU): .checkpoints/ + .gitignore ---"
+# ============================================================================
+# 2026-05-27 (user-directed): writes to non-source paths must NOT arm the Rule 18
+# pre-checkpoint. The command-classification deny-hint itself instructs the agent
+# to Write <repo>/.checkpoints/classify/pending-*.cmd; arming on that deadlocked
+# the classify protocol (reproduced this session). Generalized to anything
+# git-ignored (episodes under .episodic-memory/, scratch/, etc.) so the gate
+# defers to git's notion of source instead of an enumerated directory list.
+
+# PV-11/12: .checkpoints/classify/pending-*.cmd → allowed via (1b), no arm.
+# This is the exact deadlock the deny-hint's prescribed write hit.
+reset_state
+assert_allowed "PV-11. .checkpoints/classify/pending-*.cmd → allowed (.checkpoints carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/.checkpoints/classify/pending-deadbeef.cmd")"
+assert_marker_absent "PV-12. PV-11 did NOT arm" "$PV_PRE_REQ"
+
+# The (1c) gitignore carve-out needs a real .gitignore in the test repo (git
+# init'd clean above). Create it now — it only affects the tests below.
+printf '%s\n' '.episodic-memory/' 'scratch/' 'analysis/' > "$TEST_DIR/.gitignore"
+
+# PV-13/14: .episodic-memory/ episode write → allowed via (1c gitignore), no arm.
+reset_state
+assert_allowed "PV-13. .episodic-memory/ episode write → allowed (gitignore carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/.episodic-memory/episodes/ep-1.json")"
+assert_marker_absent "PV-14. PV-13 did NOT arm" "$PV_PRE_REQ"
+
+# PV-15/16: an arbitrary gitignored scratch path → allowed (proves the general
+# mechanism, not just episodes/.checkpoints).
+reset_state
+assert_allowed "PV-15. gitignored scratch/ path → allowed (gitignore carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/scratch/draft-plan.md")"
+assert_marker_absent "PV-16. PV-15 did NOT arm" "$PV_PRE_REQ"
+
+# PV-17/18: NEGATIVE CONTROL — a tracked, NON-ignored source file (with .gitignore
+# now present) must STILL arm + block. Proves git check-ignore returns "not
+# ignored" for real source and the carve-outs did not over-broaden.
+reset_state
+assert_blocked "PV-17. tracked source file (not ignored) → still blocks" \
+  "$(pv_edit_json "$TEST_DIR/hooks/checkpoint-gate.sh")" "Checkpoint required"
+assert_marker_exists "PV-18. PV-17 still armed .checkpoint-required" "$PV_PRE_REQ"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"

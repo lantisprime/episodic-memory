@@ -847,14 +847,40 @@ _tool_call_targets_repo_source() {
   fi
   [ "$in_repo" = "0" ] || return 1
 
-  # In-repo target. Two downgrades make it NOT count as repo source (PR-B2 §11):
+  # In-repo target. Four downgrades make it NOT count as repo source (PR-B2 §11):
   #
   #  (1) .review-store/ carve-out — second-opinion review artifacts the harness
   #      stages in-project (.review-store/) are never repo source, so a review
-  #      write must never arm the pre-checkpoint.
+  #      write must never arm the pre-checkpoint. (.review-store/ is untracked
+  #      but NOT in .gitignore, so it needs its own arm independent of (1c).)
   case "$fp_canon" in
     "$repo_canon"/.review-store|"$repo_canon"/.review-store/*) return 1 ;;
   esac
+  #
+  #  (1b) .checkpoints/ carve-out — gate infrastructure (markers, classify cache,
+  #      the runbook-ack marker, and the pending command-files the command-
+  #      classification deny-hint itself tells the agent to write to
+  #      <repo>/.checkpoints/classify/pending-*.cmd) is never repo source.
+  #      Without this, that prescribed write arms the pre-checkpoint and
+  #      deadlocks the classify protocol (reproduced 2026-05-27). Marker CONTENT
+  #      validation still happens in the marker_write path; this governs ARMING
+  #      only. Canonical-anchored + kept as a hard infra invariant independent of
+  #      .gitignore drift (it ships gitignored, but the gate must never arm on
+  #      its own substrate even if a user edits .gitignore).
+  case "$fp_canon" in
+    "$repo_canon"/.checkpoints|"$repo_canon"/.checkpoints/*) return 1 ;;
+  esac
+  #
+  #  (1c) .gitignore carve-out — a gitignored target is by definition NOT tracked
+  #      repo source (covers .episodic-memory/ episodes, scratch/, analysis/,
+  #      node_modules/, .codex/, etc.). Defer to git's own notion of "source"
+  #      rather than enumerating directories — gating on an open-ended directory
+  #      list is the enumeration treadmill. Fail-closed: git absent / path
+  #      outside the worktree / not-ignored → fall through and arm conservatively.
+  if command -v git >/dev/null 2>&1 \
+     && git -C "$repo_canon" check-ignore -q -- "$fp_canon" 2>/dev/null; then
+    return 1
+  fi
   #
   #  (2) Path verdict — the agent classified THIS target nonsrc_write/read_only
   #      via classifier-marker.mjs --target-path. Verdict-over-heuristic
