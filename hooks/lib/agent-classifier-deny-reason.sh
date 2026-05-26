@@ -78,18 +78,14 @@ once per command shape:
                    installs, mkdir/rmdir, a redirect to /tmp or outside the repo,
                    or the episodic-memory episode store.
 
-To classify (OS-neutral, no shell chaining required):
+To classify (OS-neutral — single-line command, no line-continuations or shell
+chaining; the double-quoted args work in bash, PowerShell, and cmd alike):
   1. Write the command verbatim to:
        $cmd_file
   2. From the repository root ($repo_root) run classifier-marker.mjs
      (process.cwd() MUST canonicalize to the repo root — the helper refuses
      otherwise; this is a precondition, not a 'cd &&' you must paste):
-       node "$helper" --write \\
-         --project-root "$repo_root" --caller-cwd "$caller_cwd" \\
-         --command-file "$cmd_file" \\
-         --label <read_only|nonsrc_write> --confidence 0.9 \\
-         --reason "<why this is not a repo-source write>" \\
-         --session-id "$session_id"
+       node "$helper" --write --project-root "$repo_root" --caller-cwd "$caller_cwd" --command-file "$cmd_file" --label <read_only|nonsrc_write> --confidence 0.9 --reason "<why this is not a repo-source write>" --session-id "$session_id"
   3. Retry the original command.
 
 Do NOT classify a real repo-source write as read_only or nonsrc_write — it
@@ -125,16 +121,12 @@ PATH once and retry; the verdict is cached for this session, so you are asked at
 most once per path:
   - nonsrc_write — the target is not repo source.
 
-To classify (OS-neutral, no shell chaining required):
+To classify (OS-neutral — single-line command, no line-continuations or shell
+chaining; the double-quoted args work in bash, PowerShell, and cmd alike):
   From the repository root ($repo_root) run classifier-marker.mjs (process.cwd()
   MUST canonicalize to the repo root — the helper refuses otherwise; this is a
   precondition, not a 'cd &&' you must paste):
-    node "$helper" --write \\
-      --project-root "$repo_root" --caller-cwd "$caller_cwd" \\
-      --target-path "$file_path" \\
-      --label nonsrc_write --confidence 0.9 \\
-      --reason "<why this file is not repo source>" \\
-      --session-id "$session_id"
+    node "$helper" --write --project-root "$repo_root" --caller-cwd "$caller_cwd" --target-path "$file_path" --label nonsrc_write --confidence 0.9 --reason "<why this file is not repo source>" --session-id "$session_id"
   Then retry the write.
 
 Do NOT classify a real repo-source write as nonsrc_write — it persists a
