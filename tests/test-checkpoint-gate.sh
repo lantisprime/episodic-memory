@@ -1957,6 +1957,90 @@ assert_allowed "B1-3. push allowed after post-checkpoint written" \
 assert_marker_absent "B1-4. allowed push swept .post-checkpoint-required" "$POST_REQ"
 assert_marker_absent "B1-5. allowed push swept .post-checkpoint-done" "$POST_DONE"
 
+# ============================================================================
+echo ""
+echo "--- PR-B2 S3 (#351, §11): Edit/Write path verdict + .review-store carve-out ---"
+# ============================================================================
+# The Edit/Write pre-gate was a pure path heuristic (any in-repo write armed),
+# which over-arms on plan/scratch/doc files cross-tool harnesses stage in-repo.
+# S3 lets the agent downgrade a specific TARGET path to nonsrc_write/read_only
+# via `classifier-marker.mjs --target-path`; the gate consults the verdict in
+# _tool_call_targets_repo_source.
+#
+# CRITICAL setup: the NC carve-out tests above `touch` an EMPTY stub at
+# $TEST_HOME/.episodic-memory/scripts/classifier-marker.mjs. agent_classify_path
+# resolves the global helper first, so under that polluted HOME the gate would
+# read the empty stub (miss → never downgrade). Use a FRESH clean HOME for the
+# PV section so the gate resolves the real repo-source (v2) helper — the same
+# one write_path_verdict uses — and the canonical path key round-trips.
+PV_PREV_HOME="$TEST_HOME"
+TEST_HOME="$(mktemp -d)"
+TEST_HOME="$(cd -P "$TEST_HOME" && pwd)"
+trap 'cleanup; rm -rf "$PV_PREV_HOME"' EXIT
+
+PV_SID="pvsid-s3-$$"
+REPO_MARKER="$REPO_ROOT/scripts/classifier-marker.mjs"
+PV_TARGET="$TEST_DIR/scripts/generated.mjs"
+# A session_id'd call arms the session-namespaced marker (touch fallback — the
+# clean HOME has no checkpoint-marker.mjs helper), not the legacy literal.
+PV_PRE_REQ="$MARKER_DIR/.checkpoint-required.$PV_SID"
+
+# Edit tool JSON carrying a session_id, so the gate threads a stable
+# CLAUDE_CODE_SESSION_ID to agent_classify_path.
+pv_edit_json() {
+  jq -n --arg fp "$1" --arg cwd "$TEST_DIR" --arg sid "$PV_SID" \
+    '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd, session_id: $sid}'
+}
+
+# Write a path verdict for <target> with <label> under PV_SID (the session the
+# gate reads). From TEST_DIR so the helper cross-repo check passes;
+# CLAUDE_CODE_SESSION_ID empty so it doesn't conflict with --session-id.
+write_path_verdict() {
+  ( cd "$TEST_DIR" && CLAUDE_CODE_SESSION_ID="" \
+      node "$REPO_MARKER" --write \
+      --project-root "$TEST_DIR" --caller-cwd "$TEST_DIR" \
+      --target-path "$1" --session-id "$PV_SID" \
+      --label "$2" --confidence 0.9 --reason "s3 test verdict" >/dev/null 2>&1 )
+}
+
+# PV-1/2: no verdict + in-repo target → block WITH the 2-way path hint, and arm.
+reset_state
+assert_blocked "PV-1. in-repo Edit, no path verdict → block with 2-way path hint" \
+  "$(pv_edit_json "$PV_TARGET")" "nonsrc_write"
+assert_marker_exists "PV-2. PV-1 armed .checkpoint-required (session-namespaced)" "$PV_PRE_REQ"
+
+# PV-3/4: nonsrc_write path verdict → Edit downgraded → ALLOWED, no arm.
+reset_state
+write_path_verdict "$PV_TARGET" "nonsrc_write"
+assert_allowed "PV-3. nonsrc_write path verdict → Edit allowed (downgrade)" \
+  "$(pv_edit_json "$PV_TARGET")"
+assert_marker_absent "PV-4. PV-3 did NOT arm .checkpoint-required" "$PV_PRE_REQ"
+
+# PV-5/6: read_only path verdict also downgrades.
+reset_state
+write_path_verdict "$PV_TARGET" "read_only"
+assert_allowed "PV-5. read_only path verdict → Edit allowed (downgrade)" \
+  "$(pv_edit_json "$PV_TARGET")"
+assert_marker_absent "PV-6. PV-5 did NOT arm" "$PV_PRE_REQ"
+
+# PV-7: shared_write verdict must NOT downgrade (only nonsrc_write/read_only do).
+reset_state
+write_path_verdict "$PV_TARGET" "shared_write"
+assert_blocked "PV-7. shared_write path verdict does NOT downgrade → block" \
+  "$(pv_edit_json "$PV_TARGET")" "Checkpoint required"
+
+# PV-8: verdict for a DIFFERENT path does not downgrade THIS target (specificity).
+reset_state
+write_path_verdict "$TEST_DIR/scripts/other.mjs" "nonsrc_write"
+assert_blocked "PV-8. verdict specificity: other path's verdict → this target still blocks" \
+  "$(pv_edit_json "$PV_TARGET")" "Checkpoint required"
+
+# PV-9/10: .review-store/ carve-out — review artifacts never arm, no verdict needed.
+reset_state
+assert_allowed "PV-9. .review-store/ target → allowed (carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/.review-store/codex/req-123.md")"
+assert_marker_absent "PV-10. .review-store/ did NOT arm" "$PV_PRE_REQ"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"

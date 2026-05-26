@@ -97,3 +97,48 @@ persists a permanent pre-checkpoint bypass for that command shape. The push-gate
 still blocks an unverified push regardless of this verdict.
 EOF
 }
+
+# agent_classifier_path_deny_hint <file_path> <repo_root> <caller_cwd> <session_id>
+#   echoes the 2-way hint shown when a Write/Edit targets an in-repo path with
+#   no fresh path verdict on file (PR-B2 §11). Symmetric with the Bash 3-way
+#   hint above, but for a TARGET PATH and 2-way: the only downgrade for a write
+#   is nonsrc_write (the file is a plan/scratch/doc/generated artifact, not repo
+#   source); otherwise the write IS implementation and the pre-checkpoint is the
+#   required action. The invocation uses --target-path (a single argument — no
+#   command-file or shell quoting needed), still expressed as an OS-neutral
+#   precondition ("from the repository root") rather than a `cd '<repo>' && …`
+#   chain, for cross-tool/cross-OS harnesses (§12/§15).
+agent_classifier_path_deny_hint() {
+  local file_path="$1" repo_root="$2" caller_cwd="$3" session_id="$4"
+  local helper
+  helper="$(__agent_classifier_deny_resolve_helper)"
+  cat <<EOF
+This Write/Edit targets a file under the repository:
+  $file_path
+so it arms the Rule 18 pre-implementation checkpoint. If this write is part of
+your IMPLEMENTATION, the pre-implementation checkpoint above IS the required
+action — write it, then retry.
+
+ONLY if this file is NOT repo source — a plan / scratch / notes / generated /
+doc file (the kind cross-tool harnesses stage in-project) — classify the TARGET
+PATH once and retry; the verdict is cached for this session, so you are asked at
+most once per path:
+  - nonsrc_write — the target is not repo source.
+
+To classify (OS-neutral, no shell chaining required):
+  From the repository root ($repo_root) run classifier-marker.mjs (process.cwd()
+  MUST canonicalize to the repo root — the helper refuses otherwise; this is a
+  precondition, not a 'cd &&' you must paste):
+    node "$helper" --write \\
+      --project-root "$repo_root" --caller-cwd "$caller_cwd" \\
+      --target-path "$file_path" \\
+      --label nonsrc_write --confidence 0.9 \\
+      --reason "<why this file is not repo source>" \\
+      --session-id "$session_id"
+  Then retry the write.
+
+Do NOT classify a real repo-source write as nonsrc_write — it persists a
+permanent pre-checkpoint bypass for that path. The push-gate still blocks an
+unverified push regardless of this verdict.
+EOF
+}

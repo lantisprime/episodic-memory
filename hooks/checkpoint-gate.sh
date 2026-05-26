@@ -566,6 +566,32 @@ _block_pre_with_hint() {
   fi
   _block_pre
 }
+# Path-aware pre-block variant (PR-B2 §11). Used by the Edit/Write pre-gate for
+# an in-repo target with no path verdict on file: leads checkpoint-first, then
+# offers the 2-way nonsrc_write path-verdict escape (classify the TARGET PATH).
+# Falls back to the plain _block_pre if the deny-reason lib OR its path-hint fn
+# is unavailable / emits nothing — never fails the gate.
+_block_pre_with_path_hint() {
+  local hint=""
+  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
+    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier-deny-reason.sh"
+      __AGENT_DENY_REASON_SOURCED=1
+    else
+      __AGENT_DENY_REASON_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ] && declare -F agent_classifier_path_deny_hint >/dev/null 2>&1; then
+    hint="$(agent_classifier_path_deny_hint "$FILE_PATH" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
+  fi
+  if [ -n "$hint" ]; then
+    jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
+      '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
+    exit 0
+  fi
+  _block_pre
+}
 _block_plan_pending() {
   jq -nc --arg path "$PLAN_PENDING_W" \
     '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
@@ -733,9 +759,14 @@ _tool_call_targets_repo_source() {
     # the predicate is by construction "needs the pre-block." Including
     # marker_write that wasn't approved upstream (e.g. POST_DONE write when
     # POST_REQ not armed — test 17 regression class).
+    # PR-B2 §14-F4(a): nonsrc_write joins read_only as "not repo source" for
+    # consistency with the verdict inversion. (This Bash branch is currently
+    # reached only defensively — the gate's lone caller is Edit/Write-cased —
+    # but keeping it aligned with the LABEL taxonomy avoids a latent surprise
+    # if a future caller routes Bash through this predicate.)
     case "$label" in
-      read_only) return 1 ;;
-      *)         return 0 ;;
+      read_only|nonsrc_write) return 1 ;;
+      *)                      return 0 ;;
     esac
   fi
 
@@ -748,19 +779,67 @@ _tool_call_targets_repo_source() {
 
   local repo_canon
   repo_canon="$( (cd "$repo_root" 2>/dev/null && pwd -P) || printf '%s' "$repo_root" )"
-
-  # Raw-prefix match (codex R1 attack class 3 — symlink-out author intent).
-  case "$file_path" in
-    "$repo_root"/*|"$repo_root") return 0 ;;
-  esac
-
-  # Canonical-prefix match (handles symlink-in, traversal, nonexistent leaf).
   local fp_canon
   fp_canon="$(_canonicalize_possibly_nonexistent "$file_path")"
-  case "$fp_canon" in
-    "$repo_canon"/*|"$repo_canon") return 0 ;;
-  esac
 
+  # Is the target inside the repo at all? Raw-prefix (codex R1 attack class 3 —
+  # symlink-out author intent) OR canonical-prefix (symlink-in / traversal /
+  # nonexistent leaf). Off-repo (memory, skills, settings) → not repo source.
+  local in_repo=1
+  case "$file_path" in
+    "$repo_root"/*|"$repo_root") in_repo=0 ;;
+  esac
+  if [ "$in_repo" != "0" ]; then
+    case "$fp_canon" in
+      "$repo_canon"/*|"$repo_canon") in_repo=0 ;;
+    esac
+  fi
+  [ "$in_repo" = "0" ] || return 1
+
+  # In-repo target. Two downgrades make it NOT count as repo source (PR-B2 §11):
+  #
+  #  (1) .review-store/ carve-out — second-opinion review artifacts the harness
+  #      stages in-project (.review-store/) are never repo source, so a review
+  #      write must never arm the pre-checkpoint.
+  case "$fp_canon" in
+    "$repo_canon"/.review-store|"$repo_canon"/.review-store/*) return 1 ;;
+  esac
+  #
+  #  (2) Path verdict — the agent classified THIS target nonsrc_write/read_only
+  #      via classifier-marker.mjs --target-path. Verdict-over-heuristic
+  #      inversion (de-assume the pure path heuristic): a plan/scratch/doc/
+  #      generated file the agent declares non-source does not arm.
+  if _path_verdict_downgrades "$file_path"; then
+    return 1
+  fi
+
+  return 0
+}
+
+# PR-B2 S3 (§11/§14-F4): consult the agent's path verdict for an in-repo
+# Write/Edit target. Returns 0 (downgrade — treat as NOT repo source, do not
+# arm) iff a fresh per-session marker classifies the target nonsrc_write or
+# read_only; returns 1 otherwise (no verdict / helper-absent → arm
+# conservatively, complete-by-construction). Lazily sources agent-classifier.sh
+# for agent_classify_path (guarded by function existence — command-classifier.sh
+# may have already sourced it). CLAUDE_CODE_SESSION_ID is threaded from MY_SID so
+# the read keys to the same session the agent wrote under (mirrors the gate's
+# other helper invocations, e.g. the push self-arm at the push-gate).
+_path_verdict_downgrades() {
+  local file_path="$1"
+  [ -n "$file_path" ] || return 1
+  if ! declare -F agent_classify_path >/dev/null 2>&1; then
+    if [ -f "$LIB_DIR/agent-classifier.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier.sh"
+    fi
+  fi
+  declare -F agent_classify_path >/dev/null 2>&1 || return 1
+  local verdict
+  verdict="$(CLAUDE_CODE_SESSION_ID="$MY_SID" agent_classify_path "$file_path" "$REPO_ROOT" "$CWD" 2>/dev/null)" || return 1
+  case "$verdict" in
+    nonsrc_write|read_only) return 0 ;;
+  esac
   return 1
 }
 
@@ -1174,8 +1253,14 @@ case "$TOOL_NAME" in
       # withheld until a real in-repo write is seen.
       if [ -n "$FILE_PATH" ]; then
         _arm_checkpoint_required_if_missing
+        # PR-B2 §11: in-repo target with no path verdict on file — block with
+        # the 2-way path-verdict hint (classify nonsrc_write, or write the
+        # pre-checkpoint). Empty FILE_PATH (conservative block, no arm) keeps
+        # the plain message — there is no concrete path to classify.
+        _block_pre_with_path_hint
+      else
+        _block_pre
       fi
-      _block_pre
     fi
     ;;
 esac
