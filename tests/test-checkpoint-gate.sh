@@ -1809,15 +1809,16 @@ assert_allowed "PP-1. read-only Bash (git status) allowed, nothing armed" \
   "$(mock_pp_bash 'git status' "$PP_SID_A")"
 assert_allowed "PP-2. node em-search (read_only) allowed, nothing armed" \
   "$(mock_pp_bash 'node scripts/em-search.mjs --tag x' "$PP_SID_A")"
-# PR-B2 (#351, F1 closed): a shared_write Bash command (second-opinion dispatch
-# is interpreter_other → shared_write) now ARMS + blocks with the 3-way deny-hint.
-# The agent classifies it once (read_only / nonsrc_write) and it is free
-# thereafter (G1) — the accepted classify-once friction. (Was: allowed, Bash
-# ungated — the F1 residual PR-B2 closes.)
-assert_blocked "PP-3. shared_write review command arms + blocks (F1 closed)" \
+# Agent-classifier-first (2026-05-26): a novel review command (second-opinion
+# dispatch is interpreter_other → shared_write, an UNEVALUATED-novel reason) is
+# HELD for agent classification — it BLOCKS with the 3-way deny-hint but does NOT
+# arm .checkpoint-required. The agent classifies it once (read_only / nonsrc_write)
+# and it is free thereafter (G1). (Was: arms + blocks — pre-arming a not-yet-
+# evaluated command framed planning-time inspection as implementation.)
+assert_blocked "PP-3. novel review command blocks (held for classification, no pre-arm)" \
   "$(mock_pp_bash 'node scripts/second-opinion.mjs request --provider codex --dispatch' "$PP_SID_A")" \
   "Checkpoint required"
-assert_marker_exists "PP-4. shared_write Bash lazily armed .checkpoint-required.<sidA>" \
+assert_marker_absent "PP-4. novel interpreter_other Bash did NOT arm .checkpoint-required.<sidA> (agent-classifier-first)" \
   "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
 assert_marker_absent "PP-4b. planning Bash did NOT arm legacy .checkpoint-required" \
   "$PP_MARKER_DIR/.checkpoint-required"
@@ -1911,12 +1912,31 @@ assert_allowed "B2-4. node em-store (nonsrc_write) allowed in idle" \
   "$(mock_json 'Bash' 'node scripts/em-store.mjs --project x')"
 assert_marker_absent "B2-5. no nonsrc_write command armed .checkpoint-required" "$PRE_REQ"
 
-# shared_write Bash arms + blocks with the 3-way deny-hint (idle → lazy-arm).
+# Agent-classifier-first (2026-05-26, user design decision): an UNEVALUATED novel
+# command — the classifier's conservative cache-miss defaults (default_write /
+# interpreter_other) — is HELD for agent classification (block + 3-way hint) but
+# does NOT arm .checkpoint-required. The block is the fail-closed mechanism; arming
+# is deferred to the agent verdict. (Was: arms + blocks — that framed read-only
+# inspection like `shasum` as implementation and left a lingering marker that
+# deadlocked the stop-gate.)
 reset_state
-assert_blocked "B2-6. shared_write Bash (cp) arms + blocks in idle" \
+assert_blocked "B2-6. novel shared_write Bash (cp, default_write) blocks (held for classification)" \
   "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')" "Checkpoint required"
-assert_marker_exists "B2-7. shared_write Bash lazily armed .checkpoint-required" "$PRE_REQ"
+assert_marker_absent "B2-7. novel shared_write Bash did NOT arm .checkpoint-required (agent-classifier-first)" "$PRE_REQ"
+# interpreter_other (a non-allowlisted node script) is the SAME unevaluated-novel
+# class — also held, also no arm. This is the canonical node-script friction.
+reset_state
+assert_blocked "B2-7c. novel interpreter_other Bash (node foo.mjs) blocks (held)" \
+  "$(mock_json 'Bash' 'node scripts/foo.mjs --run')" "Checkpoint required"
+assert_marker_absent "B2-7d. novel interpreter_other Bash did NOT arm" "$PRE_REQ"
+# Boundary guard: a RECOGNIZED write reason (allowlisted cmd + redirect →
+# readonly_cmd_redirected) is NOT unevaluated-novel and STILL arms conservatively.
+reset_state
+assert_blocked "B2-7e. recognized write (cat redirect) arms + blocks" \
+  "$(mock_json 'Bash' 'cat /etc/hosts > scripts/x.txt')" "Checkpoint required"
+assert_marker_exists "B2-7f. recognized write (cat redirect) DID arm (boundary preserved)" "$PRE_REQ"
 # The 3-way deny-hint offers the nonsrc_write escape (verify the hint text).
+reset_state
 assert_blocked "B2-8. deny-hint offers the nonsrc_write escape" \
   "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')" "nonsrc_write"
 

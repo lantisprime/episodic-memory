@@ -65,18 +65,17 @@ agent_classifier_deny_hint() {
   digest="$(__agent_classifier_deny_digest "$command")"
   cmd_file="$repo_root/.checkpoints/classify/pending-$digest.cmd"
   cat <<EOF
-This Bash command arms the Rule 18 pre-implementation checkpoint (it writes file
-content, or its target can't be determined). If this command is part of your
-IMPLEMENTATION, the pre-implementation checkpoint above IS the required action —
-write it, then retry.
-
-ONLY if this command is NOT a repo-source write, classify it ONCE and retry; the
-verdict is cached for this session (and auto-persists), so you are asked at most
-once per command shape:
+This Bash command is not auto-classified as read-only, so it is HELD for the
+agent classifier (it has NOT run). Classify it ONCE and retry; the verdict is
+cached for this session (and auto-persists), so you are asked at most once per
+command shape:
   - read_only    — it genuinely writes nothing (output only to stdout/stderr/tmp).
   - nonsrc_write — it writes, but NOT repo source: .git internals, package
                    installs, mkdir/rmdir, a redirect to /tmp or outside the repo,
                    or the episodic-memory episode store.
+  - shared_write — it writes REPO SOURCE (this IS implementation). Classifying it
+                   shared_write arms the Rule 18 pre-implementation checkpoint;
+                   write that checkpoint block, then retry.
 
 To classify (OS-neutral — single-line command, no line-continuations or shell
 chaining; the double-quoted args work in bash, PowerShell, and cmd alike):
@@ -85,7 +84,7 @@ chaining; the double-quoted args work in bash, PowerShell, and cmd alike):
   2. From the repository root ($repo_root) run classifier-marker.mjs
      (process.cwd() MUST canonicalize to the repo root — the helper refuses
      otherwise; this is a precondition, not a 'cd &&' you must paste):
-       node "$helper" --write --project-root "$repo_root" --caller-cwd "$caller_cwd" --command-file "$cmd_file" --label <read_only|nonsrc_write> --confidence 0.9 --reason "<why this is not a repo-source write>" --session-id "$session_id"
+       node "$helper" --write --project-root "$repo_root" --caller-cwd "$caller_cwd" --command-file "$cmd_file" --label <read_only|nonsrc_write|shared_write> --confidence 0.9 --reason "<why this classification>" --session-id "$session_id"
   3. Retry the original command.
 
 Do NOT classify a real repo-source write as read_only or nonsrc_write — it

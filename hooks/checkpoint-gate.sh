@@ -660,6 +660,28 @@ _bash_label_arms_pre_checkpoint() {
   esac
 }
 
+# Agent-classifier-first (2026-05-26, user design decision). The two conservative
+# shared_write REASONs the classifier emits for an UNRECOGNIZED command shape that
+# the agent classifier has NOT yet evaluated (no marker verdict):
+#   default_write     — the terminal G1 default (cp/mv/dd/curl/unknown binary,
+#                       e.g. `shasum`); command-classifier.sh:1954.
+#   interpreter_other — the interpreter Tier-1 fallback for a non-allowlisted
+#                       node/python/ruby/perl script (e.g. `node foo.mjs`);
+#                       command-classifier.sh:1939.
+# Both mean "novel command, agent verdict pending" → route to the agent classifier
+# (block + 3-way hint) WITHOUT arming .checkpoint-required. Arming a not-yet-
+# evaluated command framed read-only inspection as implementation (and left a
+# lingering marker → stop-gate deadlock). All OTHER shared_write reasons are
+# recognized writes — redirects (readonly_cmd_redirected / echo_redirected),
+# git/gh subcommands, or an agent-verdict marker hit (bash_marker_cache_hit /
+# interpreter_marker_cache_hit) — and arm conservatively as before.
+_bash_reason_is_unevaluated_novel() {
+  case "$1" in
+    default_write|interpreter_other) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Smart-arming helpers (PR fix/checkpoint-gate-smart-arming, 2026-05-24)
 #
@@ -1286,8 +1308,25 @@ case "$TOOL_NAME" in
   Bash)
     if _bash_label_arms_pre_checkpoint "$LABEL" \
        && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
-      _arm_checkpoint_required_if_missing
-      _block_pre_with_hint
+      # Agent-classifier-first (2026-05-26, user design decision): an UNEVALUATED
+      # novel command — the classifier's conservative cache-miss defaults
+      # (LABEL=shared_write, REASON in {default_write, interpreter_other}, e.g.
+      # `shasum` or `node foo.mjs`) — is routed to the agent classifier (block +
+      # 3-way hint) WITHOUT arming .checkpoint-required. Arming a not-yet-
+      # evaluated command framed read-only inspection as implementation AND left
+      # a lingering .checkpoint-required that deadlocked the stop-gate. The block
+      # itself is fail-closed: the command cannot run until the agent classifies
+      # it. Arming is DEFERRED to the agent's verdict — a marker-cache hit
+      # reclassifying the command a repo-source write (a recognized reason, not
+      # default_write/interpreter_other) takes the arm branch on retry, where the
+      # pre-checkpoint is then required. unknown / unsafe_complex and recognized
+      # write reasons (redirects, git/gh subcommands) still arm here (fail closed).
+      if [ "$LABEL" = "shared_write" ] && _bash_reason_is_unevaluated_novel "$REASON"; then
+        _block_pre_with_hint
+      else
+        _arm_checkpoint_required_if_missing
+        _block_pre_with_hint
+      fi
     fi
     ;;
 esac
