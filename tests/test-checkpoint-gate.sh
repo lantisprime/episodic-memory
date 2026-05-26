@@ -510,8 +510,8 @@ assert_blocked "65. marker-write THEN && chained shared_write — arms + blocks"
   "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")" "Checkpoint required"
 assert_blocked "66. marker-write THEN || chained shared_write — arms + blocks" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")" "Checkpoint required"
-assert_blocked "67. marker-write THEN | piped shared_write — arms + blocks" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")" "Checkpoint required"
+assert_blocked "67. marker-write THEN | piped shared_write — held for classification + blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")" "Classify it ONCE"
 assert_blocked "67b. marker-write THEN newline + ; chained shared_write — arms + blocks (#72)" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE
 ; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
@@ -1665,9 +1665,9 @@ assert_allowed "NC-7. Symlink → allowed canonical path allowed (canonicalize f
 #    the cache (it was allowed under the F1 residual). ──
 SYMLINK_TO_EVIL="$SYMLINK_HELPER_DIR/classifier-marker-evil.mjs"
 ln -sf "$SHIMMED_HELPER" "$SYMLINK_TO_EVIL"
-assert_blocked "NC-8. Symlink → shimmed binary now arms + blocks (F1 closed)" \
+assert_blocked "NC-8. Symlink → shimmed binary held for classification + blocks (F1 closed)" \
   "$(mock_json 'Bash' "node $SYMLINK_TO_EVIL --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
-  "Checkpoint required"
+  "Classify it ONCE"
 
 # ── Plan-pending invariant preserved: classifier-marker BLOCKED while plan-pending ──
 # (Even with carve-out, plan-pending check fires earlier and blocks marker_write.)
@@ -1817,7 +1817,7 @@ assert_allowed "PP-2. node em-search (read_only) allowed, nothing armed" \
 # evaluated command framed planning-time inspection as implementation.)
 assert_blocked "PP-3. novel review command blocks (held for classification, no pre-arm)" \
   "$(mock_pp_bash 'node scripts/second-opinion.mjs request --provider codex --dispatch' "$PP_SID_A")" \
-  "Checkpoint required"
+  "Classify it ONCE"
 assert_marker_absent "PP-4. novel interpreter_other Bash did NOT arm .checkpoint-required.<sidA> (agent-classifier-first)" \
   "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
 assert_marker_absent "PP-4b. planning Bash did NOT arm legacy .checkpoint-required" \
@@ -1921,13 +1921,13 @@ assert_marker_absent "B2-5. no nonsrc_write command armed .checkpoint-required" 
 # deadlocked the stop-gate.)
 reset_state
 assert_blocked "B2-6. novel shared_write Bash (cp, default_write) blocks (held for classification)" \
-  "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')" "Checkpoint required"
+  "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')" "Classify it ONCE"
 assert_marker_absent "B2-7. novel shared_write Bash did NOT arm .checkpoint-required (agent-classifier-first)" "$PRE_REQ"
 # interpreter_other (a non-allowlisted node script) is the SAME unevaluated-novel
 # class — also held, also no arm. This is the canonical node-script friction.
 reset_state
 assert_blocked "B2-7c. novel interpreter_other Bash (node foo.mjs) blocks (held)" \
-  "$(mock_json 'Bash' 'node scripts/foo.mjs --run')" "Checkpoint required"
+  "$(mock_json 'Bash' 'node scripts/foo.mjs --run')" "Classify it ONCE"
 assert_marker_absent "B2-7d. novel interpreter_other Bash did NOT arm" "$PRE_REQ"
 # Boundary guard: a RECOGNIZED write reason (allowlisted cmd + redirect →
 # readonly_cmd_redirected) is NOT unevaluated-novel and STILL arms conservatively.

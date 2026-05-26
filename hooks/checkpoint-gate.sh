@@ -566,6 +566,35 @@ _block_pre_with_hint() {
   fi
   _block_pre
 }
+# Block variant for an UNEVALUATED novel Bash command HELD for agent
+# classification (agent-classifier-first, 2026-05-26). This is NOT a pre-
+# checkpoint requirement — the command is held until the agent classifies it —
+# so the message must NOT say "Checkpoint required" (which wrongly implies that
+# writing a pre-checkpoint is the fix and is the exact error the user kept
+# hitting on read-only/novel commands). It emits ONLY the 3-way classify hint.
+# Falls back to a generic classify message if the deny-reason lib is unavailable.
+_block_needs_classification() {
+  local hint=""
+  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
+    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier-deny-reason.sh"
+      __AGENT_DENY_REASON_SOURCED=1
+    else
+      __AGENT_DENY_REASON_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ]; then
+    hint="$(agent_classifier_deny_hint "$COMMAND" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
+  fi
+  if [ -n "$hint" ]; then
+    jq -nc --arg hint "$hint" \
+      '{decision: "block", reason: ($hint + "\n\nHook: checkpoint-gate.sh.")}'
+    exit 0
+  fi
+  jq -nc '{decision: "block", reason: "Novel command held for agent classification (it has NOT run). Classify it once (read_only / nonsrc_write / shared_write) via classifier-marker.mjs, then retry. Hook: checkpoint-gate.sh."}'
+  exit 0
+}
 # Path-aware pre-block variant (PR-B2 §11). Used by the Edit/Write pre-gate for
 # an in-repo target with no path verdict on file: leads checkpoint-first, then
 # offers the 2-way nonsrc_write path-verdict escape (classify the TARGET PATH).
@@ -1322,7 +1351,7 @@ case "$TOOL_NAME" in
       # pre-checkpoint is then required. unknown / unsafe_complex and recognized
       # write reasons (redirects, git/gh subcommands) still arm here (fail closed).
       if [ "$LABEL" = "shared_write" ] && _bash_reason_is_unevaluated_novel "$REASON"; then
-        _block_pre_with_hint
+        _block_needs_classification
       else
         _arm_checkpoint_required_if_missing
         _block_pre_with_hint
