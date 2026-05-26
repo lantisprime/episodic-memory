@@ -1847,6 +1847,19 @@ _classify_segment() {
           printf '%s\t\t%s\n' "nonsrc_write" "interpreter_em_write"
           return 0
           ;;
+        install.mjs)
+          # 2026-05-26: install.mjs is the deploy tool. It writes
+          # ~/.episodic-memory/scripts, ~/.claude/hooks/*, and installed
+          # skill/config artifacts under <project>/.claude/ (untracked) — never
+          # repo SOURCE (scripts/, hooks/, tests/, docs/*.md). nonsrc_write so a
+          # deploy never arms the pre-checkpoint nor needs a per-run marker
+          # (same gate-class as the em-* episode-store writes above). Without
+          # this, a first-run misclassification could auto-persist a stale
+          # shared_write Tier-0 override that then permanently shadows the
+          # correct verdict.
+          printf '%s\t\t%s\n' "nonsrc_write" "interpreter_install_deploy"
+          return 0
+          ;;
         classify-correction.mjs)
           # FU-6: LLM-classifier correction helper. Writes only inside
           # <project>/.episodic-memory/classifier-overrides.jsonl AFTER the

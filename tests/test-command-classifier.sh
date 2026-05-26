@@ -194,6 +194,10 @@ assert_label "T80 git commit" "git commit -m wip" "nonsrc_write"
 assert_label "T81 npm install" "npm install" "nonsrc_write"
 assert_label "T82 mkdir" "mkdir -p foo" "nonsrc_write"
 assert_label "T83 node em-store" "node scripts/em-store.mjs --project x" "nonsrc_write"
+# install.mjs deploy tool → nonsrc_write (writes ~/.claude, ~/.episodic-memory, installed
+# artifacts; never repo source). Prevents a first-run misclassification auto-persisting a
+# stale shared_write Tier-0 override (2026-05-26).
+assert_label "T83b node install.mjs --install-hooks" "node install.mjs --tool claude-code --install-hooks --install-hooks-force" "nonsrc_write"
 
 echo ""
 echo "--- Audit P1 (subagent finding 1): shell-keyword / group bypass ---"
