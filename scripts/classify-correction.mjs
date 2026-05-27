@@ -11,7 +11,7 @@
  *     --project-root <abs-path> \
  *     --caller-cwd  <abs-path> \
  *     --command     "<command text>" \
- *     --label       <read_only|shared_write|marker_write|push_or_pr_create|unsafe_complex> \
+ *     --label       <read_only|nonsrc_write|shared_write|marker_write|push_or_pr_create|unsafe_complex> \
  *     [--reason     "<note>"] \
  *     [--allow-non-git]
  *

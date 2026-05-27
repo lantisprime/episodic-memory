@@ -11,13 +11,23 @@
  * `.checkpoints/` first, fallback `.claude/` second) until the legacy
  * branch is removed in a follow-up commit.
  *
- * Six markers in migration scope:
+ * Seven markers in migration scope:
  *
  *   Marker name                    | Set membership
  *   ---                            | ---
  *   .checkpoint-required           | TASK_SIGNAL + CHECKPOINT_CLEANUP
  *   .post-checkpoint-required      | TASK_SIGNAL + CHECKPOINT_CLEANUP
  *   .plan-approval-pending         | TASK_SIGNAL only (not cleared by push)
+ *   .plan-approved                 | ALL_MIGRATED only — own-session cleanup
+ *                                    (approval token; created by plan-marker
+ *                                    --approve, consumed at checkpoint-gate arm,
+ *                                    one-shot). Deliberately NOT in
+ *                                    CHECKPOINT_CLEANUP: the push sweep globs all
+ *                                    sessions' suffixed forms, which would delete
+ *                                    a CONCURRENT session's live token and skip
+ *                                    its pre-checkpoint (review F1). It is
+ *                                    consumed at arm in the normal flow; orphans
+ *                                    are own-session-cleaned at SessionEnd.
  *   .pre-checkpoint-done           | CHECKPOINT_CLEANUP only
  *   .post-checkpoint-done          | CHECKPOINT_CLEANUP only
  *   .session-baseline              | BASELINE only
@@ -39,8 +49,9 @@
  *   CHECKPOINT_CLEANUP_MARKERS  4 markers — push-gate clears on successful
  *                               push (Codex round-1 F2: must sweep BOTH
  *                               .checkpoints/ AND .claude/ during burn-in).
- *                               Mirrors prior checkpoint-gate.sh:200.
- *   ALL_MIGRATED_MARKERS        6 names — full migration scope used by
+ *                               Mirrors prior checkpoint-gate.sh:200. (.plan-approved
+ *                               is intentionally excluded — see review F1.)
+ *   ALL_MIGRATED_MARKERS        7 names — full migration scope used by
  *                               tests, sweep tools, and SessionEnd cleanup.
  *
  * Codex round-2 ACCEPT (episode 20260509-044331-...-bc1c) per plan v3 §B.
@@ -62,9 +73,13 @@ export const TASK_SIGNAL_MARKERS = [
 ]
 
 // Push-gate cleanup class — markers cleared on a successful push that has
-// satisfied the post-checkpoint. .plan-approval-pending is intentionally
-// NOT here (its lifecycle is plan-gate's marker_write allowance, not
-// checkpoint cleanup). Mirrors the prior checkpoint-gate.sh:200 list.
+// satisfied the post-checkpoint. The push sweep glob-deletes ALL sessions'
+// suffixed forms (`<marker>.*`) — the convergence semantics for the quartet.
+// .plan-approval-pending is NOT here (plan-gate owns its lifecycle). .plan-approved
+// is NOT here either (review F1): it is the per-session authorization-to-arm
+// token, so cross-session glob-deletion would skip a concurrent session's
+// pre-checkpoint. It is consumed at arm in the normal flow; own-session orphans
+// are cleaned at SessionEnd via ALL_MIGRATED_MARKERS.
 export const CHECKPOINT_CLEANUP_MARKERS = [
   '.checkpoint-required',
   '.pre-checkpoint-done',
@@ -72,12 +87,13 @@ export const CHECKPOINT_CLEANUP_MARKERS = [
   '.post-checkpoint-done'
 ]
 
-// Full migration scope = task-signal + done markers + baseline = 6 names.
-// Used by sweep tools and tests to validate completeness.
+// Full migration scope = task-signal + approval token + done markers +
+// baseline = 7 names. Used by sweep tools and tests to validate completeness.
 export const ALL_MIGRATED_MARKERS = [
   '.checkpoint-required',
   '.post-checkpoint-required',
   '.plan-approval-pending',
+  '.plan-approved',
   '.pre-checkpoint-done',
   '.post-checkpoint-done',
   '.session-baseline'
@@ -180,6 +196,31 @@ export function planMarkerBasenameMatches(basename) {
 export function planMarkerBasenameForSession(sid) {
   return PLAN_MARKER_BASENAME_TEMPLATE.replace('{sid}', sid)
 }
+
+// ---------------------------------------------------------------------------
+// Checkpoint-planapproval redesign — `.plan-approved` approval token.
+//
+// Lifecycle: plan-marker.mjs --approve atomically creates
+// `.plan-approved.<sid>` (and removes `.plan-approval-pending.<sid>`).
+// checkpoint-gate.sh's _arm_checkpoint_required_if_missing arms
+// `.checkpoint-required` ONLY when `.plan-approved.<sid>` exists, and CONSUMES
+// (deletes) it on arm — one-shot, so an approval can't leak into a later
+// planning phase. plan-marker.mjs --touch stale-clears the EXACT
+// `.plan-approved.<sid>` (no glob — prefix-collision safe).
+//
+// Per-session form `.plan-approved.<sid>` uses the generic namespaced-marker
+// helpers (namespacedMarkerBasenameForSession / namespacedMarkerBasenameMatches
+// / anyNamespacedMarkerExists). Shell parity: PLAN_APPROVED_LEGACY_BASENAME in
+// hooks/lib/marker-paths.sh.
+//
+// NOTE: a forged or wrong-root `.plan-approved` is INERT — arm only reads
+// `.plan-approved.<sid>` at the repo root, and a forged token only opts the
+// session INTO the checkpoint lifecycle (more friction), never bypassing a
+// gate. So it is intentionally NOT plumbed into the wrong-root / relative-
+// marker detectors (unlike the agent-writable quartet/plan-pending markers).
+// ---------------------------------------------------------------------------
+
+export const PLAN_APPROVED_LEGACY_BASENAME = '.plan-approved'
 
 // ---------------------------------------------------------------------------
 // #279 fix — per-session .preflight-done marker contract.

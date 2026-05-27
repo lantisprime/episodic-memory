@@ -93,7 +93,7 @@ assert_label "T34 gh pr review --approve" "gh pr review 5 --approve" "push_or_pr
 echo ""
 echo "--- False-positive guards (push detection should NOT fire) ---"
 assert_label "T40 git stash push" "git stash push -m wip" "shared_write"
-assert_label "T41 git commit -m push" "git commit -m push" "shared_write"
+assert_label "T41 git commit -m push" "git commit -m push" "nonsrc_write"
 assert_label "T42 quoted gh pr create in echo" "echo 'gh pr create'" "read_only"
 assert_label "T43 quoted git push in echo" "echo \"git push origin\"" "read_only"
 assert_label "T44 git branch (read shape)" "git branch" "read_only"
@@ -181,7 +181,7 @@ echo "--- Control-operator chain reduction ---"
 # Most-restrictive wins. unsafe > push > shared > marker > read_only.
 assert_label "T70 marker rm then push" "rm .plan-approval-pending && git push" "push_or_pr_create"
 assert_label "T71 ls then rm marker" "ls && rm .plan-approval-pending" "marker_write"
-assert_label "T72 ls then commit" "ls && git commit -m foo" "shared_write"
+assert_label "T72 ls then commit" "ls && git commit -m foo" "nonsrc_write"
 assert_label "T73 ls then bash -c" "ls && bash -c 'foo'" "unsafe_complex"
 assert_label "T74 chained pipe" "ls | grep foo" "read_only"
 assert_label "T75 chained pipe with write" "ls | tee output.txt" "shared_write"
@@ -189,11 +189,15 @@ assert_label "T76 quoted control op" "echo 'a && b'" "read_only"
 assert_label "T77 quoted semicolon" "echo 'foo;bar'" "read_only"
 
 echo ""
-echo "--- shared_write defaults ---"
-assert_label "T80 git commit" "git commit -m wip" "shared_write"
-assert_label "T81 npm install" "npm install" "shared_write"
-assert_label "T82 mkdir" "mkdir -p foo" "shared_write"
-assert_label "T83 node em-store" "node scripts/em-store.mjs --project x" "shared_write"
+echo "--- nonsrc_write (PR-B2 #351: reclassified from shared_write — non-source writes) ---"
+assert_label "T80 git commit" "git commit -m wip" "nonsrc_write"
+assert_label "T81 npm install" "npm install" "nonsrc_write"
+assert_label "T82 mkdir" "mkdir -p foo" "nonsrc_write"
+assert_label "T83 node em-store" "node scripts/em-store.mjs --project x" "nonsrc_write"
+# install.mjs deploy tool → nonsrc_write (writes ~/.claude, ~/.episodic-memory, installed
+# artifacts; never repo source). Prevents a first-run misclassification auto-persisting a
+# stale shared_write Tier-0 override (2026-05-26).
+assert_label "T83b node install.mjs --install-hooks" "node install.mjs --tool claude-code --install-hooks --install-hooks-force" "nonsrc_write"
 
 echo ""
 echo "--- Audit P1 (subagent finding 1): shell-keyword / group bypass ---"
@@ -219,21 +223,22 @@ assert_label "T101 timeout gh api" "timeout 30 gh api -X POST /foo" "unsafe_comp
 
 echo ""
 echo "--- Codex PR-113 review finding 1: git management subcommands ---"
-# branch/tag/remote/worktree/config: list forms read_only, write forms shared_write.
+# branch/tag/remote/worktree/config: list forms read_only. PR-B2 (#351): write
+# forms are .git ref/config metadata → nonsrc_write (were shared_write).
 assert_label "T110 git branch (list)" "git branch" "read_only"
 assert_label "T111 git branch -a (list)" "git branch -a" "read_only"
-assert_label "T112 git branch foo (create)" "git branch new-topic" "shared_write"
-assert_label "T113 git branch -D foo (delete)" "git branch -D old-topic" "shared_write"
+assert_label "T112 git branch foo (create)" "git branch new-topic" "nonsrc_write"
+assert_label "T113 git branch -D foo (delete)" "git branch -D old-topic" "nonsrc_write"
 assert_label "T114 git tag (list)" "git tag" "read_only"
-assert_label "T115 git tag v1 (create)" "git tag v1.0" "shared_write"
+assert_label "T115 git tag v1 (create)" "git tag v1.0" "nonsrc_write"
 assert_label "T116 git remote (list)" "git remote" "read_only"
 assert_label "T117 git remote -v (list)" "git remote -v" "read_only"
-assert_label "T118 git remote add (write)" "git remote add origin https://x" "shared_write"
+assert_label "T118 git remote add (write)" "git remote add origin https://x" "nonsrc_write"
 assert_label "T119 git worktree list" "git worktree list" "read_only"
-assert_label "T120 git worktree add (write)" "git worktree add /tmp/wt foo" "shared_write"
+assert_label "T120 git worktree add (write)" "git worktree add /tmp/wt foo" "nonsrc_write"
 assert_label "T121 git config user.name (read)" "git config user.name" "read_only"
-assert_label "T122 git config user.name x (write)" "git config user.name foo" "shared_write"
-assert_label "T123 git config --unset (write)" "git config --unset user.name" "shared_write"
+assert_label "T122 git config user.name x (write)" "git config user.name foo" "nonsrc_write"
+assert_label "T123 git config --unset (write)" "git config --unset user.name" "nonsrc_write"
 
 echo ""
 echo "--- Codex PR-113 review finding 2: gh pr review ---"
@@ -274,27 +279,30 @@ assert_label "T164 git config --file path key" "git config --file /tmp/c user.na
 assert_label "T165 git worktree list" "git worktree list" "read_only"
 assert_label "T166 git worktree --help" "git worktree --help" "read_only"
 
-# Write forms still detected (regression).
-assert_label "T170 git branch new-name (create)" "git branch new-topic" "shared_write"
-assert_label "T171 git branch -D delete" "git branch -D old" "shared_write"
-assert_label "T172 git branch --edit-description" "git branch --edit-description" "shared_write"
-assert_label "T173 git branch --edit-description=foo" "git branch --edit-description=foo" "shared_write"
-assert_label "T174 git branch --set-upstream-to=" "git branch --set-upstream-to=origin/main" "shared_write"
-assert_label "T175 git branch --track" "git branch --track main origin" "shared_write"
-assert_label "T176 git tag v1" "git tag v1.0" "shared_write"
-assert_label "T177 git tag -d" "git tag -d v1.0" "shared_write"
-assert_label "T178 git tag -f" "git tag -f v1.0" "shared_write"
-assert_label "T179 git tag -s" "git tag -s v1.0" "shared_write"
-assert_label "T180 git remote add" "git remote add origin https://x" "shared_write"
-assert_label "T181 git remote rename" "git remote rename old new" "shared_write"
-assert_label "T182 git remote set-url" "git remote set-url origin https://y" "shared_write"
-assert_label "T183 git remote prune" "git remote prune origin" "shared_write"
-assert_label "T184 git config user.name foo" "git config user.name foo" "shared_write"
-assert_label "T185 git config --global user.name foo" "git config --global user.name foo" "shared_write"
-assert_label "T186 git config --unset" "git config --unset user.name" "shared_write"
-assert_label "T187 git config --add" "git config --add user.name foo" "shared_write"
-assert_label "T188 git worktree add" "git worktree add /tmp/wt foo" "shared_write"
-assert_label "T189 git worktree remove" "git worktree remove /tmp/wt" "shared_write"
+# Write forms still DETECTED as writes (regression). PR-B2 (#351): these are
+# .git ref/config/worktree metadata, not working-tree source → nonsrc_write
+# (were shared_write). The detection (not read_only) is what the regression
+# guards; the write CLASS changed from arming to free.
+assert_label "T170 git branch new-name (create)" "git branch new-topic" "nonsrc_write"
+assert_label "T171 git branch -D delete" "git branch -D old" "nonsrc_write"
+assert_label "T172 git branch --edit-description" "git branch --edit-description" "nonsrc_write"
+assert_label "T173 git branch --edit-description=foo" "git branch --edit-description=foo" "nonsrc_write"
+assert_label "T174 git branch --set-upstream-to=" "git branch --set-upstream-to=origin/main" "nonsrc_write"
+assert_label "T175 git branch --track" "git branch --track main origin" "nonsrc_write"
+assert_label "T176 git tag v1" "git tag v1.0" "nonsrc_write"
+assert_label "T177 git tag -d" "git tag -d v1.0" "nonsrc_write"
+assert_label "T178 git tag -f" "git tag -f v1.0" "nonsrc_write"
+assert_label "T179 git tag -s" "git tag -s v1.0" "nonsrc_write"
+assert_label "T180 git remote add" "git remote add origin https://x" "nonsrc_write"
+assert_label "T181 git remote rename" "git remote rename old new" "nonsrc_write"
+assert_label "T182 git remote set-url" "git remote set-url origin https://y" "nonsrc_write"
+assert_label "T183 git remote prune" "git remote prune origin" "nonsrc_write"
+assert_label "T184 git config user.name foo" "git config user.name foo" "nonsrc_write"
+assert_label "T185 git config --global user.name foo" "git config --global user.name foo" "nonsrc_write"
+assert_label "T186 git config --unset" "git config --unset user.name" "nonsrc_write"
+assert_label "T187 git config --add" "git config --add user.name foo" "nonsrc_write"
+assert_label "T188 git worktree add" "git worktree add /tmp/wt foo" "nonsrc_write"
+assert_label "T189 git worktree remove" "git worktree remove /tmp/wt" "nonsrc_write"
 
 # Reverse-flag-order (Plan-agent [P3] fuzz)
 assert_label "T190 reversed: pattern then --list" "git branch 'feat/*' --list" "read_only"
@@ -309,13 +317,13 @@ assert_label "T193 git config --get-urlmatch" \
   "git config --get-urlmatch http http://example.com" "read_only"
 # git config write-only flags previously missed
 assert_label "T194 git config --remove-section" \
-  "git config --remove-section section.name" "shared_write"
+  "git config --remove-section section.name" "nonsrc_write"
 assert_label "T195 git config --rename-section" \
-  "git config --rename-section old new" "shared_write"
-# git worktree lock/unlock/prune restored as writes
-assert_label "T196 git worktree lock" "git worktree lock /tmp/wt" "shared_write"
-assert_label "T197 git worktree unlock" "git worktree unlock /tmp/wt" "shared_write"
-assert_label "T198 git worktree prune" "git worktree prune" "shared_write"
+  "git config --rename-section old new" "nonsrc_write"
+# git worktree lock/unlock/prune still detected as writes (PR-B2: .git metadata → nonsrc_write).
+assert_label "T196 git worktree lock" "git worktree lock /tmp/wt" "nonsrc_write"
+assert_label "T197 git worktree unlock" "git worktree unlock /tmp/wt" "nonsrc_write"
+assert_label "T198 git worktree prune" "git worktree prune" "nonsrc_write"
 
 # Codex PR #113 F2 (`...9796`/`...9cdd`): gh pr checkout/lock/unlock were
 # wrongly bucketed read_only. checkout mutates local working tree;
@@ -766,6 +774,135 @@ assert_label "HV31 node --version | head (pipe is not a redirect)" "node /tmp/fo
 # never rides the read_only allowlist (PR #271 attack class).
 assert_label "HV40 env-prefix node --help (carve-out skipped, falls to shared_write)" \
   "FOO=bar node /tmp/foo.mjs --help" "shared_write"
+
+echo ""
+echo "--- PR-B2 (#351): git total-function split (§14-F1) ---"
+# nonsrc_write side: .git / index / object / ref ops (FREE — never arm).
+assert_label "B2-G01 git commit" "git commit -m x" "nonsrc_write"
+assert_label "B2-G02 git add" "git add ." "nonsrc_write"
+assert_label "B2-G03 git notes add" "git notes add -m n" "nonsrc_write"
+assert_label "B2-G04 git update-ref" "git update-ref refs/heads/x HEAD" "nonsrc_write"
+assert_label "B2-G05 git gc" "git gc" "nonsrc_write"
+assert_label "B2-G06 git hash-object" "git hash-object -w f" "nonsrc_write"
+assert_label "B2-G07 git init" "git init" "nonsrc_write"
+# shared_write side: working-tree-mutating (ARM). Negative-control pairs —
+# same `git` first token, the SUBCOMMAND (the predicate's contract) flips the
+# label (lesson dc94: vary the field IN the predicate, not adjacent).
+assert_label "B2-G10 git checkout (vs add)" "git checkout main" "shared_write"
+assert_label "B2-G11 git switch" "git switch feature" "shared_write"
+assert_label "B2-G12 git restore" "git restore scripts/x.mjs" "shared_write"
+assert_label "B2-G13 git rm (vs commit)" "git rm scripts/x.mjs" "shared_write"
+assert_label "B2-G14 git mv" "git mv a b" "shared_write"
+assert_label "B2-G15 git reset" "git reset --hard HEAD" "shared_write"
+assert_label "B2-G16 git stash" "git stash" "shared_write"
+assert_label "B2-G17 git merge" "git merge feature" "shared_write"
+assert_label "B2-G18 git rebase" "git rebase main" "shared_write"
+assert_label "B2-G19 git pull" "git pull" "shared_write"
+assert_label "B2-G20 git read-tree" "git read-tree HEAD" "shared_write"
+# Total-function completeness: any UNLISTED subcommand arms.
+assert_label "B2-G30 git frobnicate (unlisted → arm)" "git frobnicate" "shared_write"
+assert_label "B2-G31 git submodule" "git submodule update" "shared_write"
+# git_local_write `--cached` is NOT distinguished (no arg parsing) → arms.
+assert_label "B2-G32 git rm --cached still arms" "git rm --cached f" "shared_write"
+
+echo ""
+echo "--- PR-B2 (#351): git metadata reasons → nonsrc_write ---"
+assert_label "B2-M01 git remote add" "git remote add o https://x" "nonsrc_write"
+assert_label "B2-M02 git config set" "git config user.name x" "nonsrc_write"
+assert_label "B2-M03 git config --unset (write flag)" "git config --unset user.name" "nonsrc_write"
+assert_label "B2-M04 git branch create" "git branch newbranch" "nonsrc_write"
+assert_label "B2-M05 git branch -d (write flag)" "git branch -d old" "nonsrc_write"
+assert_label "B2-M06 git tag create" "git tag v1.0" "nonsrc_write"
+assert_label "B2-M07 git worktree add (lean-accept)" "git worktree add ../wt" "nonsrc_write"
+assert_label "B2-M08 bare git (help)" "git" "nonsrc_write"
+# Negative controls: git reads stay read_only (not downgraded to nonsrc).
+assert_label "B2-M20 git config --get is read" "git config --get user.name" "read_only"
+assert_label "B2-M21 git remote -v is read" "git remote -v" "read_only"
+assert_label "B2-M22 git branch --list is read" "git branch --list" "read_only"
+# Negative control: push stays push (most-restrictive, unaffected by split).
+assert_label "B2-M30 git push unaffected" "git push origin main" "push_or_pr_create"
+
+echo ""
+echo "--- PR-B2 (#351, M4): package install + dir ops → nonsrc_write ---"
+assert_label "B2-P01 npm install" "npm install" "nonsrc_write"
+assert_label "B2-P02 npm i" "npm i" "nonsrc_write"
+assert_label "B2-P03 npm ci" "npm ci" "nonsrc_write"
+assert_label "B2-P04 pnpm install" "pnpm install" "nonsrc_write"
+assert_label "B2-P05 yarn add" "yarn add lodash" "nonsrc_write"
+assert_label "B2-P06 mkdir" "mkdir scripts/newdir" "nonsrc_write"
+assert_label "B2-P07 rmdir" "rmdir scripts/olddir" "nonsrc_write"
+# Negative controls: arbitrary-code-exec package ops stay shared_write (M4).
+assert_label "B2-P20 npm run (vs install)" "npm run build" "shared_write"
+assert_label "B2-P21 npx (separate binary)" "npx create-foo" "shared_write"
+assert_label "B2-P22 npm publish" "npm publish" "shared_write"
+# Redirect demotes the install allowlist (target may be repo source).
+assert_label "B2-P23 npm install > scripts/x" "npm install > scripts/x.mjs" "shared_write"
+
+echo ""
+echo "--- PR-B2 (#351): em-store → nonsrc_write; conservative emits stay shared ---"
+assert_label "B2-E01 node em-store" "node em-store.mjs --project x" "nonsrc_write"
+assert_label "B2-E02 node em-revise" "node em-revise.mjs --original i" "nonsrc_write"
+# Conservative-by-construction: no marker on disk → escapable emits stay armed.
+assert_label "B2-E10 echo > src stays shared (no marker)" "echo x > scripts/x.mjs" "shared_write"
+assert_label "B2-E11 cp default_write stays shared" "cp a scripts/b" "shared_write"
+assert_label "B2-E12 readonly redirect stays shared" "ls > out.txt" "shared_write"
+# rm/touch stay shared_write (§15-C1 — conservative, no reclassification).
+assert_label "B2-E20 rm non-marker stays shared" "rm scripts/x.mjs" "shared_write"
+assert_label "B2-E21 touch non-marker stays shared" "touch scripts/new.mjs" "shared_write"
+
+echo ""
+echo "--- PR-B2 (#351, §14-F3): _priority ladder + nonsrc_write precedence ---"
+# nonsrc_write ranks above read_only (chain stays nonsrc, not downgraded to the
+# gate-allow read_only) and below shared_write (chain upgrades to arm).
+assert_label "B2-PR01 nonsrc && read_only stays nonsrc" "git add . && ls" "nonsrc_write"
+assert_label "B2-PR02 nonsrc && shared upgrades to shared" "git add . && cp a scripts/b" "shared_write"
+assert_label "B2-PR03 nonsrc && push upgrades to push" "git add . && git push" "push_or_pr_create"
+assert_label "B2-PR04 read_only && nonsrc stays nonsrc" "ls && git commit -m x" "nonsrc_write"
+
+echo ""
+echo "--- PR-B2 (#351, §16/G1): general Bash marker-cache escape ---"
+# Integration: plant a per-session agent marker, confirm classify_command
+# returns the agent verdict for the escapable redirect / default_write emits
+# (the interpreter branch already had this). Uses a real temp git repo + a
+# clean HOME so the marker helper resolves to repo-source (policy v2), matching
+# the write side. The KEY test is the REDIRECT case (the exact #351 class): a
+# token-only reconstruction would drop `> foo` and miss — _seg_raw_command
+# threading makes the read key match the write exactly.
+g1_run() {
+  local desc="$1" cmd="$2" expected="$3" plant="${4:-}" plant_label="${5:-nonsrc_write}"
+  local saved_home="$HOME" tmp marker_helper
+  tmp="$(mktemp -d)"; tmp="$(cd -P "$tmp" && pwd)"
+  git -C "$tmp" init -q 2>/dev/null
+  local g1home; g1home="$(mktemp -d)"; g1home="$(cd -P "$g1home" && pwd)"
+  marker_helper="$REPO_ROOT/scripts/classifier-marker.mjs"
+  if [ -n "$plant" ]; then
+    ( cd "$tmp" && HOME="$g1home" CLAUDE_CODE_SESSION_ID=g1test node "$marker_helper" --write \
+        --project-root "$tmp" --caller-cwd "$tmp" --command "$plant" \
+        --label "$plant_label" --confidence 0.9 --reason g1test --session-id g1test ) >/dev/null 2>&1
+  fi
+  local result label
+  result="$(HOME="$g1home" CLAUDE_CODE_SESSION_ID=g1test classify_command "$cmd" "$tmp" "$tmp")"
+  label="${result%%	*}"
+  rm -rf "$tmp" "$g1home"
+  export HOME="$saved_home"
+  if [ "$label" = "$expected" ]; then
+    echo "  ✓ $desc"; passed=$((passed+1))
+  else
+    echo "  ✗ $desc (expected $expected, got $label / $result)"; failed=$((failed+1))
+  fi
+}
+# Baseline: no marker → conservative arm.
+g1_run "G1-01 redirect, no marker → shared_write" "echo hi > scripts/gen.mjs" "shared_write"
+g1_run "G1-02 default_write, no marker → shared_write" "cp /etc/hosts scripts/c.txt" "shared_write"
+# Escape: marker present → agent verdict honored (REDIRECT — the #351 class).
+g1_run "G1-03 redirect + nonsrc marker → escapes" "echo hi > scripts/gen.mjs" "nonsrc_write" "echo hi > scripts/gen.mjs"
+g1_run "G1-04 default_write + nonsrc marker → escapes" "cp /etc/hosts scripts/c.txt" "nonsrc_write" "cp /etc/hosts scripts/c.txt"
+g1_run "G1-05 redirect + read_only marker → escapes" "echo hi > scripts/gen.mjs" "read_only" "echo hi > scripts/gen.mjs" "read_only"
+# Hard-deny preserved: a marker on a push chain cannot downgrade the push
+# segment (most-restrictive reduction wins).
+g1_run "G1-06 push chain marker cannot downgrade push" "git push && echo hi > scripts/gen.mjs" "push_or_pr_create" "git push && echo hi > scripts/gen.mjs"
+# Negative control: a marker for a DIFFERENT command does not escape this one.
+g1_run "G1-07 mismatched marker does not escape" "echo hi > scripts/gen.mjs" "shared_write" "echo DIFFERENT > scripts/other.mjs"
 
 echo ""
 echo "=================================================="

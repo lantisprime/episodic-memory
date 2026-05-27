@@ -201,6 +201,65 @@ function expect(cond, label) {
   expect(out && Array.isArray(out.removed) && out.removed.length === 0, `H13: stdout removed=[] (nothing removed)`)
 }
 
+// ---------- H14: --approve creates .plan-approved.<sid> AND removes pending ----------
+{
+  const root = mkTmpRepo()
+  const sid = 'valid-sid-123'
+  const ck = (n) => path.join(root, '.checkpoints', n)
+  fs.writeFileSync(ck(`.plan-approval-pending.${sid}`), '')
+  const r = run(['--approve', '--root', root])
+  expect(r.status === 0, `H14: --approve exit 0 (got ${r.status}; stderr=${r.stderr.trim()})`)
+  expect(fs.existsSync(ck(`.plan-approved.${sid}`)), `H14: created .plan-approved.<sid> token`)
+  expect(!fs.existsSync(ck(`.plan-approval-pending.${sid}`)), `H14: removed .plan-approval-pending.<sid>`)
+  const out = (() => { try { return JSON.parse(r.stdout) } catch { return null } })()
+  expect(out && typeof out.approved === 'string' && Array.isArray(out.removed), `H14: stdout has approved path + removed[]`)
+}
+
+// ---------- H15: --approve with no pending → still creates token (idempotent rm) ----------
+{
+  const root = mkTmpRepo()
+  const sid = 'valid-sid-123'
+  const ck = (n) => path.join(root, '.checkpoints', n)
+  const r = run(['--approve', '--root', root])
+  expect(r.status === 0, `H15: --approve exit 0 with no pending`)
+  expect(fs.existsSync(ck(`.plan-approved.${sid}`)), `H15: token created even when no pending existed`)
+}
+
+// ---------- H16: --touch stale-clears the .plan-approved.<sid> token ----------
+{
+  const root = mkTmpRepo()
+  const sid = 'valid-sid-123'
+  const ck = (n) => path.join(root, '.checkpoints', n)
+  fs.writeFileSync(ck(`.plan-approved.${sid}`), '')  // stale approval from a prior plan
+  const r = run(['--touch', '--root', root])
+  expect(r.status === 0, `H16: --touch exit 0`)
+  expect(fs.existsSync(ck(`.plan-approval-pending.${sid}`)), `H16: armed new pending marker`)
+  expect(!fs.existsSync(ck(`.plan-approved.${sid}`)), `H16: stale-cleared the .plan-approved.<sid> token`)
+}
+
+// ---------- H17: --touch stale-clear is prefix-collision safe (no glob) ----------
+{
+  const root = mkTmpRepo()
+  const sid = 'valid-sid-123'
+  const ck = (n) => path.join(root, '.checkpoints', n)
+  fs.writeFileSync(ck(`.plan-approved.${sid}`), '')        // exact token (should clear)
+  fs.writeFileSync(ck(`.plan-approved.${sid}-sib`), '')    // sibling sharing the prefix (must survive)
+  const r = run(['--touch', '--root', root])
+  expect(r.status === 0, `H17: --touch exit 0`)
+  expect(!fs.existsSync(ck(`.plan-approved.${sid}`)), `H17: cleared the EXACT token`)
+  expect(fs.existsSync(ck(`.plan-approved.${sid}-sib`)), `H17: prefix-collision sibling UNTOUCHED (no glob)`)
+}
+
+// ---------- H18: three-way action mutex (--approve combos) → exit 6 ----------
+{
+  const root = mkTmpRepo()
+  const r1 = run(['--touch', '--approve', '--root', root])
+  expect(r1.status === 6, `H18: --touch + --approve → exit 6 (got ${r1.status})`)
+  expect(/MUTEX_VIOLATION/.test(r1.stderr), `H18: stderr has MUTEX_VIOLATION`)
+  const r2 = run(['--rm', '--approve', '--root', root])
+  expect(r2.status === 6, `H18b: --rm + --approve → exit 6 (got ${r2.status})`)
+}
+
 console.log('')
 console.log(`Results: ${passed} passed, ${failed} failed`)
 process.exit(failed > 0 ? 1 : 0)

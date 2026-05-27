@@ -538,6 +538,89 @@ _block_post() {
     '{decision: "block", reason: ("Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to " + $path + " (must be non-empty) before pushing. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
+# Pre-block variant that appends the 3-way agent-classifier deny-hint (#333,
+# PR-B2). Used by the Bash pre-checkpoint arm for commands that arm the gate
+# (shared_write / unsafe_complex / unknown): the message leads checkpoint-first
+# (write the Rule 18 pre-checkpoint), then offers the read_only / nonsrc_write
+# escape for a genuinely-not-repo-source command. The deny-reason lib is sourced
+# lazily; if unavailable or it emits nothing, fall back to the plain _block_pre
+# message (never fail the gate).
+_block_pre_with_hint() {
+  local hint=""
+  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
+    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier-deny-reason.sh"
+      __AGENT_DENY_REASON_SOURCED=1
+    else
+      __AGENT_DENY_REASON_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ]; then
+    hint="$(agent_classifier_deny_hint "$COMMAND" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
+  fi
+  if [ -n "$hint" ]; then
+    jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
+      '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
+    exit 0
+  fi
+  _block_pre
+}
+# Block variant for an UNEVALUATED novel Bash command HELD for agent
+# classification (agent-classifier-first, 2026-05-26). This is NOT a pre-
+# checkpoint requirement — the command is held until the agent classifies it —
+# so the message must NOT say "Checkpoint required" (which wrongly implies that
+# writing a pre-checkpoint is the fix and is the exact error the user kept
+# hitting on read-only/novel commands). It emits ONLY the 3-way classify hint.
+# Falls back to a generic classify message if the deny-reason lib is unavailable.
+_block_needs_classification() {
+  local hint=""
+  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
+    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier-deny-reason.sh"
+      __AGENT_DENY_REASON_SOURCED=1
+    else
+      __AGENT_DENY_REASON_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ]; then
+    hint="$(agent_classifier_deny_hint "$COMMAND" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
+  fi
+  if [ -n "$hint" ]; then
+    jq -nc --arg hint "$hint" \
+      '{decision: "block", reason: ($hint + "\n\nHook: checkpoint-gate.sh.")}'
+    exit 0
+  fi
+  jq -nc '{decision: "block", reason: "Novel command held for agent classification (it has NOT run). Classify it once (read_only / nonsrc_write / shared_write) via classifier-marker.mjs, then retry. Hook: checkpoint-gate.sh."}'
+  exit 0
+}
+# Path-aware pre-block variant (PR-B2 §11). Used by the Edit/Write pre-gate for
+# an in-repo target with no path verdict on file: leads checkpoint-first, then
+# offers the 2-way nonsrc_write path-verdict escape (classify the TARGET PATH).
+# Falls back to the plain _block_pre if the deny-reason lib OR its path-hint fn
+# is unavailable / emits nothing — never fails the gate.
+_block_pre_with_path_hint() {
+  local hint=""
+  if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
+    if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier-deny-reason.sh"
+      __AGENT_DENY_REASON_SOURCED=1
+    else
+      __AGENT_DENY_REASON_SOURCED=0
+    fi
+  fi
+  if [ "${__AGENT_DENY_REASON_SOURCED:-0}" = "1" ] && declare -F agent_classifier_path_deny_hint >/dev/null 2>&1; then
+    hint="$(agent_classifier_path_deny_hint "$FILE_PATH" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
+  fi
+  if [ -n "$hint" ]; then
+    jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
+      '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
+    exit 0
+  fi
+  _block_pre
+}
 _block_plan_pending() {
   jq -nc --arg path "$PLAN_PENDING_W" \
     '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
@@ -571,24 +654,105 @@ _block_env_prefix_marker() {
 # Idempotent: no-op if the marker already exists (own-session or legacy).
 # Best-effort: never aborts the hook under set -e.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Plan-approval token helpers (checkpoint-planapproval redesign).
+#
+# `.plan-approved.<sid>` is created by `plan-marker.mjs --approve` and is the
+# ONLY thing that authorizes arming a checkpoint. It is own-session + suffixed
+# by nature (a UUID session approved a specific plan) — there is NO legacy
+# suffix-less form (the marker is new; no burn-in literal). F14 fail-closed:
+# an invalid/empty sid is never "approved", so it can never arm.
+# ---------------------------------------------------------------------------
+_plan_approved_exists_for_session() {
+  local sid="$1"
+  validate_session_id "$sid" || return 1
+  local bn
+  bn="$(namespaced_marker_basename_for_session "$PLAN_APPROVED_LEGACY_BASENAME" "$sid")"
+  [ -e "$PRIMARY_DIR/$bn" ] && return 0
+  [ -e "$LEGACY_DIR/$bn" ] && return 0
+  return 1
+}
+
+# Consume (delete) THIS session's approval token at both roots. One-shot: an
+# approval authorizes exactly one arm and can't leak into a later planning
+# phase. Best-effort under set -e. Own-session only (never the bare literal).
+_consume_plan_approved() {
+  local sid="$1"
+  validate_session_id "$sid" || return 0
+  local bn
+  bn="$(namespaced_marker_basename_for_session "$PLAN_APPROVED_LEGACY_BASENAME" "$sid")"
+  rm -f "$PRIMARY_DIR/$bn" "$LEGACY_DIR/$bn" 2>/dev/null || true
+}
+
 _arm_checkpoint_required_if_missing() {
   if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
     return 0
   fi
-  ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
-  if validate_session_id "$MY_SID"; then
-    local helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
-    if [ -f "$helper" ]; then
-      CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
-        --target .checkpoint-required \
-        --action arm-if-missing \
-        --root "$REPO_ROOT" >/dev/null 2>&1 || true
-    else
-      touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
-    fi
-  else
-    touch "$(write_marker_path "$REPO_ROOT" .checkpoint-required)" 2>/dev/null || true
+  # planapproval redesign: arming is ANCHORED to plan-approval, NOT to a file-
+  # write heuristic. Do NOT arm unless THIS session has an approved-plan token.
+  # No approval → no checkpoint (NO CHECKPOINTS DURING PLANNING; and per the
+  # user decision dropping the plan-requirement block, no plan simply means no
+  # implementation gate — the write is allowed by the conditional callers).
+  if ! _plan_approved_exists_for_session "$MY_SID"; then
+    return 0
   fi
+  # sid is valid here (the approval check requires it).
+  ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
+  local helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+  if [ -f "$helper" ]; then
+    CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
+      --target .checkpoint-required \
+      --action arm-if-missing \
+      --root "$REPO_ROOT" >/dev/null 2>&1 || true
+  else
+    touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
+  fi
+  # Transactional consume (codex PR review P1): the arm above is best-effort
+  # (`|| true`) — an installed helper that exits non-zero would leave NO
+  # `.checkpoint-required` armed. Consume the one-shot approval token ONLY after
+  # verifying the arm actually succeeded. If arming FAILED, preserve the token so
+  # the write stays gated (callers fail closed on token-present) and a retry can
+  # arm — never consume the approval AND leave the implementation ungated.
+  if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
+    _consume_plan_approved "$MY_SID"
+  fi
+}
+
+# F1 #351 closure (PR-B2, §4): which classifier LABELS arm the Bash pre-
+# implementation checkpoint. The inversion (vs the abandoned writer-binary
+# REASON-enumeration): arm on the "writes-repo-source / can't-tell" bucket, not
+# an enumerated list. nonsrc_write / read_only / marker_write / push_or_pr_create
+# never arm here. `unknown` arms conservatively — a parsed-but-unrecognized
+# shape must fail closed (codex R1/F3). Complete by construction: anything the
+# classifier can't downgrade to nonsrc_write/read_only arms (friction, not
+# bypass); the agent downgrades it once via the deny-hint verdict.
+_bash_label_arms_pre_checkpoint() {
+  case "$1" in
+    shared_write|unsafe_complex|unknown) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Agent-classifier-first (2026-05-26, user design decision). The two conservative
+# shared_write REASONs the classifier emits for an UNRECOGNIZED command shape that
+# the agent classifier has NOT yet evaluated (no marker verdict):
+#   default_write     — the terminal G1 default (cp/mv/dd/curl/unknown binary,
+#                       e.g. `shasum`); command-classifier.sh:1954.
+#   interpreter_other — the interpreter Tier-1 fallback for a non-allowlisted
+#                       node/python/ruby/perl script (e.g. `node foo.mjs`);
+#                       command-classifier.sh:1939.
+# Both mean "novel command, agent verdict pending" → route to the agent classifier
+# (block + 3-way hint) WITHOUT arming .checkpoint-required. Arming a not-yet-
+# evaluated command framed read-only inspection as implementation (and left a
+# lingering marker → stop-gate deadlock). All OTHER shared_write reasons are
+# recognized writes — redirects (readonly_cmd_redirected / echo_redirected),
+# git/gh subcommands, or an agent-verdict marker hit (bash_marker_cache_hit /
+# interpreter_marker_cache_hit) — and arm conservatively as before.
+_bash_reason_is_unevaluated_novel() {
+  case "$1" in
+    default_write|interpreter_other) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -690,9 +854,14 @@ _tool_call_targets_repo_source() {
     # the predicate is by construction "needs the pre-block." Including
     # marker_write that wasn't approved upstream (e.g. POST_DONE write when
     # POST_REQ not armed — test 17 regression class).
+    # PR-B2 §14-F4(a): nonsrc_write joins read_only as "not repo source" for
+    # consistency with the verdict inversion. (This Bash branch is currently
+    # reached only defensively — the gate's lone caller is Edit/Write-cased —
+    # but keeping it aligned with the LABEL taxonomy avoids a latent surprise
+    # if a future caller routes Bash through this predicate.)
     case "$label" in
-      read_only) return 1 ;;
-      *)         return 0 ;;
+      read_only|nonsrc_write) return 1 ;;
+      *)                      return 0 ;;
     esac
   fi
 
@@ -705,19 +874,93 @@ _tool_call_targets_repo_source() {
 
   local repo_canon
   repo_canon="$( (cd "$repo_root" 2>/dev/null && pwd -P) || printf '%s' "$repo_root" )"
-
-  # Raw-prefix match (codex R1 attack class 3 — symlink-out author intent).
-  case "$file_path" in
-    "$repo_root"/*|"$repo_root") return 0 ;;
-  esac
-
-  # Canonical-prefix match (handles symlink-in, traversal, nonexistent leaf).
   local fp_canon
   fp_canon="$(_canonicalize_possibly_nonexistent "$file_path")"
-  case "$fp_canon" in
-    "$repo_canon"/*|"$repo_canon") return 0 ;;
-  esac
 
+  # Is the target inside the repo at all? Raw-prefix (codex R1 attack class 3 —
+  # symlink-out author intent) OR canonical-prefix (symlink-in / traversal /
+  # nonexistent leaf). Off-repo (memory, skills, settings) → not repo source.
+  local in_repo=1
+  case "$file_path" in
+    "$repo_root"/*|"$repo_root") in_repo=0 ;;
+  esac
+  if [ "$in_repo" != "0" ]; then
+    case "$fp_canon" in
+      "$repo_canon"/*|"$repo_canon") in_repo=0 ;;
+    esac
+  fi
+  [ "$in_repo" = "0" ] || return 1
+
+  # In-repo target. Four downgrades make it NOT count as repo source (PR-B2 §11):
+  #
+  #  (1) .review-store/ carve-out — second-opinion review artifacts the harness
+  #      stages in-project (.review-store/) are never repo source, so a review
+  #      write must never arm the pre-checkpoint. (.review-store/ is untracked
+  #      but NOT in .gitignore, so it needs its own arm independent of (1c).)
+  case "$fp_canon" in
+    "$repo_canon"/.review-store|"$repo_canon"/.review-store/*) return 1 ;;
+  esac
+  #
+  #  (1b) .checkpoints/ carve-out — gate infrastructure (markers, classify cache,
+  #      the runbook-ack marker, and the pending command-files the command-
+  #      classification deny-hint itself tells the agent to write to
+  #      <repo>/.checkpoints/classify/pending-*.cmd) is never repo source.
+  #      Without this, that prescribed write arms the pre-checkpoint and
+  #      deadlocks the classify protocol (reproduced 2026-05-27). Marker CONTENT
+  #      validation still happens in the marker_write path; this governs ARMING
+  #      only. Canonical-anchored + kept as a hard infra invariant independent of
+  #      .gitignore drift (it ships gitignored, but the gate must never arm on
+  #      its own substrate even if a user edits .gitignore).
+  case "$fp_canon" in
+    "$repo_canon"/.checkpoints|"$repo_canon"/.checkpoints/*) return 1 ;;
+  esac
+  #
+  #  (1c) .gitignore carve-out — a gitignored target is by definition NOT tracked
+  #      repo source (covers .episodic-memory/ episodes, scratch/, analysis/,
+  #      node_modules/, .codex/, etc.). Defer to git's own notion of "source"
+  #      rather than enumerating directories — gating on an open-ended directory
+  #      list is the enumeration treadmill. Fail-closed: git absent / path
+  #      outside the worktree / not-ignored → fall through and arm conservatively.
+  if command -v git >/dev/null 2>&1 \
+     && git -C "$repo_canon" check-ignore -q -- "$fp_canon" 2>/dev/null; then
+    return 1
+  fi
+  #
+  #  (2) Path verdict — the agent classified THIS target nonsrc_write/read_only
+  #      via classifier-marker.mjs --target-path. Verdict-over-heuristic
+  #      inversion (de-assume the pure path heuristic): a plan/scratch/doc/
+  #      generated file the agent declares non-source does not arm.
+  if _path_verdict_downgrades "$file_path"; then
+    return 1
+  fi
+
+  return 0
+}
+
+# PR-B2 S3 (§11/§14-F4): consult the agent's path verdict for an in-repo
+# Write/Edit target. Returns 0 (downgrade — treat as NOT repo source, do not
+# arm) iff a fresh per-session marker classifies the target nonsrc_write or
+# read_only; returns 1 otherwise (no verdict / helper-absent → arm
+# conservatively, complete-by-construction). Lazily sources agent-classifier.sh
+# for agent_classify_path (guarded by function existence — command-classifier.sh
+# may have already sourced it). CLAUDE_CODE_SESSION_ID is threaded from MY_SID so
+# the read keys to the same session the agent wrote under (mirrors the gate's
+# other helper invocations, e.g. the push self-arm at the push-gate).
+_path_verdict_downgrades() {
+  local file_path="$1"
+  [ -n "$file_path" ] || return 1
+  if ! declare -F agent_classify_path >/dev/null 2>&1; then
+    if [ -f "$LIB_DIR/agent-classifier.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$LIB_DIR/agent-classifier.sh"
+    fi
+  fi
+  declare -F agent_classify_path >/dev/null 2>&1 || return 1
+  local verdict
+  verdict="$(CLAUDE_CODE_SESSION_ID="$MY_SID" agent_classify_path "$file_path" "$REPO_ROOT" "$CWD" 2>/dev/null)" || return 1
+  case "$verdict" in
+    nonsrc_write|read_only) return 0 ;;
+  esac
   return 1
 }
 
@@ -1122,17 +1365,103 @@ case "$TOOL_NAME" in
        && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID" \
        && _tool_call_targets_repo_source "$REPO_ROOT" "$TOOL_NAME" "$FILE_PATH" "$LABEL"; then
       # Lazy-arm ONLY when we have a concrete in-repo FILE_PATH. The empty-
-      # FILE_PATH conservative-block path (relative path with no absolute cwd
+      # FILE_PATH conservative path (relative path with no absolute cwd
       # authority — _tool_call_targets_repo_source returns 0 defensively) must
       # NOT write a marker: REPO_ROOT there falls back to the hook process cwd
       # (off-project invocation), so arming would leak .checkpoint-required
-      # into an unrelated repo. Regression: SA-cwd-strict caller-leak. The
-      # block still fires (Rule 18 conservative direction); only the arm is
-      # withheld until a real in-repo write is seen.
+      # into an unrelated repo. Regression: SA-cwd-strict caller-leak.
+      #
+      # planapproval redesign: the arm itself no-ops unless THIS session has an
+      # approved-plan token (and consumes it on arm). Block ONLY if a checkpoint
+      # is actually armed — i.e. a plan was approved (now, or earlier this
+      # implementation phase). With NO approved plan there is no checkpoint and
+      # NO block: NO CHECKPOINTS DURING PLANNING, and (per the user decision
+      # dropping finding #6) no plan ⇒ no implementation gate. The empty-
+      # FILE_PATH branch likewise only blocks when a checkpoint is already
+      # armed mid-implementation (pre-done still missing); it no longer blocks
+      # unconditionally.
       if [ -n "$FILE_PATH" ]; then
+        # Concrete in-repo path: arm (no-ops without approval; consumes the
+        # approval token only if the arm succeeded). Block if a checkpoint is
+        # armed OR an approval token is still present — the latter is the
+        # fail-closed case where arming FAILED (codex PR review P1): the token
+        # survives, so the write stays gated until a retry arms successfully.
         _arm_checkpoint_required_if_missing
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           || _plan_approved_exists_for_session "$MY_SID"; then
+          # PR-B2 §11: in-repo target with no path verdict on file — block with
+          # the 2-way path-verdict hint (classify nonsrc_write, or write the
+          # pre-checkpoint).
+          _block_pre_with_path_hint
+        fi
+      else
+        # Empty FILE_PATH: cannot arm safely (REPO_ROOT may be a fallback cwd →
+        # arming would leak .checkpoint-required into an unrelated repo;
+        # regression SA-cwd-strict). Block to require a pre-checkpoint ONLY when
+        # implementation is sanctioned — a checkpoint is already armed OR a plan
+        # is approved this session. No approval + not armed = planning → allow.
+        # Arming defers to the pre-checkpoint write, where REPO_ROOT resolves
+        # from the absolute marker path.
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           || _plan_approved_exists_for_session "$MY_SID"; then
+          _block_pre
+        fi
       fi
-      _block_pre
+    fi
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Bash pre-checkpoint gate (PR-B2 #351 — F1 closure via the nonsrc_write
+# inversion). A Bash command whose LABEL is in the "writes-repo-source /
+# can't-tell" bucket (shared_write / unsafe_complex / unknown) arms
+# .checkpoint-required and blocks WITH the 3-way deny-hint (#333). nonsrc_write
+# (git internals, npm install, mkdir/rmdir, em-store, /tmp redirects) and
+# read_only fall through FREE — preserving the PR #352 planning-passive win.
+# read_only already exited at the top; marker_write was handled earlier;
+# push_or_pr_create is the push-gate's job below.
+#
+# The deny-hint offers the per-instance escape: if the command does NOT write
+# repo source, the agent classifies it once (read_only / nonsrc_write) and
+# retries free; if it IS implementation, the agent writes the pre-checkpoint.
+# G1 (#351): command-classifier.sh now consults the per-session marker before
+# the escapable redirect/default_write emits, so a classified command re-
+# classifies to its agent verdict on retry and this gate no longer fires for it.
+# ---------------------------------------------------------------------------
+case "$TOOL_NAME" in
+  Bash)
+    if _bash_label_arms_pre_checkpoint "$LABEL" \
+       && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+      # Agent-classifier-first (2026-05-26, user design decision): an UNEVALUATED
+      # novel command — the classifier's conservative cache-miss defaults
+      # (LABEL=shared_write, REASON in {default_write, interpreter_other}, e.g.
+      # `shasum` or `node foo.mjs`) — is routed to the agent classifier (block +
+      # 3-way hint) WITHOUT arming .checkpoint-required. Arming a not-yet-
+      # evaluated command framed read-only inspection as implementation AND left
+      # a lingering .checkpoint-required that deadlocked the stop-gate. The block
+      # itself is fail-closed: the command cannot run until the agent classifies
+      # it. Arming is DEFERRED to the agent's verdict — a marker-cache hit
+      # reclassifying the command a repo-source write (a recognized reason, not
+      # default_write/interpreter_other) takes the arm branch on retry, where the
+      # pre-checkpoint is then required. unknown / unsafe_complex and recognized
+      # write reasons (redirects, git/gh subcommands) still arm here (fail closed).
+      if [ "$LABEL" = "shared_write" ] && _bash_reason_is_unevaluated_novel "$REASON"; then
+        # Agent-classifier-first (#351): novel unevaluated command is HELD for
+        # classification regardless of plan state — this is NOT a checkpoint
+        # (it never arms) and is orthogonal to the planapproval redesign.
+        _block_needs_classification
+      else
+        # planapproval redesign: arm no-ops unless an approved-plan token exists
+        # (consumes it only if the arm succeeded). Block if a checkpoint is armed
+        # OR an approval token is still present — the latter is the fail-closed
+        # case where arming FAILED (codex PR review P1). No approved plan ⇒ no
+        # checkpoint ⇒ no block (NO CHECKPOINTS DURING PLANNING).
+        _arm_checkpoint_required_if_missing
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           || _plan_approved_exists_for_session "$MY_SID"; then
+          _block_pre_with_hint
+        fi
+      fi
     fi
     ;;
 esac
@@ -1141,7 +1470,57 @@ esac
 # Push-gate: only fires for Bash classified as push_or_pr_create.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
-  # Rank-2: session-aware post-checkpoint check.
+  # B1 (#351, §11b/§15-C3 — D7 backstop): push self-arms .post-checkpoint-required
+  # regardless of pre-checkpoint state, so push is an INDEPENDENT hard gate even
+  # when the pre-checkpoint was escaped via an agent verdict (D7 made the pre-
+  # checkpoint fully agent-discretionary). Without this, escaping the pre-
+  # checkpoint transitively no-ops the whole post/push/stop chain (post-req arms
+  # only if pre was armed+done; push blocks only if post-req exists; stop-gate
+  # fires only if checkpoint armed). Capture arm-if-missing's `noop` signal:
+  # noop:false ⇒ created THIS invocation ⇒ block UNCONDITIONALLY without re-
+  # reading .post-checkpoint-done (a marker created this instant cannot have a
+  # satisfied done-marker; closes the read-after-arm TOCTOU, §15-C3/F2). The
+  # cross-session sweep below is NOT weakened (load-bearing for orphan cleanup).
+  _push_self_arm_created=0
+  if ! checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
+    ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
+    if validate_session_id "$MY_SID"; then
+      HELPER_CKM_PUSH="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+      if [ -f "$HELPER_CKM_PUSH" ]; then
+        # CAPTURE stdout (codex C3: the gate previously discarded it) and parse
+        # the helper's authoritative `noop` field.
+        _push_arm_out="$(CLAUDE_CODE_SESSION_ID="$MY_SID" node "$HELPER_CKM_PUSH" \
+          --target .post-checkpoint-required \
+          --action arm-if-missing \
+          --root "$REPO_ROOT" 2>/dev/null)" || true
+        case "$_push_arm_out" in
+          *'"noop":false'*|*'"noop": false'*) _push_self_arm_created=1 ;;
+        esac
+      else
+        # Fallback (helper not installed): compute existence BEFORE touch so the
+        # created-now signal is race-free (§15-C3 — no read-after-arm window).
+        _push_req_path="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")"
+        if [ ! -e "$_push_req_path" ]; then
+          touch "$_push_req_path" 2>/dev/null || true
+          _push_self_arm_created=1
+        fi
+      fi
+    else
+      # Invalid/empty sid: legacy direct touch, existence-before-touch.
+      _push_req_path="$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
+      if [ ! -e "$_push_req_path" ]; then
+        touch "$_push_req_path" 2>/dev/null || true
+        _push_self_arm_created=1
+      fi
+    fi
+  fi
+  if [ "$_push_self_arm_created" = "1" ]; then
+    # Created THIS invocation → cannot already have a satisfied
+    # .post-checkpoint-done. Block unconditionally without re-reading (TOCTOU-free).
+    _block_post
+  fi
+  # Rank-2: session-aware post-checkpoint check (already-armed path — a prior
+  # invocation or post-write arming armed post-req; block until it's satisfied).
   if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
      && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
     _block_post

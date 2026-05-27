@@ -56,7 +56,7 @@ assert_eq "LEGACY_MARKER_DIR is .claude" ".claude" "$LEGACY_MARKER_DIR"
 assert_eq "BASELINE_NAME is .session-baseline" ".session-baseline" "$BASELINE_NAME"
 assert_eq "TASK_SIGNAL_MARKERS count is 3 (em-recall carve-out class)" "3" "${#TASK_SIGNAL_MARKERS[@]}"
 assert_eq "CHECKPOINT_CLEANUP_MARKERS count is 4 (push-gate cleanup class)" "4" "${#CHECKPOINT_CLEANUP_MARKERS[@]}"
-assert_eq "ALL_MIGRATED_MARKERS count is 6 (full migration scope)" "6" "${#ALL_MIGRATED_MARKERS[@]}"
+assert_eq "ALL_MIGRATED_MARKERS count is 7 (full migration scope)" "7" "${#ALL_MIGRATED_MARKERS[@]}"
 
 # Spot-check membership of each set.
 case " ${TASK_SIGNAL_MARKERS[*]} " in
@@ -81,6 +81,22 @@ case " ${ALL_MIGRATED_MARKERS[*]} " in
   *" .session-baseline "*) pass "ALL_MIGRATED_MARKERS contains .session-baseline" ;;
   *) fail "ALL_MIGRATED_MARKERS contains .session-baseline" "missing" ;;
 esac
+# planapproval redesign — .plan-approved approval token membership.
+# Review F1: EXCLUDED from CHECKPOINT_CLEANUP (no cross-session push-sweep).
+case " ${CHECKPOINT_CLEANUP_MARKERS[*]} " in
+  *" .plan-approved "*) fail "CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approved" "leaked into push cleanup" ;;
+  *) pass "CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approved (F1: no cross-session push-sweep)" ;;
+esac
+case " ${ALL_MIGRATED_MARKERS[*]} " in
+  *" .plan-approved "*) pass "ALL_MIGRATED_MARKERS contains .plan-approved" ;;
+  *) fail "ALL_MIGRATED_MARKERS contains .plan-approved" "missing" ;;
+esac
+case " ${TASK_SIGNAL_MARKERS[*]} " in
+  *" .plan-approved "*)
+    fail "TASK_SIGNAL_MARKERS does NOT contain .plan-approved" "leaked into carve-out class" ;;
+  *) pass "TASK_SIGNAL_MARKERS does NOT contain .plan-approved" ;;
+esac
+assert_eq "PLAN_APPROVED_LEGACY_BASENAME is .plan-approved" ".plan-approved" "$PLAN_APPROVED_LEGACY_BASENAME"
 
 echo
 echo "Path helpers:"

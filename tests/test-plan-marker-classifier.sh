@@ -76,6 +76,9 @@ echo ""
 echo "--- E5b: plan-marker.mjs helper invocation (F13) ---"
 run "node /Users/x/.episodic-memory/scripts/plan-marker.mjs --touch --root /repo" "marker_write" "plan_marker_touch" "E5b helper --touch"
 run "node /Users/x/.episodic-memory/scripts/plan-marker.mjs --rm --root /repo" "marker_write" "plan_marker_rm" "E5b helper --rm"
+# planapproval redesign: --approve is the sanctioned approval; classify as
+# marker_write so plan-gate allows it while a plan-pending marker exists.
+run "node /Users/x/.episodic-memory/scripts/plan-marker.mjs --approve --root /repo" "marker_write" "plan_marker_approve" "E5b helper --approve"
 
 echo ""
 echo "--- F-3: classifier reads CLAUDE_CODE_SESSION_ID from env (target encodes sid) ---"
@@ -98,6 +101,8 @@ run "ENV1=x ENV2=y node /Users/x/.episodic-memory/scripts/plan-marker.mjs --rm -
 echo ""
 echo "--- Mutex / missing action ---"
 run "node /scripts/plan-marker.mjs --touch --rm --root /repo" "unsafe_complex" "plan_marker_mutex" "mutex violation"
+run "node /scripts/plan-marker.mjs --touch --approve --root /repo" "unsafe_complex" "plan_marker_mutex" "mutex --touch --approve"
+run "node /scripts/plan-marker.mjs --rm --approve --root /repo" "unsafe_complex" "plan_marker_mutex" "mutex --rm --approve"
 run "node /scripts/plan-marker.mjs --root /repo" "unsafe_complex" "plan_marker_missing" "missing action"
 
 echo ""

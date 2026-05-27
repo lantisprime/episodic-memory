@@ -21,6 +21,7 @@ import {
   TASK_SIGNAL_MARKERS,
   CHECKPOINT_CLEANUP_MARKERS,
   ALL_MIGRATED_MARKERS,
+  PLAN_APPROVED_LEGACY_BASENAME,
   primaryMarkerPath,
   legacyMarkerPath,
   resolveMarkerRead,
@@ -60,7 +61,7 @@ test('LEGACY_MARKER_DIR is .claude', () => eq(LEGACY_MARKER_DIR, '.claude'))
 test('BASELINE_NAME is .session-baseline', () => eq(BASELINE_NAME, '.session-baseline'))
 test('TASK_SIGNAL_MARKERS length is 3 (em-recall carve-out class)', () => eq(TASK_SIGNAL_MARKERS.length, 3))
 test('CHECKPOINT_CLEANUP_MARKERS length is 4 (push-gate cleanup class)', () => eq(CHECKPOINT_CLEANUP_MARKERS.length, 4))
-test('ALL_MIGRATED_MARKERS length is 6 (full migration scope)', () => eq(ALL_MIGRATED_MARKERS.length, 6))
+test('ALL_MIGRATED_MARKERS length is 7 (full migration scope)', () => eq(ALL_MIGRATED_MARKERS.length, 7))
 test('TASK_SIGNAL_MARKERS contains .checkpoint-required', () => {
   if (!TASK_SIGNAL_MARKERS.includes('.checkpoint-required')) throw new Error('missing')
 })
@@ -76,6 +77,20 @@ test('CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approval-pending', () =>
 test('ALL_MIGRATED_MARKERS contains .session-baseline', () => {
   if (!ALL_MIGRATED_MARKERS.includes('.session-baseline')) throw new Error('missing')
 })
+// planapproval redesign — .plan-approved approval token membership.
+// Review F1: it is deliberately EXCLUDED from CHECKPOINT_CLEANUP (push sweep
+// globs all sessions' suffixed forms → would delete a concurrent session's
+// live token). It IS in ALL_MIGRATED (own-session SessionEnd cleanup).
+test('CHECKPOINT_CLEANUP_MARKERS does NOT contain .plan-approved (F1: no cross-session push-sweep)', () => {
+  if (CHECKPOINT_CLEANUP_MARKERS.includes('.plan-approved')) throw new Error('leaked into push cleanup — would cross-session-sweep live tokens')
+})
+test('ALL_MIGRATED_MARKERS contains .plan-approved', () => {
+  if (!ALL_MIGRATED_MARKERS.includes('.plan-approved')) throw new Error('missing')
+})
+test('TASK_SIGNAL_MARKERS does NOT contain .plan-approved (not a stop-gate signal)', () => {
+  if (TASK_SIGNAL_MARKERS.includes('.plan-approved')) throw new Error('leaked into carve-out class')
+})
+test('PLAN_APPROVED_LEGACY_BASENAME is .plan-approved', () => eq(PLAN_APPROVED_LEGACY_BASENAME, '.plan-approved'))
 
 console.log('\nPath helpers:')
 test('primaryMarkerPath returns .checkpoints/<basename>', () => {

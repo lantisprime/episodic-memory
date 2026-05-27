@@ -633,6 +633,205 @@ test('§CF4 --command-file write then inline --read hit (write path honors --com
   assert.strictEqual(r.label, 'read_only')
 })
 
+// ----- PR-B2 S3: --target-path path-verdict mode (§11/§14-F4/§15-C2) -----
+
+test('§P1 path verdict write + read round-trip (existing target)', () => {
+  const repo = mkrepo('p1')
+  const sid = 's_p1_' + crypto.randomBytes(4).toString('hex')
+  const target = path.join(repo, 'docs', 'note.md')
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  fs.writeFileSync(target, '# note')
+
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid,
+    '--label', 'nonsrc_write', '--confidence', '0.9', '--reason', 'doc, not source'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  assert.strictEqual(parseStdout(w).label, 'nonsrc_write')
+
+  const r = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(r.status, 0, `read failed: ${r.stderr}`)
+  const rj = parseStdout(r)
+  assert.strictEqual(rj.status, 'hit')
+  assert.strictEqual(rj.label, 'nonsrc_write')
+})
+
+test('§P2 nonexistent target: write key == read key (canonicalize via existing ancestor)', () => {
+  const repo = mkrepo('p2')
+  const sid = 's_p2_' + crypto.randomBytes(4).toString('hex')
+  // None of newdir/sub/gen.md exist yet — Write would create them.
+  const target = path.join(repo, 'newdir', 'sub', 'gen.md')
+
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid,
+    '--label', 'nonsrc_write', '--confidence', '0.9', '--reason', 'generated doc'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  const wsha = parseStdout(w).cache_key
+
+  // Read BEFORE the file is created → must hit (same canonical key).
+  const r1 = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(parseStdout(r1).status, 'hit', 'nonexistent-target read must hit')
+  assert.strictEqual(parseStdout(r1).cache_key, wsha, 'key must match write key')
+
+  // Create the file, read again → key must be stable (still hit).
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  fs.writeFileSync(target, 'x')
+  const r2 = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(parseStdout(r2).status, 'hit', 'post-create read must still hit')
+  assert.strictEqual(parseStdout(r2).cache_key, wsha, 'key must be stable after file creation')
+})
+
+test('§P3 symlinked ancestor escaping the repo → refused (exit 2)', () => {
+  const repo = mkrepo('p3')
+  const external = mktmp('p3-external')
+  // repo/linkdir → external (outside repo)
+  fs.symlinkSync(external, path.join(repo, 'linkdir'))
+  const target = path.join(repo, 'linkdir', 'evil.mjs')  // canonicalizes outside repo
+  const r = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', 'sid_p3_aaaa',
+    '--label', 'nonsrc_write', '--confidence', '1', '--reason', 'escape attempt'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(r.status, 2, `symlink-escape target must refuse; got ${r.status}`)
+  assert.match(r.stderr, /resolves outside project root/, `expected escape rejection: ${r.stderr}`)
+})
+
+test('§P4 off-repo target → refused (exit 2)', () => {
+  const repo = mkrepo('p4')
+  const elsewhere = mktmp('p4-elsewhere')
+  const target = path.join(elsewhere, 'foo.mjs')
+  const r = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', 'sid_p4_aaaa',
+    '--label', 'nonsrc_write', '--confidence', '1', '--reason', 'off-repo'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(r.status, 2, `off-repo target must refuse; got ${r.status}`)
+  assert.match(r.stderr, /resolves outside project root/)
+})
+
+test('§P5 namespace segregation: path tuple key never collides with a command key', () => {
+  const repo = mkrepo('p5')
+  const sid = 's_p5_' + crypto.randomBytes(4).toString('hex')
+  const target = path.join(repo, 'x.mjs')
+  fs.writeFileSync(target, 'x')
+
+  // Write a PATH verdict for target.
+  const wp = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid,
+    '--label', 'nonsrc_write', '--confidence', '0.9', '--reason', 'path'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  const pathKey = parseStdout(wp).cache_key
+
+  // A COMMAND whose text is exactly the segregating `write:<canonical>` string
+  // must NOT collide with the path tuple's key, and a --command read of it must
+  // miss the path marker.
+  const collidingCmd = `write:${target}`
+  const rc = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command', collidingCmd, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(rc.status, 1, 'command read must not see the path marker')
+  assert.notStrictEqual(parseStdout(rc).cache_key, pathKey, 'command key must differ from path key')
+})
+
+test('§P6 (axis-9) caller-cwd is a subdir: relative target resolves under repo, marker under repo', () => {
+  const repo = mkrepo('p6')
+  const sid = 's_p6_' + crypto.randomBytes(4).toString('hex')
+  const sub = path.join(repo, 'scripts')
+  fs.mkdirSync(sub)
+
+  // caller-cwd = scripts/, relative target 'gen.mjs' → repo/scripts/gen.mjs.
+  // Helper process cwd MUST be repo (cross-repo check); caller-cwd differs.
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', sub,
+    '--target-path', 'gen.mjs', '--session-id', sid,
+    '--label', 'nonsrc_write', '--confidence', '0.9', '--reason', 'rel target'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+
+  // Marker lands under the TARGET project, never under caller cwd.
+  const markerDir = path.join(repo, '.checkpoints', 'classify')
+  assert.ok(fs.readdirSync(markerDir).length > 0, 'marker missing under repo store')
+  assert.ok(!fs.existsSync(path.join(sub, '.checkpoints')), 'marker leaked under caller cwd')
+
+  // Read with the SAME caller-cwd + relative target → hit (key stable).
+  const r = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', sub,
+    '--target-path', 'gen.mjs', '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(parseStdout(r).status, 'hit', 'relative-target read must hit')
+})
+
+test('§P7 --target-path label allowlist + read returns the path verdict label', () => {
+  const repo = mkrepo('p7')
+  const sid = 's_p7_' + crypto.randomBytes(4).toString('hex')
+  const target = path.join(repo, 'README-draft.md')
+
+  // Invalid label → exit 2.
+  const bad = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid,
+    '--label', 'evil_inject', '--confidence', '1', '--reason', 'x'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(bad.status, 2, 'invalid label must refuse')
+  assert.match(bad.stderr, /invalid --label/)
+
+  // read_only path verdict round-trips too (gate honors nonsrc_write|read_only).
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'draft, not source'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  const r = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sid
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(parseStdout(r).label, 'read_only')
+})
+
+test('§P8 --target-path is mutually exclusive with --command', () => {
+  const repo = mkrepo('p8')
+  const r = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', path.join(repo, 'x.mjs'), '--command', 'node x.mjs',
+    '--session-id', 'sid_p8_aaaa'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(r.status, 2, 'expected exit 2')
+  assert.match(r.stderr, /mutually exclusive/)
+})
+
+test('§P9 cross-session: path marker from another session does not read back', () => {
+  const repo = mkrepo('p9')
+  const sidA = 's_p9A_' + crypto.randomBytes(4).toString('hex')
+  const sidB = 's_p9B_' + crypto.randomBytes(4).toString('hex')
+  const target = path.join(repo, 'gen.mjs')
+  runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sidA,
+    '--label', 'nonsrc_write', '--confidence', '0.9', '--reason', 'A'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  // Session B reads the same target → miss (session-bound key).
+  const rB = runHelper(['--read',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--target-path', target, '--session-id', sidB
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(rB.status, 1, 'session B must not read session A path marker')
+})
+
 // ----- Runner -----
 async function run() {
   console.log('classifier-marker.mjs tests')

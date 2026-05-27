@@ -196,7 +196,7 @@ agent_classify_command() {
       # helper's threshold gate (default 0.7).
       local parsed
       parsed="$(printf '%s' "$out" | node -e '
-        const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+        const ALLOWED = new Set(["read_only","nonsrc_write","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
         let buf = ""
         process.stdin.on("data", c => buf += c)
         process.stdin.on("end", () => {
@@ -267,7 +267,7 @@ agent_classify_command() {
         # marker-cache parser above).
         local parsed
         parsed="$(printf '%s' "$out" | node -e '
-          const ALLOWED = new Set(["read_only","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+          const ALLOWED = new Set(["read_only","nonsrc_write","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
           let buf = ""
           process.stdin.on("data", c => buf += c)
           process.stdin.on("end", () => {
@@ -310,6 +310,86 @@ agent_classify_command() {
     fi
   fi
 
+  return 1
+}
+
+# agent_classify_path <file_path> <repo_root> <caller_cwd>
+#   echoes "<label>" (read_only|nonsrc_write|…) on a per-session marker hit
+#   (exit 0); echoes "" and returns 1 on miss / helper-absent / root drift.
+#
+# PR-B2 S3 (§11/§14-F4): the Write/Edit pre-checkpoint arm was a pure path
+# heuristic — any in-repo target armed — which over-arms on plan/scratch/doc
+# files cross-tool harnesses stage in-project. This is the READ side of the
+# path-verdict escape: the agent classifies a TARGET path once via
+# `classifier-marker.mjs --write --target-path`, and the gate consults the
+# verdict here. Mirrors agent_classify_command but with --target-path instead
+# of --command. NO auto-persist: path verdicts have no Tier-0 analog
+# (classify_path is path-shaped, not command-shaped), so they live only as
+# per-session markers — re-classified each session, like cross-session command
+# markers before Tier-0 promotion. NO legacy direct-fetch fallback (paths were
+# never an LLM-dispatch subject).
+agent_classify_path() {
+  local file_path="$1"
+  local repo_root="$2"
+  local caller_cwd="$3"
+
+  if [ -z "$file_path" ] || [ -z "$repo_root" ] || [ -z "$caller_cwd" ]; then
+    return 1
+  fi
+
+  local session_id
+  session_id="$(__agent_classifier_session_id)"
+
+  local marker_helper
+  if ! marker_helper="$(__agent_classifier_resolve_marker_helper)"; then
+    return 1
+  fi
+
+  local out
+  # Subshell cd forces helper's process.cwd() to repo_root (the helper's
+  # canonicalization binds the target to --project-root). 2>/dev/null keeps
+  # helper diagnostics out of the hook stream.
+  out="$(cd "$repo_root" 2>/dev/null && node "$marker_helper" --read \
+    --project-root "$repo_root" \
+    --caller-cwd "$caller_cwd" \
+    --target-path "$file_path" \
+    --session-id "$session_id" 2>/dev/null)"
+  local rc=$?
+  if [ $rc -ne 0 ] || [ -z "$out" ]; then
+    return 1
+  fi
+
+  local parsed
+  parsed="$(printf '%s' "$out" | node -e '
+    const ALLOWED = new Set(["read_only","nonsrc_write","shared_write","marker_write","push_or_pr_create","unsafe_complex"])
+    let buf = ""
+    process.stdin.on("data", c => buf += c)
+    process.stdin.on("end", () => {
+      try {
+        const last = buf.trim().split("\n").pop()
+        const j = JSON.parse(last)
+        if (j.status !== "hit") { process.stdout.write(""); return }
+        let label = j.label || ""
+        if (label && !ALLOWED.has(label)) label = ""
+        const root = String(j.project_root_used || "").replace(/[\t\n\r]/g, "_")
+        process.stdout.write(`${label}\t${root}`)
+      } catch { process.stdout.write("") }
+    })
+  ' 2>/dev/null)"
+
+  if [ -n "$parsed" ]; then
+    local label root
+    label="$(printf '%s' "$parsed" | awk -F'\t' '{print $1}')"
+    root="$(printf '%s' "$parsed" | awk -F'\t' '{print $2}')"
+    # Re-verify project_root_used echo (macOS /var → /private/var; PR #336
+    # file 6/8 lesson) before trusting the verdict.
+    local _repo_root_canon
+    _repo_root_canon="$(cd "$repo_root" 2>/dev/null && pwd -P)"
+    if [ -n "$label" ] && [ "$root" = "$_repo_root_canon" ]; then
+      printf '%s\n' "$label"
+      return 0
+    fi
+  fi
   return 1
 }
 

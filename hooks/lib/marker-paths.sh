@@ -12,13 +12,20 @@
 # `.checkpoints/` first, fallback `.claude/` second) until the legacy
 # branch is removed in a follow-up commit.
 #
-# Six markers in migration scope:
+# Seven markers in migration scope:
 #
 #   Marker name                    | Set membership
 #   ---                            | ---
 #   .checkpoint-required           | TASK_SIGNAL + CHECKPOINT_CLEANUP
 #   .post-checkpoint-required      | TASK_SIGNAL + CHECKPOINT_CLEANUP
 #   .plan-approval-pending         | TASK_SIGNAL only (not cleared by push)
+#   .plan-approved                 | ALL_MIGRATED only — own-session cleanup
+#                                    (approval token; consumed at arm, one-shot).
+#                                    Deliberately NOT in CHECKPOINT_CLEANUP: the
+#                                    push sweep globs all sessions' suffixed
+#                                    forms, which would delete a CONCURRENT
+#                                    session's live token and skip its
+#                                    pre-checkpoint (review F1).
 #   .pre-checkpoint-done           | CHECKPOINT_CLEANUP only
 #   .post-checkpoint-done          | CHECKPOINT_CLEANUP only
 #   .session-baseline              | BASELINE only
@@ -44,8 +51,9 @@
 #   CHECKPOINT_CLEANUP_MARKERS  4 markers — push-gate clears on successful
 #                               push (Codex round-1 F2: must sweep BOTH
 #                               .checkpoints/ AND .claude/ during burn-in).
-#                               Mirrors prior checkpoint-gate.sh:200.
-#   ALL_MIGRATED_MARKERS        6 names — full migration scope used by
+#                               Mirrors prior checkpoint-gate.sh:200. (.plan-approved
+#                               intentionally excluded — see review F1.)
+#   ALL_MIGRATED_MARKERS        7 names — full migration scope used by
 #                               tests, sweep tools, and SessionEnd cleanup.
 #
 # Codex round-2 ACCEPT (episode 20260509-044331-...-bc1c) per plan v3 §B.
@@ -64,9 +72,12 @@ TASK_SIGNAL_MARKERS=(
 )
 
 # Push-gate cleanup class — markers cleared on a successful push that has
-# satisfied the post-checkpoint. .plan-approval-pending is intentionally
-# NOT here (its lifecycle is plan-gate's marker_write allowance, not
-# checkpoint cleanup). Mirrors the prior checkpoint-gate.sh:200 list.
+# satisfied the post-checkpoint. The push sweep glob-deletes ALL sessions'
+# suffixed forms — convergence semantics for the quartet. .plan-approval-pending
+# is NOT here (plan-gate owns it). .plan-approved is NOT here either (review F1):
+# it is the per-session authorization-to-arm token, so cross-session glob-
+# deletion would skip a concurrent session's pre-checkpoint. It is consumed at
+# arm in the normal flow; own-session orphans are cleaned at SessionEnd.
 CHECKPOINT_CLEANUP_MARKERS=(
   ".checkpoint-required"
   ".pre-checkpoint-done"
@@ -74,12 +85,13 @@ CHECKPOINT_CLEANUP_MARKERS=(
   ".post-checkpoint-done"
 )
 
-# Full migration scope = task-signal + done markers + baseline = 6 names.
-# Used by sweep tools and tests to validate completeness.
+# Full migration scope = task-signal + approval token + done markers +
+# baseline = 7 names. Used by sweep tools and tests to validate completeness.
 ALL_MIGRATED_MARKERS=(
   ".checkpoint-required"
   ".post-checkpoint-required"
   ".plan-approval-pending"
+  ".plan-approved"
   ".pre-checkpoint-done"
   ".post-checkpoint-done"
   ".session-baseline"
@@ -187,6 +199,20 @@ plan_marker_basename_matches() {
 plan_marker_basename_for_session() {
   printf '.plan-approval-pending.%s' "$1"
 }
+
+# ---------------------------------------------------------------------------
+# Checkpoint-planapproval redesign — `.plan-approved` approval token (shell
+# parity for scripts/lib/marker-paths.mjs PLAN_APPROVED_LEGACY_BASENAME).
+#
+# Per-session form `.plan-approved.<sid>` uses the generic namespaced-marker
+# helpers below (namespaced_marker_basename_for_session /
+# namespaced_marker_basename_matches / any_namespaced_marker_exists).
+# Created by plan-marker.mjs --approve; consumed (one-shot) by
+# checkpoint-gate.sh's _arm_checkpoint_required_if_missing. A forged/wrong-root
+# `.plan-approved` is INERT (see .mjs note) — not plumbed into wrong-root
+# detectors.
+# ---------------------------------------------------------------------------
+readonly PLAN_APPROVED_LEGACY_BASENAME='.plan-approved'
 
 # any_plan_marker_exists <repo-root>
 # True if ANY plan-approval marker (legacy suffix-less OR any suffixed form)

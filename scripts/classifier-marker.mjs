@@ -8,8 +8,10 @@
  * verdict here. A PreToolUse shell hook reads the marker and gates.
  *
  * Mode: --read
- *   Args: --project-root <abs> --caller-cwd <abs> --command <text>
- *         --session-id <string>
+ *   Args: --project-root <abs> --caller-cwd <abs> --session-id <string>
+ *         and ONE classification subject:
+ *           --command <text> | --command-file <path>  (a Bash command), OR
+ *           --target-path <path>                       (a Write/Edit target)
  *   Emits the cached JSON verdict on stdout, exit 0; exits 1 if no marker
  *   exists or marker is stale/invalid.
  *
@@ -17,6 +19,15 @@
  *   Args: above + --label <L> --confidence <N> --reason <S>
  *   Atomically writes to <project>/.checkpoints/classify/<sha>.json.
  *   Exits 0 on success; exits 2 on input/binding error.
+ *
+ * Path-verdict subject (PR-B2 §11/§15-C2, #351): --target-path classifies a
+ * Write/Edit TARGET path rather than a command. The Edit/Write pre-checkpoint
+ * arming was a pure path heuristic — any in-repo write armed — which over-arms
+ * on the plan/scratch/doc files cross-tool harnesses stage in-project. A path
+ * verdict lets the agent declare a specific target nonsrc_write/read_only and
+ * skip the arm, symmetric with the Bash command verdict. The path tuple is
+ * namespace-segregated from command tuples (see buildPathTuple) so the two
+ * key spaces can never collide.
  *
  * Mode: --vacuum
  *   Args: --project-root <abs> [--max-age-days N (default 30)]
@@ -67,6 +78,7 @@ import { resolveRepoRoot } from './lib/local-dir.mjs'
 
 const LABELS = new Set([
   'read_only',
+  'nonsrc_write',
   'shared_write',
   'marker_write',
   'push_or_pr_create',
@@ -75,7 +87,10 @@ const LABELS = new Set([
 
 // Path-versioning fields. Bumping either makes ALL existing markers
 // unreachable via their old paths and forces re-classification.
-const CLASSIFIER_POLICY_VERSION = 1
+// Bumped 1→2 (PR-B2, #351): the `nonsrc_write` label is a taxonomy change.
+// Stale markers carrying the old policy version become unreachable and force
+// re-classification (handled at the version-mismatch check ~L380; --vacuum reaps).
+const CLASSIFIER_POLICY_VERSION = 2
 const NORMALIZED_COMMAND_VERSION = 1
 const MARKER_SCHEMA_VERSION = 2
 
@@ -200,6 +215,100 @@ function cacheKey(tuple) {
   const sorted = {}
   for (const k of Object.keys(tuple).sort()) sorted[k] = tuple[k]
   return crypto.createHash('sha256').update(JSON.stringify(sorted)).digest('hex')
+}
+
+// ----- Path-verdict tuple (PR-B2 §11/§15-C2): a Write/Edit TARGET path -----
+
+// canonicalizeTargetPath — resolve a write target to a canonical absolute path
+// BOUND to project_root (codex R2 C2(e), MANDATORY). The target frequently does
+// NOT exist yet (a Write creates it), so we must NOT realpathSync.native(target)
+// — that throws ENOENT. Instead walk up to the nearest EXISTING ancestor,
+// realpath THAT (native, resolving any symlinked parent), reject an escape
+// outside project_root, then re-append the unresolved trailing segments
+// lexically. This makes write-side and read-side canonicalization identical for
+// a not-yet-created path so the cache key matches on the retry.
+//
+// lstatSync (not statSync) is used during the walk so a broken-symlink leaf is
+// treated as "existing surface to resolve" rather than walked through.
+function canonicalizeTargetPath(targetArg, callerCwd, projectRoot) {
+  const abs = path.resolve(callerCwd, targetArg)
+  const trailing = []
+  let cur = abs
+  while (true) {
+    try {
+      fs.lstatSync(cur)
+      break
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e
+      const parent = path.dirname(cur)
+      if (parent === cur) break   // reached filesystem root; nothing on path exists
+      trailing.unshift(path.basename(cur))
+      cur = parent
+    }
+  }
+  let realAncestor
+  try { realAncestor = fs.realpathSync.native(cur) }
+  catch { realAncestor = cur }
+
+  // The existing ancestor MUST canonicalize INSIDE project_root. A symlinked
+  // ancestor escaping the repo — or an explicitly off-repo target — is refused:
+  // path verdicts are only meaningful for in-repo write targets (the gate's
+  // repo-source heuristic already excludes off-repo writes), and a key that
+  // resolves outside the repo must never be honored as a downgrade. Compare
+  // against the native-canonical project root so realpathSync (used at the
+  // call site) vs realpathSync.native can't drift (macOS /var→/private/var).
+  let projectRootNative
+  try { projectRootNative = fs.realpathSync.native(projectRoot) }
+  catch { projectRootNative = projectRoot }
+  if (!isUnder(realAncestor, projectRootNative)) {
+    die(2, `--target-path resolves outside project root: ${realAncestor} not under ${projectRootNative}`)
+  }
+
+  return trailing.length ? path.join(realAncestor, ...trailing) : realAncestor
+}
+
+// buildPathTuple — the path-verdict cache tuple. Namespace-segregated from
+// command tuples (buildTuple) TWO ways, either of which alone guarantees the
+// sha can never collide with a command key: (1) a `_kind: 'path_write'`
+// discriminator field that command tuples never carry, and (2) the canonical
+// path stored under a `write:`-prefixed `target_path` field (the literal
+// `write:<canonical-path>` namespace from §14-F4/§15-C2). The field-name set
+// differs from buildTuple's, so the sorted-JSON the sha is taken over is
+// structurally distinct.
+function buildPathTuple({ targetCanonical, projectRoot, sessionId }) {
+  return {
+    _kind: 'path_write',
+    project_root_canonical: projectRoot,
+    target_path: `write:${targetCanonical}`,
+    session_id: sessionId,
+    classifier_policy_version: CLASSIFIER_POLICY_VERSION,
+    normalized_command_version: NORMALIZED_COMMAND_VERSION
+  }
+}
+
+// resolveInputTuple — resolve the classification subject for --read/--write:
+// exactly one of {--command|--command-file} (a Bash command) OR --target-path
+// (a Write/Edit target). Returns the cache tuple, its sha, and the value to
+// store in the marker's informational `command_normalized` field.
+function resolveInputTuple(argv, { projectRoot, callerCwd, sessionId }) {
+  const targetPath = flag(argv, '--target-path')
+  const inlineCmd = flag(argv, '--command')
+  const cmdFile = flag(argv, '--command-file')
+
+  if (targetPath !== undefined) {
+    if (inlineCmd !== undefined || cmdFile !== undefined) {
+      die(2, '--target-path is mutually exclusive with --command/--command-file')
+    }
+    if (targetPath === '') die(2, '--target-path must be non-empty')
+    const canonical = canonicalizeTargetPath(targetPath, callerCwd, projectRoot)
+    const tuple = buildPathTuple({ targetCanonical: canonical, projectRoot, sessionId })
+    return { tuple, sha: cacheKey(tuple), payloadNorm: `write:${canonical}` }
+  }
+
+  const command = resolveCommandArg(argv)
+  if (command === undefined) die(2, '--command, --command-file, or --target-path required')
+  const tuple = buildTuple({ command, projectRoot, callerCwd, sessionId })
+  return { tuple, sha: cacheKey(tuple), payloadNorm: tuple.normalized_command }
 }
 
 // ----- Path-component hardening (lstat each ancestor, refuse symlinks) -----
@@ -435,16 +544,21 @@ function emit(obj) {
 function mainRead(argv) {
   const projectRootArg = flag(argv, '--project-root')
   const callerCwd = flag(argv, '--caller-cwd')
-  const command = resolveCommandArg(argv)
   const sessionId = flag(argv, '--session-id')
 
   if (!projectRootArg) die(2, '--project-root required')
   if (!callerCwd) die(2, '--caller-cwd required')
-  if (command === undefined) die(2, '--command or --command-file required')
   if (!sessionId) die(2, '--session-id required')
   if (!SESSION_ID_RE.test(sessionId)) die(2, `--session-id "${sessionId}" does not match ${SESSION_ID_RE}`)
 
   const projectRoot = realpathOrSame(path.resolve(projectRootArg))
+
+  // Resolve + validate the classification subject BEFORE the store-dir check.
+  // Subject misuse (mutual-exclusion, oversize --command-file, off-repo
+  // --target-path) is a usage error (exit 2) that must take precedence over a
+  // missing-store cache miss (exit 1) — otherwise a fresh repo with no
+  // .checkpoints/ would mask the misuse as a benign miss.
+  const { tuple, sha } = resolveInputTuple(argv, { projectRoot, callerCwd, sessionId })
 
   // Codex BLOCKER #1 fix: --read MUST apply the same ancestor validation as
   // --write. Symlinked .checkpoints/ would otherwise let a read escape to an
@@ -457,8 +571,6 @@ function mainRead(argv) {
   }
   const classifyDir = v.classifyDir
 
-  const tuple = buildTuple({ command, projectRoot, callerCwd, sessionId })
-  const sha = cacheKey(tuple)
   const result = readMarker(classifyDir, sha, tuple, sessionId)
 
   if (result.status === 'hit') {
@@ -486,7 +598,6 @@ function mainRead(argv) {
 function mainWrite(argv) {
   const projectRootArg = flag(argv, '--project-root')
   const callerCwd = flag(argv, '--caller-cwd')
-  const command = resolveCommandArg(argv)
   const sessionId = flag(argv, '--session-id')
   const label = flag(argv, '--label')
   const confidenceStr = flag(argv, '--confidence')
@@ -494,7 +605,6 @@ function mainWrite(argv) {
 
   if (!projectRootArg) die(2, '--project-root required')
   if (!callerCwd) die(2, '--caller-cwd required')
-  if (command === undefined) die(2, '--command or --command-file required')
   if (!sessionId) die(2, '--session-id required')
   if (!label) die(2, '--label required')
   if (!LABELS.has(label)) die(2, `invalid --label "${label}" (allowed: ${[...LABELS].join(', ')})`)
@@ -521,15 +631,17 @@ function mainWrite(argv) {
     die(2, `--project-root (${projectRoot}) != resolveRepoRoot(process.cwd()) (${resolvedFromCwd}); refusing cross-repo write`)
   }
 
+  // Resolve + validate the subject BEFORE creating the store dir, so a misuse
+  // (mutual-exclusion, oversize, off-repo --target-path) exits 2 without
+  // leaving an empty .checkpoints/classify/ behind.
+  const { tuple, sha, payloadNorm } = resolveInputTuple(argv, { projectRoot, callerCwd, sessionId })
   const { classifyDir } = validateMarkerStoreDir(projectRoot, { allowCreate: true, missingIsMiss: false })
-  const tuple = buildTuple({ command, projectRoot, callerCwd, sessionId })
-  const sha = cacheKey(tuple)
   const nowIso = new Date().toISOString()
   const payload = {
     label,
     confidence,
     reason: String(reasonRaw).slice(0, REASON_MAX),
-    command_normalized: tuple.normalized_command,
+    command_normalized: payloadNorm,
     _project_root_canonical: projectRoot,
     _cache_key: sha,
     _session_id: sessionId,
