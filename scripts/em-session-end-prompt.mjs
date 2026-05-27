@@ -25,6 +25,7 @@ import {
   legacyMarkerPath,
   namespacedMarkerBasenameForSession,
   CHECKPOINT_QUARTET,
+  PLAN_APPROVED_LEGACY_BASENAME,
 } from './lib/marker-paths.mjs'
 import { validateSessionId } from './lib/session-id.mjs'
 
@@ -144,10 +145,16 @@ for (const marker of ALL_MIGRATED_MARKERS) {
   // form. NEVER delete other sessions' suffixed forms (cross-session
   // safety — concurrent session A's quartet markers preserved at B's
   // SessionEnd, mirrors plan-marker F12 cross-session contract).
+  //
+  // Review F2: `.plan-approved.<sid>` (the approval token) gets the SAME
+  // own-session suffixed cleanup as the quartet — without it, a session that
+  // approves but ends before arming leaks an orphan token (it is deliberately
+  // excluded from the push sweep, so SessionEnd is its only own-session reaper).
   for (const p of bothMarkerPaths(repoRoot, marker)) {
     try { fs.unlinkSync(p) } catch {}
   }
-  if (CHECKPOINT_QUARTET.includes(marker) && validateSessionId(sessionEndSid)) {
+  if ((CHECKPOINT_QUARTET.includes(marker) || marker === PLAN_APPROVED_LEGACY_BASENAME)
+      && validateSessionId(sessionEndSid)) {
     const ownBasename = namespacedMarkerBasenameForSession(marker, sessionEndSid)
     for (const p of [
       primaryMarkerPath(repoRoot, ownBasename),

@@ -312,6 +312,34 @@ test('em-session-end-prompt removes non-plan markers; F12 preserves legacy + rem
   }
 })
 
+test('SessionEnd removes own-session .plan-approved.<sid>; preserves a concurrent session token (review F2)', () => {
+  // Review F2: `.plan-approved` is excluded from the push sweep (F1), so
+  // SessionEnd is its only own-session reaper. It must remove the ENDING
+  // session's `.plan-approved.<sid>` (orphan from approve-but-never-implement)
+  // while preserving a CONCURRENT session's live token (cross-session safety,
+  // mirrors the F12 plan-marker contract).
+  const root = setupRepo()
+  const sid = 'session-end-A'
+  const otherSid = 'concurrent-B'
+  for (const dir of ['.checkpoints', '.claude']) {
+    fs.mkdirSync(path.join(root, dir), { recursive: true })
+    fs.writeFileSync(path.join(root, dir, `.plan-approved.${sid}`), 'x')        // own (orphan)
+    fs.writeFileSync(path.join(root, dir, `.plan-approved.${otherSid}`), 'x')   // concurrent (live)
+  }
+  execSync(`node ${SESSION_END}`, {
+    cwd: root,
+    input: JSON.stringify({ session_id: sid, hook_event_name: 'SessionEnd' }),
+    stdio: ['pipe', 'pipe', 'ignore'],
+    env: { ...process.env, HOME: root }
+  })
+  for (const dir of ['.checkpoints', '.claude']) {
+    assertMissing(path.join(root, dir, `.plan-approved.${sid}`),
+      `F2: own-session ${dir}/.plan-approved.${sid} should be removed at SessionEnd`)
+    assertExists(path.join(root, dir, `.plan-approved.${otherSid}`),
+      `F2: concurrent ${dir}/.plan-approved.${otherSid} must be PRESERVED (cross-session safety)`)
+  }
+})
+
 test('SessionEnd with invalid session_id leaves all plan-markers untouched', () => {
   // F12: invalid sid → skip plan-marker cleanup entirely. Non-plan markers
   // continue to clean up normally.

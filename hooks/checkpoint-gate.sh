@@ -654,23 +654,67 @@ _block_env_prefix_marker() {
 # Idempotent: no-op if the marker already exists (own-session or legacy).
 # Best-effort: never aborts the hook under set -e.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Plan-approval token helpers (checkpoint-planapproval redesign).
+#
+# `.plan-approved.<sid>` is created by `plan-marker.mjs --approve` and is the
+# ONLY thing that authorizes arming a checkpoint. It is own-session + suffixed
+# by nature (a UUID session approved a specific plan) — there is NO legacy
+# suffix-less form (the marker is new; no burn-in literal). F14 fail-closed:
+# an invalid/empty sid is never "approved", so it can never arm.
+# ---------------------------------------------------------------------------
+_plan_approved_exists_for_session() {
+  local sid="$1"
+  validate_session_id "$sid" || return 1
+  local bn
+  bn="$(namespaced_marker_basename_for_session "$PLAN_APPROVED_LEGACY_BASENAME" "$sid")"
+  [ -e "$PRIMARY_DIR/$bn" ] && return 0
+  [ -e "$LEGACY_DIR/$bn" ] && return 0
+  return 1
+}
+
+# Consume (delete) THIS session's approval token at both roots. One-shot: an
+# approval authorizes exactly one arm and can't leak into a later planning
+# phase. Best-effort under set -e. Own-session only (never the bare literal).
+_consume_plan_approved() {
+  local sid="$1"
+  validate_session_id "$sid" || return 0
+  local bn
+  bn="$(namespaced_marker_basename_for_session "$PLAN_APPROVED_LEGACY_BASENAME" "$sid")"
+  rm -f "$PRIMARY_DIR/$bn" "$LEGACY_DIR/$bn" 2>/dev/null || true
+}
+
 _arm_checkpoint_required_if_missing() {
   if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
     return 0
   fi
+  # planapproval redesign: arming is ANCHORED to plan-approval, NOT to a file-
+  # write heuristic. Do NOT arm unless THIS session has an approved-plan token.
+  # No approval → no checkpoint (NO CHECKPOINTS DURING PLANNING; and per the
+  # user decision dropping the plan-requirement block, no plan simply means no
+  # implementation gate — the write is allowed by the conditional callers).
+  if ! _plan_approved_exists_for_session "$MY_SID"; then
+    return 0
+  fi
+  # sid is valid here (the approval check requires it).
   ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
-  if validate_session_id "$MY_SID"; then
-    local helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
-    if [ -f "$helper" ]; then
-      CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
-        --target .checkpoint-required \
-        --action arm-if-missing \
-        --root "$REPO_ROOT" >/dev/null 2>&1 || true
-    else
-      touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
-    fi
+  local helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+  if [ -f "$helper" ]; then
+    CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
+      --target .checkpoint-required \
+      --action arm-if-missing \
+      --root "$REPO_ROOT" >/dev/null 2>&1 || true
   else
-    touch "$(write_marker_path "$REPO_ROOT" .checkpoint-required)" 2>/dev/null || true
+    touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
+  fi
+  # Transactional consume (codex PR review P1): the arm above is best-effort
+  # (`|| true`) — an installed helper that exits non-zero would leave NO
+  # `.checkpoint-required` armed. Consume the one-shot approval token ONLY after
+  # verifying the arm actually succeeded. If arming FAILED, preserve the token so
+  # the write stays gated (callers fail closed on token-present) and a retry can
+  # arm — never consume the approval AND leave the implementation ungated.
+  if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
+    _consume_plan_approved "$MY_SID"
   fi
 }
 
@@ -1321,22 +1365,47 @@ case "$TOOL_NAME" in
        && ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID" \
        && _tool_call_targets_repo_source "$REPO_ROOT" "$TOOL_NAME" "$FILE_PATH" "$LABEL"; then
       # Lazy-arm ONLY when we have a concrete in-repo FILE_PATH. The empty-
-      # FILE_PATH conservative-block path (relative path with no absolute cwd
+      # FILE_PATH conservative path (relative path with no absolute cwd
       # authority — _tool_call_targets_repo_source returns 0 defensively) must
       # NOT write a marker: REPO_ROOT there falls back to the hook process cwd
       # (off-project invocation), so arming would leak .checkpoint-required
-      # into an unrelated repo. Regression: SA-cwd-strict caller-leak. The
-      # block still fires (Rule 18 conservative direction); only the arm is
-      # withheld until a real in-repo write is seen.
+      # into an unrelated repo. Regression: SA-cwd-strict caller-leak.
+      #
+      # planapproval redesign: the arm itself no-ops unless THIS session has an
+      # approved-plan token (and consumes it on arm). Block ONLY if a checkpoint
+      # is actually armed — i.e. a plan was approved (now, or earlier this
+      # implementation phase). With NO approved plan there is no checkpoint and
+      # NO block: NO CHECKPOINTS DURING PLANNING, and (per the user decision
+      # dropping finding #6) no plan ⇒ no implementation gate. The empty-
+      # FILE_PATH branch likewise only blocks when a checkpoint is already
+      # armed mid-implementation (pre-done still missing); it no longer blocks
+      # unconditionally.
       if [ -n "$FILE_PATH" ]; then
+        # Concrete in-repo path: arm (no-ops without approval; consumes the
+        # approval token only if the arm succeeded). Block if a checkpoint is
+        # armed OR an approval token is still present — the latter is the
+        # fail-closed case where arming FAILED (codex PR review P1): the token
+        # survives, so the write stays gated until a retry arms successfully.
         _arm_checkpoint_required_if_missing
-        # PR-B2 §11: in-repo target with no path verdict on file — block with
-        # the 2-way path-verdict hint (classify nonsrc_write, or write the
-        # pre-checkpoint). Empty FILE_PATH (conservative block, no arm) keeps
-        # the plain message — there is no concrete path to classify.
-        _block_pre_with_path_hint
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           || _plan_approved_exists_for_session "$MY_SID"; then
+          # PR-B2 §11: in-repo target with no path verdict on file — block with
+          # the 2-way path-verdict hint (classify nonsrc_write, or write the
+          # pre-checkpoint).
+          _block_pre_with_path_hint
+        fi
       else
-        _block_pre
+        # Empty FILE_PATH: cannot arm safely (REPO_ROOT may be a fallback cwd →
+        # arming would leak .checkpoint-required into an unrelated repo;
+        # regression SA-cwd-strict). Block to require a pre-checkpoint ONLY when
+        # implementation is sanctioned — a checkpoint is already armed OR a plan
+        # is approved this session. No approval + not armed = planning → allow.
+        # Arming defers to the pre-checkpoint write, where REPO_ROOT resolves
+        # from the absolute marker path.
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           || _plan_approved_exists_for_session "$MY_SID"; then
+          _block_pre
+        fi
       fi
     fi
     ;;
@@ -1377,10 +1446,21 @@ case "$TOOL_NAME" in
       # pre-checkpoint is then required. unknown / unsafe_complex and recognized
       # write reasons (redirects, git/gh subcommands) still arm here (fail closed).
       if [ "$LABEL" = "shared_write" ] && _bash_reason_is_unevaluated_novel "$REASON"; then
+        # Agent-classifier-first (#351): novel unevaluated command is HELD for
+        # classification regardless of plan state — this is NOT a checkpoint
+        # (it never arms) and is orthogonal to the planapproval redesign.
         _block_needs_classification
       else
+        # planapproval redesign: arm no-ops unless an approved-plan token exists
+        # (consumes it only if the arm succeeded). Block if a checkpoint is armed
+        # OR an approval token is still present — the latter is the fail-closed
+        # case where arming FAILED (codex PR review P1). No approved plan ⇒ no
+        # checkpoint ⇒ no block (NO CHECKPOINTS DURING PLANNING).
         _arm_checkpoint_required_if_missing
-        _block_pre_with_hint
+        if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+           || _plan_approved_exists_for_session "$MY_SID"; then
+          _block_pre_with_hint
+        fi
       fi
     fi
     ;;

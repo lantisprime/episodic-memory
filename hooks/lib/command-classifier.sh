@@ -1311,7 +1311,7 @@ _classify_segment() {
           return 0
         fi
         # Parse --root <ARG> from remaining tokens
-        local _helper_root="" _has_touch=0 _has_rm=0
+        local _helper_root="" _has_touch=0 _has_rm=0 _has_approve=0
         local _k=$((_next_idx+1))
         while [ $_k -lt ${#TOKS[@]} ]; do
           case "${TOKS[$_k]}" in
@@ -1321,8 +1321,9 @@ _classify_segment() {
                 _helper_root="${TOKS[$_k]}"
               fi
               ;;
-            --touch) _has_touch=1 ;;
-            --rm)    _has_rm=1 ;;
+            --touch)   _has_touch=1 ;;
+            --rm)      _has_rm=1 ;;
+            --approve) _has_approve=1 ;;
           esac
           _k=$((_k+1))
         done
@@ -1330,21 +1331,30 @@ _classify_segment() {
         local _env_sid="${CLAUDE_CODE_SESSION_ID:-}"
         # Compose target. If --root or sid is missing, emit marker_write
         # with empty TARGET; gate's existing equality check will fail and
-        # block — helper would also fail-closed anyway.
+        # block — helper would also fail-closed anyway. For ALL three actions
+        # the TARGET is the per-session PENDING path: --touch/--rm operate on
+        # it directly, and --approve removes it (while creating .plan-approved
+        # internally). Keying on the pending basename lets plan-gate.sh allow
+        # --approve while a plan-pending marker exists for this session.
         local _target=""
         if [ -n "$_helper_root" ] && [ -n "$_env_sid" ]; then
           _target="${_helper_root}/.checkpoints/.plan-approval-pending.${_env_sid}"
         fi
-        local _reason="plan_marker_helper"
-        if [ $_has_touch -eq 1 ] && [ $_has_rm -eq 1 ]; then
+        # Exactly-one-action mutex (matches helper main()): >1 → block.
+        local _action_count=$((_has_touch + _has_rm + _has_approve))
+        if [ $_action_count -gt 1 ]; then
           # Mutex violation in args — helper will exit 6 anyway. Classify as
           # unsafe_complex; gate blocks.
           printf '%s\t\t%s\n' "unsafe_complex" "plan_marker_mutex_violation"
           return 0
-        elif [ $_has_touch -eq 1 ]; then
+        fi
+        local _reason="plan_marker_helper"
+        if [ $_has_touch -eq 1 ]; then
           _reason="plan_marker_touch"
         elif [ $_has_rm -eq 1 ]; then
           _reason="plan_marker_rm"
+        elif [ $_has_approve -eq 1 ]; then
+          _reason="plan_marker_approve"
         else
           # Missing action — helper will exit 6. Classify as unsafe_complex.
           printf '%s\t\t%s\n' "unsafe_complex" "plan_marker_missing_action"

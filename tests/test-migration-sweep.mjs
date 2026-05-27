@@ -89,12 +89,13 @@ test('one legacy marker → exit 1, allClean false, totalLegacy 1', () => {
   eq(scan.markers[0].name, '.checkpoint-required')
 })
 
-test('all 6 legacy markers seeded → totalLegacy 6', () => {
+test('all 7 legacy markers seeded → totalLegacy 7', () => {
   const root = mkRoot('all-legacy')
   for (const name of [
     '.checkpoint-required',
     '.post-checkpoint-required',
     '.plan-approval-pending',
+    '.plan-approved',
     '.pre-checkpoint-done',
     '.post-checkpoint-done',
     '.session-baseline'
@@ -103,7 +104,7 @@ test('all 6 legacy markers seeded → totalLegacy 6', () => {
   }
   const { result, exitCode } = runSweep(`--root ${root}`)
   eq(exitCode, 1)
-  eq(result.totalLegacy, 6)
+  eq(result.totalLegacy, 7)
 })
 
 console.log('\nConfig file mode:')
