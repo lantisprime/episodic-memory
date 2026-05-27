@@ -49,6 +49,22 @@
       "status": "withdrawn",
       "champion": "Charlton Ho",
       "file": "RFC-006-codex-review-adapter.md"
+    },
+    {
+      "id": "RFC-007",
+      "slug": "graph-projection",
+      "title": "Graph Projection — first-class traversal over latent episode/rule edges",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-007-graph-projection.md"
+    },
+    {
+      "id": "RFC-008",
+      "slug": "decouple-enforcement-from-substrate",
+      "title": "Decoupling the Enforcement Layer from the Memory Substrate",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-008-decouple-enforcement-from-substrate.md"
     }
   ]
 }

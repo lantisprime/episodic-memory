@@ -1,0 +1,709 @@
+---
+rfc_id: RFC-008
+slug: decouple-enforcement-from-substrate
+title: Decoupling the Enforcement Layer from the Memory Substrate
+status: draft
+champion: Charlton Ho
+created: 2026-05-27
+last_modified: 2026-05-27
+supersedes: ~
+superseded_by: ~
+---
+
+# RFC-008 — Decoupling the Enforcement Layer from the Memory Substrate
+
+> **Source of truth.** This RFC is the committed form of consolidated rearchitecture
+> **spec v8** (episode `20260527-081221-consolidated-rearchitecture-spec-v8-comp-000c`,
+> supersedes chain v7 → v6 → v5 → v4 → v3). The parent-goal containment is recorded in
+> `20260527-051225-decoupling-enforcement-from-memory-subst-c4af`. Every design element
+> below maps to a requirement (R1–R10); no element exists without a requirement parent.
+
+## AI context
+
+> (1) This RFC decouples the enforcement layer (BP gates, classifiers, markers, contracts) from the memory substrate (`em-store` / `em-recall` / `em-search`), making enforcement a pluggable layer that *imports* the substrate rather than living inside it. (2) Today `em-recall.mjs` — nominally the memory recall core — is saturated with enforcement logic (`--gate stop`, checkpoint markers, carve-outs, the `.checkpoints/` migration), a soft P9/P1 violation that RFC-003 deferred by committing to "gate decision stays in core." (3) The key decision: episodic-memory *dictates the contract* (`patterns/bp-XXX.json` + `patterns/taxonomy.json` + `plugins/_index.json`); a thin waist (`enforce-contract.mjs`) reads the contract and delegates to `em-recall --gate`; one plugin per harness adapts the contract to that harness's hook surface at its declared capability tier — never the reverse.
+
+---
+
+## Requirements (R1–R10)
+
+These are the anchors. Every architecture decision in this RFC maps to one or more of these requirements. **No design element exists without a requirement parent.**
+
+### R1 — Memory is the substrate
+Enforcement (BP gates, classifiers, markers, contracts) is decoupled from the memory substrate (em-store / em-recall / em-search). The substrate is pure store-and-recall. Enforcement is a separate layer that imports the substrate — never the reverse.
+**Governed by:** PRINCIPLES.md P9 (Core never imports adapters; adapters import core).
+
+### R2 — Pluggable enforcement; episodic-memory dictates the contract
+BP enforcements are plugins. Episodic-memory defines WHAT must be enforced (contracts in `patterns/bp-XXX.json`). Plugins implement HOW the agent harness executes the enforcement. The contract flows FROM episodic-memory TO plugins, not the other direction.
+**Governed by:** PRINCIPLES.md P2 (Behavior definitions are data), P11 (Portable core contract).
+
+### R3 — Capability mapping contract
+Each enforcement plugin must map its harness capabilities into the episodic-memory contract schema. A plugin declares which capabilities its harness provides (`pre_tool_use`, `stop`, `session_start`, `session_end`) and at what tier (`STRONG`, `MEDIUM`, `WEAK`). The effective enforcement tier is the intersection of what the contract requires and what the harness provides, further clamped by per-project configuration.
+**Governed by:** PRINCIPLES.md P5 (Cross-platform with honest capability labels).
+
+### R4 — Default classifier; plugins may override
+A default command classifier (`command-classifier.sh` → 7-label taxonomy) ships with episodic-memory. Each enforcement plugin MAY supply its own classifier override. Overrides are harness-specific (e.g., a Pi Agent plugin might classify `tool_call` verbs differently than the default Bash tokenizer). Two labels are NON-OVERRIDABLE: `unsafe_complex` (safety fail-closed) and `marker_write` (gate infrastructure deadlock-prevention).
+**Governed by:** PRINCIPLES.md P4 (Cognitive load > lightweight), P2 (Behavior definitions are data).
+
+### R5 — Classifier activation gating
+The classifier (default or plugin override) only executes when at least one enforcement plugin is active for the current harness. If no enforcement plugin is installed or active, the classifier is silent — no hook spawns, no token cost, no latency. Activation is detected via the plugin registry and per-project `enforce-config.json`.
+**Governed by:** PRINCIPLES.md P6 (Tokens are the budget; bounded background work).
+
+### R6 — Plugin-to-harness binding
+Each enforcement plugin is tied to exactly one agent harness: Pi Agent, OpenCode, Claude Code, Windsurf, Cursor, or Codex. A plugin is the bridge between episodic-memory's contracts and a specific harness's hook/event surface. One harness, one plugin directory. Shared logic lives in the enforcement thin waist (`enforce-contract.mjs`), not duplicated across plugins.
+**Governed by:** PRINCIPLES.md P9 (Core never imports adapters), P11 (Portable core contract).
+
+### R7 — Pluggable recall strategies
+`em-recall.mjs` supports multiple recall strategies. The default is tag-based lexical recall (zero deps). Additional strategies — semantic (embeddings), knowledge graph (episode reference traversal), hybrid (RRF merge) — are opt-in plugins that register in `em-recall/strategies/`. Each strategy exports a `recall()` interface. Strategies that require embeddings declare `requiresEmbeddings: true` and remain inert when the embedding backend is absent.
+**Governed by:** PRINCIPLES.md P6 (Tokens are the budget), P1 (Memory is the substrate).
+
+### R8 — Plugin registry
+All enforcement plugins and recall strategies MUST be registered in `plugins/_index.json`. The registry is the single source of truth for: which plugins exist, which harness they bind to, their capability declarations, and their classifier override status. Installers, the enforcement thin waist, and the classifier activation gate all consult the registry. Unregistered plugins are invisible to the system.
+**Governed by:** PRINCIPLES.md P2 (Behavior definitions are data), Rule 14 (Machine-readable blocks for drift-prone state).
+
+### R9 — No checkpoints during exploration, planning, or architecture design
+The pre-checkpoint gate materializes ONLY at the IMPLEMENTATION boundary — the first repo-source file write. Nothing is armed during exploration, planning, discovery, architecture design, or code review. Bash is intentionally ungated from the pre-checkpoint gate so reviews, inspections, exploration, and architecture work never block and never create markers. The post-checkpoint, push-gate, and stop-gate lifecycle remains fully enforced once implementation begins.
+**Governed by:** PRINCIPLES.md P4 (Cognitive load > lightweight), P6 (Tokens are the budget). **Implemented by:** planning-passive redesign in `checkpoint-gate.sh:1297-1317` (lazy-arm on first repo-source write, Bash ungated from pre-checkpoint, F1 RESIDUAL documented at lines 55-66).
+
+### R10 — Enforcement plugin runbooks
+Each enforcement plugin MUST include a runbook in `plugins/<harness>/runbooks/` with specified content per section. The runbook is injected on first invocation per session via content-addressed UX-marker (`.so-runbook-shown.<sha8>`). Runbook marker writes are exempt from checkpoint/plan gating. Session-start lifecycle clears all runbook markers. Content-addressed (sha8 = SHA256(full_runbook_content).hex.slice(0, 8)) — edits invalidate the marker, forcing re-injection.
+**Governed by:** PRINCIPLES.md P4 (Cognitive load > lightweight — the runbook prevents the model from rediscovering the same lessons each session). **Precedent:** second-opinion harness runbook at `hooks/runbooks/second-opinion-harness.md` (118 lines, production since 2026-05-13).
+
+---
+
+## Problem
+
+Ground this in observable behavior, not a proposed solution.
+
+`em-recall.mjs` is nominally the memory **recall** core, but it is saturated with **enforcement** logic:
+
+- `--gate stop` decision logic (lines 68 / 295)
+- `.checkpoint-required` / `.post-checkpoint-required` marker handling
+- the stop-gate carve-out and the plan-gate deadlock triangle
+- the `.checkpoints/` dual-root migration
+- it imports `stop-gate-helpers.mjs`
+
+The memory substrate's recall script **is** the bp-001 enforcement engine. RFC-003:506 made this explicit and load-bearing: *"The block-or-allow decision lives in `scripts/em-recall.mjs` as `--gate stop` … the core `--gate` flag remains in core unchanged (P9)."* RFC-003 relocated only the shell wrapper to `adapters/claude-code/capabilities/enforcement.mjs`, never the decision logic.
+
+This collapses **recall** and **react** into one script — arguably already a soft P1 violation that RFC-003 deferred, and a P9 tension because the substrate now contains adapter-shaped enforcement behavior. Cross-tool reach is also blocked: adding a harness today means re-deriving enforcement plumbing rather than declaring a capability mapping against a contract.
+
+---
+
+## Proposal
+
+What changes: episodic-memory becomes a contract authority (data files), a thin enforcement waist reads those contracts and delegates the actual gate decision to the unchanged `em-recall --gate` core, and each harness gets exactly one plugin directory that maps the contract onto its hook surface at an honestly-declared capability tier.
+
+### Architecture (maps to R1, R2, R3, R6, R8, R9, R10)
+
+```mermaid
+graph TD
+    subgraph EM["episodic-memory — dictates WHAT"]
+        BP["patterns/bp-001.json<br/>(R2 — contract definitions)"]
+        TAX["patterns/taxonomy.json<br/>(R4 — canonical 7-label set + per-gate allow/block)"]
+        REG["plugins/_index.json<br/>(R8 — plugin registry)"]
+    end
+
+    EC["enforce-contract.mjs — thin waist<br/>(R1, R2, R3, R5, R9)<br/>contract validation + tier computation +<br/>implementation-boundary detection"]
+
+    subgraph CORE["substrate core (unchanged)"]
+        RECALL["em-recall.mjs --gate &lt;event&gt;<br/>(R1 — core decision engine)"]
+    end
+
+    subgraph PLUG["plugins/&lt;harness&gt;/ — one dir per harness (R6)"]
+        MAN["manifest.json<br/>(R3, R8 — capability declarations)"]
+        CAP["capabilities/enforcement.{mjs,ts,py}<br/>(R6 — harness adapter)"]
+        CLS["classifier/command-classifier.{sh,ts,py}<br/>(R4 — optional override)"]
+        RUN["runbooks/enforcement.md + .quickref.md<br/>(R10)"]
+    end
+
+    BP --> EC
+    TAX --> EC
+    REG --> EC
+    EC -->|plugin lookup via _index.json R8| PLUG
+    EC -->|implementation-boundary detection R9| EC
+    EC -->|classifier dispatch R4/R5<br/>override else default| CLS
+    EC -->|effective_tier = min harness,contract,config R3| EC
+    EC -->|gate action = contract.gates[gate].action_for label R3| EC
+    EC -->|delegate gate decision R1| RECALL
+    RECALL -->|consults recall strategy R7| RECALL
+```
+
+**Decision flow:**
+1. Hook fires (harness-specific event: PreToolUse, Stop, SessionStart).
+2. Hook calls `enforce-contract.mjs` — the single thin waist.
+3. `enforce-contract.mjs` consults `plugins/_index.json` → finds the active plugin for this harness (R8).
+4. Detects implementation boundary: is this a repo-source write? If yes → lazy-arm `.checkpoint-required` (R9). If exploration/planning/architecture → silent, no markers.
+5. First enforcement action per session: runbook gate checks `.so-runbook-shown.<sha8>` (R10). If absent → block with quickref injection + full runbook path. Model reads runbook, touches marker to acknowledge.
+6. Computes `effective_tier = min(harness_cap, contract_tier, project_config)` (R3).
+7. If `effective_tier < contract_tier`: degrade gracefully (warn, allow, or prompt — harness-specific).
+8. Dispatches classifier: plugin override if registered, else default (R4, R5).
+9. Looks up `contract.gates[gate].action_for(label)` → `"allow"` or `"block"` (R3 — contract-driven).
+10. If `action == "block"` and `effective_tier == STRONG`: emit block decision.
+11. If `action == "block"` and `effective_tier == MEDIUM`: warn (lifecycle-gated, not real-time block).
+12. If `action == "block"` and `effective_tier == WEAK`: pass (prompt-injection only).
+13. Delegates gate decision to `em-recall.mjs --gate <event>` (R1).
+14. `em-recall.mjs` consults the recall strategy plugin (R7) and returns block/allow verdict.
+
+### Canonical taxonomy (maps to R3, R4)
+
+Single source of truth: `patterns/taxonomy.json`. Validated by `validate-bp-contract.mjs`. CI fails if any contract or classifier references a label not in this file (Rule 14).
+
+```json
+{
+  "version": "1.0.0",
+  "labels": [
+    {
+      "id": "read_only",
+      "meaning": "Pure observation — ls, cat, git status, gh pr view, grep, find",
+      "overridable": true,
+      "gates": { "plan_approval": "allow", "pre_checkpoint": "allow", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "nonsrc_write",
+      "meaning": "Writes but NOT repo source — .git internals, npm/yarn install, mkdir/rmdir, em-store episode writes",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "allow", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "shared_write",
+      "meaning": "Repo-source content write or cannot-tell — redirect-to-file, non-allowlisted node/python/ruby, cp/mv/dd, worktree-mutating git, curl -o, tee",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "push_or_pr_create",
+      "meaning": "Publishes/mutates shared external state — git push, gh pr create/merge/close, gh issue create/close, gh release, gh api POST/PUT/PATCH/DELETE",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "allow", "post_checkpoint": "block" }
+    },
+    {
+      "id": "marker_write",
+      "meaning": "Gate-control deadlock-prevention — writes/removes .checkpoints/.* marker files at canonical paths",
+      "overridable": false,
+      "gates": { "plan_approval": "allow", "pre_checkpoint": "allow", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "unsafe_complex",
+      "meaning": "Cannot tokenize safely — bash -c, eval, $(), backticks, unbalanced quotes, ambiguous heredoc",
+      "overridable": false,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "block" }
+    },
+    {
+      "id": "unknown",
+      "meaning": "Parsed cleanly but unrecognized command shape — default_write or interpreter_other reason",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "block" }
+    }
+  ],
+  "non_overridable": ["unsafe_complex", "marker_write"],
+  "non_overridable_rationale": {
+    "unsafe_complex": "Safety fail-closed. A plugin that redefines unsafe_complex as read_only would allow eval/bash -c/subshells through the gate unexamined.",
+    "marker_write": "Gate infrastructure deadlock-prevention. marker_write is the escape hatch that allows agents to write .pre-checkpoint-done / .post-checkpoint-done / .plan-approval-pending markers. A plugin that misclassifies a marker write as shared_write creates an unrecoverable deadlock (deadlock class 1)."
+  }
+}
+```
+
+#### Gate semantics — what each gate blocks (R3, R4)
+
+| Gate | Event | Blocks labels where `gates[gate] == "block"` | Effect |
+|------|-------|----------------------------------------------|--------|
+| **Plan-approval** | PreToolUse (all write tools) | `shared_write`, `push_or_pr_create`, `nonsrc_write`, `unsafe_complex`, `unknown` | Write tools blocked while `.plan-approval-pending` exists. `read_only` + `marker_write` allowed (deadlock prevention). |
+| **Pre-checkpoint** | PreToolUse (write tools, Bash) | `shared_write`, `unsafe_complex`, `unknown` | Repo-source writes blocked while `.checkpoint-required` armed + `.pre-checkpoint-done` absent. Only fires at the implementation boundary (R9). `nonsrc_write` + `push_or_pr_create` allowed. |
+| **Post-checkpoint** | PreToolUse (Bash only) | `push_or_pr_create`, `unsafe_complex`, `unknown` | Push/PR-create blocked while `.post-checkpoint-required` armed + `.post-checkpoint-done` absent. |
+| **Stop** | Stop / SubagentStop | (does not use command classification) | Blocked while `.checkpoint-required` armed + `.post-checkpoint-done` absent. Reads marker state, not command labels. |
+
+#### Overridability rules (R4)
+
+| Label | Overridable? | Rationale |
+|-------|-------------|-----------|
+| `read_only` | ✓ | Harness-specific read tools may differ |
+| `nonsrc_write` | ✓ | Harness-specific non-source surfaces may differ (npm vs yarn vs pip) |
+| `shared_write` | ✓ | Harness-specific write primitives may differ (Write vs Edit vs MultiEdit) |
+| `push_or_pr_create` | ✓ | Harness-specific push/PR surfaces may differ |
+| `marker_write` | **✗** | Gate infrastructure. Deadlock class 1: misclassification creates unrecoverable agent deadlock. Same safety tier as `unsafe_complex`. |
+| `unsafe_complex` | **✗** | Safety fail-closed. Redefining as read_only bypasses all gates. |
+| `unknown` | ✓ | Harness-specific unknown shapes may be classifiable |
+
+#### Why `marker_write` is non-overridable (v4 fix)
+`marker_write` is the deadlock-prevention escape hatch — how an agent writes `.pre-checkpoint-done` or `.plan-approval-pending` to unblock itself. If a plugin overrides `marker_write` and misclassifies a genuine marker write as `shared_write`, the gates deadlock: the agent is told "write the marker to unblock," but the gate blocks the marker write. This is the exact deadlock class that took 7 rounds of Codex review to close in `checkpoint-gate.sh`. Infrastructure labels are not opinions.
+
+#### Why per-gate mapping replaces the single boolean (v4 fix)
+The v3 taxonomy had `arms_pre_checkpoint: true/false`. This cannot express actual gate behavior because different gates block different label subsets:
+- `push_or_pr_create` was `arms_pre_checkpoint: true` in v3, but it arms the *post-checkpoint* gate (`.post-checkpoint-required`), NOT the pre-checkpoint gate (`.checkpoint-required`). The v3 entry was factually wrong against the working `checkpoint-gate.sh`.
+- `nonsrc_write` was `arms_pre_checkpoint: false` — correct for the pre-checkpoint gate, but incorrect for the plan-approval gate where it DOES block.
+- A single boolean cannot express three gates with different subsets. The contract must be the source of truth; the enforcement layer reads the contract, never hardcodes the label→gate mapping.
+
+#### Gate-action lookup (replaces hardcoded label set)
+```
+// BEFORE (v3): hardcoded in enforce-contract.mjs
+if label in {shared_write, push_or_pr_create, unsafe_complex, unknown}:
+    block
+
+// AFTER (v4): contract-driven, reads taxonomy
+action = taxonomy.gates[gate].action_for(label)
+if action == "block" and effective_tier == STRONG:
+    enforce-contract.mjs.block(label, reason)
+```
+The contract drives the behavior; the enforcement layer consults the contract. R2 satisfied.
+
+### Capability-degradable enforcement (maps to R3)
+
+#### Effective tier formula (ternary)
+```
+effective_tier(gate, harness) = min(
+    harness_capability[gate.capability],   // R3: what the harness provides
+    plugin_tier[pattern][gate],             // R2: what the contract requires
+    project_config[gate]                    // R5: per-project clamp (LOWER only)
+)
+```
+
+#### Per-harness capability declarations (R3, R6)
+
+| Harness | pre_tool_use | stop | session_start | session_end | R6 binding |
+|---------|-------------|------|---------------|-------------|------------|
+| Claude Code | STRONG | STRONG | STRONG | STRONG | `plugins/claude-code/` |
+| OpenCode | STRONG | MEDIUM | MEDIUM | — | `plugins/opencode/` |
+| Pi Agent | STRONG | MEDIUM | STRONG | — | `plugins/pi-agent/` |
+| Codex | **MEDIUM** | STRONG | STRONG | — | `plugins/codex/` |
+| Cursor | WEAK | — | — | — | `plugins/cursor/` |
+| Windsurf | WEAK | — | — | — | `plugins/windsurf/` |
+
+**Codex pre_tool_use correction (R3 → P5):** declared MEDIUM, not STRONG. Codex PreToolUse is a guardrail with a known multi-edit bypass — "Hard mechanical enforcement (block-on-fail)" per P5 is not satisfied. Bypass documented in the manifest.
+
+**Example — bp-001 plan-approval gate (R2, R3):**
+
+| Harness | harness_cap | contract_tier | project_config | effective |
+|---------|-------------|---------------|----------------|-----------|
+| Claude Code | STRONG | STRONG | STRONG | **STRONG** |
+| OpenCode | STRONG | STRONG | STRONG | **STRONG** |
+| Pi Agent | STRONG | STRONG | STRONG | **STRONG** |
+| Codex | MEDIUM | STRONG | STRONG | **MEDIUM** |
+| Cursor | WEAK | STRONG | STRONG | **WEAK** |
+
+**Example — bp-001 stop-gate (R2, R3):**
+
+| Harness | harness_cap | contract_tier | project_config | effective |
+|---------|-------------|---------------|----------------|-----------|
+| Claude Code | STRONG | STRONG | STRONG | **STRONG** |
+| OpenCode | MEDIUM | STRONG | STRONG | **MEDIUM** |
+| Pi Agent | MEDIUM | STRONG | STRONG | **MEDIUM** |
+| Codex | STRONG | STRONG | STRONG | **STRONG** |
+
+### Classifier activation gating (maps to R5, R9)
+
+```
+on_tool_call(tool, harness, gate):
+    plugin = plugins/_index.json.lookup(harness)
+    if plugin == null or enforce-config.json.active == false:
+        return ALLOW  // R5: classifier silent, no hooks spawn
+
+    // R9: implementation-boundary detection
+    if is_exploration_or_planning(tool):
+        return ALLOW  // no checkpoint, no friction during non-implementation work
+
+    classifier = plugin.classifier == "override"
+        ? plugins/<harness>/classifier/command-classifier
+        : default command-classifier.sh          // R4: default fallback
+
+    label = classifier.classify(tool.command, harness_context)
+
+    // R3: contract-driven gate action — taxonomy is the source of truth
+    action = taxonomy.gates[gate].action_for(label)  // "allow" | "block"
+    if action == "allow":
+        return ALLOW
+
+    effective_tier = min(harness_cap, contract_tier, project_config)
+
+    // R9: only STRONG tier blocks at implementation boundary
+    if effective_tier == STRONG and is_implementation_boundary(tool):
+        enforce-contract.mjs.block(label, reason)
+    elif effective_tier == MEDIUM:
+        enforce-contract.mjs.warn(label)  // lifecycle-gated check, not real-time block
+    else:  // WEAK
+        pass  // prompt-injection only, no programmatic enforcement
+```
+
+Key: the classifier (default or override) ONLY executes inside `enforce-contract.mjs`, which ONLY runs when a plugin is active (R5). No plugin → no classifier → no token cost → no latency. The gate action is read from the taxonomy contract — never hardcoded in the enforcement layer (R2, R3). Exploration/planning/architecture work passes through without arming checkpoints (R9).
+
+### Recall strategies (maps to R7)
+
+Registry: `em-recall/strategies/_index.json`
+
+| Strategy | Module | Dependencies | Default? |
+|----------|--------|--------------|----------|
+| `lexical` | `strategies/lexical.mjs` | Zero deps | **Yes** |
+| `semantic` | `strategies/semantic.mjs` | Embedding model | No |
+| `graph` | `strategies/graph.mjs` | Zero deps | No |
+| `hybrid` | `strategies/hybrid.mjs` | semantic + lexical | No |
+| `structured` | `strategies/structured.mjs` | Zero deps | No |
+
+CLI: `em-recall --strategy semantic|hybrid|graph|structured|lexical`. If `--strategy semantic` is requested but no embedding backend is configured, fall back to `lexical` with a warning.
+
+### Plugin registry (maps to R8)
+
+`plugins/_index.json` — single source of truth.
+
+```json
+{
+  "plugins": [
+    {
+      "id": "claude-code",
+      "harness": "claude-code",
+      "directory": "plugins/claude-code",
+      "capabilities": { "pre_tool_use": "STRONG", "stop": "STRONG", "session_start": "STRONG", "session_end": "STRONG" },
+      "classifier": "default",
+      "manifest": "plugins/claude-code/manifest.json",
+      "status": "active"
+    },
+    {
+      "id": "opencode",
+      "harness": "opencode",
+      "directory": "plugins/opencode",
+      "capabilities": { "pre_tool_use": "STRONG", "tool_result": "STRONG", "session_start": "MEDIUM", "stop": "MEDIUM" },
+      "classifier": "default",
+      "manifest": "plugins/opencode/manifest.json",
+      "status": "active"
+    }
+  ],
+  "recall_strategies": [
+    { "id": "lexical", "module": "em-recall/strategies/lexical.mjs", "requiresEmbeddings": false, "default": true },
+    { "id": "semantic", "module": "em-recall/strategies/semantic.mjs", "requiresEmbeddings": true, "default": false },
+    { "id": "graph", "module": "em-recall/strategies/graph.mjs", "requiresEmbeddings": false, "default": false },
+    { "id": "hybrid", "module": "em-recall/strategies/hybrid.mjs", "requiresEmbeddings": true, "default": false }
+  ]
+}
+```
+
+**Validation (CI) — `scripts/validate-plugin-registry.mjs` checks:**
+- Every `plugins/<harness>/` directory has an entry in `_index.json`
+- Every entry in `_index.json` has a corresponding directory on disk
+- No duplicate harness bindings (one plugin per harness)
+- All capability tiers are valid (`STRONG`, `MEDIUM`, `WEAK`, `TBD`)
+- Classifier field is `"default"` or `"override"`; if override, `plugins/<harness>/classifier/` must exist
+- Manifest `classifier.emits_labels` is a subset of taxonomy canonical labels
+- Manifest `taxonomy_version` hash matches current `patterns/taxonomy.json`
+- `plugins/<harness>/runbooks/enforcement.md` exists, ≥ MIN_RUNBOOK_BYTES, contains RUNBOOK_SENTINEL (R10)
+- `plugins/<harness>/runbooks/enforcement.quickref.md` exists, ≥ MIN_QUICKREF_BYTES (R10)
+
+### Contract boundary (maps to R2)
+
+- **Contracts** (BP definitions, RFCs, taxonomy, plugin registry): git-versioned repo files. If `git blame` is the right tool to understand history → it is a contract.
+- **Episodes** (runtime lifecycle state, decisions, discoveries): stored in `.episodic-memory/`, immutable IDs, revised via supersedes chains (P7).
+- R2: episodic-memory dictates contracts. Plugins follow them. Contracts flow FROM core TO plugins.
+
+### Migration detection (maps to R8)
+
+Pre-plugin install vs current install: distinguished by `plugins/_index.json` presence AND `~/.episodic-memory/adapters/<harness>.installed.json` (RFC-003 manifest `installed_state` field). If hooks exist at `~/.claude/hooks/` but no plugin registry entry exists for that harness → pre-plugin install → offer migration.
+
+### Implementation boundary (maps to R9)
+
+The pre-checkpoint gate is inert during exploration, planning, discovery, architecture design, and code review. It materializes only when an agent crosses the implementation boundary — the first write to a repo-source file.
+
+**What triggers the boundary (lazy-arm):**
+- Any `Edit`/`Write`/`MultiEdit`/`NotebookEdit` targeting an in-repo, non-gitignored, non-`.review-store/`, non-`.checkpoints/` file path.
+- Any `Bash` classified as `shared_write`/`unsafe_complex`/`unknown` (NOT `default_write`/`interpreter_other` — those are novel commands held for classification first per agent-classifier-first).
+
+**What does NOT trigger the boundary:**
+- Read-only tools (Read, Glob, Grep, Agent, WebFetch, Skill, etc.) — always allowed.
+- Bash classified as `read_only`, `nonsrc_write`, `marker_write`, or unevaluated novel (`default_write`/`interpreter_other`).
+- Write/Edit targeting off-repo paths (memory under `~/.claude/projects/`, skills, settings).
+- Write/Edit targeting `.review-store/` (second-opinion artifacts).
+- Write/Edit targeting `.checkpoints/` (gate infrastructure).
+- Write/Edit targeting gitignored paths (`.episodic-memory/`, `scratch/`, `analysis/`, `node_modules/`).
+- Write/Edit with a path verdict of `nonsrc_write`/`read_only` from the agent classifier.
+
+**What remains enforced regardless:**
+- The post-checkpoint + push-gate + stop-gate lifecycle: once `.checkpoint-required` is armed (implementation began), the full lifecycle tracks through `.pre-checkpoint-done` → `.post-checkpoint-required` → `.post-checkpoint-done` → push cleanup → stop satisfaction.
+- Push self-arms `.post-checkpoint-required` independently ("push is an INDEPENDENT hard gate even when the pre-checkpoint was escaped").
+
+**F1 RESIDUAL (documented, accepted):** Bash is intentionally ungated from pre-checkpoint (planning-passive redesign). A pure-Bash implementation (`sed -i`, `cat > file`, `git commit`, `node script-that-writes.mjs`) can mutate repo source without ever arming `.checkpoint-required`, bypassing the pre-checkpoint. This is a deliberate trade: gating all `shared_write` Bash reintroduced planning-time friction (read-only node/inspection commands mis-blocked). Clean closure depends on the PR-B2 agent-classifier verdict (`nonsrc_write`) distinguishing repo-source Bash writes from non-source Bash writes. Tracked as #351.
+
+### Enforcement plugin runbooks — content specification (maps to R10)
+
+#### Mechanism (from the existing second-opinion harness pattern)
+
+| File | Purpose |
+|------|---------|
+| `plugins/<harness>/runbooks/enforcement.md` | Full operator checklist |
+| `plugins/<harness>/runbooks/enforcement.quickref.md` | Short inline reference on first block per session |
+| `plugins/<harness>/capabilities/enforcement.{mjs,ts,py}` | Runbook gate: detects first plugin invocation, blocks with quickref injection |
+| `em-recall-sessionstart.sh` (or harness equivalent) | SessionStart glob-clear of all `.so-runbook-shown.*` |
+
+**Lifecycle:**
+1. SessionStart → clear all `.so-runbook-shown.*` markers at canonical repo root.
+2. First enforcement action → gate detects, blocks with quickref + full runbook path.
+3. Model `Read`s the full runbook, then `touch .checkpoints/.so-runbook-shown.<sha8>` to acknowledge.
+4. Subsequent actions → marker exists → gate passes silently.
+5. Runbook edited mid-session → sha8 changes → marker invalid → re-inject.
+6. Next session → step 1 repeats.
+
+**Content-addressed:** sha8 = SHA256(full_runbook_content).hex.slice(0, 8). Edits invalidate the marker, forcing re-injection. **Checkpoint-immune:** `.so-runbook-shown.*` is excluded from TASK_SIGNAL and CHECKPOINT_CLEANUP marker sets; runbook marker writes pass through even under armed gates.
+
+#### Six required sections
+
+Each enforcement runbook has six sections; COMMON rows ship in every plugin, HARNESS-SPECIFIC rows are added per plugin.
+
+**Section 1 — Self-trigger checklist** (table: Moment | habit | rule | self-check). COMMON rows cover: about to Edit/Write repo source; about to `git push`; Bash `sed -i`/`cat > file` redirect to repo source; returned HOLD from classifier (novel command); writing a marker file (must be nonempty, not `touch`); session end blocked by stop-gate; plan-pending blocks marker writes (escape hatch: `rm .checkpoints/.plan-approval-pending`). HARNESS-SPECIFIC rows: Claude Code (Bash 120s timeout → set `timeout: 600000`); OpenCode (`tool_call` vs `tool_result` dispatch); Pi Agent (`session_shutdown` advisory, MEDIUM); Codex (multi-edit bypass, PreToolUse MEDIUM).
+
+**Section 2 — Canonical invocation** (HARNESS-SPECIFIC). Exact command shapes: classify a command; write the pre-implementation checkpoint (NONEMPTY content: what you will implement, plan ref, approval ref, tests alongside); write the post-implementation checkpoint (NONEMPTY: E2E results, bugs filed, command inventory); acknowledge the runbook (`touch .checkpoints/.so-runbook-shown.<sha8>` AFTER reading); harness-specific gotchas (Claude Code: Bash default timeout 120000ms → set 600000; session id from PreToolUse stdin `.session_id`; `run_in_background: true` bypasses PreToolUse — NEVER use for enforcement; hook order checkpoint-gate → plan-gate → second-opinion-gate → stop-gate).
+
+**Section 3 — Failure mode → diagnosis cheat sheet** (table: Symptom | likely cause | verify | recovery). COMMON rows cover each block message: "Checkpoint required…"; "Post-implementation checkpoint required…"; "Plan approval pending"; the deadlock-class-1 marker_write misclassification; empty marker (`[ -s ]`); stop-gate blocks session end; wrong-root in a worktree; novel command held. HARNESS-SPECIFIC: Claude Code (hook not firing → `run_in_background`); OpenCode (PreToolUse event registration); Codex (multi-edit MEDIUM bypass).
+
+**Section 4 — Anti-patterns this runbook exists to prevent** (COMMON + HARNESS-SPECIFIC). COMMON: writing repo source before the pre-checkpoint block; `touch` for marker content (0-byte → rejected); bypassing pre-checkpoint with pure Bash (F1 RESIDUAL, #351); writing markers to the wrong root in a worktree; ignoring the runbook re-injection; writing `.post-checkpoint-done` before `.pre-checkpoint-done`; `run_in_background: true` on enforcement commands.
+
+**Section 5 — Trigger phrases** (COMMON). Prompt words meaning "the enforcement plugin activates now": `implement`, `write code`, `make changes`, `fix this bug`, `add feature`, `build`, `refactor`, `modify`, `create file`, `update the` → implementation boundary; `push`/`git push`, `PR`/`pull request`, `deploy`/`release` → post-checkpoint gate. Words that do NOT trigger enforcement (R9): `explore`, `plan`/`planning`, `architecture`, `review`, `discover`, `research`, `what does`, `how does`.
+
+**Section 6 — Composes with** (COMMON). Cross-references every runbook must include: `patterns/taxonomy.json`, `patterns/bp-001.json`, `plugins/<harness>/manifest.json`, `plugins/_index.json`, `enforce-contract.mjs`, the deadlock-analysis episode, `PRINCIPLES.md` (P4/P5/P6/P9), `.episodic-memory/episodes/`.
+
+#### Per-plugin runbook paths
+
+| Plugin | Full runbook | Quickref | Deployed to |
+|--------|-------------|----------|-------------|
+| claude-code | `plugins/claude-code/runbooks/enforcement.md` | `enforcement.quickref.md` | `~/.claude/hooks/runbooks/claude-code-enforcement.md` |
+| opencode | `plugins/opencode/runbooks/enforcement.md` | `enforcement.quickref.md` | `~/.opencode/runbooks/enforcement.md` |
+| pi-agent | `plugins/pi-agent/runbooks/enforcement.md` | `enforcement.quickref.md` | `~/.pi-agent/runbooks/enforcement.md` |
+| codex | `plugins/codex/runbooks/enforcement.md` | `enforcement.quickref.md` | `~/.codex/runbooks/enforcement.md` |
+| second-opinion | `plugins/second-opinion/runbooks/harness.md` | `harness.quickref.md` | `~/.claude/hooks/runbooks/second-opinion-harness.md` (existing) |
+
+#### Scaffold-generated runbook stub + CI validation
+The `add-enforcement-plugin` skill (`scripts/scaffold-plugin.mjs`) generates `plugins/<harness>/runbooks/enforcement.md` with: all 6 section headers pre-populated; all COMMON rows filled from the taxonomy + deadlock analysis; HARNESS-SPECIFIC sections marked with `<!-- TODO -->` placeholders; the quickref generated from the full runbook; runbook sentinel `## ⚠️ Self-trigger checklist` (validated by the runbook gate). `scripts/validate-plugin-registry.mjs` checks: `enforcement.md` exists, ≥ MIN_RUNBOOK_BYTES (1024), contains the sentinel; `enforcement.quickref.md` exists, ≥ MIN_QUICKREF_BYTES (256). Missing/corrupt runbook → CI fail → plugin cannot ship.
+
+### Plugin authoring skill + taxonomy conformance (maps to R3, R4, R6, R8, R10)
+
+Because the contract is machine-readable, authoring a conformant plugin is **generated, not hand-rolled**. A scaffolding skill turns "add a harness = a plugin directory" into a guided flow and makes the canonical taxonomy (R4) impossible to violate by emitting it, CI-checking it, and runtime-clamping it.
+
+**Skill `add-enforcement-plugin`** is backed by a harness-agnostic generator `scripts/scaffold-plugin.mjs` (zero-dep, callable from any harness per R6); the Claude Code *skill* is a thin wrapper over it. Flow:
+1. Prompt for harness name + capability tiers per event + classifier mode (`default` | `override`).
+2. Read `patterns/taxonomy.json` and `patterns/schema.json` to drive prompts — always in sync with the current contract.
+3. Scaffold `plugins/<harness>/` — `manifest.json`, `capabilities/enforcement.{mjs,ts,py}` stub wired to that harness's hook API, optional `classifier/` if override.
+4. Scaffold `plugins/<harness>/runbooks/enforcement.md` — all 6 sections, COMMON rows pre-filled, HARNESS-SPECIFIC placeholders, quickref auto-derived, sentinel validated.
+5. **Auto-register** in `plugins/_index.json` (R8) — the registry step cannot be forgotten.
+6. Run `validate-plugin-registry.mjs` + `validate-bp-contract.mjs` → fail loud if non-conformant.
+
+Net: **R3, R8, and R10 conformance-by-construction** — the author cannot produce a plugin that fails to map into the contract schema, is missing from the registry, or lacks a conformant runbook.
+
+**Taxonomy conformance enforced at three layers (R4):**
+
+| Layer | Mechanism | Catches |
+|---|---|---|
+| **Author-time (skill)** | Injects `LABELS` from `taxonomy.json`; writes `emits_labels` + `taxonomy_version` hash into the manifest; refuses to let an override remap/suppress `unsafe_complex` or `marker_write` | Author inventing a label by hand; overriding infrastructure labels |
+| **CI (`validate-plugin-registry.mjs`)** | Asserts `manifest.classifier.emits_labels ⊆ taxonomy.labels`; asserts `taxonomy_version` == current hash else "built against stale taxonomy"; checks no non-overridable label is suppressed; runs the golden test; validates runbook (R10) | Drift after taxonomy changes; stale manifest; suppressed non-overridable; missing runbook |
+| **Runtime (`enforce-contract.mjs`)** | Normalizes the classifier's return value against `taxonomy.json` — any label ∉ canonical set is coerced to `unknown` (fail-closed) and logged; non-overridable labels always processed by core logic regardless of plugin output | A buggy/malicious override emitting garbage at runtime |
+
+The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **only** vocabulary it accepts, so the canonical 7 labels are the hard boundary of the whole system — even if author-time and CI were skipped.
+
+**Generalization.** The same schema-driven generator backs three "new X" entry points — all are "fill a schema + register in an index + validate": `add-enforcement-plugin` (R6) — harness plugin + runbook stub (R10); `add-bp-contract` (R2) — new `patterns/bp-XXX.json`; `add-recall-strategy` (R7) — new `em-recall/strategies/<x>.mjs` + registry entry. The generator can also **regenerate the capability matrix** from all registered manifests, so the human-readable matrix is always derived, never hand-maintained.
+
+### Scope
+
+- **In scope:** the substrate↔enforcement boundary — `patterns/bp-XXX.json` contracts, `patterns/taxonomy.json` + validator, `plugins/_index.json` registry, `enforce-contract.mjs` thin waist, per-project `enforce-config.json`, capability-degradable `min()` formula, per-harness plugins (Claude Code, OpenCode, Codex, Pi Agent; Cursor/Windsurf WEAK advisory), enforcement-plugin runbooks (R10), the plugin-authoring scaffold skill, and the real work — extracting `--gate`/markers/carve-outs OUT of `em-recall.mjs`.
+- **Out of scope:** Phase 9 pluggable recall strategies (R7) — substrate side of the boundary, carved into its own RFC (folds into RFC-001 semantic + RFC-007 graph-projection). The semantic strategy's embedding dependency is in tension with P6 and must be decided there, not here.
+
+---
+
+## 9 phases mapped to requirements
+
+| Phase | Name | New | Mod | Tokens | Deps | Maps to |
+|-------|------|-----|-----|--------|------|---------|
+| 1 | Plugin directory structure | 3 | 7 | ~25-30K | — | R1, R6, R8 |
+| 2 | BP contract JSONs + taxonomy | 5 | 3 | ~35K | P1 | R2, R3, R4 |
+| 3 | `enforce-contract.mjs` thin waist | 2 | 5 | ~55K | P1, P2 | R1, R2, R3, R5, R9 |
+| 4 | Classifier schema extraction | 1 | 5 | ~30K | P2 | R4, R5 |
+| 5 | Per-project `enforce-config.json` | 2 | 3 | ~25K | P3 | R3, R5 |
+| 6 | OpenCode plugin (TS, STRONG) | 5 | 0 | ~45K | P3 | R6, R10 |
+| 7 | Codex plugin (Python hooks) | 5 | 0 | ~40K | P3 | R6, R10 |
+| 8 | Pi Agent plugin | 5 | 0 | ~35K | P3 | R6, R10 |
+| 9 | Pluggable recall strategies | 5 | 1 | ~50K | — | R7 |
+
+**Phase 1 → R1, R6, R8:** create `plugins/` with subdirectories per harness; `git mv hooks/` → `plugins/claude-code/hooks/` (zero behavior change, byte-identical); create `plugins/_index.json` skeleton; update `install.mjs` to deploy from `plugins/<harness>/hooks/`. ~25-30K (pure git mv + path-reference patching).
+
+**Phase 2 → R2, R3, R4:** convert Markdown patterns to JSON contracts `patterns/bp-001.json`..`bp-012.json`; create `patterns/taxonomy.json` (canonical 7-label set with per-gate allow/block, R3/R4); create `patterns/schema.json` (contract schema, required by the scaffold generator); create `scripts/validate-bp-contract.mjs` (fails CI on any non-canonical label). Contract schema shape: `{ gates: { plan_approval: {tier}, pre_checkpoint: {tier}, post_checkpoint: {tier}, stop: {tier} }, taxonomy_ref: "patterns/taxonomy.json" }`.
+
+**Phase 3 → R1, R2, R3, R5, R9:** `enforce-contract.mjs` — the thin waist. Validates against BP contracts; implementation-boundary detection (R9, lazy-arm on first repo-source write, silent during exploration/planning/architecture); ternary `min()` (R3); classifier dispatch (R4/R5); reads gate action from taxonomy (R3, contract-driven); delegates to `em-recall.mjs --gate` (R1). Two invocation modes: plugin-native import (in-process, STRONG harnesses) + CLI spawn (degrade). Runtime taxonomy clamp: labels not in canonical set → coerced to `unknown` (fail-closed).
+
+**Phase 4 → R4, R5:** extract the 7-label taxonomy into `patterns/taxonomy.json`; refactor `command-classifier.sh` to source taxonomy from JSON (or validate at CI that it matches); plugin classifier override interface; override registration in `plugins/_index.json`; non-overridable labels enforced at scaffold + CI + runtime.
+
+**Phase 5 → R3, R5:** `enforce-config.json` per project (`{ "bp-001": { "plan_approval": "MEDIUM", ... } }`); can only LOWER effective tier (clamp down), never raise; controls classifier activation (`active`/`classifier`); if `active: false` for all plugins → classifier silent (R5).
+
+**Phase 6 → R6, R10 (OpenCode):** `plugins/opencode/` TypeScript plugin wrapping `pre_tool_use` + `tool_result` + lifecycle hooks; manifest declares `pre_tool_use: STRONG, tool_result: STRONG, session_start: MEDIUM, stop: MEDIUM`; includes runbooks per R10.
+
+**Phase 7 → R6, R10 (Codex):** `plugins/codex/` Python hooks for PreToolUse + Stop; `pre_tool_use` MEDIUM (multi-edit bypass documented), `stop: STRONG`, `session_start: STRONG`; includes runbooks per R10.
+
+**Phase 8 → R6, R10 (Pi Agent):** `plugins/pi-agent/` wrapping `tool_call` + `session_shutdown`/`turn_end`; `pre_tool_use: STRONG`, `stop: MEDIUM`, `session_start: STRONG`; includes runbooks per R10.
+
+**Phase 9 → R7:** pluggable recall strategies for `em-recall.mjs` (lexical default zero-dep; semantic opt-in `requiresEmbeddings: true`; graph zero-dep; hybrid RRF). Registry `em-recall/strategies/_index.json`. **Caveat:** the only FEATURE phase — carve into its own RFC (semantic's embedding dependency is in tension with P6).
+
+### Build priority (maps to R1–R10)
+
+| Priority | What | Maps to | Rationale |
+|----------|------|---------|-----------|
+| **P0** | `patterns/taxonomy.json` + validator | R3, R4 | Canonize the 7 labels with per-gate allow/block. Cheapest fix, prevents downstream label drift + hardcoded gate logic. Labels already exist in `command-classifier.sh:13-28`. |
+| **P1** | Phase 1: Plugin directory structure | R1, R6, R8 | `git mv hooks/` → `plugins/claude-code/hooks/`; `plugins/_index.json` skeleton. Zero behavior change, ~25-30K. |
+| **P2** | Phase 2: BP contract JSONs | R2, R3, R4 | `patterns/bp-001.json`..`bp-012.json`. Contract schema that Phase 3 validates against. `patterns/schema.json` for scaffold generator. |
+| **P3** | Phase 3: `enforce-contract.mjs` | R1, R2, R3, R5, R9 | The thin waist. Validates against contracts, computes effective tier, implementation-boundary detection (R9), dispatches classifier, reads gate action from taxonomy, delegates to core. |
+| **P4** | Phase 5: `enforce-config.json` | R3, R5 | Per-project config clamping. Classifier activation gating. Ternary `min()`. |
+| **P5-P7** | Phase 6/7/8: Per-tool plugins | R6, R10 | OpenCode (TS), Codex (Python), Pi Agent. Each depends on P3. Each includes `runbooks/enforcement.md` per R10. |
+| **—** | Phase 9: Recall strategies | R7 | Carve into own RFC. Semantic has embedding dependency against P6. |
+| **Bug** | Fix `plan-gate.sh:108-115` ordering | R4 | Deadlock class 2 — F14 early-exit blocks the `marker_write` escape hatch. |
+| **Follow** | Migrate second-opinion runbook to `plugins/second-opinion/runbooks/` | R10 | Post-Phase 1: `hooks/runbooks/` → `plugins/second-opinion/runbooks/`. |
+
+---
+
+## Requirement traceability matrix
+
+| Requirement | Architecture section | Phase(s) | Principle(s) |
+|-------------|---------------------|----------|--------------|
+| R1 — Memory is substrate | North star, architecture diagram, enforce-contract.mjs delegates to em-recall | P1, P3 | P9 |
+| R2 — Pluggable enforcement, episodic-memory dictates contract | Contract flow direction, BP contract JSONs, contract boundary, taxonomy as gate-action source of truth | P2, P3 | P2, P11 |
+| R3 — Capability mapping contract | Effective tier formula, per-harness declarations, per-gate allow/block taxonomy | P2, P3, P5 | P5 |
+| R4 — Default classifier, plugin override | Canonical taxonomy, non-overridable labels, classifier dispatch | P2, P4 | P2, P4 |
+| R5 — Classifier activation gating | Classifier pseudocode, enforce-config.json `active` field | P3, P5 | P6 |
+| R6 — Plugin-to-harness binding | plugins/<harness>/ structure, one-per-harness | P6, P7, P8 | P9, P11 |
+| R7 — Pluggable recall strategies | Recall strategies registry, em-recall/strategies/ | P9 | P6, P1 |
+| R8 — Plugin registry | plugins/_index.json, validation CI check | P1, all | P2, Rule 14 |
+| R9 — No checkpoints during exploration | Implementation boundary detection, planning-passive redesign, classifier pseudocode guard | P3 | P4, P6 |
+| R10 — Enforcement plugin runbooks | Runbook content spec, content-addressed UX-markers, checkpoint exemption, per-plugin paths, CI validation | P5-P7, scaffold | P4 |
+
+---
+
+## Deadlock analysis (maps to taxonomy, R3, R4, R9)
+
+Full analysis: episode `20260527-073522-deadlock-analysis-7-classes-traced-again-2648`.
+
+| Class | Deadlock? | Root cause | Fix |
+|-------|-----------|------------|-----|
+| 1 — marker_write misclassified | **TRUE** | Plugin overrides marker_write → gate blocks its own escape hatch | `marker_write: overridable: false` (v4+ taxonomy). Three-layer enforcement: author-time (scaffold), CI (validator), runtime (thin waist clamp to unknown). |
+| 2 — Invalid SID + plan pending | **TRUE (bug)** | `plan-gate.sh:108-115` F14 early-exit before `marker_write` dispatch at :136. The escape hatch that allows `rm .checkpoints/.plan-approval-pending` is unreachable because F14 exits first. | Reorder: check marker_write targeting plan-marker BEFORE the F14 block. |
+| 3 — Empty marker | No (tax) | Agent writes 0-byte file with `touch()`; gate rejects it. Block message says "must be non-empty." | Already handled — block message at `checkpoint-gate.sh:533` is explicit. Two-step tax, not deadlock. |
+| 4 — Wrong-root (worktree) | UX deadlock | Agent writes to worktree root; gate reads main repo | Message names canonical path. Agent re-reads and re-writes at the correct location. |
+| 5 — Plan-pending blocks checkpoint | No (2-step) | Cross-gate invariant; escape hatch (rm plan marker) works | Escape hatch functional — remove plan marker, then write checkpoint. Two steps, resolvable. |
+| 6 — Agent-classifier bootstrap | RESOLVED | Carve-out at `checkpoint-gate.sh:1159-1181` | In code — validates script path resolves to `~/.episodic-memory/scripts/` or repo `scripts/`. Security layered: env-prefix rejected upstream, plan-pending checked before carve-out. |
+| 7 — `.checkpoints/` arms own gate | RESOLVED | Smart-arming carve-out at `checkpoint-gate.sh:868-872` | In code — `.checkpoints/*` paths excluded from `_tool_call_targets_repo_source`. Gate infrastructure carved out from own enforcement. |
+
+**Key insight:** Class 1 is the only deadlock the taxonomy can prevent. Classes 6 and 7 prove the pattern — infrastructure carve-outs are necessary and already exist in the gate code. Class 2 is a genuine `plan-gate.sh` ordering bug requiring a separate code fix.
+
+---
+
+## Alternatives considered
+
+| Alternative | Why rejected |
+|---|---|
+| Keep gate decision inside `em-recall.mjs` (RFC-003:506 stance) | Collapses recall+react into one script; soft P1 violation and P9 tension. Blocks cross-tool reach — each new harness re-derives plumbing instead of declaring a capability mapping. This RFC supersedes that commitment. |
+| Single boolean `arms_pre_checkpoint` per label (v3 taxonomy) | Cannot express three gates with different label subsets. `push_or_pr_create` was factually wrong (arms post-checkpoint, not pre-checkpoint); `nonsrc_write` blocks plan-approval but not pre-checkpoint. Replaced by per-gate `gates: {plan_approval, pre_checkpoint, post_checkpoint}`. |
+| Make all taxonomy labels overridable | A plugin could redefine `unsafe_complex` as `read_only` (bypass all gates) or misclassify `marker_write` as `shared_write` (unrecoverable deadlock class 1). `unsafe_complex` + `marker_write` are non-overridable. |
+| Declare Codex `pre_tool_use` STRONG | Dishonest per P5 — Codex PreToolUse has a known multi-edit bypass. Declared MEDIUM with the bypass documented; push-gate + stop-gate are the hard enforcement for Codex. |
+| Two node spawns in Phase 3 (validate, then delegate) | Doubles startup latency. Single node entry with two invocation modes (in-process import for STRONG harnesses; CLI spawn for degrade). |
+| Include Phase 9 recall strategies in this RFC | Recall strategies are substrate-side, not enforcement. The semantic strategy's embedding dependency conflicts with P6 and must be decided in RFC-001/RFC-007. Carved out. |
+| Gate during planning/exploration (pre-R9 behavior) | Reintroduced planning-time friction — read-only node/inspection commands mis-blocked. R9 makes the pre-checkpoint inert until the implementation boundary; F1 RESIDUAL (#351) is the accepted trade. |
+| Hand-roll each harness plugin | Lets authors invent labels, skip registry registration, or ship without a runbook. Scaffold generator makes R3/R8/R10 conformance-by-construction. |
+
+---
+
+## Implementation plan
+
+> Concrete PR/phase breakdown is populated as the RFC moves to `accepted`. Build priority P0–P9 above is the ordering; sequencing graph below shows the dependency layers.
+
+### Sequencing
+
+```mermaid
+graph TD
+    P0["P0 — patterns/taxonomy.json + validator<br/>(R3, R4) — no deps, cheapest"]
+    P1["P1 — Phase 1: plugin dir git mv + _index.json<br/>(R1, R6, R8) — zero behavior change"]
+    P2["P2 — Phase 2: bp-XXX.json contracts + schema<br/>(R2, R3, R4)"]
+    P3["P3 — Phase 3: enforce-contract.mjs thin waist<br/>(R1, R2, R3, R5, R9)"]
+    P4["P4 — Phase 5: enforce-config.json<br/>(R3, R5)"]
+    P5["P5 — Phase 6: OpenCode plugin (TS)<br/>(R6, R10)"]
+    P6["P6 — Phase 7: Codex plugin (Python)<br/>(R6, R10)"]
+    P7["P7 — Phase 8: Pi Agent plugin<br/>(R6, R10)"]
+    BUG["Bug — plan-gate.sh:108-115 reorder<br/>(R4, deadlock class 2)"]
+    P9["Phase 9 — recall strategies<br/>(R7) — CARVE TO OWN RFC"]
+
+    P0 --> P2
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    P3 --> P5
+    P3 --> P6
+    P3 --> P7
+```
+
+---
+
+## Implementation
+
+> Populate during build stage — mark each item immediately after it ships. Do not batch at the end.
+
+| PR/Commit | Files changed | Tests | Notes |
+|---|---|---|---|
+| _pending_ | _pending_ | _pending_ | _pending_ |
+
+---
+
+## Related RFCs
+
+- **RFC-003 — Pluggable Tool Adapters** (`accepted`). RFC-003 ⊂ this RFC. RFC-003's load-bearing commitment — *gate decision logic stays in `em-recall.mjs` core* (RFC-003:506) — is **partially superseded** by RFC-008: `--gate`, markers, carve-outs, and the classifier migrate OUT to the enforcement thin waist (`enforce-contract.mjs` + `patterns/*.json`), restoring `em-recall.mjs` to pure recall. RFC-003's adapter contract, `installed_state` manifest field, and cross-tool messaging remain in force; this RFC reuses `installed_state` + `plugins/_index.json` presence for migration detection (R8). RFC-003 frontmatter status is unchanged (it is shipped) — only the decision-in-core stance is annotated as superseded.
+- **RFC-001 — Intelligent Memory** (`accepted`) and **RFC-007 — Graph Projection** (`draft`): Phase 9 (pluggable recall strategies, R7) is substrate-side and carves into these — semantic embeddings fold into RFC-001, graph traversal into RFC-007. Not in this RFC.
+
+---
+
+## Second opinion
+
+> Required before `status: accepted` can be set. This RFC is the committed form of spec v8; the design review below was conducted on the converging spec (two reviewers — author self-review + OpenCode second-opinion in the `episodic-memory-bp-opt` checkout) across the v3 → v8 chain. All substantive findings were ACCEPTED and incorporated.
+
+**Reviewer:** self-review + OpenCode second-opinion (cross-tool, `episodic-memory-bp-opt`)
+**Date:** 2026-05-27
+**AI-slop check:** clean — fixed in revision (every finding below was incorporated into v8 before this RFC was written)
+**Decision:** proceed (7/7 ACCEPT). Champion sign-off flips `draft` → `accepted`.
+
+| # | Finding | Resolution | Maps to |
+|---|---------|------------|---------|
+| 1 | Phase 3 double node spawn latency | Single node entry, two invocation modes (import vs CLI) | R1 |
+| 2 | Phase 1 70K estimate inflated | Corrected to ~25-30K (git mv + path patching) | P1 |
+| 3 | Phase 9 does not belong | Carve into own RFC; semantic has embedding dependency | R7 |
+| 4 | Codex pre_tool_use: STRONG dishonest | Corrected to MEDIUM with bypass documented | R3 |
+| 5 | Taxonomy drift | Canonical `patterns/taxonomy.json` + validator | R4 |
+| 6 | BP contract: repo vs episode | Contracts = git-versioned files; episodes = runtime state | R2 |
+| 7 | Effective-tier formula omits Phase 5 | Ternary `min(harness, contract, config)` | R3 |
+| — | Migration detection broken | Use `installed_state` + `plugins/_index.json` presence | R8 |
+| — | Deadlock class 1: marker_write misclassification | `marker_write: overridable: false` + three-layer enforcement | R4 |
+| — | Deadlock class 2: plan-gate.sh F14 ordering bug | Reorder `plan-gate.sh:108-115` before marker_write dispatch at :136 | R4 |
+| — | Runbook pattern generalized from second-opinion | 6-section spec, content-addressed UX-marker, session-scoped, checkpoint-immune | R10 |
+
+### v4 → v8 change log (provenance of this RFC)
+
+| # | Change | Version | Reason |
+|---|--------|---------|--------|
+| T1 | Replace `arms_pre_checkpoint: boolean` with per-label `gates: {plan_approval, pre_checkpoint, post_checkpoint}` | v4 | Single boolean cannot express 3 gates with different subsets. `push_or_pr_create` was factually wrong. Taxonomy must be the source of truth for gate logic. |
+| T2 | `marker_write: overridable: false` | v4 | Gate infrastructure deadlock-prevention; same safety tier as `unsafe_complex`. |
+| T3 | Added `non_overridable` array + rationale in taxonomy schema | v4 | Explicit declared set + reason; CI and author-time tooling check it. |
+| T4 | Gate-action lookup changed from hardcoded set to `taxonomy.gates[gate].action_for(label)` | v4 | R2: contract drives behavior; enforcement layer consults taxonomy. |
+| T5 | R9 added — no checkpoints during exploration/planning/architecture | v5 | Implementation boundary only. Planning-passive redesign. Bash ungated from pre-checkpoint. |
+| T6 | Deadlock analysis section — 7 classes traced against checkpoint-gate.sh + plan-gate.sh | v5 | 3 true deadlocks, 2 resolved by carve-outs, 2 UX taxes. Class 2 documented. |
+| T7 | Implementation boundary detection added to architecture + pseudocode | v5 | `is_exploration_or_planning()` guard before gate logic (R9). Lazy-arm on first repo-source write. |
+| T8 | Build priority: bug fix row for plan-gate.sh:108-115 | v5 | Deadlock class 2 code fix. |
+| T9 | R10 added — enforcement plugin runbooks, 6 required sections | v6 | Content-addressed UX-marker, session-scoped, checkpoint-immune. Generalized from the second-opinion harness. |
+| T10 | Runbook section in build priority + traceability matrix | v6 | Deployment paths, CI validation, scaffold stubs. |
+| T11 | Runbook content specification completed — all 6 sections, common + harness-specific | v7 | Self-trigger checklist, canonical invocation, failure-mode diagnosis, anti-patterns, trigger phrases, composes-with. |
+| T12 | Complete combined v8 spec — all sections unified | v8 | v4 (base) + v5 (R9, boundary, deadlock) + v6 (R10 structure) + v7 (R10 content). Architecture, phases, traceability, build priority, review findings, ground truth all updated. |
+
+---
+
+## Open questions
+
+| # | Question | Owner | Status |
+|---|---|---|---|
+| OQ-1 | Phase 9 (recall strategies, R7) destination: split between RFC-001 (semantic) and RFC-007 (graph), or a single new substrate RFC? | Charlton Ho | open |
+| OQ-2 | Does `command-classifier.sh` source `taxonomy.json` at runtime, or is the match validated only at CI (Phase 4 offers both)? | — | open |
+| OQ-3 | Cursor/Windsurf are WEAK (prompt-injection advisory only) — do they get plugin directories at all, or only a rules-injection artifact? | — | open |
+
+---
+
+## Ground truth hierarchy
+
+1. **PRINCIPLES.md** — governing principles; all design must conform.
+2. **Code on disk** — what works today (`hooks/`, `scripts/`, `plugins/`, `patterns/`, `hooks/runbooks/`).
+3. **Accepted RFCs** — RFC-003 (accepted), RFC-004 (accepted).
+4. **This RFC (spec v8)** — requirements R1–R10 anchor all decisions.
+5. **Deadlock analysis** — episode `20260527-073522-deadlock-analysis-7-classes-traced-again-2648`.
+6. **Runbook analysis** — episode `20260527-080017-runbook-infrastructure-analysis-second-o-43d9`.
+7. **Design review episodes** — second-opinion chain 2026-05-27 (v3 → v4 → v5 → v6 → v7 → v8).
+8. **Global rearchitecture episodes** — design speculation 2026-05-26; informs but does not override accepted specs.
