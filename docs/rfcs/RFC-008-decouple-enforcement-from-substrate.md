@@ -298,7 +298,7 @@ Both are themselves validated by `scripts/validate-schemas.mjs` against the JSON
 - Each value ∈ closed enum: `{STRONG, MEDIUM, WEAK, TBD}`.
 - `TBD` allowed only with a sibling comment field pointing at an open issue URL (validator greps for the URL pattern).
 - Missing capability for an event the plugin's adapter actually dispatches into = fail. Validator inspects `plugins/<harness>/capabilities/enforcement.{mjs,ts,py}` for hook-registration call sites and asserts each registered event appears in `capabilities`.
-- **Capability honesty (M4a):** SELF-DECLARED, but `plugins/bypass_known.json` records the ceiling per `{harness, event}` pair. Any declared tier exceeding the known-bypass ceiling for that harness/event = fail. **F28 closure (v10 round 2):** the registry MUST contain one explicit record per `{harness, event}` covered by any installed plugin — either `{ ceiling: "<tier>", citation: "<episode-or-url>" }` (known bypass) or `{ no_known_bypass_evidence: true, last_audited_iso8601: "<date>", auditor: "<id>" }` (clean audit). Missing record for a declared `{harness, event}` = fail (vacuity prevention: an empty `bypass_known.json` no longer silently accepts any tier). P0 ships the file pre-populated with the known Codex `pre_tool_use: { ceiling: "MEDIUM", citation: "multi-edit bypass per RFC-008 §Per-harness capability declarations" }` record so P5–P7 plugins inherit the ceiling at install-time.
+- **Capability honesty (M4a):** SELF-DECLARED, but `plugins/bypass_known.json` records the ceiling per `{harness, event}` pair. Any declared tier exceeding the known-bypass ceiling for that harness/event = fail. **F28 closure (v10 round 2):** the registry MUST contain one explicit record per `{harness, event}` covered by any installed plugin — either `{ ceiling: "<tier>", citation: "<episode-or-url>" }` (known bypass) or `{ no_known_bypass_evidence: true, last_audited_iso8601: "<date>", auditor: "<id>" }` (clean audit). Missing record for a declared `{harness, event}` = fail (vacuity prevention: an empty `bypass_known.json` no longer silently accepts any tier). P0 ships the file pre-populated with the known Codex `pre_tool_use: { ceiling: "MEDIUM", citation: "multi-edit bypass per RFC-008 §Per-harness capability declarations" }` record so P5–P7 plugins inherit the ceiling at install-time. **F34 closure (v10 round 3):** `plugins/bypass_known.schema.json` ships in P0 alongside the file itself; meta-schema is JSON Schema 2020-12 with `additionalProperties: false` at every level. Top-level shape: `{ "records": [ { "harness": <enum-from-M3>, "event": <enum-from-M4>, "ceiling": <enum-from-M4>, "citation": <string>, "last_audited_iso8601": <string>, "auditor": <string>, "no_known_bypass_evidence": <bool> } ] }` with `oneOf` discriminator on `ceiling` (known bypass) vs `no_known_bypass_evidence: true` (clean audit). Validator (assertion 7) asserts: schema validation passes; every `{harness, event}` pair that appears in any installed manifest has exactly one matching record; record record-validity (one of the two shapes, not both, not neither).
 
 #### Classifier mode + emits_labels (M5 — extends F6)
 
@@ -354,8 +354,14 @@ Both are themselves validated by `scripts/validate-schemas.mjs` against the JSON
 - `bad-short-runbook.json` — runbook exists but below `MIN_RUNBOOK_BYTES`.
 - `bad-default-mode-with-override-path.json` — `mode: default` but `override_path` present.
 - `bad-capability-dishonest.json` — declared tier exceeds `bypass_known.json` ceiling.
+- **F33 closure (v10 round 3) — four new fixtures absorbed from round-1 + round-2 closures:**
+  - `bad-runbook-path-traversal.json` — `runbook.full: "../other-plugin/runbooks/enforcement.md"` (F29).
+  - `bad-override-path-traversal.json` — `classifier.override_path: "../other-plugin/classifier/foo.mjs"` (F29).
+  - `bad-override-emits-tsv.json` — plugin manifest with `mode: override`; override classifier file emits TSV at runtime (golden-input test catches it via thin-waist dispatch-context rule, F27+F35).
+  - `bad-missing-bypass-record.json` — manifest declares `capabilities: { tool_result: STRONG }` for `harness: opencode` but `bypass_known.json` has no `{ harness: "opencode", event: "tool_result" }` record (F28).
+- **Round-2 symlink fixture (F33 sweep):** `bad-runbook-symlink-escape.json` — `plugins/X/runbooks/enforcement.md` is a symlink whose `realpath` resolves OUTSIDE `plugins/X/` (M7b symlink-canonicalization edge case).
 
-Each fixture maps 1:1 to one or more of assertions M3–M9 + scaffold-template equality (M7a).
+Each fixture maps 1:1 to one or more of assertions M3–M9 + scaffold-template equality (M7a). Corpus size: 16 fixtures (12 original + 4 closure additions + 1 symlink sweep = 17; net 16 after collapsing the symlink case into the existing path-traversal fixture if structurally equivalent — implementation chooses; CI asserts ≥16).
 
 #### `validate-plugin-registry.mjs` — normative assertion checklist
 
@@ -365,7 +371,7 @@ Each fixture maps 1:1 to one or more of assertions M3–M9 + scaffold-template e
 4. **id == harness (M3):** for every plugin entry.
 5. **Capability key closure (M4):** `capabilities` keys ⊆ closed event set.
 6. **Capability tier enum (M4):** each value ∈ `{STRONG, MEDIUM, WEAK, TBD}`; `TBD` requires sibling issue-URL comment.
-7. **Capability honesty (M4a):** cross-check against `bypass_known.json`; declared ≤ known-bypass ceiling.
+7. **Capability honesty (M4a):** `bypass_known.json` validates against `bypass_known.schema.json` (F34); for every `{harness, event}` pair appearing in any installed manifest's `capabilities`, there MUST exist exactly one matching record (missing record = fail, F28 vacuity prevention); declared tier ≤ record's `ceiling` (or any tier OK if `no_known_bypass_evidence: true`).
 8. **Vocabulary closure (M5, extends F6):** `emits_labels ⊆ taxonomy.labels`.
 9. **Non-overridable preservation (M5a):** golden-input commands through override emit `marker_write` + `unsafe_complex` with canonical semantics.
 10. **Mode/override consistency (M5):** `mode == override` ⇔ `override_path` set + file exists; `mode == default` ⇒ `emits_labels == canonical`.
@@ -407,7 +413,7 @@ Every classifier invocation emits ONE NDJSON line on stdout:
 
 **Format rules:** NDJSON one line per emission. UTF-8. No trailing comma. No whitespace around the JSON object beyond the trailing `\n`. Multi-emission classifiers (segment chains in `unsafe_complex` detection) emit one line per segment.
 
-**Legacy TSV format (bash default, deprecated):** emits `label\ttarget\treason\n`. Thin waist accepts TSV **ONLY** when the emission source is the built-in bash default classifier (`verdict_source == "default"`) during P4 burn-in; post-cutover only NDJSON. **F27 closure (v10 round 2):** plugin override classifiers (any language, `mode == override`) MUST emit NDJSON regardless of burn-in state — TSV from an override is HARD-REJECTED with a structured alert (Contract 4), preventing overrides from sidestepping required fields like `taxonomy_version` / `classifier_version` / `verdict_source` by emitting in legacy format. The TSV→NDJSON migration of the bash default itself is P4's responsibility (along with F4 runtime-sourcing). Golden corpus fixture `bad-override-emits-tsv.json` asserts this.
+**Legacy TSV format (bash default, deprecated):** emits `label\ttarget\treason\n`. **F35 closure (v10 round 3):** TSV source authority is the **thin-waist dispatch context** (`selectedClassifier == "default"`), NOT a field inspected on the classifier's stdout. TSV has no `verdict_source` field by definition; the thin waist knows which classifier it invoked (default vs override) and applies the format rule based on that dispatch decision before parsing. Implementers MUST NOT inspect TSV payload content to decide acceptance. Post-cutover (P4) only NDJSON. **F27 closure:** plugin override classifiers (any language, `mode == override`) MUST emit NDJSON regardless of burn-in state — TSV from an override is HARD-REJECTED by the thin waist (before parse) with a structured alert (Contract 4), preventing overrides from sidestepping required fields like `taxonomy_version` / `classifier_version` / `verdict_source` by emitting in legacy format. The TSV→NDJSON migration of the bash default itself is P4's responsibility (along with F4 runtime-sourcing). Golden corpus fixture `bad-override-emits-tsv.json` asserts the override path (including the adversarial case of TSV containing stringified NDJSON-looking fields — still rejected because the dispatch source, not the payload, is the authority).
 
 #### Contract 2 — Adapter → thin waist call (per hook fire) — `adapter-call.schema.json`
 
@@ -542,7 +548,7 @@ Exit `0` = plugin passes the universal contract. Exit non-zero = specific assert
 | 6 | F3 hard-reject simulation: inject out-of-vocab label, assert structured alert episode written with `project_root` cwd (Contract 4) | Contract 4 + F3 |
 | 7 | Capability honesty: declared tier ≤ `bypass_known.json` ceiling for harness/event | M4a |
 
-CI runs `test-plugin.mjs --plugin <id>` for every entry in `_index.json` on every PR. Authors run it locally before pushing.
+CI runs `node scripts/test-plugin.mjs --plugin <id> --project "$GITHUB_WORKSPACE"` for every entry in `_index.json` on every PR (**F32 closure (v10 round 3):** `--project` is required in CI too — the round-2 fix earlier listed bare `--plugin <id>`, which reopened F31 via caller-cwd fallback). Authors run it locally with `--project "$(git rev-parse --show-toplevel)"` (the harness will also auto-discover if omitted, but explicit invocation is the documented form per F31).
 
 #### What this eliminates
 
@@ -587,6 +593,10 @@ Today, every gate-adjacent script ships its own 200–400 line bespoke test harn
 | F29 | P1 | runbook/override path checks miss containment — `runbook.full: "../other-plugin/..."` resolves but escapes plugin dir | M7b realpath containment under `plugins/<harness>/`; golden fixtures `bad-runbook-path-traversal.json` + `bad-override-path-traversal.json` |
 | F30 | P1 | `installed-state.schema.json` referenced by assertion 16 but absent from P0 schema list | P0 schema list expanded 6 → 7; includes `plugins/installed-state.schema.json` |
 | F31 | P1 | `test-plugin.mjs` has no `--project`/root binding — caller-cwd binding can orphan alerts under wrong project | `--project <root>` REQUIRED (or git-root discovery); all subprocesses spawn with `cwd: projectRoot` + `EPISODIC_MEMORY_PROJECT_ROOT` env; alerts land under `<projectRoot>/.episodic-memory/` |
+| F32 | P1 | round-1 fix listed CI invocation as bare `--plugin <id>`, reopening F31 via caller-cwd fallback | CI invocation updated to `--project "$GITHUB_WORKSPACE"`; local invocation uses `--project "$(git rev-parse --show-toplevel)"` |
+| F33 | P1 | golden corpus + assertion 7 text didn't absorb round-1 closures | corpus expanded 12→16 (added `bad-runbook-path-traversal`, `bad-override-path-traversal`, `bad-override-emits-tsv`, `bad-missing-bypass-record`, optional `bad-runbook-symlink-escape`); assertion 7 made explicit on missing-record fail |
+| F34 | P1 | `plugins/bypass_known.json` had no meta-schema; record shape not normative | `plugins/bypass_known.schema.json` added to P0 (JSON Schema 2020-12, `additionalProperties: false`); top-level `{records[]}` with `oneOf` discriminator on `ceiling` vs `no_known_bypass_evidence` |
+| F35 | P2 | TSV acceptance keyed on `verdict_source` field that TSV doesn't have | source authority moved to thin-waist dispatch context (`selectedClassifier == "default"`); TSV payload content NOT inspected; override TSV w/ stringified NDJSON fields still hard-rejects |
 
 ### Capability-degradable enforcement (maps to R3)
 
@@ -879,7 +889,7 @@ The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **o
 
 | Priority | What | Maps to | Rationale |
 |----------|------|---------|-----------|
-| **P0** | `patterns/taxonomy.json` + validator + all v10 schema docs | R3, R4 + F11–F31 | Canonize the 7 labels with per-gate allow/block. Cheapest fix, prevents downstream label drift + hardcoded gate logic. Labels already exist in `command-classifier.sh:13-28`. **v10 P0 expansion (round-2 corrected):** ship the **seven** static JSON-Schema docs — plugin manifest (`plugins/manifest.schema.json`, `plugins/_index.schema.json`, `plugins/installed-state.schema.json` — F30 closure), four runtime wire contracts (`classifier-output.schema.json`, `adapter-call.schema.json`, `adapter-response.schema.json`, `structured-alert.schema.json`) — plus `plugins/bypass_known.json` **pre-populated** with the Codex `pre_tool_use: MEDIUM` ceiling record (F28 closure, not empty skeleton). Cheap to land together, lets P1 wire validators against locked schemas. |
+| **P0** | `patterns/taxonomy.json` + validator + all v10 schema docs | R3, R4 + F11–F35 | Canonize the 7 labels with per-gate allow/block. Cheapest fix, prevents downstream label drift + hardcoded gate logic. Labels already exist in `command-classifier.sh:13-28`. **v10 P0 expansion (round-3 corrected):** ship the **eight** static JSON-Schema docs — plugin manifest (`plugins/manifest.schema.json`, `plugins/_index.schema.json`, `plugins/installed-state.schema.json` — F30), `plugins/bypass_known.schema.json` (F34 — meta-schema for the honesty registry), four runtime wire contracts (`classifier-output.schema.json`, `adapter-call.schema.json`, `adapter-response.schema.json`, `structured-alert.schema.json`) — plus `plugins/bypass_known.json` **pre-populated** with the Codex `pre_tool_use: MEDIUM` ceiling record (F28, not empty skeleton). Cheap to land together, lets P1 wire validators against locked schemas. |
 | **P1** | Phase 1: Plugin directory structure | R1, R6, R8 | `git mv hooks/` → `plugins/claude-code/hooks/`; `plugins/_index.json` skeleton. Zero behavior change, ~25-30K. |
 | **P2** | Phase 2: BP contract JSONs | R2, R3, R4 | `patterns/bp-001.json`..`bp-012.json`. Contract schema that Phase 3 validates against. `patterns/schema.json` for scaffold generator. |
 | **P3** | Phase 3: `enforce-contract.mjs` | R1, R2, R3, R5, R9 | The thin waist. Validates against contracts, computes effective tier, implementation-boundary detection (R9), dispatches classifier, reads gate action from taxonomy, delegates to core. |
@@ -1038,7 +1048,8 @@ After acceptance, the champion flagged the validation/contract layer as thin. A 
 After v9 closed the taxonomy/contract validator gap (F1–F10), the champion flagged a parallel gap at the plugin layer: the plugin manifest schema, the runtime emission contracts, and the per-plugin test path were all example-driven, not normatively specified. v10 adds three new normative sections (§Plugin-manifest-validation-contract / §Runtime-data-contract / §Plugin-testing-harness) closing findings F11–F26. A consolidated second-opinion review on the combined v10 + P0 implementation plan is dispatched concurrent with this commit.
 
 - **Round 1 — codex**, episode `20260528-100613-reply-codex-to-20260528-100352-rfc-008-v-0f80`: **HOLD** — 5 P1 findings (F27–F31): override-classifier TSV bypass (F27), `bypass_known.json` vacuity (F28), runbook/override path-traversal (F29), missing `installed-state.schema.json` in P0 (F30), `test-plugin.mjs` cwd binding (F31). All 5 ACCEPT — concrete spec edits, no architectural pushback. Fixes folded inline (this commit). All P0 schema list expanded from six to seven. Going to round 2.
-- **Round 2 — pending dispatch** (post round-1 fixes).
+- **Round 2 — codex**, episode `20260528-101359-reply-codex-to-20260528-101123-rfc-008-v-3815`: **HOLD** — 4 new findings (F32–F35). F27/F29/F30 conceptually closed. F28/F31 needed coherence fixes (CI invocation reopened F31; bypass_known missing meta-schema; golden corpus didn't absorb new fixtures; TSV source authority wording needed dispatch-context, not stdout content). All 4 ACCEPT — small spec patches. Folded inline (this commit).
+- **Round 3 — pending dispatch** (post round-2 fixes; T19 changelog row).
 
 | # | Sev | Finding | Resolution (v10) |
 |---|-----|---------|------------------|
@@ -1063,6 +1074,10 @@ After v9 closed the taxonomy/contract validator gap (F1–F10), the champion fla
 | F29 | P1 | runbook/override path checks miss containment — `runbook.full: "../other-plugin/..."` resolves but escapes plugin dir | M7b realpath containment under `plugins/<harness>/`; golden fixtures `bad-runbook-path-traversal.json` + `bad-override-path-traversal.json` |
 | F30 | P1 | `installed-state.schema.json` referenced by assertion 16 but absent from P0 schema list | P0 schema list expanded 6 → 7; includes `plugins/installed-state.schema.json` |
 | F31 | P1 | `test-plugin.mjs` has no `--project`/root binding — caller-cwd binding can orphan alerts under wrong project | `--project <root>` REQUIRED (or git-root discovery); all subprocesses spawn with `cwd: projectRoot` + `EPISODIC_MEMORY_PROJECT_ROOT` env; alerts land under `<projectRoot>/.episodic-memory/` |
+| F32 | P1 | round-1 fix listed CI invocation as bare `--plugin <id>`, reopening F31 via caller-cwd fallback | CI invocation updated to `--project "$GITHUB_WORKSPACE"`; local invocation uses `--project "$(git rev-parse --show-toplevel)"` |
+| F33 | P1 | golden corpus + assertion 7 text didn't absorb round-1 closures | corpus expanded 12→16 (added `bad-runbook-path-traversal`, `bad-override-path-traversal`, `bad-override-emits-tsv`, `bad-missing-bypass-record`, optional `bad-runbook-symlink-escape`); assertion 7 made explicit on missing-record fail |
+| F34 | P1 | `plugins/bypass_known.json` had no meta-schema; record shape not normative | `plugins/bypass_known.schema.json` added to P0 (JSON Schema 2020-12, `additionalProperties: false`); top-level `{records[]}` with `oneOf` discriminator on `ceiling` vs `no_known_bypass_evidence` |
+| F35 | P2 | TSV acceptance keyed on `verdict_source` field that TSV doesn't have | source authority moved to thin-waist dispatch context (`selectedClassifier == "default"`); TSV payload content NOT inspected; override TSV w/ stringified NDJSON fields still hard-rejects |
 
 ### v4 → v10 change log (provenance of this RFC)
 
@@ -1086,6 +1101,7 @@ After v9 closed the taxonomy/contract validator gap (F1–F10), the champion fla
 | T16 | §Plugin-testing-harness specification added (F26) | v10 | Per-plugin tests today are bespoke scripts with inconsistent quality bars. `scripts/test-plugin.mjs --plugin <id>` 7-step gauntlet replaces N hand-rolled harnesses; authors only write harness-specific translation tests. |
 | T17 | P0 build-priority expanded — runtime + manifest schema files ship as static JSON-Schema docs in P0 (validators still P1/P3) | v10 | Cheap to ship together; lets P1 immediately wire validators against locked schemas without bootstrap dependency on a future schema spec. |
 | T18 | v10 round-2 fixes (F27–F31): TSV-restriction for overrides (Contract 1), `bypass_known.json` non-vacuity contract (M4a), path-traversal containment (M7b), P0 schema list 6→7 incl. `installed-state.schema.json`, `test-plugin.mjs --project` binding | v10 | Codex round-1 HOLD with 5 P1 findings, all ACCEPT. Folded inline in this commit; round 2 dispatched against the fixes. |
+| T19 | v10 round-3 fixes (F32–F35): CI invocation `--project "$GITHUB_WORKSPACE"` (closes F31 reopening), golden corpus 12→16 + assertion 7 explicit (F33), `bypass_known.schema.json` added to P0 (8 schemas), TSV source authority = thin-waist dispatch context not stdout `verdict_source` field (F35) | v10 | Codex round-2 HOLD with 4 findings, all ACCEPT — small doc-only patches. Folded inline; round 3 dispatched. |
 
 ---
 
