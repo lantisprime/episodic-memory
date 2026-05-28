@@ -143,9 +143,51 @@ export function bothMarkerPaths(repoRoot, basename) {
 /**
  * Ensure the primary marker directory exists. Idempotent. Use before
  * writeMarkerPath writes.
+ *
+ * Parent-dir symlink rejection (codex round 4 P1, #364): the primary marker
+ * directory MUST be a real directory, never a symlink. Pattern matches
+ * classifier-marker.mjs:validateMarkerStoreDir which has refused symlinked
+ * `.checkpoints/` since the codex BLOCKER #1 round on that fix. Without
+ * this guard, an attacker who plants `<repo>/.checkpoints -> <outside>`
+ * makes every subsequent marker write physically land outside the
+ * substrate while the gate reports paths inside it.
+ *
+ * Self-healing semantics (consistent with hooks/checkpoint-gate.sh
+ * _arm_marker_via_touch_safely for leaf markers): if the dir is detected
+ * as a symlink, `unlink` it and recreate as a real dir. The user-facing
+ * substrate is restored without operator intervention (per
+ * feedback_never_make_user_run_marker_commands — agent's substrate is
+ * agent's job). Symlink target file is untouched (rename/unlink at the
+ * symlink itself, not through it). ENOENT → mkdir; existing real
+ * directory → idempotent no-op.
+ *
+ * Throws only on EMARKERDIRNOTDIR (path exists as a regular file, not a
+ * directory) — that's a different class of substrate corruption that
+ * deserves explicit surface.
  */
 export function ensurePrimaryDir(repoRoot) {
-  fs.mkdirSync(path.join(repoRoot, PRIMARY_MARKER_DIR), { recursive: true })
+  const dir = path.join(repoRoot, PRIMARY_MARKER_DIR)
+  let st
+  try { st = fs.lstatSync(dir) }
+  catch (e) {
+    if (e.code !== 'ENOENT') throw e
+    // Doesn't exist — create as a regular directory.
+    fs.mkdirSync(dir, { recursive: true })
+    return
+  }
+  if (st.isSymbolicLink()) {
+    // Symlink at marker-dir path — substrate tamper. Unlink (the symlink
+    // entry itself, NOT its target — fs.unlinkSync on a symlink path
+    // removes the link, not the target file) and recreate as a real dir.
+    fs.unlinkSync(dir)
+    fs.mkdirSync(dir, { recursive: true })
+    return
+  }
+  if (!st.isDirectory()) {
+    const err = new Error(`primary marker path exists but is not a directory: ${dir}`)
+    err.code = 'EMARKERDIRNOTDIR'
+    throw err
+  }
 }
 
 // ---------------------------------------------------------------------------

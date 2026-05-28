@@ -38,10 +38,20 @@ set -e
 #   - .pre-checkpoint-done write: requires .checkpoint-required exists
 #     (either root) AND .pre-checkpoint-done is missing/empty (both roots).
 #   - .post-checkpoint-done write: requires .post-checkpoint-required exists
-#     AND .post-checkpoint-done is missing/empty.
+#     OR .pre-checkpoint-done is non-empty for this session (#362 fix —
+#     allows the natural `pre → post → push` flow without an intervening
+#     work-write to arm POST_REQ). Push enforcement is independent: push-gate
+#     self-arms POST_REQ at :1485 and blocks at :1525 when POST_DONE is empty.
 # Cross-gate invariant (Codex ...3503 P1): checkpoint marker writes are
 # blocked while .plan-approval-pending exists (either root). Both gates
 # independently enforce.
+#
+# Marker-substrate trust policy (#364, 2026-05-28): marker-read predicates
+# (marker_exists / marker_nonempty / checkpoint_marker_*_for_session)
+# REJECT symlinks via `[ ! -L "$path" ]` precheck. No legitimate code path
+# creates symlink markers (Write tool, Bash redirect, checkpoint-marker.mjs,
+# and touch all create regular files); a symlink at a marker path signals
+# substrate tampering and is refused without affecting any legitimate flow.
 #
 # ---------------------------------------------------------------------------
 # Planning-passive redesign (2026-05-25) + F1 RESIDUAL
@@ -127,12 +137,20 @@ LEGACY_DIR="$REPO_ROOT/$LEGACY_MARKER_DIR"
 # fallback branch is removed).
 # ---------------------------------------------------------------------------
 # marker_exists <basename> — true if the marker exists at either root.
+# Symlinks are REJECTED (#364): no legitimate code path creates symlink
+# markers (LLM Write tool, Bash redirect, checkpoint-marker.mjs, and touch
+# all create regular files). A symlink at a marker path indicates a
+# substrate-trust violation; refusing to honor it closes a trust-by-stat
+# bypass without affecting legitimate flows.
 marker_exists() {
-  [ -e "$PRIMARY_DIR/$1" ] || [ -e "$LEGACY_DIR/$1" ]
+  { [ ! -L "$PRIMARY_DIR/$1" ] && [ -e "$PRIMARY_DIR/$1" ]; } \
+    || { [ ! -L "$LEGACY_DIR/$1" ] && [ -e "$LEGACY_DIR/$1" ]; }
 }
 # marker_nonempty <basename> — true if either root's copy is non-empty.
+# Symlinks REJECTED (#364): see marker_exists for rationale.
 marker_nonempty() {
-  [ -s "$PRIMARY_DIR/$1" ] || [ -s "$LEGACY_DIR/$1" ]
+  { [ ! -L "$PRIMARY_DIR/$1" ] && [ -s "$PRIMARY_DIR/$1" ]; } \
+    || { [ ! -L "$LEGACY_DIR/$1" ] && [ -s "$LEGACY_DIR/$1" ]; }
 }
 
 # Rank-2 (PR for checkpoint-quartet) — session-aware sibling of marker_exists.
@@ -147,29 +165,29 @@ marker_nonempty() {
 # Pair with marker_nonempty_for_session() for `.X-done` size-based checks.
 checkpoint_marker_exists_for_session() {
   local legacy="$1" sid="$2"
-  [ -e "$PRIMARY_DIR/$legacy" ] && return 0
-  [ -e "$LEGACY_DIR/$legacy" ] && return 0
+  { [ ! -L "$PRIMARY_DIR/$legacy" ] && [ -e "$PRIMARY_DIR/$legacy" ]; } && return 0
+  { [ ! -L "$LEGACY_DIR/$legacy" ] && [ -e "$LEGACY_DIR/$legacy" ]; } && return 0
   if validate_session_id "$sid"; then
     local basename
     basename="$(namespaced_marker_basename_for_session "$legacy" "$sid")"
-    [ -e "$PRIMARY_DIR/$basename" ] && return 0
-    [ -e "$LEGACY_DIR/$basename" ] && return 0
+    { [ ! -L "$PRIMARY_DIR/$basename" ] && [ -e "$PRIMARY_DIR/$basename" ]; } && return 0
+    { [ ! -L "$LEGACY_DIR/$basename" ] && [ -e "$LEGACY_DIR/$basename" ]; } && return 0
   fi
   return 1
 }
 
 # Rank-2 — session-aware sibling of marker_nonempty. Tests own-session-or-
 # legacy-literal forms for non-empty size. Other sessions' suffixed
-# markers IGNORED.
+# markers IGNORED. Symlinks REJECTED (#364): see marker_exists for rationale.
 checkpoint_marker_nonempty_for_session() {
   local legacy="$1" sid="$2"
-  [ -s "$PRIMARY_DIR/$legacy" ] && return 0
-  [ -s "$LEGACY_DIR/$legacy" ] && return 0
+  { [ ! -L "$PRIMARY_DIR/$legacy" ] && [ -s "$PRIMARY_DIR/$legacy" ]; } && return 0
+  { [ ! -L "$LEGACY_DIR/$legacy" ] && [ -s "$LEGACY_DIR/$legacy" ]; } && return 0
   if validate_session_id "$sid"; then
     local basename
     basename="$(namespaced_marker_basename_for_session "$legacy" "$sid")"
-    [ -s "$PRIMARY_DIR/$basename" ] && return 0
-    [ -s "$LEGACY_DIR/$basename" ] && return 0
+    { [ ! -L "$PRIMARY_DIR/$basename" ] && [ -s "$PRIMARY_DIR/$basename" ]; } && return 0
+    { [ ! -L "$LEGACY_DIR/$basename" ] && [ -s "$LEGACY_DIR/$basename" ]; } && return 0
   fi
   return 1
 }
@@ -684,6 +702,28 @@ _consume_plan_approved() {
   rm -f "$PRIMARY_DIR/$bn" "$LEGACY_DIR/$bn" 2>/dev/null || true
 }
 
+# Symlink-aware existence check for marker paths (codex round 3 P1, #364).
+# Mirrors marker-read predicates: a symlink at a marker path is NOT
+# considered present. Used by self-arm sites' pre-check to detect that a
+# fresh arm IS needed (the symlink will be replaced atomically by the
+# subsequent touch/write).
+_marker_path_has_real_file() {
+  [ ! -L "$1" ] && [ -e "$1" ]
+}
+
+# Symlink-safe touch: if a symlink exists at the path, unlink it first so
+# the touch creates a fresh regular file rather than following the symlink
+# to write outside the substrate. Best-effort under set -e (||true). Used
+# by the bash fallback sites that arm checkpoint markers when the
+# checkpoint-marker.mjs helper is not installed.
+_arm_marker_via_touch_safely() {
+  local p="$1"
+  if [ -L "$p" ]; then
+    rm -f "$p" 2>/dev/null || true
+  fi
+  touch "$p" 2>/dev/null || true
+}
+
 _arm_checkpoint_required_if_missing() {
   if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
     return 0
@@ -705,7 +745,10 @@ _arm_checkpoint_required_if_missing() {
       --action arm-if-missing \
       --root "$REPO_ROOT" >/dev/null 2>&1 || true
   else
-    touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
+    # Symlink-safe (#364): unlink any planted symlink at the marker path
+    # before touch, otherwise touch follows the symlink and writes outside
+    # the substrate.
+    _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")"
   fi
   # Transactional consume (codex PR review P1): the arm above is best-effort
   # (`|| true`) — an installed helper that exits non-zero would leave NO
@@ -1183,16 +1226,24 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         fi
         ;;
       .post-checkpoint-done|.post-checkpoint-done.*)
-        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
-          # POST_REQ armed → post-checkpoint phase; allow the write (first
-          # write OR idempotent re-write of an already-satisfied marker).
+        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+           || checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+          # Either POST_REQ armed (post-checkpoint phase entered via push-gate
+          # self-arm at :1485 OR allowed-write tail at :1572) OR pre-checkpoint
+          # already satisfied for THIS session — both signal the agent has
+          # legitimately reached the post-implementation write boundary. Issue
+          # #362: the prior POST_REQ-only check deadlocked the natural
+          # `pre → finish → post → push` flow when no intervening Edit/Write/Bash
+          # armed POST_REQ between the pre-done and post-done writes. PRE_DONE
+          # non-empty is the load-bearing signal that implementation began;
+          # push-gate (:1485) still independently self-arms POST_REQ and
+          # :1525 still blocks push when POST_DONE is empty.
           exit 0
         fi
-        # POST_REQ NOT armed → writing the post-checkpoint before the
-        # lifecycle has armed it. The planning-passive redesign (2026-05-25)
-        # removed Bash from the pre-gate, so a premature marker_write no
-        # longer falls through to a block. Block DIRECTLY here so this branch
-        # is self-contained (tests 17/49/50/56).
+        # Neither POST_REQ nor PRE_DONE present → genuinely premature
+        # post-checkpoint write (no pre-checkpoint exists). _block_pre's
+        # "write the pre-checkpoint" message is accurate in this case (tests
+        # 17/49/50/DL-3 setup with PRE_REQ only — PRE_DONE empty).
         _block_pre
         ;;
       .plan-approval-pending|.plan-approval-pending.*)
@@ -1319,13 +1370,17 @@ case "$TOOL_NAME" in
             fi
             ;;
           .post-checkpoint-done|.post-checkpoint-done.*)
-            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
-              # POST_REQ armed → post-checkpoint phase; allow the write.
+            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+               || checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+              # Either POST_REQ armed OR pre-checkpoint already satisfied for
+              # THIS session → post-checkpoint write allowed (Edit/Write
+              # counterpart of Bash branch above; issue #362 fix). Push-gate
+              # at :1485/:1525 remains the independent push-time gate.
               exit 0
             fi
-            # POST_REQ NOT armed → premature post-checkpoint write. marker_write
-            # skips the pre-gate (the `LABEL != marker_write` guard below), so
-            # block DIRECTLY here (planning-passive redesign self-containment).
+            # Neither POST_REQ nor PRE_DONE present → genuinely premature
+            # post-checkpoint write. _block_pre's "write pre-checkpoint" message
+            # is accurate.
             _block_pre
             ;;
           .plan-approval-pending|.plan-approval-pending.*)
@@ -1499,17 +1554,20 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
       else
         # Fallback (helper not installed): compute existence BEFORE touch so the
         # created-now signal is race-free (§15-C3 — no read-after-arm window).
+        # Symlink-safe (#364): _marker_path_has_real_file returns false for a
+        # symlink, so this branch correctly enters the arm path; the helper
+        # touch then unlinks the symlink before writing.
         _push_req_path="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")"
-        if [ ! -e "$_push_req_path" ]; then
-          touch "$_push_req_path" 2>/dev/null || true
+        if ! _marker_path_has_real_file "$_push_req_path"; then
+          _arm_marker_via_touch_safely "$_push_req_path"
           _push_self_arm_created=1
         fi
       fi
     else
       # Invalid/empty sid: legacy direct touch, existence-before-touch.
       _push_req_path="$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
-      if [ ! -e "$_push_req_path" ]; then
-        touch "$_push_req_path" 2>/dev/null || true
+      if ! _marker_path_has_real_file "$_push_req_path"; then
+        _arm_marker_via_touch_safely "$_push_req_path"
         _push_self_arm_created=1
       fi
     fi
@@ -1583,14 +1641,14 @@ case "$TOOL_NAME" in
             --action arm-if-missing \
             --root "$REPO_ROOT" >/dev/null 2>&1 || true
         else
-          # Fallback: direct write when helper not installed.
-          touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")" 2>/dev/null || true
+          # Fallback: direct write when helper not installed. Symlink-safe (#364).
+          _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")"
         fi
       else
         # Invalid/empty sid: legacy direct touch (preserves pre-rank-2
         # behavior; gate inactive for own-session checks but legacy literal
-        # still works for old hooks).
-        touch "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)" 2>/dev/null || true
+        # still works for old hooks). Symlink-safe (#364).
+        _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
       fi
     fi
     ;;
