@@ -8,9 +8,12 @@
  *   - scripts/classifier-override-persist.mjs (auto-persist write after LLM hit)
  *   - scripts/agent-classifier-dispatch.mjs    (legacy Tier 2/3 dispatcher)
  *
- * scripts/classifier-marker.mjs intentionally does NOT consume this module —
- * its tuple shape extends with session_id + policy versions and its store
- * path is .checkpoints/classify/<sha>.json (not classifier-overrides.jsonl).
+ * scripts/classifier-marker.mjs does NOT consume this module's tuple/store
+ * primitives — its tuple shape extends with session_id + policy versions and
+ * its store path is .checkpoints/classify/<sha>.json (not
+ * classifier-overrides.jsonl). It imports ONLY the pure isInterpreterScriptIdentity
+ * predicate (codex FU-2): a no-coupling boolean so the script-identity key rule
+ * is single-sourced across both stores while their tuple fields stay independent.
  *
  * UNIFIED normalizeCommand: strip trailing `# comment`, collapse whitespace,
  * trim. Pre-PR-#336, classify-correction used the whitespace-only form, so
@@ -177,6 +180,29 @@ export function sha256File(p) {
   }
 }
 
+// isInterpreterScriptIdentity — shared key-omission predicate (codex plan-review
+// R1-finding-3 + R2 FU-2). Returns true iff the command is an INTERPRETER
+// invocation (`node|python|python3|ruby|perl <script> ...`) of an IN-REPO script
+// (non-null `digest`), in which case the cache key should be SCRIPT-IDENTITY:
+// `normalized_command` is collapsed to a constant null so per-request args
+// (`--summary`, `--body-file`, tags …) do NOT bust the cache. The script body
+// is still pinned by `script_digest`, so editing the script re-keys (forces
+// re-classification).
+//
+// Deliberately checks toks[0] (the LITERAL first token), NOT resolveExeAgainstCwd's
+// any-position loop: an env-prefixed (`FOO=bar node …`) or wrapper-prefixed
+// (`time node …`) command keeps its full normalized_command (arg-sensitive) and
+// is NEVER downgraded to script-identity — defense-in-depth with the env-prefix
+// short-circuits at the call sites. Direct in-repo executables (`scripts/x …`,
+// toks[0] not an interpreter) also keep arg-sensitivity.
+export function isInterpreterScriptIdentity(command, digest) {
+  if (!digest) return false
+  const toks = String(command).trim().split(/\s+/)
+  if (toks.length < 2) return false
+  if (!INTERPRETERS.has(path.basename(toks[0] || ''))) return false
+  return !toks[1].startsWith('-')
+}
+
 export function buildTuple({ command, projectRoot, callerCwd }) {
   const cwdCanon = realpathOrSame(callerCwd)
   const callerCwdRelOrAbs = isUnder(cwdCanon, projectRoot)
@@ -195,10 +221,16 @@ export function buildTuple({ command, projectRoot, callerCwd }) {
       }
     } catch {}
   }
+  // Script-identity migration (codex FU-2 — explicit, one-shot): in-repo
+  // interpreter commands key on script identity (exe + digest), NOT args, so
+  // `normalized_command` is collapsed to null. Pre-existing Tier-0 overrides
+  // keyed under the old full-command form become unreachable (re-correction is
+  // one-shot — same contract as the PR #336 normalizeCommand unification).
+  const scriptIdentity = isInterpreterScriptIdentity(command, digest)
   return {
     project_root_canonical: projectRoot,
     caller_cwd_or_rel: callerCwdRelOrAbs,
-    normalized_command: normalizeCommand(command),
+    normalized_command: scriptIdentity ? null : normalizeCommand(command),
     executable_resolved: exeAbs || exeResolved,
     script_digest: digest
   }

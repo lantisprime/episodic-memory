@@ -75,6 +75,13 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { resolveRepoRoot } from './lib/local-dir.mjs'
+// Narrow exception to the "does NOT consume classifier-cache" rule: import ONLY
+// the pure isInterpreterScriptIdentity predicate (codex FU-2). It carries no
+// tuple-shape or store-path coupling — it just decides whether a command keys on
+// script identity — so the two stores' tuple shapes (this file keeps session_id +
+// policy versions; classifier-cache does not) stay independent while the
+// key-omission rule is shared, single-sourced, and cannot drift.
+import { isInterpreterScriptIdentity } from './lib/classifier-cache.mjs'
 
 const LABELS = new Set([
   'read_only',
@@ -91,7 +98,11 @@ const LABELS = new Set([
 // Stale markers carrying the old policy version become unreachable and force
 // re-classification (handled at the version-mismatch check ~L380; --vacuum reaps).
 const CLASSIFIER_POLICY_VERSION = 2
-const NORMALIZED_COMMAND_VERSION = 1
+// Bumped 1→2 (script-identity key): in-repo interpreter commands now key on
+// script identity (exe + digest) with normalized_command collapsed to null, so
+// per-request args no longer bust the cache. All markers cached under the old
+// full-command key become unreachable and force a one-shot re-classification.
+const NORMALIZED_COMMAND_VERSION = 2
 const MARKER_SCHEMA_VERSION = 2
 
 const TTL_MS = 24 * 60 * 60 * 1000        // 24h marker freshness
@@ -198,10 +209,18 @@ function buildTuple({ command, projectRoot, callerCwd, sessionId }) {
       }
     } catch {}
   }
+  // Script-identity key (codex plan-review R1-finding-3 + R2 ACCEPT): an in-repo
+  // interpreter command keys on script identity (exe + digest), so its args do
+  // NOT bust the cache and the de-quoting asymmetry between the two shell read
+  // sites becomes moot (the key no longer depends on command text). The full
+  // command is still preserved for debuggability in the marker's informational
+  // `command_normalized` field (see resolveInputTuple — payloadNorm is computed
+  // independently of this keyed tuple).
+  const scriptIdentity = isInterpreterScriptIdentity(command, digest)
   return {
     project_root_canonical: projectRoot,
     caller_cwd_or_rel: callerCwdRelOrAbs,
-    normalized_command: normalizeCommand(command),
+    normalized_command: scriptIdentity ? null : normalizeCommand(command),
     executable_resolved: exeAbs || exeResolved,
     script_digest: digest,
     session_id: sessionId,
@@ -308,7 +327,10 @@ function resolveInputTuple(argv, { projectRoot, callerCwd, sessionId }) {
   const command = resolveCommandArg(argv)
   if (command === undefined) die(2, '--command, --command-file, or --target-path required')
   const tuple = buildTuple({ command, projectRoot, callerCwd, sessionId })
-  return { tuple, sha: cacheKey(tuple), payloadNorm: tuple.normalized_command }
+  // payloadNorm is the INFORMATIONAL command_normalized field, NOT the key.
+  // Computed from the full command (not tuple.normalized_command, which is null
+  // for script-identity keys) so the marker always records what was classified.
+  return { tuple, sha: cacheKey(tuple), payloadNorm: normalizeCommand(command) }
 }
 
 // ----- Path-component hardening (lstat each ancestor, refuse symlinks) -----

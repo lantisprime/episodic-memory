@@ -169,6 +169,18 @@ agent_classify_command() {
     return 1
   fi
 
+  # FU-1 (codex plan-review R2): env-prefix refusal at the marker-cache AUTHORITY
+  # itself, not only at the shell call sites. A leading `FOO=bar` assignment is a
+  # cross-session attack vector (PR #271/#272 F-4): a command-local env override
+  # can desync session_id and, under the script-identity key, let an env-prefixed
+  # invocation reuse a clean script marker. Refuse here so "env-prefix never
+  # reaches the marker cache" is locally verifiable in ONE place; the call-site
+  # guards (Site A + the interpreter Tier-2/3 branch) remain as defense-in-depth.
+  local _first_tok="${command%%[[:space:]]*}"
+  case "$_first_tok" in
+    [A-Za-z_]*=*) return 1 ;;
+  esac
+
   local session_id
   session_id="$(__agent_classifier_session_id)"
 

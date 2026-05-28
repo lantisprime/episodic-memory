@@ -987,6 +987,31 @@ _detect_helper_invocation() {
 # caller_cwd_authoritative, env_prefix_count) — identical to how the
 # interpreter branch reads them.
 # ---------------------------------------------------------------------------
+# Resolve the command text used for the marker cache-key lookup. PREFER the raw
+# command threaded from classify_command (_seg_raw_command via dynamic scope) —
+# the EXACT string the agent classified and the deny-hint told it to classify, so
+# normalizeCommand(read) == normalizeCommand(write) exactly, INCLUDING shell
+# redirects (`echo x > src.mjs`). A token-only reconstruction DROPS the redirect
+# (a REDIR record, not a TOK) and would miss the marker. Fall back to the token
+# reconstruction only when the raw command wasn't threaded (direct
+# _classify_segment unit tests); that fallback matches for redirect-free commands.
+# Used by BOTH Site A (_try_agent_marker_verdict) and the interpreter Tier-2/3
+# branch so the two marker-read sites can NEVER drift on quote handling.
+_resolve_marker_cmd_text() {
+  local __t="${_seg_raw_command:-}"
+  if [ -z "$__t" ]; then
+    local __ti
+    for __ti in ${TOKS[@]+"${TOKS[@]}"}; do
+      if [ -z "$__t" ]; then
+        __t="$__ti"
+      else
+        __t="$__t $__ti"
+      fi
+    done
+  fi
+  printf '%s' "$__t"
+}
+
 _try_agent_marker_verdict() {
   # env-prefix forms never escape (cross-session attack class, PR #271).
   if [ "${env_prefix_count:-0}" -ne 0 ]; then
@@ -1008,26 +1033,11 @@ _try_agent_marker_verdict() {
   if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" != "1" ]; then
     return 1
   fi
-  # Command text for the lookup key. PREFER the raw command threaded from
-  # classify_command (_seg_raw_command via dynamic scope) — it is the EXACT
-  # string the agent invoked and the deny-hint tells the agent to classify, so
-  # normalizeCommand(read) == normalizeCommand(write) exactly, INCLUDING shell
-  # redirects (`echo x > src.mjs`). A token-only reconstruction would DROP the
-  # `> src.mjs` redirect (it's a REDIR record, not a TOK) and miss the marker —
-  # the exact #351 redirect class. Fall back to the token reconstruction only
-  # when the raw command wasn't threaded (e.g. direct _classify_segment unit
-  # tests); that fallback matches for redirect-free commands (cp/node …).
-  local __cmd_text="${_seg_raw_command:-}"
-  if [ -z "$__cmd_text" ]; then
-    local __ti
-    for __ti in ${TOKS[@]+"${TOKS[@]}"}; do
-      if [ -z "$__cmd_text" ]; then
-        __cmd_text="$__ti"
-      else
-        __cmd_text="$__cmd_text $__ti"
-      fi
-    done
-  fi
+  # Command text for the lookup key — resolved via the shared helper (raw
+  # threaded command preferred; token reconstruction fallback). Identical
+  # resolution to the interpreter Tier-2/3 branch so the two sites cannot drift.
+  local __cmd_text
+  __cmd_text="$(_resolve_marker_cmd_text)"
   [ -z "$__cmd_text" ] && return 1
   local __agent_out __agent_label
   if __agent_out="$(agent_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
@@ -1930,24 +1940,26 @@ _classify_segment() {
           __AGENT_CLASSIFIER_SOURCED=0
         fi
       fi
-      if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" = "1" ]; then
-        # Reconstruct command text from tokens (already shell-unquoted; the
-        # dispatcher collapses whitespace and re-normalizes anyway).
-        local __cmd_text=""
-        local __ti
-        for __ti in ${TOKS[@]+"${TOKS[@]}"}; do
-          if [ -z "$__cmd_text" ]; then
-            __cmd_text="$__ti"
-          else
-            __cmd_text="$__cmd_text $__ti"
-          fi
-        done
+      # R1-finding-1 (codex plan-review BLOCKER): env-prefix forms must NOT
+      # consult the marker cache. Under the script-identity key the env prefix
+      # no longer rides in normalized_command, so `SKIP_PREFLIGHT=1 node x.mjs`
+      # could otherwise reuse the clean `node x.mjs` marker. Guard on the shell's
+      # authoritative env_prefix_count (reliable even when the token/raw
+      # reconstruction drops the prefix) — mirrors Site A (_try_agent_marker_verdict)
+      # and composes with FU-1's guard inside agent_classify_command.
+      if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" = "1" ] && [ "${env_prefix_count:-0}" -eq 0 ]; then
+        # Command text via the shared helper (raw threaded command preferred so
+        # normalizeCommand(read)==normalizeCommand(write) for the residual
+        # non-digest interpreter case; identical resolution to Site A so the two
+        # marker-read sites cannot drift on quoting).
+        local __cmd_text
+        __cmd_text="$(_resolve_marker_cmd_text)"
         local __agent_out __agent_label __agent_reason
         # PR-A P1.1: pass caller_cwd_authoritative (parsed .cwd from hook
         # stdin) instead of hook process $PWD. Codex R1 P1: marker written
         # under nested cwd was a miss when classify_command subprocess
         # $PWD differs from the .cwd authority.
-        if __agent_out="$(agent_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
+        if [ -n "$__cmd_text" ] && __agent_out="$(agent_classify_command "$__cmd_text" "$target_root" "$caller_cwd_authoritative" 2>/dev/null)"; then
           __agent_label="${__agent_out%%	*}"
           __agent_reason="${__agent_out#*	}"
           __agent_reason="${__agent_reason%$'\n'}"
