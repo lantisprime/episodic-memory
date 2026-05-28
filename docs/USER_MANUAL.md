@@ -334,7 +334,7 @@ AI:   I see from a previous session that you chose Tailwind CSS
 
 **How it works:** Both tools read from and write to `~/.episodic-memory/`. The instruction files are different per tool, but the data is shared.
 
-**Cross-tool messaging via the second-opinion harness.** When you ask one tool to review another's plan or diff, `scripts/second-opinion.mjs` writes the request as a local episode, dispatches it to the chosen provider (Codex, Claude subagent, Gemini), and writes the reply back as another episode. Both halves live in `.episodic-memory/` so any tool can read them later. Under the hood, `em-watch-codex.mjs` provides the per-scope cursors that keep replies from being read twice.
+**Cross-tool messaging via the second-opinion harness.** When you ask one tool to review another's plan or diff, `scripts/second-opinion.mjs` writes the request as a local episode, dispatches it to the chosen provider (Codex, Claude subagent, Gemini, OpenCode), and writes the reply back as another episode. Both halves live in `.episodic-memory/` so any tool can read them later. Under the hood, `em-watch-codex.mjs` provides the per-scope cursors that keep replies from being read twice.
 
 ---
 
@@ -372,7 +372,7 @@ node scripts/second-opinion.mjs request \
 
 The `--rebuttal-cb` is a script that takes the reviewer's verdict and decides what to send back next round — accept the findings, push back with new evidence, or stop. Each round is one request episode + one reply episode, so the whole conversation is auditable later via `em-search --tag codex-review --scope local`.
 
-**Providers available:** `codex` (OpenAI Codex CLI), `claude-subagent` (a separate Claude Code session), `gemini` (Google's CLI), and `stub` for testing harness behavior without spending tokens.
+**Providers available:** `codex` (OpenAI Codex CLI), `claude-subagent` (a separate Claude Code session), `gemini` (Google's CLI), `opencode` (the OpenCode CLI, defaulting to the `deepseek/deepseek-v4-pro` model; set `OPENCODE_MODEL` to use a different `provider/model`), and `stub` for testing harness behavior without spending tokens.
 
 **When to use it:** Rule 18 step 2 (any non-trivial implementation needs a second-opinion review on the plan before approval), PR-level reviews before merge, or any time you want a sanity check from a different model family on a load-bearing decision.
 

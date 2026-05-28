@@ -17,7 +17,7 @@
  *     full-tree hash byte-identical pre vs post (active runtime untouched).
  *
  *   Case 4 — Gate 2 failure with quarantine: pre-existing happy snapshot →
- *     overwrite all 4 provider modules in temp repo copy so every
+ *     overwrite all 5 provider modules in temp repo copy so every
  *     available() returns {ok: false} → install passes Gate 1 (source
  *     registry shape is valid) but Gate 2 fails (installedProviders is
  *     empty → N1) → quarantine pre-existing snapshot to .stale.<ts> so
@@ -128,7 +128,7 @@ function mutateRegistryInvalid(tempRepoCopy) {
 // {ok: false}. installedProviders becomes empty → Gate 2 N1 fires.
 function makeAllProvidersUnavailable(tempRepoCopy) {
   const providersDir = path.join(tempRepoCopy, 'scripts/second-opinion/providers')
-  for (const name of ['stub', 'codex', 'claude-subagent', 'gemini']) {
+  for (const name of ['stub', 'codex', 'claude-subagent', 'gemini', 'opencode']) {
     fs.writeFileSync(
       path.join(providersDir, `${name}.mjs`),
       `export const id = '${name}'\n` +
@@ -224,6 +224,17 @@ test('happy install: exit 0, Done!, full surface populated, snapshot valid', () 
   const snap = JSON.parse(fs.readFileSync(snapshot, 'utf8'))
   assert.ok(Array.isArray(snap.providers) && snap.providers.length >= 1,
     `snapshot.providers must be non-empty, got ${JSON.stringify(snap.providers)}`)
+
+  // If opencode is available() on this host, the installed snapshot must carry
+  // it with the scoped cli_match (gates `opencode run`, not the bare TUI).
+  // available()-filtered: only assert when present so CI hosts without the
+  // opencode CLI still pass.
+  const opencodeEntry = snap.providers.find((p) => p.id === 'opencode')
+  if (opencodeEntry) {
+    assert.strictEqual(opencodeEntry.cli_match, '^opencode\\s+run\\b',
+      `opencode snapshot entry must use scoped cli_match, got ${opencodeEntry.cli_match}`)
+    assert.strictEqual(opencodeEntry.binary, 'opencode')
+  }
 
   // R7-F1: caller cwd untouched (no .episodic-memory / .claude there).
   assert.ok(!fs.existsSync(path.join(callerCwd, '.episodic-memory')),
