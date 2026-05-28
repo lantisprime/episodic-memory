@@ -2504,6 +2504,128 @@ assert_allowed "DL-EX-E idempotent: post-done re-write with PRE_DONE+POST_DONE b
     --arg cwd "$TEST_DIR" --arg sid "$DL_EX_E_SID" \
     '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')"
 
+# ============================================================================
+echo ""
+echo "--- Issue #364: marker-read predicates reject symlinks (substrate trust) ---"
+# ============================================================================
+# Root cause being fixed: marker_exists / marker_nonempty /
+# checkpoint_marker_*_for_session used `[ -e ]` / `[ -s ]` which follow
+# symlinks. A `.pre-checkpoint-done.<sid>` symlinked to an outside-repo
+# non-empty file satisfied the predicate and (post-#362) unlocked
+# `.post-checkpoint-done.<sid>` writes through the new disjunction.
+# Codex PR-level review of #363 confirmed empirically.
+#
+# Fix: precheck `[ ! -L "$path" ]` in all 4 marker-read helpers. No
+# legitimate code path creates symlink markers — Write tool, Bash redirect,
+# checkpoint-marker.mjs, touch all produce regular files. A symlink at a
+# marker path signals substrate tampering and is refused.
+
+# I364-1: symlink PRE_DONE -> outside non-empty file does NOT unlock post-write.
+# Pre-fix this REPRODUCED the FU codex caught. Post-fix this BLOCKS.
+reset_state
+I364_SID="aaaa1364-1111-4111-8111-aaaa13641111"
+# Outside-repo (tmp-host) non-empty file the attacker controls.
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+echo "attacker-controlled content (would satisfy [-s])" > "$I364_OUTSIDE_DIR/payload"
+ln -s "$I364_OUTSIDE_DIR/payload" "$MARKER_DIR/.pre-checkpoint-done.$I364_SID"
+assert_blocked "I364-1. symlink PRE_DONE -> outside non-empty file does NOT unlock post-write (#364 fix)" \
+  "$(jq -n --arg cmd "echo 'post' > $MARKER_DIR/.post-checkpoint-done.$I364_SID" \
+    --arg cwd "$TEST_DIR" --arg sid "$I364_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+rm -rf "$I364_OUTSIDE_DIR"
+
+# I364-2: regular-file PRE_DONE still unlocks (negative control — the fix does
+# not break the legitimate non-symlink path).
+reset_state
+echo "real pre" > "$MARKER_DIR/.pre-checkpoint-done.$I364_SID"
+assert_allowed "I364-2. regular-file PRE_DONE non-empty still unlocks post-write (negative control)" \
+  "$(jq -n --arg cmd "echo 'post' > $MARKER_DIR/.post-checkpoint-done.$I364_SID" \
+    --arg cwd "$TEST_DIR" --arg sid "$I364_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')"
+
+# I364-3: symlink POST_REQ (the *required* arm marker) does NOT count as
+# armed. Closes the parallel attack where an attacker symlinks
+# .post-checkpoint-required to a benign file to fake the post-checkpoint
+# phase entry. `checkpoint_marker_exists_for_session` now also rejects
+# symlinks (was the existing-marker side of the same FU).
+reset_state
+I364_SID2="bbbb1364-2222-4222-8222-bbbb13642222"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+: > "$I364_OUTSIDE_DIR/decoy"   # zero-byte (-e would pass; -L now rejects)
+ln -s "$I364_OUTSIDE_DIR/decoy" "$MARKER_DIR/.post-checkpoint-required.$I364_SID2"
+# PRE_DONE also absent → BOTH allow paths fail → block.
+assert_blocked "I364-3. symlink POST_REQ -> outside file does NOT count as armed (#364 fix)" \
+  "$(jq -n --arg cmd "echo 'post' > $MARKER_DIR/.post-checkpoint-done.$I364_SID2" \
+    --arg cwd "$TEST_DIR" --arg sid "$I364_SID2" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+rm -rf "$I364_OUTSIDE_DIR"
+
+# I364-4: symlinked PRE_DONE that points INTO the repo (to a legitimate
+# repo file) is STILL rejected. The policy is "no symlinks at marker
+# paths," not "no outside-repo symlinks" — defense-in-depth, since an
+# in-repo symlink can also be cheaper to create as a bypass.
+reset_state
+I364_SID3="cccc1364-3333-4333-8333-cccc13643333"
+# Symlink to a regular file inside the test repo.
+mkdir -p "$TEST_DIR/data"
+echo "in-repo content" > "$TEST_DIR/data/decoy"
+ln -s "$TEST_DIR/data/decoy" "$MARKER_DIR/.pre-checkpoint-done.$I364_SID3"
+assert_blocked "I364-4. symlink PRE_DONE -> in-repo file ALSO rejected (no symlinks at marker paths)" \
+  "$(jq -n --arg cmd "echo 'post' > $MARKER_DIR/.post-checkpoint-done.$I364_SID3" \
+    --arg cwd "$TEST_DIR" --arg sid "$I364_SID3" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+
+# I364-5: dangling symlink (target does not exist) — already failed `-s`
+# pre-fix, but assert explicitly that post-fix it ALSO fails `[ ! -L ]`,
+# so the rejection is consistent across target existence.
+reset_state
+I364_SID4="dddd1364-4444-4444-8444-dddd13644444"
+ln -s "/nonexistent/path/that/does/not/exist" "$MARKER_DIR/.pre-checkpoint-done.$I364_SID4"
+assert_blocked "I364-5. dangling symlink PRE_DONE — rejected (consistent regardless of target existence)" \
+  "$(jq -n --arg cmd "echo 'post' > $MARKER_DIR/.post-checkpoint-done.$I364_SID4" \
+    --arg cwd "$TEST_DIR" --arg sid "$I364_SID4" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+
+# I364-6: pre-gate side — symlinked .pre-checkpoint-done.<sid> does NOT
+# unblock the pre-checkpoint gate either. The pre-gate uses the same
+# `checkpoint_marker_nonempty_for_session` predicate at :1365; tests 19/20
+# already cover empty/non-empty regular-file behavior. This adds the
+# symlink case for that same predicate at a DIFFERENT call site.
+reset_state
+I364_SID5="eeee1364-5555-4555-8555-eeee13645555"
+seed_approval "$MARKER_DIR" "$I364_SID5"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+echo "decoy" > "$I364_OUTSIDE_DIR/payload"
+# Arm the impl boundary first via a real Edit (planning-passive).
+echo "$(jq -n --arg fp "$TEST_DIR/scripts/x.mjs" --arg cwd "$TEST_DIR" --arg sid "$I364_SID5" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" | run_hook >/dev/null 2>&1
+# Now symlink PRE_DONE to outside file and try another in-repo Edit; should
+# STILL be blocked because the symlink is rejected.
+ln -s "$I364_OUTSIDE_DIR/payload" "$MARKER_DIR/.pre-checkpoint-done.$I364_SID5"
+assert_blocked "I364-6. pre-gate also rejects symlink PRE_DONE — Edit still blocked under armed checkpoint" \
+  "$(jq -n --arg fp "$TEST_DIR/scripts/y.mjs" --arg cwd "$TEST_DIR" --arg sid "$I364_SID5" \
+    '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+rm -rf "$I364_OUTSIDE_DIR"
+
+# I364-7: push-side — symlinked POST_DONE does NOT satisfy push gate's
+# `.post-checkpoint-done` non-empty check at :1525. The non-empty check
+# uses the same hardened predicate.
+reset_state
+I364_SID6="ffff1364-6666-4666-8666-ffff13646666"
+echo "pre" > "$MARKER_DIR/.pre-checkpoint-done.$I364_SID6"
+touch "$MARKER_DIR/.post-checkpoint-required.$I364_SID6"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+echo "decoy post" > "$I364_OUTSIDE_DIR/payload"
+ln -s "$I364_OUTSIDE_DIR/payload" "$MARKER_DIR/.post-checkpoint-done.$I364_SID6"
+assert_blocked "I364-7. push gate rejects symlink POST_DONE — push still BLOCKED" \
+  "$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$I364_SID6" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Post-implementation checkpoint required"
+rm -rf "$I364_OUTSIDE_DIR"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"

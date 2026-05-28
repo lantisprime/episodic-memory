@@ -46,6 +46,13 @@ set -e
 # blocked while .plan-approval-pending exists (either root). Both gates
 # independently enforce.
 #
+# Marker-substrate trust policy (#364, 2026-05-28): marker-read predicates
+# (marker_exists / marker_nonempty / checkpoint_marker_*_for_session)
+# REJECT symlinks via `[ ! -L "$path" ]` precheck. No legitimate code path
+# creates symlink markers (Write tool, Bash redirect, checkpoint-marker.mjs,
+# and touch all create regular files); a symlink at a marker path signals
+# substrate tampering and is refused without affecting any legitimate flow.
+#
 # ---------------------------------------------------------------------------
 # Planning-passive redesign (2026-05-25) + F1 RESIDUAL
 # ---------------------------------------------------------------------------
@@ -130,12 +137,20 @@ LEGACY_DIR="$REPO_ROOT/$LEGACY_MARKER_DIR"
 # fallback branch is removed).
 # ---------------------------------------------------------------------------
 # marker_exists <basename> — true if the marker exists at either root.
+# Symlinks are REJECTED (#364): no legitimate code path creates symlink
+# markers (LLM Write tool, Bash redirect, checkpoint-marker.mjs, and touch
+# all create regular files). A symlink at a marker path indicates a
+# substrate-trust violation; refusing to honor it closes a trust-by-stat
+# bypass without affecting legitimate flows.
 marker_exists() {
-  [ -e "$PRIMARY_DIR/$1" ] || [ -e "$LEGACY_DIR/$1" ]
+  { [ ! -L "$PRIMARY_DIR/$1" ] && [ -e "$PRIMARY_DIR/$1" ]; } \
+    || { [ ! -L "$LEGACY_DIR/$1" ] && [ -e "$LEGACY_DIR/$1" ]; }
 }
 # marker_nonempty <basename> — true if either root's copy is non-empty.
+# Symlinks REJECTED (#364): see marker_exists for rationale.
 marker_nonempty() {
-  [ -s "$PRIMARY_DIR/$1" ] || [ -s "$LEGACY_DIR/$1" ]
+  { [ ! -L "$PRIMARY_DIR/$1" ] && [ -s "$PRIMARY_DIR/$1" ]; } \
+    || { [ ! -L "$LEGACY_DIR/$1" ] && [ -s "$LEGACY_DIR/$1" ]; }
 }
 
 # Rank-2 (PR for checkpoint-quartet) — session-aware sibling of marker_exists.
@@ -150,29 +165,29 @@ marker_nonempty() {
 # Pair with marker_nonempty_for_session() for `.X-done` size-based checks.
 checkpoint_marker_exists_for_session() {
   local legacy="$1" sid="$2"
-  [ -e "$PRIMARY_DIR/$legacy" ] && return 0
-  [ -e "$LEGACY_DIR/$legacy" ] && return 0
+  { [ ! -L "$PRIMARY_DIR/$legacy" ] && [ -e "$PRIMARY_DIR/$legacy" ]; } && return 0
+  { [ ! -L "$LEGACY_DIR/$legacy" ] && [ -e "$LEGACY_DIR/$legacy" ]; } && return 0
   if validate_session_id "$sid"; then
     local basename
     basename="$(namespaced_marker_basename_for_session "$legacy" "$sid")"
-    [ -e "$PRIMARY_DIR/$basename" ] && return 0
-    [ -e "$LEGACY_DIR/$basename" ] && return 0
+    { [ ! -L "$PRIMARY_DIR/$basename" ] && [ -e "$PRIMARY_DIR/$basename" ]; } && return 0
+    { [ ! -L "$LEGACY_DIR/$basename" ] && [ -e "$LEGACY_DIR/$basename" ]; } && return 0
   fi
   return 1
 }
 
 # Rank-2 — session-aware sibling of marker_nonempty. Tests own-session-or-
 # legacy-literal forms for non-empty size. Other sessions' suffixed
-# markers IGNORED.
+# markers IGNORED. Symlinks REJECTED (#364): see marker_exists for rationale.
 checkpoint_marker_nonempty_for_session() {
   local legacy="$1" sid="$2"
-  [ -s "$PRIMARY_DIR/$legacy" ] && return 0
-  [ -s "$LEGACY_DIR/$legacy" ] && return 0
+  { [ ! -L "$PRIMARY_DIR/$legacy" ] && [ -s "$PRIMARY_DIR/$legacy" ]; } && return 0
+  { [ ! -L "$LEGACY_DIR/$legacy" ] && [ -s "$LEGACY_DIR/$legacy" ]; } && return 0
   if validate_session_id "$sid"; then
     local basename
     basename="$(namespaced_marker_basename_for_session "$legacy" "$sid")"
-    [ -s "$PRIMARY_DIR/$basename" ] && return 0
-    [ -s "$LEGACY_DIR/$basename" ] && return 0
+    { [ ! -L "$PRIMARY_DIR/$basename" ] && [ -s "$PRIMARY_DIR/$basename" ]; } && return 0
+    { [ ! -L "$LEGACY_DIR/$basename" ] && [ -s "$LEGACY_DIR/$basename" ]; } && return 0
   fi
   return 1
 }
