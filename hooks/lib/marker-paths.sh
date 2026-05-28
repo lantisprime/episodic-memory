@@ -145,8 +145,30 @@ both_marker_paths() {
 
 # ensure_primary_dir <repo-root> → mkdir -p the primary marker directory.
 # Idempotent. Used before write_marker_path writes.
+#
+# Parent-dir symlink rejection (codex round 4 P1, #364): the primary marker
+# directory MUST be a real directory, never a symlink. Pattern matches the
+# Node-side ensurePrimaryDir + the existing classifier-marker.mjs
+# validateMarkerStoreDir precedent. If `.checkpoints/` is already a symlink,
+# every subsequent marker write would physically land outside the substrate
+# while the gate reports paths inside it.
+#
+# Returns 0 (idempotent success) when dir is a real directory or was just
+# created. Returns 1 (refusal) when dir is a symlink — caller's downstream
+# touch will then fail closed under set -e (best-effort `|| true` patterns
+# at call sites also limit blast radius).
 ensure_primary_dir() {
-  mkdir -p "$1/$PRIMARY_MARKER_DIR" 2>/dev/null
+  local dir="$1/$PRIMARY_MARKER_DIR"
+  if [ -L "$dir" ]; then
+    # Symlink at marker-dir path — substrate tamper. Unlink the symlink
+    # entry (NOT its target; `rm -f` on a symlink path removes the link,
+    # not the target file/dir) and recreate as a real directory. Self-
+    # healing matches the leaf-symlink handling in
+    # _arm_marker_via_touch_safely (checkpoint-gate.sh) and the Node-side
+    # ensurePrimaryDir.
+    rm -f "$dir" 2>/dev/null
+  fi
+  mkdir -p "$dir" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------

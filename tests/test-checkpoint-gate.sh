@@ -2722,6 +2722,102 @@ else
 fi
 rm -rf "$I364_OUTSIDE_DIR" "$I364_FAKE_HOME3"
 
+# I364-10 (codex R4 P1 repro): symlinked PARENT directory `.checkpoints/`
+# itself. Pre-fix: `mkdir -p .checkpoints` no-ops (parent already "exists"
+# as a symlink to outside), `touch .checkpoints/<marker>` writes through
+# the symlink to the outside directory — physical artifact lands outside
+# the project root while the gate reports paths inside it. Codex repro'd
+# this for both helper and bash-fallback paths in round 4.
+#
+# Post-fix: ensure_primary_dir / ensurePrimaryDir detects the symlinked
+# parent, unlinks it, and recreates a real .checkpoints/ directory. The
+# subsequent touch lands at the canonical location.
+reset_state
+I364_SID9="b00b1364-aaaa-4aaa-8aaa-b00b13649aaa"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+mkdir -p "$I364_OUTSIDE_DIR/decoy-checkpoints"
+# Replace MARKER_DIR with a symlink to outside.
+rm -rf "$MARKER_DIR"
+ln -s "$I364_OUTSIDE_DIR/decoy-checkpoints" "$MARKER_DIR"
+# Verify the symlink is set up correctly before exercising the gate.
+if [ ! -L "$MARKER_DIR" ]; then
+  echo "  ✗ I364-10 setup: .checkpoints/ should be a symlink before test"; ((failed++))
+fi
+# Trigger push self-arm with a fake HOME (no installed helper → bash fallback).
+I364_FAKE_HOME4=$(mktemp -d)
+I364_FAKE_HOME4="$(cd -P "$I364_FAKE_HOME4" && pwd)"
+I364_PUSH_OUT3=$(echo "$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$I364_SID9" \
+  '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" \
+  | HOME="$I364_FAKE_HOME4" bash "$HOOK" 2>/dev/null)
+if echo "$I364_PUSH_OUT3" | grep -q '"decision".*"block"' \
+   && echo "$I364_PUSH_OUT3" | grep -q "Post-implementation checkpoint required"; then
+  echo "  ✓ I364-10a (codex R4 P1 repro, bash fallback): symlinked .checkpoints/ parent → push BLOCKED + self-heal"; ((passed++))
+else
+  echo "  ✗ I364-10a (codex R4 P1 repro, bash fallback): expected block, got: $I364_PUSH_OUT3"; ((failed++))
+fi
+# .checkpoints/ should now be a REAL directory (symlink replaced by mkdir
+# after ensure_primary_dir's rm -f path).
+if [ -L "$MARKER_DIR" ]; then
+  echo "  ✗ I364-10b (codex R4 P1): .checkpoints/ parent symlink was NOT replaced (still a symlink)"; ((failed++))
+elif [ -d "$MARKER_DIR" ]; then
+  echo "  ✓ I364-10b (codex R4 P1): .checkpoints/ parent symlink replaced by real directory via ensure_primary_dir"; ((passed++))
+else
+  echo "  ✗ I364-10b (codex R4 P1): .checkpoints/ missing after self-heal"; ((failed++))
+fi
+# The marker MUST land at the canonical location, NOT in the outside dir.
+if [ -f "$MARKER_DIR/.post-checkpoint-required.$I364_SID9" ] && [ ! -L "$MARKER_DIR/.post-checkpoint-required.$I364_SID9" ]; then
+  echo "  ✓ I364-10c (codex R4 P1): POST_REQ marker landed under canonical .checkpoints/ (not the outside decoy)"; ((passed++))
+else
+  echo "  ✗ I364-10c (codex R4 P1): POST_REQ marker missing or symlinked"; ((failed++))
+fi
+# The outside decoy directory should NOT contain any new marker (proves
+# the write did NOT follow the symlink-parent before self-heal).
+if [ -e "$I364_OUTSIDE_DIR/decoy-checkpoints/.post-checkpoint-required.$I364_SID9" ]; then
+  echo "  ✗ I364-10d (codex R4 P1): a marker leaked into the OUTSIDE decoy dir (symlink was followed)"; ((failed++))
+else
+  echo "  ✓ I364-10d (codex R4 P1): no marker leaked outside the project (symlink unlinked before mkdir/touch)"; ((passed++))
+fi
+rm -rf "$I364_OUTSIDE_DIR" "$I364_FAKE_HOME4"
+
+# I364-11 (codex R4 P1, helper path): same parent-symlink scenario, now
+# with checkpoint-marker.mjs installed in fake HOME. Exercises the
+# Node-side ensurePrimaryDir self-heal (lstat → unlink → mkdir).
+reset_state
+I364_SID10="b00b1364-bbbb-4bbb-8bbb-b00b1364bbbb"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+mkdir -p "$I364_OUTSIDE_DIR/decoy-checkpoints"
+rm -rf "$MARKER_DIR"
+ln -s "$I364_OUTSIDE_DIR/decoy-checkpoints" "$MARKER_DIR"
+I364_FAKE_HOME5=$(mktemp -d)
+I364_FAKE_HOME5="$(cd -P "$I364_FAKE_HOME5" && pwd)"
+mkdir -p "$I364_FAKE_HOME5/.episodic-memory/scripts/lib"
+cp "$REPO_ROOT/scripts/checkpoint-marker.mjs" "$I364_FAKE_HOME5/.episodic-memory/scripts/checkpoint-marker.mjs"
+cp -R "$REPO_ROOT/scripts/lib/." "$I364_FAKE_HOME5/.episodic-memory/scripts/lib/"
+I364_PUSH_OUT4=$(echo "$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$I364_SID10" \
+  '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" \
+  | HOME="$I364_FAKE_HOME5" bash "$HOOK" 2>/dev/null)
+if echo "$I364_PUSH_OUT4" | grep -q '"decision".*"block"' \
+   && echo "$I364_PUSH_OUT4" | grep -q "Post-implementation checkpoint required"; then
+  echo "  ✓ I364-11a (codex R4 P1 repro, helper path): symlinked .checkpoints/ parent → push BLOCKED + self-heal"; ((passed++))
+else
+  echo "  ✗ I364-11a (codex R4 P1 repro, helper path): expected block, got: $I364_PUSH_OUT4"; ((failed++))
+fi
+if [ -L "$MARKER_DIR" ]; then
+  echo "  ✗ I364-11b (codex R4 P1, helper): .checkpoints/ parent symlink was NOT replaced"; ((failed++))
+elif [ -d "$MARKER_DIR" ]; then
+  echo "  ✓ I364-11b (codex R4 P1, helper): .checkpoints/ parent symlink replaced via ensurePrimaryDir"; ((passed++))
+else
+  echo "  ✗ I364-11b (codex R4 P1, helper): .checkpoints/ missing after self-heal"; ((failed++))
+fi
+if [ -e "$I364_OUTSIDE_DIR/decoy-checkpoints/.post-checkpoint-required.$I364_SID10" ]; then
+  echo "  ✗ I364-11c (codex R4 P1, helper): marker leaked outside the project"; ((failed++))
+else
+  echo "  ✓ I364-11c (codex R4 P1, helper): no marker leaked outside the project"; ((passed++))
+fi
+rm -rf "$I364_OUTSIDE_DIR" "$I364_FAKE_HOME5"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"
