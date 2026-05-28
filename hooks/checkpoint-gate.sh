@@ -38,7 +38,10 @@ set -e
 #   - .pre-checkpoint-done write: requires .checkpoint-required exists
 #     (either root) AND .pre-checkpoint-done is missing/empty (both roots).
 #   - .post-checkpoint-done write: requires .post-checkpoint-required exists
-#     AND .post-checkpoint-done is missing/empty.
+#     OR .pre-checkpoint-done is non-empty for this session (#362 fix —
+#     allows the natural `pre → post → push` flow without an intervening
+#     work-write to arm POST_REQ). Push enforcement is independent: push-gate
+#     self-arms POST_REQ at :1485 and blocks at :1525 when POST_DONE is empty.
 # Cross-gate invariant (Codex ...3503 P1): checkpoint marker writes are
 # blocked while .plan-approval-pending exists (either root). Both gates
 # independently enforce.
@@ -1183,16 +1186,24 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         fi
         ;;
       .post-checkpoint-done|.post-checkpoint-done.*)
-        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
-          # POST_REQ armed → post-checkpoint phase; allow the write (first
-          # write OR idempotent re-write of an already-satisfied marker).
+        if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+           || checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+          # Either POST_REQ armed (post-checkpoint phase entered via push-gate
+          # self-arm at :1485 OR allowed-write tail at :1572) OR pre-checkpoint
+          # already satisfied for THIS session — both signal the agent has
+          # legitimately reached the post-implementation write boundary. Issue
+          # #362: the prior POST_REQ-only check deadlocked the natural
+          # `pre → finish → post → push` flow when no intervening Edit/Write/Bash
+          # armed POST_REQ between the pre-done and post-done writes. PRE_DONE
+          # non-empty is the load-bearing signal that implementation began;
+          # push-gate (:1485) still independently self-arms POST_REQ and
+          # :1525 still blocks push when POST_DONE is empty.
           exit 0
         fi
-        # POST_REQ NOT armed → writing the post-checkpoint before the
-        # lifecycle has armed it. The planning-passive redesign (2026-05-25)
-        # removed Bash from the pre-gate, so a premature marker_write no
-        # longer falls through to a block. Block DIRECTLY here so this branch
-        # is self-contained (tests 17/49/50/56).
+        # Neither POST_REQ nor PRE_DONE present → genuinely premature
+        # post-checkpoint write (no pre-checkpoint exists). _block_pre's
+        # "write the pre-checkpoint" message is accurate in this case (tests
+        # 17/49/50/DL-3 setup with PRE_REQ only — PRE_DONE empty).
         _block_pre
         ;;
       .plan-approval-pending|.plan-approval-pending.*)
@@ -1319,13 +1330,17 @@ case "$TOOL_NAME" in
             fi
             ;;
           .post-checkpoint-done|.post-checkpoint-done.*)
-            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
-              # POST_REQ armed → post-checkpoint phase; allow the write.
+            if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+               || checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
+              # Either POST_REQ armed OR pre-checkpoint already satisfied for
+              # THIS session → post-checkpoint write allowed (Edit/Write
+              # counterpart of Bash branch above; issue #362 fix). Push-gate
+              # at :1485/:1525 remains the independent push-time gate.
               exit 0
             fi
-            # POST_REQ NOT armed → premature post-checkpoint write. marker_write
-            # skips the pre-gate (the `LABEL != marker_write` guard below), so
-            # block DIRECTLY here (planning-passive redesign self-containment).
+            # Neither POST_REQ nor PRE_DONE present → genuinely premature
+            # post-checkpoint write. _block_pre's "write pre-checkpoint" message
+            # is accurate.
             _block_pre
             ;;
           .plan-approval-pending|.plan-approval-pending.*)
