@@ -905,6 +905,73 @@ g1_run "G1-06 push chain marker cannot downgrade push" "git push && echo hi > sc
 g1_run "G1-07 mismatched marker does not escape" "echo hi > scripts/gen.mjs" "shared_write" "echo DIFFERENT > scripts/other.mjs"
 
 echo ""
+echo "--- #358 regression: quoted-arg + script-identity shell-pipeline parity ---"
+# Reproduces the exact #358 failure scenario at the SHELL pipeline level
+# (test-script-identity-key.mjs SI-M01 covers the script API; this exercises
+# classify_command → _try_agent_marker_verdict / interpreter Tier-2/3, where
+# the original bug lived). Both Site A (_try_agent_marker_verdict, line 1040)
+# and Site B (interpreter dispatch, line 1956) now route through the shared
+# _resolve_marker_cmd_text helper — the two sites cannot drift on quote
+# handling — AND script-identity keying makes normalized_command moot in the
+# cache_key for in-repo interpreter commands so per-request quoted args
+# (`--summary "RFC-008 (thin-contracts concern)"`) no longer bust the cache.
+i358_run() {
+  local desc="$1" plant_cmd="$2" read_cmd="$3" expected="$4"
+  local saved_home="$HOME" tmp marker_helper g1home
+  tmp="$(mktemp -d)"; tmp="$(cd -P "$tmp" && pwd)"
+  git -C "$tmp" init -q 2>/dev/null
+  mkdir -p "$tmp/scripts"
+  # In-repo interpreter target — non-null script_digest is required for the
+  # isInterpreterScriptIdentity predicate to fire (this is the #358 shape:
+  # `node scripts/second-opinion.mjs ...` against an in-repo file).
+  printf '#!/usr/bin/env node\nconsole.log("hi")\n' > "$tmp/scripts/foo.mjs"
+  g1home="$(mktemp -d)"; g1home="$(cd -P "$g1home" && pwd)"
+  marker_helper="$REPO_ROOT/scripts/classifier-marker.mjs"
+  ( cd "$tmp" && HOME="$g1home" CLAUDE_CODE_SESSION_ID=i358 node "$marker_helper" --write \
+      --project-root "$tmp" --caller-cwd "$tmp" --command "$plant_cmd" \
+      --label read_only --confidence 0.9 --reason i358 --session-id i358 ) >/dev/null 2>&1
+  local result label
+  result="$(HOME="$g1home" CLAUDE_CODE_SESSION_ID=i358 classify_command "$read_cmd" "$tmp" "$tmp")"
+  label="${result%%	*}"
+  rm -rf "$tmp" "$g1home"
+  export HOME="$saved_home"
+  if [ "$label" = "$expected" ]; then
+    echo "  ✓ $desc"; passed=$((passed+1))
+  else
+    echo "  ✗ $desc (expected $expected, got $label / $result)"; failed=$((failed+1))
+  fi
+}
+# Baseline: quoted-arg plant + identical lookup → HIT. The pre-#360 bug was
+# that this could MISS because Site A keyed the raw quoted form and Site B
+# keyed a de-quoted reconstruction; even the same command could drift.
+i358_run "#358-01 quoted-arg plant + identical lookup → HIT" \
+  'node scripts/foo.mjs --summary "RFC-008 (thin-contracts concern)"' \
+  'node scripts/foo.mjs --summary "RFC-008 (thin-contracts concern)"' \
+  "read_only"
+# Script-identity: same in-repo script, completely different per-request args
+# → HIT (normalized_command omitted from key, only script_digest + cwd +
+# session + policy versions pin the verdict).
+i358_run "#358-02 quoted-arg plant + different quoted-args lookup → HIT (script-identity)" \
+  'node scripts/foo.mjs --summary "RFC-008 (thin-contracts concern)"' \
+  'node scripts/foo.mjs --summary "different topic" --tag x --body-file /tmp/y' \
+  "read_only"
+# Cross-quote parity: unquoted plant + quoted lookup → HIT. Pre-#360 this
+# would MISS via Site B's de-quoted reconstruction differing from Site A's
+# raw form; the shared _resolve_marker_cmd_text + script-identity both
+# foreclose the drift class.
+i358_run "#358-03 unquoted plant + quoted-args lookup → HIT (no Site A/B drift)" \
+  'node scripts/foo.mjs --some-flag value' \
+  'node scripts/foo.mjs --summary "quoted text with (parens) and spaces"' \
+  "read_only"
+# Negative control: a DIFFERENT in-repo script must NOT reuse the marker
+# (script_digest differs → key differs → no HIT). Confirms the fix is not
+# over-broad.
+i358_run "#358-04 different script does not reuse marker (digest pin)" \
+  'node scripts/foo.mjs --summary "x"' \
+  'node scripts/bar.mjs --summary "x"' \
+  "shared_write"
+
+echo ""
 echo "=================================================="
 echo "Results: $passed passed, $failed failed"
 echo "=================================================="
