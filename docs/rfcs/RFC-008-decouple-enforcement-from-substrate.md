@@ -18,9 +18,49 @@ superseded_by: ~
 > `20260527-051225-decoupling-enforcement-from-memory-subst-c4af`. Every design element
 > below maps to a requirement (R1–R10); no element exists without a requirement parent.
 
+## Table of contents
+
+- [AI context](#ai-context)
+- [Requirements (R1–R10)](#requirements-r1r10)
+- [Problem](#problem)
+- [Proposal](#proposal)
+  - [Architecture](#architecture-maps-to-r1-r2-r3-r6-r8-r9-r10)
+  - [Canonical taxonomy](#canonical-taxonomy-maps-to-r3-r4)
+  - [Events-and-action-semantics specification (v11)](#events-and-action-semantics-specification-v11--closes-event-vocabulary-gap-findings-f37f38)
+  - [Validation-contract specification (v9)](#validation-contract-specification-v9--closes-round-1-review-hold-findings-f1f10)
+  - [Plugin-manifest-validation-contract specification (v10)](#plugin-manifest-validation-contract-specification-v10--closes-p1-gap-findings-f11f20)
+  - [Runtime-data-contract specification (v10)](#runtime-data-contract-specification-v10--closes-runtime-emission-gap-findings-f21f25)
+  - [Plugin-testing-harness specification (v10)](#plugin-testing-harness-specification-v10--standardizes-plugin-tests-finding-f26)
+  - [Capability-degradable enforcement](#capability-degradable-enforcement-maps-to-r3)
+  - [Classifier activation gating](#classifier-activation-gating-maps-to-r5-r9)
+  - [Recall strategies](#recall-strategies-maps-to-r7)
+  - [Plugin registry](#plugin-registry-maps-to-r8)
+  - [Contract boundary](#contract-boundary-maps-to-r2)
+  - [Migration detection](#migration-detection-maps-to-r8)
+  - [Implementation boundary](#implementation-boundary-maps-to-r9)
+  - [Enforcement plugin runbooks — content specification](#enforcement-plugin-runbooks--content-specification-maps-to-r10)
+  - [Plugin authoring skill + taxonomy conformance](#plugin-authoring-skill--taxonomy-conformance-maps-to-r3-r4-r6-r8-r10)
+  - [Scope](#scope)
+- [9 phases mapped to requirements](#9-phases-mapped-to-requirements)
+  - [Build priority](#build-priority-maps-to-r1r10)
+- [Requirement traceability matrix](#requirement-traceability-matrix)
+- [Deadlock analysis](#deadlock-analysis-maps-to-taxonomy-r3-r4-r9)
+- [Alternatives considered](#alternatives-considered)
+- [Implementation plan](#implementation-plan)
+  - [Sequencing](#sequencing)
+- [Implementation](#implementation)
+- [Related RFCs](#related-rfcs)
+- [Second opinion](#second-opinion)
+  - [Post-acceptance validation-layer review — consensus chain (2026-05-28)](#post-acceptance-validation-layer-review--consensus-chain-2026-05-28)
+  - [Post-acceptance v10 plugin-layer review (2026-05-28)](#post-acceptance-v10-plugin-layer-review--pending-dispatch-2026-05-28)
+  - [Post-acceptance v11 architectural corrections (2026-05-28)](#post-acceptance-v11-architectural-corrections-2026-05-28)
+  - [v4 → v11 change log](#v4--v11-change-log-provenance-of-this-rfc)
+- [Open questions](#open-questions)
+- [Ground truth hierarchy](#ground-truth-hierarchy)
+
 ## AI context
 
-> (1) This RFC decouples the enforcement layer (BP gates, classifiers, markers, contracts) from the memory substrate (`em-store` / `em-recall` / `em-search`), making enforcement a pluggable layer that *imports* the substrate rather than living inside it. (2) Today `em-recall.mjs` — nominally the memory recall core — is saturated with enforcement logic (`--gate stop`, checkpoint markers, carve-outs, the `.checkpoints/` migration), a soft P9/P1 violation that RFC-003 deferred by committing to "gate decision stays in core." (3) The key decision: episodic-memory *dictates the contract* (`patterns/bp-XXX.json` + `patterns/taxonomy.json` + `plugins/_index.json`); a thin waist (`enforce-contract.mjs`) reads the contract and delegates to `em-recall --gate`; one plugin per harness adapts the contract to that harness's hook surface at its declared capability tier — never the reverse.
+> (1) This RFC decouples the enforcement layer (BP gates, classifiers, markers, contracts) from the memory substrate (`em-store` / `em-recall` / `em-search`), making enforcement a pluggable layer that *imports* the substrate rather than living inside it. (2) Today `em-recall.mjs` — nominally the memory recall core — is saturated with enforcement logic (`--gate stop`, checkpoint markers, carve-outs, the `.checkpoints/` migration), a soft P9/P1 violation that RFC-003 deferred by committing to "gate decision stays in core." (3) The key decision (**v11 correction**): episodic-memory *dictates the contract* (`patterns/bp-XXX.json` + `patterns/taxonomy.json` + `patterns/events.json` + `plugins/_index.json`); a thin waist (`enforce-contract.mjs`) reads the contract, **reads marker state via its own `scripts/lib/marker-state.mjs`**, and emits the block/allow/warn/inject decision; one plugin per harness adapts the contract to that harness's hook surface at its declared capability tier. **`em-recall.mjs` is NEVER called from the enforcement path** — it is pure recall, restored in P3 by deleting the `--gate` flag, the `stop-gate-helpers.mjs` import, and all marker reads.
 
 ---
 
@@ -30,6 +70,9 @@ These are the anchors. Every architecture decision in this RFC maps to one or mo
 
 ### R1 — Memory is the substrate
 Enforcement (BP gates, classifiers, markers, contracts) is decoupled from the memory substrate (em-store / em-recall / em-search). The substrate is pure store-and-recall. Enforcement is a separate layer that imports the substrate — never the reverse.
+
+**v11 strong form (architectural correction):** `em-recall.mjs` MUST have ZERO enforcement code. P3 REMOVES from em-recall: (a) the `--gate` flag and its handler, (b) the `stop-gate-helpers.mjs` import, (c) every `.checkpoint-required` / `.post-checkpoint-required` / `.plan-approval-pending` marker read, (d) the `.checkpoints/` migration code. Net diff on em-recall: −LOC, fewer files imported, no new dependencies. The substrate's only enforcement-adjacent surface is `em-store` writing F3 structured-alert episodes for callers that happen to be the enforcement layer — and that is just `em-store` doing its normal job (append episode), not enforcement-aware behavior. Marker state reading lives in the enforcement layer's own `scripts/lib/marker-state.mjs`, owned by `enforce-contract.mjs`.
+
 **Governed by:** PRINCIPLES.md P9 (Core never imports adapters; adapters import core).
 
 ### R2 — Pluggable enforcement; episodic-memory dictates the contract
@@ -86,6 +129,8 @@ The memory substrate's recall script **is** the bp-001 enforcement engine. RFC-0
 
 This collapses **recall** and **react** into one script — arguably already a soft P1 violation that RFC-003 deferred, and a P9 tension because the substrate now contains adapter-shaped enforcement behavior. Cross-tool reach is also blocked: adding a harness today means re-deriving enforcement plumbing rather than declaring a capability mapping against a contract.
 
+**RFC-008 reverses RFC-003:506 COMPLETELY (v11):** the gate decision AND the marker-state reads BOTH lift out of em-recall. RFC-003's incremental compromise (decision-in-core stays; only shell wrapper moves) is dropped. The substrate ends in a strictly purer state than RFC-003 left it: em-recall has no `--gate` flag, no marker reads, no `stop-gate-helpers.mjs` import. Phase 3 is a NET DELETION on em-recall, with the lifted code landing in `enforce-contract.mjs` + `scripts/lib/marker-state.mjs` under the enforcement layer.
+
 ---
 
 ## Proposal
@@ -99,17 +144,20 @@ graph TD
     subgraph EM["episodic-memory — dictates WHAT"]
         BP["patterns/bp-001.json<br/>(R2 — contract definitions)"]
         TAX["patterns/taxonomy.json<br/>(R4 — canonical 7-label set + per-gate allow/block)"]
+        EVT["patterns/events.json<br/>(v11 — 5 events + per-tier action semantics)"]
         REG["plugins/_index.json<br/>(R8 — plugin registry)"]
     end
 
-    EC["enforce-contract.mjs — thin waist<br/>(R1, R2, R3, R5, R9)<br/>contract validation + tier computation +<br/>implementation-boundary detection"]
+    EC["enforce-contract.mjs — thin waist<br/>(R1, R2, R3, R5, R9)<br/>contract validation + tier computation +<br/>implementation-boundary detection +<br/>block/allow/warn/inject decision"]
+    MS["scripts/lib/marker-state.mjs<br/>(v11 — marker reads, owned by EC)"]
 
-    subgraph CORE["substrate core (unchanged)"]
-        RECALL["em-recall.mjs --gate &lt;event&gt;<br/>(R1 — core decision engine)"]
+    subgraph CORE["substrate core (pure recall — v11)"]
+        RECALL["em-recall.mjs<br/>(R1 — episode recall ONLY)<br/>NO --gate, NO marker reads"]
+        STORE["em-store.mjs<br/>(pure append; called by EC for F3 alerts)"]
     end
 
     subgraph PLUG["plugins/&lt;harness&gt;/ — one dir per harness (R6)"]
-        MAN["manifest.json<br/>(R3, R8 — capability declarations)"]
+        MAN["manifest.json<br/>(R3, R8 — capability declarations + event_translations)"]
         CAP["capabilities/enforcement.{mjs,ts,py}<br/>(R6 — harness adapter)"]
         CLS["classifier/command-classifier.{sh,ts,py}<br/>(R4 — optional override)"]
         RUN["runbooks/enforcement.md + .quickref.md<br/>(R10)"]
@@ -117,31 +165,31 @@ graph TD
 
     BP --> EC
     TAX --> EC
+    EVT --> EC
     REG --> EC
+    EC -->|owns marker IO| MS
     EC -->|plugin lookup via _index.json R8| PLUG
     EC -->|implementation-boundary detection R9| EC
     EC -->|classifier dispatch R4/R5<br/>override else default| CLS
     EC -->|effective_tier = min harness,contract,config R3| EC
     EC -->|gate action = contract.gates[gate].action_for label R3| EC
-    EC -->|delegate gate decision R1| RECALL
-    RECALL -->|consults recall strategy R7| RECALL
+    EC -->|F3 alert episode — pure append| STORE
+    RECALL -.->|NOT called from EC<br/>v11 architectural invariant| EC
 ```
 
-**Decision flow:**
-1. Hook fires (harness-specific event: PreToolUse, Stop, SessionStart).
-2. Hook calls `enforce-contract.mjs` — the single thin waist.
+**Decision flow (v11):**
+1. Hook fires (harness-specific event: PreToolUse, Stop, SessionStart, SessionEnd, ToolResult).
+2. Plugin adapter translates raw harness event into canonical event payload (validates against `schemas/events/event-<type>.schema.json`) and calls `enforce-contract.mjs` — the single thin waist.
 3. `enforce-contract.mjs` consults `plugins/_index.json` → finds the active plugin for this harness (R8).
-4. Detects implementation boundary: is this a repo-source write? If yes → lazy-arm `.checkpoint-required` (R9). If exploration/planning/architecture → silent, no markers.
+4. Detects implementation boundary: is this a repo-source write? If yes → lazy-arm `.checkpoint-required` via `lib/marker-state.mjs` (R9). If exploration/planning/architecture → silent, no markers.
 5. First enforcement action per session: runbook gate checks `.so-runbook-shown.<sha8>` (R10). If absent → block with quickref injection + full runbook path. Model reads runbook, touches marker to acknowledge.
 6. Computes `effective_tier = min(harness_cap, contract_tier, project_config)` (R3).
-7. If `effective_tier < contract_tier`: degrade gracefully (warn, allow, or prompt — harness-specific).
+7. If `effective_tier < contract_tier`: degrade gracefully per `patterns/events.json` action semantics for this event (warn, inject, or pass — per-event, per-tier).
 8. Dispatches classifier: plugin override if registered, else default (R4, R5).
 9. Looks up `contract.gates[gate].action_for(label)` → `"allow"` or `"block"` (R3 — contract-driven).
-10. If `action == "block"` and `effective_tier == STRONG`: emit block decision.
-11. If `action == "block"` and `effective_tier == MEDIUM`: warn (lifecycle-gated, not real-time block).
-12. If `action == "block"` and `effective_tier == WEAK`: pass (prompt-injection only).
-13. Delegates gate decision to `em-recall.mjs --gate <event>` (R1).
-14. `em-recall.mjs` consults the recall strategy plugin (R7) and returns block/allow verdict.
+10. Reads relevant marker state via `lib/marker-state.mjs` (`.checkpoint-required`, `.post-checkpoint-done`, etc.) — purely within the enforcement layer.
+11. Combines `(action, effective_tier, marker_state)` → final outcome `{block, allow, warn, inject}` per `events.json` semantics.
+12. **v11 architectural invariant:** `em-recall.mjs` is NEVER called from this flow. The enforcement layer owns the entire decision. The only substrate write is an `em-store` call for F3 structured-alert episodes when the classifier emits an out-of-vocabulary label — a pure append, no enforcement awareness on the substrate side.
 
 ### Canonical taxonomy (maps to R3, R4)
 
@@ -244,6 +292,136 @@ if action == "block" and effective_tier == STRONG:
     enforce-contract.mjs.block(label, reason)
 ```
 The contract drives the behavior; the enforcement layer consults the contract. R2 satisfied.
+
+### Events-and-action-semantics specification (v11 — closes event-vocabulary gap, findings F37–F38)
+
+The taxonomy (labels + per-gate allow/block) is one half of the structural vocabulary. The other half is the **events vocabulary** — what events the enforcement layer reacts to, what each event's payload looks like, and what each capability tier means per event. Today RFC-008 names tiers (STRONG/MEDIUM/WEAK) without speccing what each tier DOES per event; plugins would each interpret. v11 closes that gap.
+
+#### `patterns/events.json` — data file (P0)
+
+Sibling to `taxonomy.json`, same authority, same hash-version pattern, same `validate-bp-contract.mjs` validator. Format:
+
+```json
+{
+  "version": "1.0.0",
+  "events": [
+    {
+      "id": "pre_tool_use",
+      "fires_on": "About to invoke a tool (Bash/Edit/Write/etc.) — before side effects",
+      "payload_schema": "schemas/events/event-pre-tool-use.schema.json",
+      "actions": {
+        "STRONG": { "id": "block",  "semantics": "Tool call refused. Harness returns non-zero exit from hook (Claude Code: exit 2; OpenCode: throw; Codex: dict {block:true})." },
+        "MEDIUM": { "id": "warn",   "semantics": "Marker file written at canonical path; warning string surfaced via side-band log; tool call proceeds. Catches lifecycle-gated checks but cannot block real-time." },
+        "WEAK":   { "id": "inject", "semantics": "Warning string injected into next model turn's system prompt (or harness equivalent). No programmatic effect this turn." }
+      }
+    },
+    {
+      "id": "tool_result",
+      "fires_on": "Tool call completed; result available — before model sees it",
+      "payload_schema": "schemas/events/event-tool-result.schema.json",
+      "actions": {
+        "STRONG": { "id": "modify", "semantics": "Result mutation/observation before model sees it. Harness returns modified result." },
+        "MEDIUM": { "id": "observe", "semantics": "Async log only; result delivered unchanged." },
+        "WEAK":   { "id": "unsupported", "semantics": "This event is not available at WEAK tier; declarations of WEAK on tool_result fail M4 capability key closure." }
+      }
+    },
+    {
+      "id": "stop",
+      "fires_on": "Agent about to end a turn",
+      "payload_schema": "schemas/events/event-stop.schema.json",
+      "actions": {
+        "STRONG": { "id": "refuse_stop", "semantics": "Stop refused until marker condition met. Harness re-enters the agent loop." },
+        "MEDIUM": { "id": "warn",        "semantics": "Warning logged; stop proceeds. Useful for post-hoc lifecycle audit." },
+        "WEAK":   { "id": "unsupported", "semantics": "stop at WEAK is not meaningful — by definition the harness has already decided to stop and there's no next turn to inject into." }
+      }
+    },
+    {
+      "id": "session_start",
+      "fires_on": "New session beginning",
+      "payload_schema": "schemas/events/event-session-start.schema.json",
+      "actions": {
+        "STRONG": { "id": "inject_context", "semantics": "Context (string/JSON) appended to system prompt; presence verifiable in transcript." },
+        "MEDIUM": { "id": "inject_context", "semantics": "Best-effort inject; harness may or may not surface (no verification path)." },
+        "WEAK":   { "id": "inject_static",  "semantics": "Inject via static rules/config file deployed at install time (Cursor `.rules`, Windsurf rules). No dynamic per-session content." }
+      }
+    },
+    {
+      "id": "session_end",
+      "fires_on": "Session terminating",
+      "payload_schema": "schemas/events/event-session-end.schema.json",
+      "actions": {
+        "STRONG": { "id": "write_artifact", "semantics": "Hook fires deterministically; can write final-state artifacts (handoff files, session summary episodes)." },
+        "MEDIUM": { "id": "write_artifact", "semantics": "Best-effort fire; artifact may be missing on abnormal termination." },
+        "WEAK":   { "id": "unsupported", "semantics": "Not available at WEAK." }
+      }
+    }
+  ]
+}
+```
+
+**`events_version`** = `"sha256:" + SHA256(JSON.stringify(eventsSortedById)).hex`. Carried by every `bp-XXX.json` and every plugin `manifest.json` analogous to `taxonomy_version` (F8 pattern). Stale hash = "built against stale events vocabulary" CI fail.
+
+#### Five canonical event-payload schemas (P0)
+
+Each event's `payload_schema` field points to a JSON Schema 2020-12 doc under `schemas/events/`. These define the **canonical post-translation payload shape** — the data the adapter MUST produce after translating its harness's raw event format.
+
+`schemas/events/event-pre-tool-use.schema.json` (representative):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "tool_args", "cwd", "session_id", "turn_index", "timestamp_iso8601"],
+  "properties": {
+    "tool": { "type": "string", "minLength": 1 },
+    "tool_args": { "type": ["object", "null"] },
+    "tool_args_raw": { "type": "string", "description": "Original harness-format string for forensic re-translation" },
+    "cwd": { "type": "string", "minLength": 1, "description": "canonicalized absolute, pwd -P equivalent" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "turn_index": { "type": "integer", "minimum": 0 },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" }
+  }
+}
+```
+
+Analogous shapes for `tool_result`, `stop`, `session_start`, `session_end` — fields per event reflect what the enforcement layer needs to make a decision.
+
+#### Translation contract — plugin manifest `event_translations` field (P0 schema, P1 data)
+
+Each plugin manifest carries:
+
+```json
+"event_translations": {
+  "pre_tool_use": {
+    "source_format": "claude-code-pre-tool-use-stdin-json",
+    "field_bindings": {
+      "tool": "$.tool_name",
+      "tool_args": "$.tool_input",
+      "session_id": "$.session_id",
+      "cwd": "$.cwd",
+      "turn_index": "$.transcript.length",
+      "timestamp_iso8601": "$$now"
+    }
+  },
+  "stop": { "source_format": "...", "field_bindings": { ... } }
+}
+```
+
+`manifest.schema.json` (P0) declares the shape of `event_translations`. `validate-plugin-registry.mjs` (P1) validates that the field bindings produce schema-valid canonical payloads when replayed against recorded fixture events. Catches "Codex plugin forgets to bind `cwd`" → "F25 authority-root will silently break in production" at PR-time, not at incident-time.
+
+#### `validate-bp-contract.mjs` — additional assertions for events vocabulary
+
+10. **Events meta-schema (F37):** `events.json` validates against `events.schema.json`.
+11. **Events vocabulary closure (F37):** every event id referenced in any `bp-XXX.json`, every plugin manifest's `capabilities` keys, every plugin manifest's `event_translations` keys is ⊆ `events[].id`.
+12. **Action enum closure (F37):** ∀ event, ∀ tier ∈ {STRONG, MEDIUM, WEAK}: `events[event].actions[tier].id` ∈ `{block, warn, inject, modify, observe, refuse_stop, inject_context, inject_static, write_artifact, unsupported}` (closed enum).
+13. **Payload schema resolution (F37):** every event's `payload_schema` path resolves on disk + validates as JSON Schema 2020-12.
+14. **Events stable-ID integrity (F37):** events may be ADDED but never REMOVED or RENAMED without major version bump (mirror of F7 for events).
+15. **`events_version` binding (F37):** every `bp-XXX.json` + every `manifest.json` carries `events_version`; validator asserts equals current computed hash.
+
+#### Why this lives in P0 (not P1)
+
+The taxonomy defines structure. Events ARE structure — they're the data shapes the system exchanges at every interaction. Deferring them to P1 means P1 plugin implementations would have to invent the event payload shapes, then back-port them into spec, then re-validate every existing plugin. That's the same gap that hit the original taxonomy (v1→v3 took 8 revisions because vocabulary was implicit). Shipping events.json + 5 event-payload schemas in P0 closes the gap before any plugin code is written.
 
 ### Validation-contract specification (v9 — closes round-1 review HOLD, findings F1–F10)
 
@@ -606,6 +784,8 @@ Today, every gate-adjacent script ships its own 200–400 line bespoke test harn
 | F34 | P1 | `plugins/bypass_known.json` had no meta-schema; record shape not normative | `plugins/bypass_known.schema.json` added to P0 (JSON Schema 2020-12, `additionalProperties: false`); top-level `{records[]}` with `oneOf` discriminator on `ceiling` vs `no_known_bypass_evidence` |
 | F35 | P2 | TSV acceptance keyed on `verdict_source` field that TSV doesn't have | source authority moved to thin-waist dispatch context (`selectedClassifier == "default"`); TSV payload content NOT inspected; override TSV w/ stringified NDJSON fields still hard-rejects |
 | F36 | P2 | round-3 FU was tracked as issue #366 (separate tracker accretion) instead of being baked into the spec's P1 acceptance criteria | folded inline as F31-paragraph addendum: `--project` wins over inherited `EPISODIC_MEMORY_PROJECT_ROOT`; three explicit acceptance tests P1 MUST ship at `tests/test-plugin-harness-binding.mjs` (inherited-env override; non-git cwd discovery failure; on-disk artifact location). Issue #366 closed with backlink. |
+| F37 | P1 | event-payload structures + per-event action semantics were deferred to P1; user correction: "the taxonomy defines the structure, so we need to define the structure in P0" | §Events-and-action-semantics specification (v11). P0 ships `patterns/events.json` (data) + `patterns/events.schema.json` (meta) + five canonical `schemas/events/event-*.schema.json` payload schemas. `events_version` hash binding mirrors F8. `validate-bp-contract.mjs` gains assertions 10–15 (meta-schema, vocabulary closure, action enum closure, payload schema resolution, stable-ID integrity, version binding). |
+| F38 | P1 | architecture had em-recall reading marker state, polluting the substrate with enforcement awareness; user correction: "em-recall should NOT know the marker state, the em-recall is part of the episodic memory and must not be polluted by gate marker logic" | R1 strengthened to v11 absolute form (em-recall ZERO enforcement code). Marker state reading lifted to new `scripts/lib/marker-state.mjs`, owned by enforce-contract.mjs. Phase 3 reworded as STRICT DELETION on em-recall (--gate flag, stop-gate-helpers import, all marker reads, .checkpoints/ migration all deleted). Architecture diagram redrawn — em-recall sits outside the enforcement path; only substrate touch from enforcement = em-store F3 alert episode append. |
 
 ### Capability-degradable enforcement (maps to R3)
 
@@ -880,7 +1060,7 @@ The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **o
 
 **Phase 2 → R2, R3, R4:** convert Markdown patterns to JSON contracts `patterns/bp-001.json`..`bp-012.json`; create `patterns/taxonomy.json` (canonical 7-label set with per-gate allow/block, R3/R4); create `patterns/schema.json` (contract schema) + `patterns/taxonomy.schema.json` (meta-schema, F5); create `scripts/validate-bp-contract.mjs` (implements the full normative §Validation-contract specification assertion checklist — gate-completeness, action-enum closure, overridability equality, vocabulary closure, stable-ID integrity, `taxonomy_version` binding, golden tests — NOT merely "non-canonical label" detection) + `scripts/validate-taxonomy-schema.mjs` (meta-validation, F5). Contract schema shape: `{ gates: { plan_approval: {tier}, pre_checkpoint: {tier}, post_checkpoint: {tier} }, stop: { tier }, taxonomy_ref: "patterns/taxonomy.json", taxonomy_version: "sha256:…" }` — the three classification gates are per-pattern; `stop` is a root-level marker-state gate (NOT per-label, F2/F10); `taxonomy_version` binds the contract to a taxonomy hash (F8).
 
-**Phase 3 → R1, R2, R3, R5, R9:** `enforce-contract.mjs` — the thin waist. Validates against BP contracts; implementation-boundary detection (R9, lazy-arm on first repo-source write, silent during exploration/planning/architecture); ternary `min()` (R3); classifier dispatch (R4/R5); reads gate action from taxonomy (R3, contract-driven); delegates to `em-recall.mjs --gate` (R1). Two invocation modes: plugin-native import (in-process, STRONG harnesses) + CLI spawn (degrade). Runtime out-of-vocabulary contract: labels not in the canonical set are HARD-REJECTED (fail-closed) with a structured alert — NOT coerced to `unknown` (F3; see §Validation-contract specification). The alert episode is written with `cwd: project_root` (authority-root binding below).
+**Phase 3 → R1, R2, R3, R5, R9 (v11 corrected):** `enforce-contract.mjs` + `scripts/lib/marker-state.mjs` — the thin waist + its marker-state companion. Validates against BP contracts; implementation-boundary detection (R9, lazy-arm on first repo-source write, silent during exploration/planning/architecture); ternary `min()` (R3); classifier dispatch (R4/R5); reads gate action from taxonomy (R3, contract-driven) + per-tier semantics from events.json (v11); reads marker state via `lib/marker-state.mjs` (v11 — was previously in em-recall, now lifted out). **v11 em-recall purification (load-bearing):** Phase 3 simultaneously DELETES from em-recall: the `--gate` flag + handler, the `stop-gate-helpers.mjs` import, all `.checkpoint-required` / `.post-checkpoint-required` / `.plan-approval-pending` marker reads, the `.checkpoints/` migration code. Net diff on em-recall is STRICT DELETION (negative LOC). em-recall returns to pure recall — no enforcement awareness. Two invocation modes for enforce-contract: plugin-native import (in-process, STRONG harnesses) + CLI spawn (degrade). Runtime out-of-vocabulary contract: labels not in the canonical set are HARD-REJECTED (fail-closed) with a structured alert — NOT coerced to `unknown` (F3; see §Validation-contract specification). The alert episode is written via `em-store` (pure append; the only substrate touch from enforcement) with `cwd: project_root` (F25 authority-root).
 
 **Phase 4 → R4, R5:** extract the 7-label taxonomy into `patterns/taxonomy.json`; refactor `command-classifier.sh` to source the taxonomy from JSON at runtime (OQ-2 closed — runtime-source; the CI-only alternative is rejected), with CI validating the sourcing helper + label-set equality (F4); plugin classifier override interface; override registration in `plugins/_index.json`; non-overridable labels enforced at scaffold + CI + runtime.
 
@@ -898,10 +1078,10 @@ The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **o
 
 | Priority | What | Maps to | Rationale |
 |----------|------|---------|-----------|
-| **P0** | `patterns/taxonomy.json` + validator + all v10 schema docs | R3, R4 + F11–F35 | Canonize the 7 labels with per-gate allow/block. Cheapest fix, prevents downstream label drift + hardcoded gate logic. Labels already exist in `command-classifier.sh:13-28`. **v10 P0 expansion (round-3 corrected):** ship the **eight** static JSON-Schema docs — plugin manifest (`plugins/manifest.schema.json`, `plugins/_index.schema.json`, `plugins/installed-state.schema.json` — F30), `plugins/bypass_known.schema.json` (F34 — meta-schema for the honesty registry), four runtime wire contracts (`classifier-output.schema.json`, `adapter-call.schema.json`, `adapter-response.schema.json`, `structured-alert.schema.json`) — plus `plugins/bypass_known.json` **pre-populated** with the Codex `pre_tool_use: MEDIUM` ceiling record (F28, not empty skeleton). Cheap to land together, lets P1 wire validators against locked schemas. |
+| **P0** | `patterns/taxonomy.json` + `patterns/events.json` + validator + all v10/v11 schema docs | R3, R4 + F11–F38 | Canonize the 7 labels with per-gate allow/block (taxonomy.json) AND the 5 events with per-tier action semantics (events.json — v11). Cheapest fix, prevents downstream label/event drift + hardcoded gate logic. **v11 P0 final shape — 17 schema-class docs (was 8 in v10 round-3):** `patterns/taxonomy.json` + `taxonomy.schema.json` + `events.json` (v11) + `events.schema.json` (v11) + `schema.json` for bp-XXX, plugin layer `plugins/{manifest, _index, installed-state, bypass_known}.schema.json` + `bypass_known.json` (pre-populated with Codex `pre_tool_use: MEDIUM`), four runtime wire contracts `schemas/runtime/{classifier-output, adapter-call, adapter-response, structured-alert}.schema.json`, five canonical event-payload schemas `schemas/events/event-{pre-tool-use, tool-result, stop, session-start, session-end}.schema.json` (v11). Cheap to land together; lets P1 wire validators + plugin manifests against locked schemas with zero invention. |
 | **P1** | Phase 1: Plugin directory structure | R1, R6, R8 | `git mv hooks/` → `plugins/claude-code/hooks/`; `plugins/_index.json` skeleton. Zero behavior change, ~25-30K. |
 | **P2** | Phase 2: BP contract JSONs | R2, R3, R4 | `patterns/bp-001.json`..`bp-012.json`. Contract schema that Phase 3 validates against. `patterns/schema.json` for scaffold generator. |
-| **P3** | Phase 3: `enforce-contract.mjs` | R1, R2, R3, R5, R9 | The thin waist. Validates against contracts, computes effective tier, implementation-boundary detection (R9), dispatches classifier, reads gate action from taxonomy, delegates to core. |
+| **P3** | Phase 3: `enforce-contract.mjs` + `scripts/lib/marker-state.mjs` + em-recall PURIFICATION | R1, R2, R3, R5, R9 + F38 | The thin waist. Validates against contracts, computes effective tier, implementation-boundary detection (R9), dispatches classifier, reads gate action from taxonomy + per-tier semantics from events.json. **v11 architectural correction:** P3 ALSO creates `scripts/lib/marker-state.mjs` (marker reads, owned by enforce-contract.mjs) AND simultaneously DELETES from `em-recall.mjs`: (a) the `--gate` flag + handler, (b) the `stop-gate-helpers.mjs` import, (c) all marker file reads, (d) the `.checkpoints/` migration code. Net diff on em-recall = STRICT DELETION; substrate restored to pure recall. `em-recall.mjs` is NEVER called from the enforcement path. Only substrate touch from enforcement = `em-store` writing F3 alert episodes (pure append). |
 | **P4** | Phase 5: `enforce-config.json` | R3, R5 | Per-project config clamping. Classifier activation gating. Ternary `min()`. |
 | **P5-P7** | Phase 6/7/8: Per-tool plugins | R6, R10 | OpenCode (TS), Codex (Python), Pi Agent. Each depends on P3. Each includes `runbooks/enforcement.md` per R10. |
 | **—** | Phase 9: Recall strategies | R7 | Carve into own RFC. Semantic has embedding dependency against P6. |
@@ -1088,8 +1268,21 @@ After v9 closed the taxonomy/contract validator gap (F1–F10), the champion fla
 | F34 | P1 | `plugins/bypass_known.json` had no meta-schema; record shape not normative | `plugins/bypass_known.schema.json` added to P0 (JSON Schema 2020-12, `additionalProperties: false`); top-level `{records[]}` with `oneOf` discriminator on `ceiling` vs `no_known_bypass_evidence` |
 | F35 | P2 | TSV acceptance keyed on `verdict_source` field that TSV doesn't have | source authority moved to thin-waist dispatch context (`selectedClassifier == "default"`); TSV payload content NOT inspected; override TSV w/ stringified NDJSON fields still hard-rejects |
 | F36 | P2 | round-3 FU was tracked as issue #366 (separate tracker accretion) instead of being baked into the spec's P1 acceptance criteria | folded inline as F31-paragraph addendum: `--project` wins over inherited `EPISODIC_MEMORY_PROJECT_ROOT`; three explicit acceptance tests P1 MUST ship at `tests/test-plugin-harness-binding.mjs` (inherited-env override; non-git cwd discovery failure; on-disk artifact location). Issue #366 closed with backlink. |
+| F37 | P1 | event-payload structures + per-event action semantics were deferred to P1; user correction: "the taxonomy defines the structure, so we need to define the structure in P0" | §Events-and-action-semantics specification (v11). P0 ships `patterns/events.json` (data) + `patterns/events.schema.json` (meta) + five canonical `schemas/events/event-*.schema.json` payload schemas. `events_version` hash binding mirrors F8. `validate-bp-contract.mjs` gains assertions 10–15 (meta-schema, vocabulary closure, action enum closure, payload schema resolution, stable-ID integrity, version binding). |
+| F38 | P1 | architecture had em-recall reading marker state, polluting the substrate with enforcement awareness; user correction: "em-recall should NOT know the marker state, the em-recall is part of the episodic memory and must not be polluted by gate marker logic" | R1 strengthened to v11 absolute form (em-recall ZERO enforcement code). Marker state reading lifted to new `scripts/lib/marker-state.mjs`, owned by enforce-contract.mjs. Phase 3 reworded as STRICT DELETION on em-recall (--gate flag, stop-gate-helpers import, all marker reads, .checkpoints/ migration all deleted). Architecture diagram redrawn — em-recall sits outside the enforcement path; only substrate touch from enforcement = em-store F3 alert episode append. |
 
-### v4 → v10 change log (provenance of this RFC)
+### Post-acceptance v11 architectural corrections (2026-05-28)
+
+After v10 round-3 ACCEPT (consensus reached), the champion surfaced two architectural gaps via Q&A:
+
+1. **Event-payload structures + per-event action semantics belong in P0, not P1.** Rationale: the taxonomy defines structure; events ARE structure; deferring them is exactly the "vocabulary implicit until rev N" gap that hit the taxonomy 8 revisions in a row before v9 closed it.
+2. **`em-recall` must have ZERO enforcement code.** Rationale: R1 in its strong form. Reading marker state inside em-recall is still substrate-pollution. RFC-003:506 should be reversed COMPLETELY (both gate decision AND marker reads lift out), not incrementally cleaned.
+
+Both corrections folded inline as v11 (this commit). Findings F37 (events vocabulary in P0) + F38 (em-recall purification) added. Architecture diagram redrawn. R1 text strengthened. Problem section updated to declare full RFC-003:506 reversal. Phase 3 reworded as STRICT DELETION on em-recall + addition of `scripts/lib/marker-state.mjs`. Build-priority P0 expanded from 8 → 17 schema-class docs.
+
+- **Round 1 — pending dispatch.** Provider: codex. Storage: episodic. Scope: v11 architectural corrections (F37 + F38) ON TOP of v10 R3-accepted spec. Round-cap 4; consensus mode. Replies will be appended.
+
+### v4 → v11 change log (provenance of this RFC)
 
 | # | Change | Version | Reason |
 |---|--------|---------|--------|
@@ -1114,6 +1307,7 @@ After v9 closed the taxonomy/contract validator gap (F1–F10), the champion fla
 | T19 | v10 round-3 fixes (F32–F35): CI invocation `--project "$GITHUB_WORKSPACE"` (closes F31 reopening), golden corpus 12→16 + assertion 7 explicit (F33), `bypass_known.schema.json` added to P0 (8 schemas), TSV source authority = thin-waist dispatch context not stdout `verdict_source` field (F35) | v10 | Codex round-2 HOLD with 4 findings, all ACCEPT — small doc-only patches. Folded inline; round 3 dispatched. |
 | T20 | v10 consensus reached — codex round-3 ACCEPT-with-FU; single non-blocking FU filed as issue #366 (test-plugin.mjs inherited-env conflict test, P1 scope). P0 implementation unblocked. | v10 | 3-round convergence: R1 HOLD (F27–F31) → R2 HOLD (F32–F35) → R3 ACCEPT. Total 9 P1/P2 findings, all resolved inline. Pattern matches v9 §Validation-contract spec consolidation (10 findings, 1 round to ACCEPT) at slightly higher round count because v10 covered three orthogonal layers (manifest + runtime + testing) instead of one. |
 | T21 | F36 — round-3 FU folded inline as a P1 acceptance criterion under §Plugin-testing-harness (instead of remaining a separate tracker). Three explicit tests added: inherited-env override, non-git-cwd discovery failure, on-disk artifact location. Issue #366 closed with backlink. | v10 | User directive: "fold the FUs into the existing plan." Pattern: spec carries the contract; trackers accrete and rot. P1 implementation now CANNOT ship without these tests passing — the spec is the gate, not a checkbox in an issue. |
+| T22 | v11 architectural corrections (F37 + F38) + TOC + AI-context fix: (a) `patterns/events.json` + 5 event-payload schemas moved to P0 (§Events-and-action-semantics specification); (b) em-recall purified to ZERO enforcement code (R1 strengthened; Phase 3 reworded as STRICT DELETION; architecture diagram redrawn; `scripts/lib/marker-state.mjs` introduced as new home for marker reads under enforce-contract); (c) TOC added at top of RFC for navigation; (d) AI-context fixed to remove the misleading "delegates to em-recall --gate" phrasing | v11 | User corrections: "the taxonomy defines the structure, so we need to define the structure in P0" + "em-recall should not know the marker state, em-recall is part of the episodic memory and must not be polluted by gate marker logic." Both substantive — closed v10 R3 ACCEPT verdict was structurally incomplete. v11 ships the corrections and goes back to second-opinion review for ACCEPT. |
 
 ---
 
