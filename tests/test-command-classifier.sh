@@ -971,6 +971,54 @@ i358_run "#358-04 different script does not reuse marker (digest pin)" \
   'node scripts/bar.mjs --summary "x"' \
   "shared_write"
 
+# Non-script-identity slot: external interpreter script (digest null because
+# the file lives OUTSIDE the project root). Here the predicate returns false
+# and `normalized_command` IS in the cache key — this is the slot where Site A
+# vs Site B drift on quote handling could have flipped the key pre-PR #360.
+# The shared `_resolve_marker_cmd_text` helper is the load-bearing fix here
+# (script-identity does not apply).
+i358_run_external() {
+  local desc="$1" plant_cmd="$2" read_cmd="$3" expected="$4"
+  local saved_home="$HOME" tmp extdir g1home marker_helper
+  tmp="$(mktemp -d)"; tmp="$(cd -P "$tmp" && pwd)"
+  git -C "$tmp" init -q 2>/dev/null
+  extdir="$(mktemp -d)"; extdir="$(cd -P "$extdir" && pwd)"
+  printf '#!/usr/bin/env node\nconsole.log("ext")\n' > "$extdir/ext.mjs"
+  g1home="$(mktemp -d)"; g1home="$(cd -P "$g1home" && pwd)"
+  marker_helper="$REPO_ROOT/scripts/classifier-marker.mjs"
+  # Substitute EXTDIR placeholder so per-run extdir path is testable.
+  plant_cmd="${plant_cmd//EXTDIR/$extdir}"
+  read_cmd="${read_cmd//EXTDIR/$extdir}"
+  ( cd "$tmp" && HOME="$g1home" CLAUDE_CODE_SESSION_ID=i358ext node "$marker_helper" --write \
+      --project-root "$tmp" --caller-cwd "$tmp" --command "$plant_cmd" \
+      --label read_only --confidence 0.9 --reason i358ext --session-id i358ext ) >/dev/null 2>&1
+  local result label
+  result="$(HOME="$g1home" CLAUDE_CODE_SESSION_ID=i358ext classify_command "$read_cmd" "$tmp" "$tmp")"
+  label="${result%%	*}"
+  rm -rf "$tmp" "$g1home" "$extdir"
+  export HOME="$saved_home"
+  if [ "$label" = "$expected" ]; then
+    echo "  ✓ $desc"; passed=$((passed+1))
+  else
+    echo "  ✗ $desc (expected $expected, got $label / $result)"; failed=$((failed+1))
+  fi
+}
+# Identical quoted command across plant + lookup → HIT. The shared
+# _resolve_marker_cmd_text helper guarantees both Site A and Site B see the
+# same raw form (no de-quoted reconstruction), so the normalized_command keys
+# match. Pre-PR-#360 this is the exact drift Site B introduced.
+i358_run_external "#358-05 external script quoted-arg + identical lookup → HIT (Site A/B parity)" \
+  'node EXTDIR/ext.mjs --summary "RFC-008 (thin-contracts concern)"' \
+  'node EXTDIR/ext.mjs --summary "RFC-008 (thin-contracts concern)"' \
+  "read_only"
+# Negative control: different args MUST MISS for non-script-identity commands
+# (arg-sensitivity preserved; the script-identity collapse does NOT extend to
+# external scripts).
+i358_run_external "#358-06 external script + different args → MISS (arg-sensitive)" \
+  'node EXTDIR/ext.mjs --summary "RFC-008 (thin-contracts concern)"' \
+  'node EXTDIR/ext.mjs --summary "completely different topic"' \
+  "shared_write"
+
 echo ""
 echo "=================================================="
 echo "Results: $passed passed, $failed failed"
