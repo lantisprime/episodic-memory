@@ -2626,6 +2626,102 @@ assert_blocked "I364-7. push gate rejects symlink POST_DONE — push still BLOCK
     '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Post-implementation checkpoint required"
 rm -rf "$I364_OUTSIDE_DIR"
 
+# I364-8 (codex round 3 P1 repro): writer/reader symlink-rejection
+# AGREEMENT. The hardened READ predicate rejects a symlinked POST_REQ, so
+# the gate enters the self-arm branch. Pre-#364-r3, the helper's
+# `arm-if-missing` used `fs.existsSync` (follows symlinks) → returned
+# noop:true → `_push_self_arm_created=0` → final read check ALSO returned
+# false (hardened predicate) → push was ALLOWED with no POST_DONE.
+#
+# Post-#364-r3, the helper uses `lstatSync` and treats symlinks as
+# "not present" → `arm-if-missing` proceeds → `atomicWriteEmpty`'s
+# fs.renameSync replaces the symlink with a real file → helper returns
+# noop:false → `_push_self_arm_created=1` → gate blocks unconditionally.
+#
+# Tests BOTH the helper path AND the bash fallback path (no installed helper).
+reset_state
+I364_SID7="cafe1364-7777-4777-8777-cafe13647777"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+echo "attacker decoy POST_REQ target" > "$I364_OUTSIDE_DIR/decoy"
+ln -s "$I364_OUTSIDE_DIR/decoy" "$MARKER_DIR/.post-checkpoint-required.$I364_SID7"
+# No POST_DONE at all. With the bug, push would be allowed.
+# Run with a fake HOME that has NO checkpoint-marker.mjs → exercises the
+# bash fallback path.
+I364_FAKE_HOME=$(mktemp -d)
+I364_FAKE_HOME="$(cd -P "$I364_FAKE_HOME" && pwd)"
+I364_PUSH_JSON="$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$I364_SID7" \
+  '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')"
+I364_PUSH_OUT=$(echo "$I364_PUSH_JSON" | HOME="$I364_FAKE_HOME" bash "$HOOK" 2>/dev/null)
+if echo "$I364_PUSH_OUT" | grep -q '"decision".*"block"' \
+   && echo "$I364_PUSH_OUT" | grep -q "Post-implementation checkpoint required"; then
+  echo "  ✓ I364-8a (codex R3 P1 repro, bash fallback): symlinked POST_REQ → push BLOCKED (no bypass)"; ((passed++))
+else
+  echo "  ✗ I364-8a (codex R3 P1 repro, bash fallback): expected block, got: $I364_PUSH_OUT"; ((failed++))
+fi
+# After the push attempt, the symlink should have been REPLACED with a
+# real regular file by _arm_marker_via_touch_safely (rm -f + touch).
+if [ -L "$MARKER_DIR/.post-checkpoint-required.$I364_SID7" ]; then
+  echo "  ✗ I364-8b (codex R3 P1): symlink POST_REQ was NOT replaced (still a symlink after self-arm)"; ((failed++))
+elif [ -e "$MARKER_DIR/.post-checkpoint-required.$I364_SID7" ]; then
+  echo "  ✓ I364-8b (codex R3 P1): symlink POST_REQ replaced by real file via _arm_marker_via_touch_safely"; ((passed++))
+else
+  echo "  ✗ I364-8b (codex R3 P1): POST_REQ missing after self-arm"; ((failed++))
+fi
+# Now repeat with a fake HOME that DOES have checkpoint-marker.mjs installed
+# → exercises the helper path (the actionArmIfMissing fix in checkpoint-marker.mjs).
+rm -f "$MARKER_DIR/.post-checkpoint-required.$I364_SID7"
+ln -s "$I364_OUTSIDE_DIR/decoy" "$MARKER_DIR/.post-checkpoint-required.$I364_SID7"
+I364_FAKE_HOME2=$(mktemp -d)
+I364_FAKE_HOME2="$(cd -P "$I364_FAKE_HOME2" && pwd)"
+mkdir -p "$I364_FAKE_HOME2/.episodic-memory/scripts/lib"
+# Copy the real helper + its deps so it actually runs (lstat-aware fix is in here).
+cp "$REPO_ROOT/scripts/checkpoint-marker.mjs" "$I364_FAKE_HOME2/.episodic-memory/scripts/checkpoint-marker.mjs"
+cp -R "$REPO_ROOT/scripts/lib/." "$I364_FAKE_HOME2/.episodic-memory/scripts/lib/"
+I364_PUSH_OUT2=$(echo "$I364_PUSH_JSON" | HOME="$I364_FAKE_HOME2" bash "$HOOK" 2>/dev/null)
+if echo "$I364_PUSH_OUT2" | grep -q '"decision".*"block"' \
+   && echo "$I364_PUSH_OUT2" | grep -q "Post-implementation checkpoint required"; then
+  echo "  ✓ I364-8c (codex R3 P1 repro, helper path): symlinked POST_REQ → push BLOCKED (no bypass)"; ((passed++))
+else
+  echo "  ✗ I364-8c (codex R3 P1 repro, helper path): expected block, got: $I364_PUSH_OUT2"; ((failed++))
+fi
+if [ -L "$MARKER_DIR/.post-checkpoint-required.$I364_SID7" ]; then
+  echo "  ✗ I364-8d (codex R3 P1, helper): symlink POST_REQ was NOT replaced"; ((failed++))
+elif [ -e "$MARKER_DIR/.post-checkpoint-required.$I364_SID7" ]; then
+  echo "  ✓ I364-8d (codex R3 P1, helper): symlink POST_REQ replaced by real file via atomic rename"; ((passed++))
+else
+  echo "  ✗ I364-8d (codex R3 P1, helper): POST_REQ missing after self-arm"; ((failed++))
+fi
+rm -rf "$I364_OUTSIDE_DIR" "$I364_FAKE_HOME" "$I364_FAKE_HOME2"
+
+# I364-9: writer/reader agreement for .checkpoint-required arming via
+# _arm_checkpoint_required_if_missing's bash fallback (:733). Pre-fix the
+# bash `touch` followed a planted symlink, leaving the symlink in place;
+# post-fix _arm_marker_via_touch_safely unlinks first. Tests the third
+# bash-fallback site we hardened.
+reset_state
+I364_SID8="dead1364-8888-4888-8888-dead13648888"
+seed_approval "$MARKER_DIR" "$I364_SID8"
+I364_OUTSIDE_DIR=$(mktemp -d)
+I364_OUTSIDE_DIR="$(cd -P "$I364_OUTSIDE_DIR" && pwd)"
+echo "attacker decoy CR target" > "$I364_OUTSIDE_DIR/decoy"
+ln -s "$I364_OUTSIDE_DIR/decoy" "$MARKER_DIR/.checkpoint-required.$I364_SID8"
+I364_FAKE_HOME3=$(mktemp -d)
+I364_FAKE_HOME3="$(cd -P "$I364_FAKE_HOME3" && pwd)"
+# Trigger _arm_checkpoint_required_if_missing via an in-repo Edit (planning-passive
+# implementation boundary). Use empty HOME so bash fallback runs.
+echo "$(jq -n --arg fp "$TEST_DIR/scripts/x.mjs" --arg cwd "$TEST_DIR" --arg sid "$I364_SID8" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" \
+  | HOME="$I364_FAKE_HOME3" bash "$HOOK" >/dev/null 2>&1 || true
+if [ -L "$MARKER_DIR/.checkpoint-required.$I364_SID8" ]; then
+  echo "  ✗ I364-9. _arm_checkpoint_required_if_missing bash fallback did NOT unlink planted symlink"; ((failed++))
+elif [ -f "$MARKER_DIR/.checkpoint-required.$I364_SID8" ]; then
+  echo "  ✓ I364-9. _arm_checkpoint_required_if_missing bash fallback unlinked + touched fresh file"; ((passed++))
+else
+  echo "  ✗ I364-9. .checkpoint-required.<sid> missing after arm"; ((failed++))
+fi
+rm -rf "$I364_OUTSIDE_DIR" "$I364_FAKE_HOME3"
+
 echo ""
 echo "Passed: $passed"
 echo "Failed: $failed"

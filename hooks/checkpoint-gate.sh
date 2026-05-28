@@ -702,6 +702,28 @@ _consume_plan_approved() {
   rm -f "$PRIMARY_DIR/$bn" "$LEGACY_DIR/$bn" 2>/dev/null || true
 }
 
+# Symlink-aware existence check for marker paths (codex round 3 P1, #364).
+# Mirrors marker-read predicates: a symlink at a marker path is NOT
+# considered present. Used by self-arm sites' pre-check to detect that a
+# fresh arm IS needed (the symlink will be replaced atomically by the
+# subsequent touch/write).
+_marker_path_has_real_file() {
+  [ ! -L "$1" ] && [ -e "$1" ]
+}
+
+# Symlink-safe touch: if a symlink exists at the path, unlink it first so
+# the touch creates a fresh regular file rather than following the symlink
+# to write outside the substrate. Best-effort under set -e (||true). Used
+# by the bash fallback sites that arm checkpoint markers when the
+# checkpoint-marker.mjs helper is not installed.
+_arm_marker_via_touch_safely() {
+  local p="$1"
+  if [ -L "$p" ]; then
+    rm -f "$p" 2>/dev/null || true
+  fi
+  touch "$p" 2>/dev/null || true
+}
+
 _arm_checkpoint_required_if_missing() {
   if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
     return 0
@@ -723,7 +745,10 @@ _arm_checkpoint_required_if_missing() {
       --action arm-if-missing \
       --root "$REPO_ROOT" >/dev/null 2>&1 || true
   else
-    touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")" 2>/dev/null || true
+    # Symlink-safe (#364): unlink any planted symlink at the marker path
+    # before touch, otherwise touch follows the symlink and writes outside
+    # the substrate.
+    _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .checkpoint-required "$MY_SID")")"
   fi
   # Transactional consume (codex PR review P1): the arm above is best-effort
   # (`|| true`) — an installed helper that exits non-zero would leave NO
@@ -1529,17 +1554,20 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
       else
         # Fallback (helper not installed): compute existence BEFORE touch so the
         # created-now signal is race-free (§15-C3 — no read-after-arm window).
+        # Symlink-safe (#364): _marker_path_has_real_file returns false for a
+        # symlink, so this branch correctly enters the arm path; the helper
+        # touch then unlinks the symlink before writing.
         _push_req_path="$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")"
-        if [ ! -e "$_push_req_path" ]; then
-          touch "$_push_req_path" 2>/dev/null || true
+        if ! _marker_path_has_real_file "$_push_req_path"; then
+          _arm_marker_via_touch_safely "$_push_req_path"
           _push_self_arm_created=1
         fi
       fi
     else
       # Invalid/empty sid: legacy direct touch, existence-before-touch.
       _push_req_path="$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
-      if [ ! -e "$_push_req_path" ]; then
-        touch "$_push_req_path" 2>/dev/null || true
+      if ! _marker_path_has_real_file "$_push_req_path"; then
+        _arm_marker_via_touch_safely "$_push_req_path"
         _push_self_arm_created=1
       fi
     fi
@@ -1613,14 +1641,14 @@ case "$TOOL_NAME" in
             --action arm-if-missing \
             --root "$REPO_ROOT" >/dev/null 2>&1 || true
         else
-          # Fallback: direct write when helper not installed.
-          touch "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")" 2>/dev/null || true
+          # Fallback: direct write when helper not installed. Symlink-safe (#364).
+          _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" "$(namespaced_marker_basename_for_session .post-checkpoint-required "$MY_SID")")"
         fi
       else
         # Invalid/empty sid: legacy direct touch (preserves pre-rank-2
         # behavior; gate inactive for own-session checks but legacy literal
-        # still works for old hooks).
-        touch "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)" 2>/dev/null || true
+        # still works for old hooks). Symlink-safe (#364).
+        _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
       fi
     fi
     ;;

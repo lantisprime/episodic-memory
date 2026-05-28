@@ -174,6 +174,29 @@ function atomicWriteEmpty(canonicalRoot, basename) {
   return finalPath
 }
 
+/**
+ * Treat a symlink at a marker path as "not present" (codex round 3 P1, #364).
+ * Mirrors hooks/checkpoint-gate.sh's marker-read policy: marker_exists and
+ * marker_nonempty REJECT symlinks via `[ ! -L "$p" ]`. The writer side must
+ * agree, otherwise an attacker who plants a symlink at <marker>.<sid> can
+ * make `arm-if-missing` no-op (existsSync follows symlinks) while the gate's
+ * READ predicate rejects the same symlink — opening the push-gate bypass
+ * codex P1 reproduced (symlink POST_REQ → arm-if-missing noop:true → push
+ * allowed with no valid POST_DONE).
+ *
+ * Returns true ONLY for regular files (or directories), never for symlinks.
+ * lstat does NOT follow symlinks (unlike existsSync/statSync); ENOENT and
+ * any other error → return false (treat as not present).
+ */
+function isRealMarkerPresent(p) {
+  try {
+    const st = fs.lstatSync(p)
+    return !st.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
 function ownSessionOrLegacyMarkerExists(canonicalRoot, target, sid) {
   // Per-codex C2 R1 P1: arm-if-missing must NOT no-op when ANOTHER
   // session's suffixed marker exists — that would recreate the
@@ -182,6 +205,13 @@ function ownSessionOrLegacyMarkerExists(canonicalRoot, target, sid) {
   //   2. Own-session <target>.<sid> at primary or legacy root.
   // OTHER sessions' <target>.<other-sid> must NOT suppress this session's
   // marker.
+  //
+  // Symlink policy (codex round 3 P1, #364): a symlink at any of the four
+  // candidate paths does NOT count as "present". Arm-if-missing then
+  // proceeds to atomicWriteEmpty, whose fs.renameSync atomically REPLACES
+  // the symlink with a real regular file (rename(2) replaces the target
+  // as a whole entity, does not follow the symlink). The gate's hardened
+  // READ predicate then sees the real file and proceeds correctly.
   const ownBasename = namespacedMarkerBasenameForSession(target, sid)
   for (const p of [
     primaryMarkerPath(canonicalRoot, target),         // bare legacy at primary
@@ -189,7 +219,7 @@ function ownSessionOrLegacyMarkerExists(canonicalRoot, target, sid) {
     primaryMarkerPath(canonicalRoot, ownBasename),    // own-session at primary
     legacyMarkerPath(canonicalRoot, ownBasename),     // own-session at legacy
   ]) {
-    if (fs.existsSync(p)) return true
+    if (isRealMarkerPresent(p)) return true
   }
   return false
 }
