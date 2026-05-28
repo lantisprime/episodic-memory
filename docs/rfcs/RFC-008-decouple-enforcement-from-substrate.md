@@ -275,6 +275,311 @@ The thin-waist runtime layer does NOT coerce an unrecognized classifier label to
 8. **Stable-ID integrity (F7):** labels may be ADDED but never REMOVED or RENAMED without a major `version` bump. The validator diffs the previous `taxonomy.json` from git; if `|old_ids| == |new_ids|` and `old_ids ≠ new_ids`, fail "possible rename — add the new label + mark the old `deprecated: true`, never rename." `bp-XXX.json.taxonomy_version` mismatch (F8) is a hard fail.
 9. **Golden tests (F5):** `validate-bp-contract.mjs` ships known-good + known-bad fixtures (missing gate, bad action value, overridability mismatch, duplicate id, extra gate key, dangling reference, rename) and asserts the expected pass/fail per fixture. The 10 round-1 negative scenarios map 1:1 to assertions 2–8 + the runtime hard-reject and form the golden-test corpus.
 
+### Plugin-manifest-validation-contract specification (v10 — closes P1 gap, findings F11–F20)
+
+The taxonomy got its full normative spec in v9 (F1–F10). The plugin manifest layer was left example-driven — the same thin-spec class. This section is the full normative contract for `plugins/_index.json`, `plugins/<harness>/manifest.json`, and `scripts/validate-plugin-registry.mjs`. CI fails on any violation.
+
+#### Two meta-schemas (M1, M2)
+
+- **`plugins/_index.schema.json`** — registry meta-schema. JSON Schema 2020-12. `additionalProperties: false` at every level. Closed enums for `harness` and `status`.
+- **`plugins/manifest.schema.json`** — per-plugin manifest meta-schema. JSON Schema 2020-12. `additionalProperties: false` at every level. Closed enums for `harness`, event keys, capability tier values, classifier mode.
+
+Both are themselves validated by `scripts/validate-schemas.mjs` against the JSON Schema 2020-12 meta-meta-schema (mirror of F5).
+
+#### Harness-name stable-ID rules (M3)
+
+- The `harness` enum is **closed**: `{claude-code, opencode, codex, pi-agent, cursor, windsurf}`. New harness = PR to episodic-memory adding the enum value. Plugins cannot self-register a new harness id.
+- A harness name may be ADDED but never RENAMED or REMOVED without a major `_index.schema.json` `version` bump. Validator git-diffs the prior schema; same cardinality + different ids = fail "possible rename — add new + mark old `deprecated: true`, never rename." Mirror of F7.
+- Per plugin entry: `id == harness` (rules out plugin-name drift from harness-name).
+
+#### Capability declarations (M4)
+
+- `capabilities` keys ⊆ closed event set: `{pre_tool_use, stop, session_start, session_end, tool_result}`. Extra keys = fail.
+- Each value ∈ closed enum: `{STRONG, MEDIUM, WEAK, TBD}`.
+- `TBD` allowed only with a sibling comment field pointing at an open issue URL (validator greps for the URL pattern).
+- Missing capability for an event the plugin's adapter actually dispatches into = fail. Validator inspects `plugins/<harness>/capabilities/enforcement.{mjs,ts,py}` for hook-registration call sites and asserts each registered event appears in `capabilities`.
+- **Capability honesty (M4a):** SELF-DECLARED, but `plugins/bypass_known.json` records cases where a tier is dishonest (e.g., "Codex `pre_tool_use: STRONG` = dishonest, multi-edit bypass documented in episode `…`"). Any declared tier exceeding the known-bypass ceiling for that harness/event = fail.
+
+#### Classifier mode + emits_labels (M5 — extends F6)
+
+- `classifier.mode` ∈ `{default, override}`.
+- `classifier.emits_labels` ⊆ `taxonomy.labels[].id` (F6 vocabulary closure, extended from contracts to manifests).
+- If `mode == override`:
+  - `classifier.override_path` REQUIRED + file exists.
+  - **Non-overridable preservation (M5a):** override MUST emit `marker_write` and `unsafe_complex` with canonical semantics. Validator runs golden-input commands (from `tests/fixtures/plugins/non-overridable-inputs.json`) through the override and checks emissions; if either non-overridable label is suppressed or remapped, fail.
+  - **Drift prevention (M5b):** override file MUST declare the same `taxonomy_version` as the manifest's top-level value.
+- If `mode == default`:
+  - `override_path` MUST be absent.
+  - `emits_labels` MUST equal the full canonical 7-label set (default classifier emits everything; manifest can't lie about it).
+
+#### Taxonomy binding (M6 — extends F8)
+
+- `manifest.taxonomy_version == computeTaxonomyVersion(taxonomy.labels)`. Stale hash = "built against stale taxonomy" fail.
+- `manifest.taxonomy_ref` is the literal constant `"patterns/taxonomy.json"` (not configurable).
+- Every override classifier file MUST source its label set from `taxonomy.json` at startup (mirror of F4 / OQ-2-closed). Validator greps for the sourcing helper.
+
+#### Runbook references (M7 — formalizes R10)
+
+- `runbook.full` → `plugins/<harness>/runbooks/enforcement.md`. MUST: exist; size ≥ `MIN_RUNBOOK_BYTES` (1024); contain sentinel `## ⚠️ Self-trigger checklist` at column 1.
+- `runbook.quickref` → `enforcement.quickref.md`. MUST: exist; size ≥ `MIN_QUICKREF_BYTES` (256).
+- Runbook MUST contain all six required section headers (R10 §"Six required sections") — validator greps for each literal.
+- **COMMON-row drift (M7a):** the COMMON rows in §1 (Self-trigger checklist) and §5 (Trigger phrases) are scaffold-generated and MUST byte-match canonical templates at `scripts/scaffold-plugin/templates/common-rows.md`. Drift = fail.
+
+#### Bidirectional registry/disk consistency (M8)
+
+- Every `plugins/<harness>/` directory on disk has an entry in `_index.json`; every entry has a directory.
+- No duplicate `harness` bindings across `plugins[]` entries (one plugin per harness — R6).
+- Every entry's `manifest` field resolves to a file that validates against `manifest.schema.json`.
+- Cross-reference equality: registry's `id`/`harness` == manifest's `id`/`harness`.
+
+#### Installed-state binding (M9 — composes with RFC-003)
+
+- `installed_state.{installer_version, installed_at_iso8601, files[].{path, sha256}}` — schema only; the validator does NOT recompute hashes at CI time (deployed files live outside the repo).
+- Migration detection: registry entry without an `installed_state` block = "registered, not deployed"; `~/.<tool>/hooks/` present with no registry entry = "deployed, not registered, offer migration" (RFC-003 §migration).
+
+#### Golden test corpus (M10 — mirrors F5 / F1-corpus)
+
+`tests/fixtures/plugins/` ships:
+
+- `good-manifest.json` — fully valid claude-code-style.
+- `bad-extra-field.json` — top-level field not in schema (catches `additionalProperties: false`).
+- `bad-unknown-harness.json` — `harness: "vscode"` (not in enum).
+- `bad-invalid-tier.json` — `capabilities.pre_tool_use: "MAYBE"`.
+- `bad-dangling-label.json` — `emits_labels` references a label ∉ taxonomy.
+- `bad-stale-taxonomy-version.json` — hash mismatch.
+- `bad-override-suppresses-marker-write.json` — override remaps `marker_write` → `shared_write`.
+- `bad-renamed-harness.json` — `claude-code` renamed to `claude` (stable-ID violation).
+- `bad-missing-runbook.json` — manifest claims runbook path that doesn't exist.
+- `bad-short-runbook.json` — runbook exists but below `MIN_RUNBOOK_BYTES`.
+- `bad-default-mode-with-override-path.json` — `mode: default` but `override_path` present.
+- `bad-capability-dishonest.json` — declared tier exceeds `bypass_known.json` ceiling.
+
+Each fixture maps 1:1 to one or more of assertions M3–M9 + scaffold-template equality (M7a).
+
+#### `validate-plugin-registry.mjs` — normative assertion checklist
+
+1. **Meta-schema validation (M1, M2):** every `_index.json` and `manifest.json` validates against its `*.schema.json` (`additionalProperties: false` everywhere).
+2. **Harness enum closure (M3):** every `harness` value ∈ closed enum.
+3. **Harness stable-ID (M3):** git-diff prior `_index.schema.json` enum vs current; same cardinality + different ids = fail.
+4. **id == harness (M3):** for every plugin entry.
+5. **Capability key closure (M4):** `capabilities` keys ⊆ closed event set.
+6. **Capability tier enum (M4):** each value ∈ `{STRONG, MEDIUM, WEAK, TBD}`; `TBD` requires sibling issue-URL comment.
+7. **Capability honesty (M4a):** cross-check against `bypass_known.json`; declared ≤ known-bypass ceiling.
+8. **Vocabulary closure (M5, extends F6):** `emits_labels ⊆ taxonomy.labels`.
+9. **Non-overridable preservation (M5a):** golden-input commands through override emit `marker_write` + `unsafe_complex` with canonical semantics.
+10. **Mode/override consistency (M5):** `mode == override` ⇔ `override_path` set + file exists; `mode == default` ⇒ `emits_labels == canonical`.
+11. **Taxonomy version binding (M6, extends F8):** `manifest.taxonomy_version == current_hash`.
+12. **Override sources taxonomy at runtime (M6, extends F4):** validator greps override file for the sourcing helper.
+13. **Runbook presence + sentinel + size (M7, R10):** full + quickref pass.
+14. **Runbook sections + COMMON-row drift (M7a):** all 6 section headers present; COMMON rows byte-match templates.
+15. **Bidirectional registry/disk (M8):** dirs ↔ entries; no duplicate harness; manifest cross-references equal.
+16. **Installed-state schema (M9):** if present, validates against `installed-state.schema.json`.
+17. **Golden corpus (M10):** all 12 fixtures pass/fail as expected.
+
+### Runtime-data-contract specification (v10 — closes runtime-emission gap, findings F21–F25)
+
+Author-time (scaffold) + CI (validators) cover the static manifest layer. The runtime emission layer was implicit (TSV strings, ad-hoc `printf` lines today). This section is the full normative contract for the four wire formats the thin waist and plugins exchange at every hook fire. CI validates the schemas; the thin waist hard-rejects malformed emissions.
+
+#### Contract 1 — Classifier output (per command) — `classifier-output.schema.json`
+
+Every classifier invocation emits ONE NDJSON line on stdout:
+
+```json
+{
+  "label": "shared_write",
+  "target": "./scripts/foo.mjs",
+  "reason": "default_write",
+  "taxonomy_version": "sha256:e3d9e25…",
+  "classifier_version": "1.0.0",
+  "verdict_source": "override:claude-code"
+}
+```
+
+| Field | Type | Required | Constraint |
+|---|---|---|---|
+| `label` | string | YES | **∈ `taxonomy.labels[].id`** (F3 hard-reject if violated) |
+| `target` | string | YES (may be `""`) | path or URL the action targets; empty for stateless cmds |
+| `reason` | string | YES | stable snake_case id; used as marker-cache key |
+| `taxonomy_version` | string | YES | sha256 hash matching the loaded taxonomy (F8 drift check) |
+| `classifier_version` | semver | YES | for cache invalidation + debug |
+| `verdict_source` | string | YES | `default` \| `override:<harness>` \| `marker_cache:<sid>:<hash>` |
+
+**Format rules:** NDJSON one line per emission. UTF-8. No trailing comma. No whitespace around the JSON object beyond the trailing `\n`. Multi-emission classifiers (segment chains in `unsafe_complex` detection) emit one line per segment.
+
+**Legacy TSV format (bash default, deprecated):** emits `label\ttarget\treason\n`. Thin waist accepts both formats (TSV from bash default, NDJSON from override languages) during P4 burn-in; post-cutover only NDJSON. The TSV→NDJSON migration is P4's responsibility (along with F4 runtime-sourcing).
+
+#### Contract 2 — Adapter → thin waist call (per hook fire) — `adapter-call.schema.json`
+
+```json
+{
+  "tool": "Bash",
+  "command": "git push origin main",
+  "tool_args": null,
+  "session_id": "abc123",
+  "project_root": "/Users/.../episodic-memory",
+  "gate": "post_checkpoint",
+  "harness": "claude-code",
+  "timestamp_iso8601": "2026-05-28T16:30:00Z",
+  "manifest_version": "1.0.0"
+}
+```
+
+| Field | Type | Required | Constraint |
+|---|---|---|---|
+| `tool` | string | YES | harness-specific tool name (Bash, Edit, Write, MultiEdit, …) |
+| `command` | string | YES for Bash | raw command text |
+| `tool_args` | object\|null | YES for non-Bash | raw tool args (e.g. Edit: `{file_path, old_string, new_string}`) |
+| `session_id` | string | YES | per-harness session identifier |
+| `project_root` | string | YES | **canonicalized absolute** (`pwd -P` equivalent — see F25 + episodes `…5705` / `…33a2`) |
+| `gate` | enum | YES | `plan_approval` \| `pre_checkpoint` \| `post_checkpoint` \| `stop` |
+| `harness` | enum | YES | closed enum from M3 |
+| `timestamp_iso8601` | string | YES | UTC, RFC 3339 |
+| `manifest_version` | semver | YES | plugin manifest version |
+
+#### Contract 3 — Thin waist → adapter response (per hook fire) — `adapter-response.schema.json`
+
+```json
+{
+  "action": "block",
+  "reason": "post_checkpoint armed; .post-checkpoint-done absent",
+  "label": "push_or_pr_create",
+  "effective_tier": "STRONG",
+  "structured_alert_episode": null,
+  "harness_format_hint": {
+    "claude_code_decision": "block",
+    "exit_code": 2
+  }
+}
+```
+
+| Field | Type | Required | Constraint |
+|---|---|---|---|
+| `action` | enum | YES | `block` \| `allow` \| `warn` |
+| `reason` | string | YES | human-readable; shown to the agent |
+| `label` | string | YES | the classifier's label; `"n/a"` for stop-gate (reads marker state, not commands) |
+| `effective_tier` | enum | YES | `STRONG` \| `MEDIUM` \| `WEAK` |
+| `structured_alert_episode` | string\|null | YES | episode id if F3 hard-reject fired, else `null` |
+| `harness_format_hint` | object | optional | harness-specific translation aid (e.g. Claude Code's `{decision, exit_code}` shape) |
+
+The adapter converts `harness_format_hint` (or builds from the canonical fields) into whatever the harness's hook API expects on stdout / exit code. The thin waist stays harness-agnostic.
+
+#### Contract 4 — Structured alert (F3 hard-reject) — `structured-alert.schema.json`
+
+Written via `em-store` when the classifier returns an out-of-vocabulary label:
+
+```json
+{
+  "alert_type": "classifier_out_of_vocabulary",
+  "plugin_id": "claude-code",
+  "harness": "claude-code",
+  "emitted_label": "totally_fake_label",
+  "command": "git push origin main",
+  "timestamp_iso8601": "2026-05-28T16:30:00Z",
+  "project_root": "/Users/.../episodic-memory",
+  "store_scope": "local",
+  "episode_file": ".episodic-memory/episodes/…"
+}
+```
+
+| Field | Type | Required | Constraint |
+|---|---|---|---|
+| `alert_type` | enum | YES | `classifier_out_of_vocabulary` (more types reserved) |
+| `plugin_id` | string | YES | from manifest |
+| `harness` | enum | YES | closed enum (M3) |
+| `emitted_label` | string | YES | the rejected label literal |
+| `command` | string | YES | raw command (may be empty for non-Bash) |
+| `timestamp_iso8601` | string | YES | UTC, RFC 3339 |
+| `project_root` | string | YES | canonicalized absolute (F25) |
+| `store_scope` | enum | YES | `local` \| `global` |
+| `episode_file` | string | YES | resolved path to the written episode |
+
+Written with `cwd: project_root` binding (F3 authority-root requirement — the PR #218 / #326 / #336 orphaned-write class). The alert episode MUST be findable via `em-search --tag classifier-alert --scope local`.
+
+#### Per-plugin runtime validation matrix
+
+| Check | Author-time | CI | Install | Runtime |
+|---|:-:|:-:|:-:|:-:|
+| Manifest schema valid | ✓ | ✓ | | |
+| `emits_labels ⊆ taxonomy.labels` | ✓ | ✓ | | |
+| `taxonomy_version` matches | | ✓ | | ✓ |
+| Non-overridable preserved (M5a) | ✓ | ✓ (golden input) | | ✓ (per call) |
+| Override file exists | | ✓ | ✓ | |
+| Runbook complete + sentinel | ✓ | ✓ | | |
+| `installed_state` sha256 | | | ✓ | |
+| **Classifier output schema** | | | | **✓** |
+| **`label ∈ taxonomy.labels` per call** | | | | **✓ (F3 hard-reject)** |
+| **`taxonomy_version` per call matches loaded** | | | | **✓** |
+| **Adapter call shape** | | | | **✓** |
+| **Adapter response shape** | | | | **✓** |
+| **Structured alert episode written w/ `project_root` cwd** | | | | **✓** |
+
+The runtime row is the F3 closure: silent coercion is prohibited (any drift fails LOUD with an episode + stderr), so the validation budget at every hook fire is small but non-zero.
+
+### Plugin-testing-harness specification (v10 — standardizes plugin tests, finding F26)
+
+The contracts above (taxonomy validator, plugin-manifest validator, four runtime wire schemas) collectively are the **test oracle**. The standard way to test a plugin is to pull it through the universal gauntlet — no bespoke per-plugin test scripts.
+
+#### Canonical invocation
+
+```bash
+node scripts/test-plugin.mjs --plugin <id>
+```
+
+Exit `0` = plugin passes the universal contract. Exit non-zero = specific assertion id printed (e.g., `FAIL M5a: override remaps marker_write`). Same exit-code semantics across all harnesses.
+
+#### Seven-step gauntlet
+
+| Step | What | Source of truth |
+|---|---|---|
+| 1 | Manifest validates against `manifest.schema.json` | M1, M2 |
+| 2 | All 17 assertions from §Plugin-manifest-validation-contract | M3–M10 |
+| 3 | Runbook present + sentinel + COMMON-row byte-equality | M7, M7a |
+| 4 | **Golden classifier inputs** → assert emitted labels match expected fixture (NDJSON shape per Contract 1) | M5a + Contract 1 |
+| 5 | **Golden adapter call → response round-trip** through `enforce-contract.mjs` (Contracts 2 + 3) | Contracts 2 + 3 |
+| 6 | F3 hard-reject simulation: inject out-of-vocab label, assert structured alert episode written with `project_root` cwd (Contract 4) | Contract 4 + F3 |
+| 7 | Capability honesty: declared tier ≤ `bypass_known.json` ceiling for harness/event | M4a |
+
+CI runs `test-plugin.mjs --plugin <id>` for every entry in `_index.json` on every PR. Authors run it locally before pushing.
+
+#### What this eliminates
+
+- **"Works on my machine" plugins.** The gauntlet runs identically anywhere.
+- **Vibe-coded tests.** Authors don't write tests for the framework; they only write tests for harness-specific translation logic (the small surface that's actually unique per plugin).
+- **Silent post-taxonomy-bump rot.** Step 4 catches a stale `taxonomy_version` immediately; CI fails on the next PR after a taxonomy edit until every plugin re-validates.
+- **Override remaps non-overridable footguns.** Step 4's golden inputs include deadlock-class-1 commands; if the override emits anything other than canonical `marker_write` for those inputs, fail.
+- **Inconsistent quality bars across plugins.** A Cursor plugin and a Codex plugin pass the same gauntlet or they don't ship.
+
+#### Author surface reduction
+
+After this lands, a new plugin author writes ~3 things, not ~30:
+
+1. `manifest.json` (filled-in scaffold from `add-enforcement-plugin` skill).
+2. `capabilities/enforcement.{mjs,ts,py}` — the adapter (harness-specific I/O translation, ~100 LOC).
+3. **Harness-specific tests** — only for code paths the universal gauntlet can't cover (e.g., "does the Codex Python hook correctly read stdin when invoked from `~/.codex/hooks/`"). Anything cross-harness is covered by `test-plugin.mjs`.
+
+Today, every gate-adjacent script ships its own 200–400 line bespoke test harness (`test-checkpoint-gate.sh` 343 cases, `test-command-classifier.sh` 428 cases, `test-classifier-marker.mjs` 30 cases, etc. — each reinvents fixture loading, assert helpers, and exit-code conventions). After this RFC ships: one harness, N plugins, deterministic.
+
+#### Findings F21–F26 (continues F1–F20 numbering)
+
+| # | Sev | Finding | Resolution |
+|---|-----|---------|-----------|
+| F11 | P1 | plugin manifest schema example-driven, not normative | §Plugin-manifest-validation-contract (closed schema + 17 assertions) |
+| F12 | P1 | no meta-schema for `_index.json` | `_index.schema.json` (M1) |
+| F13 | P1 | no meta-schema for `manifest.json` | `manifest.schema.json` (M2) |
+| F14 | P1 | override may suppress non-overridable labels at runtime undetected | golden-input test (M5a / assertion 9) |
+| F15 | P1 | harness enum open-ended in earlier examples | closed enum + stable-ID (M3) |
+| F16 | P2 | capability honesty unenforced | `bypass_known.json` + assertion 7 |
+| F17 | P2 | runbook COMMON-row drift between plugins | byte-match templates (M7a / assertion 14) |
+| F18 | P2 | harness stable-ID rename undetected | git-diff schema enum (M3 / assertion 3) |
+| F19 | P3 | override doesn't source taxonomy at runtime | grep sourcing helper (M6 / assertion 12) |
+| F20 | P3 | `installed_state` schema unspecified | `installed-state.schema.json` + assertion 16 |
+| F21 | P1 | classifier output schema undefined | §Runtime-data-contract Contract 1 (`classifier-output.schema.json`) |
+| F22 | P1 | adapter call / response shape undefined | Contracts 2 + 3 |
+| F23 | P1 | structured-alert schema + tagging convention undefined | Contract 4 (`structured-alert.schema.json`, tag `classifier-alert`) |
+| F24 | P2 | emission format inconsistent between bash default + override languages | NDJSON canonical, TSV deprecated, migration in P4 |
+| F25 | P2 | `project_root` canonicalization unspecified | `pwd -P` equivalent + cwd-mismatch test corpus (episodes `…5705` / `…33a2`) |
+| F26 | P1 | per-plugin tests are bespoke "vibe-coded" scripts with inconsistent quality bars | §Plugin-testing-harness (`scripts/test-plugin.mjs --plugin <id>`, 7-step gauntlet, CI-mandatory) |
+
 ### Capability-degradable enforcement (maps to R3)
 
 #### Effective tier formula (ternary)
@@ -566,7 +871,7 @@ The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **o
 
 | Priority | What | Maps to | Rationale |
 |----------|------|---------|-----------|
-| **P0** | `patterns/taxonomy.json` + validator | R3, R4 | Canonize the 7 labels with per-gate allow/block. Cheapest fix, prevents downstream label drift + hardcoded gate logic. Labels already exist in `command-classifier.sh:13-28`. |
+| **P0** | `patterns/taxonomy.json` + validator + all v10 schema docs | R3, R4 + F11–F26 | Canonize the 7 labels with per-gate allow/block. Cheapest fix, prevents downstream label drift + hardcoded gate logic. Labels already exist in `command-classifier.sh:13-28`. **v10 P0 expansion:** ship the static JSON-Schema docs for the plugin manifest (`plugins/manifest.schema.json`, `plugins/_index.schema.json`), the four runtime wire contracts (`classifier-output.schema.json`, `adapter-call.schema.json`, `adapter-response.schema.json`, `structured-alert.schema.json`), and the empty `plugins/bypass_known.json` skeleton — cheap to land together, lets P1 wire validators against locked schemas. |
 | **P1** | Phase 1: Plugin directory structure | R1, R6, R8 | `git mv hooks/` → `plugins/claude-code/hooks/`; `plugins/_index.json` skeleton. Zero behavior change, ~25-30K. |
 | **P2** | Phase 2: BP contract JSONs | R2, R3, R4 | `patterns/bp-001.json`..`bp-012.json`. Contract schema that Phase 3 validates against. `patterns/schema.json` for scaffold generator. |
 | **P3** | Phase 3: `enforce-contract.mjs` | R1, R2, R3, R5, R9 | The thin waist. Validates against contracts, computes effective tier, implementation-boundary detection (R9), dispatches classifier, reads gate action from taxonomy, delegates to core. |
@@ -720,7 +1025,32 @@ After acceptance, the champion flagged the validation/contract layer as thin. A 
 | F9 | P3 | `overridable` double-sourced | per-label `overridable` canonical; `non_overridable` derived + CI-checked |
 | F10 | P3 | `stop` tier computation source unspecified | `stop.tier` root-level; `min(harness, pattern, config)`, no label term |
 
-### v4 → v9 change log (provenance of this RFC)
+### Post-acceptance v10 plugin-layer review — pending dispatch (2026-05-28)
+
+After v9 closed the taxonomy/contract validator gap (F1–F10), the champion flagged a parallel gap at the plugin layer: the plugin manifest schema, the runtime emission contracts, and the per-plugin test path were all example-driven, not normatively specified. v10 adds three new normative sections (§Plugin-manifest-validation-contract / §Runtime-data-contract / §Plugin-testing-harness) closing findings F11–F26. A consolidated second-opinion review on the combined v10 + P0 implementation plan is dispatched concurrent with this commit.
+
+- **Round 1 — pending dispatch.** Provider: codex. Storage: episodic. Scope of review: v10 additions (F11–F26) + P0 implementation plan (taxonomy.json + validator + four runtime schemas). Round-cap 4; consensus mode. Replies will be appended to this section as they arrive.
+
+| # | Sev | Finding | Resolution (v10) |
+|---|-----|---------|------------------|
+| F11 | P1 | plugin manifest schema example-driven, not normative | §Plugin-manifest-validation-contract (closed schema + 17 assertions) |
+| F12 | P1 | no meta-schema for `_index.json` | `_index.schema.json` (M1) |
+| F13 | P1 | no meta-schema for `manifest.json` | `manifest.schema.json` (M2) |
+| F14 | P1 | override may suppress non-overridable labels at runtime undetected | golden-input test through override (M5a / assertion 9) |
+| F15 | P1 | harness enum open-ended in earlier examples | closed enum + stable-ID (M3) |
+| F16 | P2 | capability honesty unenforced | `bypass_known.json` + assertion 7 |
+| F17 | P2 | runbook COMMON-row drift between plugins | byte-match templates (M7a / assertion 14) |
+| F18 | P2 | harness stable-ID rename undetected | git-diff schema enum (M3 / assertion 3) |
+| F19 | P3 | override doesn't source taxonomy at runtime | grep sourcing helper (M6 / assertion 12) |
+| F20 | P3 | `installed_state` schema unspecified | `installed-state.schema.json` + assertion 16 |
+| F21 | P1 | classifier output schema undefined | §Runtime-data-contract Contract 1 (`classifier-output.schema.json`) |
+| F22 | P1 | adapter call / response shape undefined | Contracts 2 + 3 |
+| F23 | P1 | structured-alert schema + tagging convention undefined | Contract 4 (`structured-alert.schema.json`, tag `classifier-alert`) |
+| F24 | P2 | emission format inconsistent between bash default + override languages | NDJSON canonical, TSV deprecated, migration in P4 |
+| F25 | P2 | `project_root` canonicalization unspecified | `pwd -P` equivalent + cwd-mismatch test corpus (episodes `…5705` / `…33a2`) |
+| F26 | P1 | per-plugin tests are bespoke "vibe-coded" scripts with inconsistent quality bars | §Plugin-testing-harness (`scripts/test-plugin.mjs --plugin <id>`, 7-step gauntlet, CI-mandatory) |
+
+### v4 → v10 change log (provenance of this RFC)
 
 | # | Change | Version | Reason |
 |---|--------|---------|--------|
@@ -737,6 +1067,10 @@ After acceptance, the champion flagged the validation/contract layer as thin. A 
 | T11 | Runbook content specification completed — all 6 sections, common + harness-specific | v7 | Self-trigger checklist, canonical invocation, failure-mode diagnosis, anti-patterns, trigger phrases, composes-with. |
 | T12 | Complete combined v8 spec — all sections unified | v8 | v4 (base) + v5 (R9, boundary, deadlock) + v6 (R10 structure) + v7 (R10 content). Architecture, phases, traceability, build priority, review findings, ground truth all updated. |
 | T13 | Validation-contract specification added — closes round-1 HOLD F1–F10 (normative assertion checklist, `stop` root-level, runtime hard-reject, OQ-2 closed, meta-validation, stable-ID integrity, `taxonomy_version` hash) | v9 | Champion flagged validators as thin; opencode/DeepSeek HOLD with 10 findings, all incorporated. |
+| T14 | §Plugin-manifest-validation-contract specification added (F11–F20) | v10 | Plugin manifest layer was example-driven; needs same normative rigor as v9 gave the taxonomy. Closed enums, stable-ID for harness names, golden-input test for non-overridable preservation, `bypass_known.json` for capability honesty. |
+| T15 | §Runtime-data-contract specification added (F21–F25) | v10 | Runtime emissions (classifier output, adapter call/response, structured alert) were implicit. Four wire schemas, NDJSON canonical, TSV deprecated during P4 burn-in, `project_root` canonicalization rule. |
+| T16 | §Plugin-testing-harness specification added (F26) | v10 | Per-plugin tests today are bespoke scripts with inconsistent quality bars. `scripts/test-plugin.mjs --plugin <id>` 7-step gauntlet replaces N hand-rolled harnesses; authors only write harness-specific translation tests. |
+| T17 | P0 build-priority expanded — runtime + manifest schema files ship as static JSON-Schema docs in P0 (validators still P1/P3) | v10 | Cheap to ship together; lets P1 immediately wire validators against locked schemas without bootstrap dependency on a future schema spec. |
 
 ---
 
