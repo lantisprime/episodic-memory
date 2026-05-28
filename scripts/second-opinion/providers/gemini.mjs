@@ -3,7 +3,7 @@
  *
  * Provider contract (per v3 §Provider availability):
  *   available()  → { ok, reason? }
- *   dispatch()   → { ok, exitCode, stdout, stderr, timedOut }
+ *   dispatch()   → { ok, exitCode, stdout, stderr, timedOut, error }
  *
  * Mechanism: invokes `gemini` CLI with composed prompt. Gemini has no
  * agent loader, so the gemini-ladder-v1 fragment ships the full review
@@ -62,5 +62,8 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     stdout: result.stdout ? result.stdout.toString() : '',
     stderr: result.stderr ? result.stderr.toString() : '',
     timedOut: result.signal === 'SIGTERM' && result.error?.code === 'ETIMEDOUT',
+    // Surface spawn failures (ENOENT / bad cwd) instead of discarding them —
+    // status is null on a spawn error, so ok=false but the cause was lost (FU-001).
+    error: result.error ? result.error.message : null,
   }
 }

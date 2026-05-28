@@ -280,7 +280,10 @@ test('preamble_source: "default" for codex with no override/flag', () => {
     '--summary', 'codex default preamble',
   ])
   assert.strictEqual(result.preamble_source, 'default')
-  assert.deepStrictEqual(result.fragment_ids, ['review-ladder-v9.4'])
+  // codex default = review ladder + env-prefix discipline (per committed
+  // preambles/index.json). This assertion was stale (review-ladder only) and
+  // failing pre-existing; corrected to match the source-of-truth registry.
+  assert.deepStrictEqual(result.fragment_ids, ['review-ladder-v9.4', 'env-prefix-discipline-v1'])
 })
 
 test('preamble_source: "repo-override" when override file present', () => {
@@ -331,6 +334,54 @@ test('--storage /tmp/foo → invalid-storage-flag', () => {
     '--summary', 'invalid storage',
   ], { expectError: true })
   assert.strictEqual(result.code, 'invalid-storage-flag')
+})
+
+// ---------------------------------------------------------------------------
+// Episodic storage: request + reply round-trip written to episodes AND
+// readable back via em-search. This is the provider-agnostic path every CLI
+// provider uses for reviews (codex, gemini, opencode). Stub stands in for the
+// real provider on the storage path (hermetic — no CLI/network). Live opencode
+// proof: episodes 20260527-235331-...-7fcc (request) + ...-626e (reply).
+// ---------------------------------------------------------------------------
+console.log('\n## Episodic storage request/reply round-trip (em-store write + em-search readback)')
+test('--storage episodic --dispatch writes request+reply episodes, readable via em-search', () => {
+  const tmp = makeTmpProject()
+  const result = runHarness([
+    'request',
+    '--provider', 'stub',
+    '--project', tmp,
+    '--storage', 'episodic',
+    '--body', 'episodic round-trip body',
+    '--summary', 'episodic round-trip test',
+    '--dispatch',
+  ])
+
+  // Writing half: request + reply are local episodes under the project store.
+  assert.strictEqual(result.storage, 'episodic')
+  assert.ok(result.written.id, 'request episode id present')
+  // Compare against realpath(tmp): on macOS mkdtemp returns /var/... but the
+  // episode store path is canonicalized to /private/var/... (the /var symlink).
+  assert.ok(result.written.file.startsWith(fs.realpathSync(tmp)),
+    `request episode under project store, got ${result.written.file}`)
+  assert.ok(fs.existsSync(result.written.file), 'request episode file on disk')
+  assert.ok(result.reply && result.reply.id, 'reply episode id present')
+  assert.ok(fs.existsSync(result.reply.file), 'reply episode file on disk')
+
+  // Reading half: em-search by reply-to-<requestId> tag returns the reply.
+  const emSearch = path.join(REPO_ROOT, 'scripts', 'em-search.mjs')
+  const r = spawnSync('node', [
+    emSearch,
+    '--scope', 'local',
+    '--tag', `reply-to-${result.written.id}`,
+    '--full', '--no-track', '--no-score',
+  ], { cwd: tmp, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } })
+  assert.strictEqual(r.status, 0, `em-search failed: ${r.stderr.toString()}`)
+  const found = JSON.parse(r.stdout.toString())
+  assert.strictEqual(found.count, 1, `expected 1 reply episode via em-search, got ${found.count}`)
+  assert.strictEqual(found.episodes[0].id, result.reply.id,
+    'em-search returns the written reply episode')
+  assert.ok(found.episodes[0].tags.includes(`reply-to-${result.written.id}`),
+    'reply episode carries reply-to-<requestId> tag (the read key)')
 })
 
 // ---------------------------------------------------------------------------

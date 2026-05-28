@@ -129,6 +129,18 @@ test('default preamble for gemini includes ladder-v1 + env-prefix-discipline', (
   assert.deepStrictEqual(result.fragmentIds, ['gemini-ladder-v1', 'env-prefix-discipline-v1'])
 })
 
+test('default preamble for opencode includes ladder-v1 + env-prefix-discipline', () => {
+  const tmp = makeTmpProject()
+  const result = compose({ provider: 'opencode', projectRoot: tmp, cliFragments: null })
+  assert.strictEqual(result.preambleSource, 'default')
+  assert.deepStrictEqual(result.fragmentIds, ['opencode-ladder-v1', 'env-prefix-discipline-v1'])
+
+  const reg = loadRegistry()
+  const ladder = readFragment(reg.fragments.find((f) => f.id === 'opencode-ladder-v1'))
+  assert.ok(result.preambleBody.includes(ladder),
+    'composed body must include opencode-ladder fragment content')
+})
+
 test('unknown provider with no default → no-default-preamble-for-provider', () => {
   const tmp = makeTmpProject()
   assert.throws(

@@ -3,7 +3,7 @@
  *
  * Provider contract (per v3 §Provider availability):
  *   available()  → { ok, reason? } — checks CLI binary on PATH + --help signature
- *   dispatch()   → { ok, replyId, replyPath, exitCode, stderr } — runs codex exec
+ *   dispatch()   → { ok, exitCode, stdout, stderr, timedOut, error } — runs codex exec
  *                 with explicit cwd: projectRoot, shell: false
  *
  * Auto-background mitigation: passes stdin: 'ignore' so codex sees stdin EOF
@@ -61,6 +61,7 @@ export function available() {
  *   stdout: string,
  *   stderr: string,
  *   timedOut: boolean,
+ *   error: string | null,   // spawn-failure message (ENOENT / bad cwd), else null
  * }
  *
  * Note: writing the reply episode is the harness's responsibility. This
@@ -83,5 +84,8 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     stdout: result.stdout ? result.stdout.toString() : '',
     stderr: result.stderr ? result.stderr.toString() : '',
     timedOut: result.signal === 'SIGTERM' && result.error?.code === 'ETIMEDOUT',
+    // Surface spawn failures (ENOENT / bad cwd) instead of discarding them —
+    // status is null on a spawn error, so ok=false but the cause was lost (FU-001).
+    error: result.error ? result.error.message : null,
   }
 }

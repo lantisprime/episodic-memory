@@ -32,6 +32,14 @@
       "prompt_max_chars": 100000,
       "agent_block_patterns": [],
       "agent_allow_patterns": []
+    },
+    {
+      "id": "opencode",
+      "binary": "opencode",
+      "cli_match": "^opencode\\s+run\\b",
+      "prompt_max_chars": 200000,
+      "agent_block_patterns": [],
+      "agent_allow_patterns": []
     }
   ]
 }

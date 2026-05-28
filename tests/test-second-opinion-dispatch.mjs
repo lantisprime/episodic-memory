@@ -181,6 +181,22 @@ test('codex provider available() returns shape {ok, reason?}', async () => {
   // Don't assert ok=true — codex may or may not be installed in CI.
 })
 
+console.log('\n## OpenCode provider available()')
+test('opencode provider available() returns shape {ok, reason?} + exports model', async () => {
+  const provider = await import(
+    `file://${path.join(REPO_ROOT, 'scripts', 'second-opinion', 'providers', 'opencode.mjs')}`
+  )
+  const result = provider.available()
+  assert.ok(typeof result.ok === 'boolean', 'available() must return {ok: boolean}')
+  if (!result.ok) {
+    assert.ok(typeof result.reason === 'string', 'when ok=false, reason must be string')
+  }
+  // model export defaults to deepseek/deepseek-v4-pro (overridable via env).
+  assert.ok(typeof provider.model === 'string' && provider.model.includes('/'),
+    `opencode must export a provider/model string, got: ${provider.model}`)
+  // Don't assert ok=true — opencode may or may not be installed in CI.
+})
+
 // ---------------------------------------------------------------------------
 // --dispatch on unknown provider → error before any spawn
 // ---------------------------------------------------------------------------

@@ -100,6 +100,11 @@ function buildLiveSnapshot(snapshotPath) {
         agent_block_patterns: ['codex:codex-rescue', 'codex:codex-cli-runtime'],
         agent_allow_patterns: ['codex:setup', 'codex:gpt-5-4-prompting', 'codex:codex-result-handling'],
       },
+      {
+        id: 'opencode', binary: 'opencode', cli_match: '^opencode\\s+run\\b',
+        prompt_max_chars: 200000,
+        agent_block_patterns: [], agent_allow_patterns: [],
+      },
     ],
     fragments: hashed.fragments,
     file_hashes: hashed.file_hashes,
@@ -405,6 +410,46 @@ test('codex command + foreground + main repo + small → allow', () => {
   // exec from main repo (the wrapper script we used in this very session).
   assert.strictEqual(r.exitCode, 0)
   assert.strictEqual(r.decision, null)
+})
+
+// opencode provider: cli_match is scoped to `^opencode\s+run\b`, so the
+// review invocation is gated but the bare TUI / other subcommands are not.
+test('opencode run command + run_in_background:true → block', () => {
+  const proj = makeTmpProject()
+  const snap = makeTmpSnapshotPath()
+  buildLiveSnapshot(snap)
+  const r = runHook(
+    { tool_name: 'Bash', tool_input: { command: 'opencode run -m deepseek/deepseek-v4-pro "review this"', run_in_background: true }, cwd: proj },
+    { snapshotPath: snap },
+  )
+  assert.strictEqual(r.decision.decision, 'block')
+  assert.match(r.decision.reason, /run_in_background/)
+})
+
+test('bare opencode (TUI, no run subcommand) → allow (cli_match scoping)', () => {
+  const proj = makeTmpProject()
+  const snap = makeTmpSnapshotPath()
+  buildLiveSnapshot(snap)
+  const r = runHook(
+    { tool_name: 'Bash', tool_input: { command: 'opencode', run_in_background: true }, cwd: proj },
+    { snapshotPath: snap },
+  )
+  // `^opencode\s+run\b` must NOT match bare `opencode` — the interactive TUI
+  // and non-review subcommands stay free even with run_in_background set.
+  assert.strictEqual(r.exitCode, 0)
+  assert.strictEqual(r.decision, null, `expected allow (empty stdout), got: ${r.stdout}`)
+})
+
+test('opencode models subcommand → allow (cli_match scoping)', () => {
+  const proj = makeTmpProject()
+  const snap = makeTmpSnapshotPath()
+  buildLiveSnapshot(snap)
+  const r = runHook(
+    { tool_name: 'Bash', tool_input: { command: 'opencode models deepseek', run_in_background: true }, cwd: proj },
+    { snapshotPath: snap },
+  )
+  assert.strictEqual(r.exitCode, 0)
+  assert.strictEqual(r.decision, null, `expected allow (empty stdout), got: ${r.stdout}`)
 })
 
 // ---------------------------------------------------------------------------

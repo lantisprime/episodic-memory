@@ -3,8 +3,8 @@
  * test-second-opinion-providers.mjs — Per-provider available() shape smoke tests.
  *
  * Coverage:
- *   - All 4 providers (codex, claude-subagent, gemini, stub) export id +
- *     binary + available + dispatch.
+ *   - All 5 providers (codex, claude-subagent, gemini, stub, opencode) export
+ *     id + binary + available + dispatch.
  *   - available() returns {ok: boolean, reason?: string} regardless of
  *     CLI presence (no throw, no undefined fields).
  *   - dispatch() throws on missing required args.
@@ -59,7 +59,7 @@ console.log('# test-second-opinion-providers')
 // All 4 providers exist + export the contract
 // ---------------------------------------------------------------------------
 console.log('\n## Provider module contract')
-const PROVIDERS = ['codex', 'claude-subagent', 'gemini', 'stub']
+const PROVIDERS = ['codex', 'claude-subagent', 'gemini', 'stub', 'opencode']
 for (const id of PROVIDERS) {
   const modPath = path.join(PROVIDERS_DIR, `${id}.mjs`)
   test(`provider module exists: ${id}.mjs`, () => {
@@ -104,6 +104,25 @@ for (const id of PROVIDERS) {
     const mod = await import(`file://${path.join(PROVIDERS_DIR, `${id}.mjs`)}`)
     assert.throws(() => mod.dispatch({ prompt: 'hi' }),
       (e) => /projectRoot is required/.test(e.message))
+  })
+}
+
+// ---------------------------------------------------------------------------
+// FU-001: dispatch() surfaces spawn failures (ENOENT / bad cwd) in `error`
+// instead of discarding result.error. A non-existent cwd makes spawnSync fail
+// with ENOENT regardless of whether the binary is installed, so this is
+// deterministic across CI hosts. Stub is in-process (no spawn) → excluded.
+// ---------------------------------------------------------------------------
+console.log('\n## dispatch() surfaces spawn-failure error (FU-001)')
+const CLI_PROVIDERS = ['codex', 'claude-subagent', 'gemini', 'opencode']
+for (const id of CLI_PROVIDERS) {
+  await asyncTest(`${id}.dispatch() on bad cwd → ok:false + error string`, async () => {
+    const mod = await import(`file://${path.join(PROVIDERS_DIR, `${id}.mjs`)}`)
+    const r = mod.dispatch({ prompt: 'x', projectRoot: '/nonexistent-so-provider-test-xyz-123' })
+    assert.strictEqual(r.ok, false, `${id}: spawn into bad cwd must be ok:false`)
+    assert.strictEqual(typeof r.error, 'string',
+      `${id}: spawn failure must surface error as a string, got ${JSON.stringify(r.error)}`)
+    assert.ok(r.error.length > 0, `${id}: error message must be non-empty`)
   })
 }
 

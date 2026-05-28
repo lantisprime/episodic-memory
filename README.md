@@ -418,7 +418,7 @@ node scripts/second-opinion.mjs request \
   --consensus --max-rounds 5 --rebuttal-cb scripts/my-rebuttal.mjs
 ```
 
-Providers: `codex`, `claude-subagent`, `gemini`, `stub` (testing). Storage backends: `files` (`.review-store/`) or `episodic` (uses em-store; default for the cross-tool message bus). Preambles: per-provider defaults at `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
+Providers: `codex`, `claude-subagent`, `gemini`, `opencode` (OpenCode CLI; DeepSeek v4-pro by default, overridable via `OPENCODE_MODEL`), `stub` (testing). Storage backends: `files` (`.review-store/`) or `episodic` (uses em-store; default for the cross-tool message bus). Preambles: per-provider defaults at `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
 
 Bootstrap (writes the install snapshot consumed by validators + the Claude Code PreToolUse gate hook):
 
