@@ -62,7 +62,7 @@
       "id": "RFC-008",
       "slug": "decouple-enforcement-from-substrate",
       "title": "Decoupling the Enforcement Layer from the Memory Substrate",
-      "status": "draft",
+      "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-008-decouple-enforcement-from-substrate.md"
     }

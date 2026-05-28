@@ -2,10 +2,10 @@
 rfc_id: RFC-008
 slug: decouple-enforcement-from-substrate
 title: Decoupling the Enforcement Layer from the Memory Substrate
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-05-27
-last_modified: 2026-05-27
+last_modified: 2026-05-28
 supersedes: ~
 superseded_by: ~
 ---
@@ -245,6 +245,36 @@ if action == "block" and effective_tier == STRONG:
 ```
 The contract drives the behavior; the enforcement layer consults the contract. R2 satisfied.
 
+### Validation-contract specification (v9 — closes round-1 review HOLD, findings F1–F10)
+
+Round-1 second-opinion (opencode/DeepSeek-v4-pro, episode `20260528-013519-reply-opencode-to-20260528-013221-second-36d9`) returned **HOLD**: the validators were specified by single-sentence anchors ("fail CI on any non-canonical label") covering ~10% of the contract. This section is the full, **normative** contract — `scripts/validate-bp-contract.mjs` MUST implement every assertion below; CI fails on any violation.
+
+#### Gate cardinality — 3 classification gates + 1 marker-state gate (F2, F10)
+The per-label `gates` object in `taxonomy.json` carries EXACTLY three classification gates: `plan_approval`, `pre_checkpoint`, `post_checkpoint`. The `stop` gate is NOT per-label — it reads marker state, not command labels (see §Gate semantics). `stop.tier` is **pattern-level metadata** at the ROOT of each `bp-XXX.json` (`{ "stop": { "tier": "STRONG" }, "gates": { … } }`), never per-label. `schema.json`'s per-label gate set is therefore `{plan_approval, pre_checkpoint, post_checkpoint}`; `stop.tier` is a root-level property. `enforce-contract.mjs` computes `effective_tier(stop) = min(harness_cap.stop, contract.stop.tier, project_config.stop.tier)` — no label term (F10).
+
+#### Single source of truth for overridability (F9)
+Per-label `overridable: boolean` is canonical. The top-level `non_overridable: [...]` array is DERIVED (`labels.filter(l => !l.overridable).map(l => l.id)`, sorted) — retained only as human-readable convenience + CI cross-check. `validate-bp-contract.mjs` asserts the stored array equals the derived set (bidirectional); drift is a CI failure (Rule 14).
+
+#### `taxonomy_version` hash (F8)
+`taxonomy_version = "sha256:" + SHA256(JSON.stringify(labelsSortedById)).hex`, where `labelsSortedById` is the `labels` array sorted by `id`. The hash covers ONLY the sorted labels array — not `version` / `non_overridable` / `non_overridable_rationale` — so editorial fields change without invalidating classification behavior. Every `bp-XXX.json` AND every plugin `manifest.json` carries `taxonomy_version`; `validate-bp-contract.mjs` and `validate-plugin-registry.mjs` assert it equals the current computed hash, else fail "built against stale taxonomy."
+
+#### OQ-2 CLOSED — classifier sources the taxonomy at runtime (F4)
+`command-classifier.sh` SOURCES its label set from `taxonomy.json` at startup via a zero-dep node helper (`node -e 'process.stdout.write(require("<taxonomy>").labels.map(l=>l.id).join(" "))'`) and fails closed if the resolved set ≠ its expectation. This eliminates label drift by construction (no hand-maintained bash label list). CI asserts the sourcing helper exists, is wired, and that the classifier's emitted-label set and `_priority` case-arm names equal `taxonomy.labels`. The CI-only alternative (parsing labels out of 3000+ lines of bash) is rejected as fragile.
+
+#### Runtime out-of-vocabulary contract — HARD-REJECT, not coerce (F3)
+The thin-waist runtime layer does NOT coerce an unrecognized classifier label to `unknown`. It HARD-REJECTS the transaction (fail-closed) and emits a structured alert (episode + stderr: plugin id, harness, emitted label, command text, timestamp). **Authority-root binding:** the alert episode MUST be written with the harness/git-resolved `project_root` bound as the subprocess `cwd` (or an explicit accepted root flag) — NEVER the inherited caller cwd. `em-store --project X --scope local` writes under the CALLER's `.episodic-memory` when cwd ≠ X (the PR #218 / #326 / #336 orphaned-write class). The alert reports `project_root`, `store_scope`, and `episode_file`; disk-location tests cover cwd-mismatch, nested cwd, linked worktree, and non-git cwd with explicit target. Author-time + CI already guarantee vocabulary closure; if a non-canonical label reaches runtime, something is catastrophically wrong, and silent coercion is a latent behavior-change landmine — a label later added to the taxonomy with `allow` semantics would silently flip prior blocks to allows. Coercion is prohibited.
+
+#### `validate-bp-contract.mjs` — normative assertion checklist (F1, F5, F6, F7)
+1. **Meta-schema (F5):** `taxonomy.json` validates against `patterns/taxonomy.schema.json` (JSON Schema 2020-12) — `version` semver string; `labels` non-empty array; each label requires `id` (non-empty string), `meaning` (string), `overridable` (boolean), `gates` (object); `non_overridable` array-of-strings; `non_overridable_rationale` object keyed by label ids. `schema.json` validates against the same draft.
+2. **Gate-completeness (F1a):** ∀ label, ∀ gate ∈ {plan_approval, pre_checkpoint, post_checkpoint}: `label.gates[gate]` exists.
+3. **No extra gate keys (F1e):** ∀ label: `keys(label.gates) ⊆ {plan_approval, pre_checkpoint, post_checkpoint}`.
+4. **Action-enum closure (F1b):** ∀ label, ∀ gate: `label.gates[gate] ∈ {allow, block}`.
+5. **Overridability equality (F1c, F9):** stored `non_overridable` (sorted) ≡ derived non-overridable set.
+6. **No duplicate ids (F1d):** label ids are unique.
+7. **Vocabulary closure — no dangling references (F6):** the label set referenced by every `bp-XXX.json`, every `manifest.classifier.emits_labels`, the classifier's emitted labels, and the classifier `_priority` case-arms is a SUBSET of `taxonomy.labels`. (`emits_labels ⊆ taxonomy.labels` is shared with `validate-plugin-registry.mjs`; BOTH validators carry it.)
+8. **Stable-ID integrity (F7):** labels may be ADDED but never REMOVED or RENAMED without a major `version` bump. The validator diffs the previous `taxonomy.json` from git; if `|old_ids| == |new_ids|` and `old_ids ≠ new_ids`, fail "possible rename — add the new label + mark the old `deprecated: true`, never rename." `bp-XXX.json.taxonomy_version` mismatch (F8) is a hard fail.
+9. **Golden tests (F5):** `validate-bp-contract.mjs` ships known-good + known-bad fixtures (missing gate, bad action value, overridability mismatch, duplicate id, extra gate key, dangling reference, rename) and asserts the expected pass/fail per fixture. The 10 round-1 negative scenarios map 1:1 to assertions 2–8 + the runtime hard-reject and form the golden-test corpus.
+
 ### Capability-degradable enforcement (maps to R3)
 
 #### Effective tier formula (ternary)
@@ -469,7 +499,7 @@ The `add-enforcement-plugin` skill (`scripts/scaffold-plugin.mjs`) generates `pl
 
 ### Plugin authoring skill + taxonomy conformance (maps to R3, R4, R6, R8, R10)
 
-Because the contract is machine-readable, authoring a conformant plugin is **generated, not hand-rolled**. A scaffolding skill turns "add a harness = a plugin directory" into a guided flow and makes the canonical taxonomy (R4) impossible to violate by emitting it, CI-checking it, and runtime-clamping it.
+Because the contract is machine-readable, authoring a conformant plugin is **generated, not hand-rolled**. A scaffolding skill turns "add a harness = a plugin directory" into a guided flow and makes the canonical taxonomy (R4) impossible to violate by emitting it, CI-checking it, and runtime-rejecting any violation.
 
 **Skill `add-enforcement-plugin`** is backed by a harness-agnostic generator `scripts/scaffold-plugin.mjs` (zero-dep, callable from any harness per R6); the Claude Code *skill* is a thin wrapper over it. Flow:
 1. Prompt for harness name + capability tiers per event + classifier mode (`default` | `override`).
@@ -487,7 +517,7 @@ Net: **R3, R8, and R10 conformance-by-construction** — the author cannot produ
 |---|---|---|
 | **Author-time (skill)** | Injects `LABELS` from `taxonomy.json`; writes `emits_labels` + `taxonomy_version` hash into the manifest; refuses to let an override remap/suppress `unsafe_complex` or `marker_write` | Author inventing a label by hand; overriding infrastructure labels |
 | **CI (`validate-plugin-registry.mjs`)** | Asserts `manifest.classifier.emits_labels ⊆ taxonomy.labels`; asserts `taxonomy_version` == current hash else "built against stale taxonomy"; checks no non-overridable label is suppressed; runs the golden test; validates runbook (R10) | Drift after taxonomy changes; stale manifest; suppressed non-overridable; missing runbook |
-| **Runtime (`enforce-contract.mjs`)** | Normalizes the classifier's return value against `taxonomy.json` — any label ∉ canonical set is coerced to `unknown` (fail-closed) and logged; non-overridable labels always processed by core logic regardless of plugin output | A buggy/malicious override emitting garbage at runtime |
+| **Runtime (`enforce-contract.mjs`)** | Validates the classifier's return value against `taxonomy.json` — any label ∉ canonical set is HARD-REJECTED (fail-closed) with a structured alert (plugin id, harness, label, command, timestamp); coercion to `unknown` is PROHIBITED (F3 — silent coercion is a latent behavior-change landmine). Non-overridable labels always processed by core logic regardless of plugin output | A buggy/malicious override emitting garbage at runtime |
 
 The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **only** vocabulary it accepts, so the canonical 7 labels are the hard boundary of the whole system — even if author-time and CI were skipped.
 
@@ -516,11 +546,11 @@ The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **o
 
 **Phase 1 → R1, R6, R8:** create `plugins/` with subdirectories per harness; `git mv hooks/` → `plugins/claude-code/hooks/` (zero behavior change, byte-identical); create `plugins/_index.json` skeleton; update `install.mjs` to deploy from `plugins/<harness>/hooks/`. ~25-30K (pure git mv + path-reference patching).
 
-**Phase 2 → R2, R3, R4:** convert Markdown patterns to JSON contracts `patterns/bp-001.json`..`bp-012.json`; create `patterns/taxonomy.json` (canonical 7-label set with per-gate allow/block, R3/R4); create `patterns/schema.json` (contract schema, required by the scaffold generator); create `scripts/validate-bp-contract.mjs` (fails CI on any non-canonical label). Contract schema shape: `{ gates: { plan_approval: {tier}, pre_checkpoint: {tier}, post_checkpoint: {tier}, stop: {tier} }, taxonomy_ref: "patterns/taxonomy.json" }`.
+**Phase 2 → R2, R3, R4:** convert Markdown patterns to JSON contracts `patterns/bp-001.json`..`bp-012.json`; create `patterns/taxonomy.json` (canonical 7-label set with per-gate allow/block, R3/R4); create `patterns/schema.json` (contract schema) + `patterns/taxonomy.schema.json` (meta-schema, F5); create `scripts/validate-bp-contract.mjs` (implements the full normative §Validation-contract specification assertion checklist — gate-completeness, action-enum closure, overridability equality, vocabulary closure, stable-ID integrity, `taxonomy_version` binding, golden tests — NOT merely "non-canonical label" detection) + `scripts/validate-taxonomy-schema.mjs` (meta-validation, F5). Contract schema shape: `{ gates: { plan_approval: {tier}, pre_checkpoint: {tier}, post_checkpoint: {tier} }, stop: { tier }, taxonomy_ref: "patterns/taxonomy.json", taxonomy_version: "sha256:…" }` — the three classification gates are per-pattern; `stop` is a root-level marker-state gate (NOT per-label, F2/F10); `taxonomy_version` binds the contract to a taxonomy hash (F8).
 
-**Phase 3 → R1, R2, R3, R5, R9:** `enforce-contract.mjs` — the thin waist. Validates against BP contracts; implementation-boundary detection (R9, lazy-arm on first repo-source write, silent during exploration/planning/architecture); ternary `min()` (R3); classifier dispatch (R4/R5); reads gate action from taxonomy (R3, contract-driven); delegates to `em-recall.mjs --gate` (R1). Two invocation modes: plugin-native import (in-process, STRONG harnesses) + CLI spawn (degrade). Runtime taxonomy clamp: labels not in canonical set → coerced to `unknown` (fail-closed).
+**Phase 3 → R1, R2, R3, R5, R9:** `enforce-contract.mjs` — the thin waist. Validates against BP contracts; implementation-boundary detection (R9, lazy-arm on first repo-source write, silent during exploration/planning/architecture); ternary `min()` (R3); classifier dispatch (R4/R5); reads gate action from taxonomy (R3, contract-driven); delegates to `em-recall.mjs --gate` (R1). Two invocation modes: plugin-native import (in-process, STRONG harnesses) + CLI spawn (degrade). Runtime out-of-vocabulary contract: labels not in the canonical set are HARD-REJECTED (fail-closed) with a structured alert — NOT coerced to `unknown` (F3; see §Validation-contract specification). The alert episode is written with `cwd: project_root` (authority-root binding below).
 
-**Phase 4 → R4, R5:** extract the 7-label taxonomy into `patterns/taxonomy.json`; refactor `command-classifier.sh` to source taxonomy from JSON (or validate at CI that it matches); plugin classifier override interface; override registration in `plugins/_index.json`; non-overridable labels enforced at scaffold + CI + runtime.
+**Phase 4 → R4, R5:** extract the 7-label taxonomy into `patterns/taxonomy.json`; refactor `command-classifier.sh` to source the taxonomy from JSON at runtime (OQ-2 closed — runtime-source; the CI-only alternative is rejected), with CI validating the sourcing helper + label-set equality (F4); plugin classifier override interface; override registration in `plugins/_index.json`; non-overridable labels enforced at scaffold + CI + runtime.
 
 **Phase 5 → R3, R5:** `enforce-config.json` per project (`{ "bp-001": { "plan_approval": "MEDIUM", ... } }`); can only LOWER effective tier (clamp down), never raise; controls classifier activation (`active`/`classifier`); if `active: false` for all plugins → classifier silent (R5).
 
@@ -571,7 +601,7 @@ Full analysis: episode `20260527-073522-deadlock-analysis-7-classes-traced-again
 
 | Class | Deadlock? | Root cause | Fix |
 |-------|-----------|------------|-----|
-| 1 — marker_write misclassified | **TRUE** | Plugin overrides marker_write → gate blocks its own escape hatch | `marker_write: overridable: false` (v4+ taxonomy). Three-layer enforcement: author-time (scaffold), CI (validator), runtime (thin waist clamp to unknown). |
+| 1 — marker_write misclassified | **TRUE** | Plugin overrides marker_write → gate blocks its own escape hatch | `marker_write: overridable: false` (v4+ taxonomy). Three-layer enforcement: author-time (scaffold), CI (validator), runtime (thin waist hard-rejects non-canonical labels; no coercion). |
 | 2 — Invalid SID + plan pending | **TRUE (bug)** | `plan-gate.sh:108-115` F14 early-exit before `marker_write` dispatch at :136. The escape hatch that allows `rm .checkpoints/.plan-approval-pending` is unreachable because F14 exits first. | Reorder: check marker_write targeting plan-marker BEFORE the F14 block. |
 | 3 — Empty marker | No (tax) | Agent writes 0-byte file with `touch()`; gate rejects it. Block message says "must be non-empty." | Already handled — block message at `checkpoint-gate.sh:533` is explicit. Two-step tax, not deadlock. |
 | 4 — Wrong-root (worktree) | UX deadlock | Agent writes to worktree root; gate reads main repo | Message names canonical path. Agent re-reads and re-writes at the correct location. |
@@ -668,7 +698,29 @@ graph TD
 | — | Deadlock class 2: plan-gate.sh F14 ordering bug | Reorder `plan-gate.sh:108-115` before marker_write dispatch at :136 | R4 |
 | — | Runbook pattern generalized from second-opinion | 6-section spec, content-addressed UX-marker, session-scoped, checkpoint-immune | R10 |
 
-### v4 → v8 change log (provenance of this RFC)
+### Post-acceptance validation-layer review — consensus chain (2026-05-28)
+
+After acceptance, the champion flagged the validation/contract layer as thin. A focused second-opinion review was run on that layer and iterated to consensus across two providers.
+
+- **Round 1 — opencode (DeepSeek-v4-pro)**, episode `20260528-013519-reply-opencode-to-20260528-013221-second-36d9`: **HOLD** — 10 findings (5×P1, 3×P2, 2×P3); validators were ~10% specified. All 10 incorporated into §Validation-contract specification (v9).
+- **Round 2 — codex**, episode `20260528-015856-reply-codex-to-20260528-015614-second-op-a1d5`: **HOLD** — 3 P1 (Phase-3/Phase-4 text still contradicted the new hard-reject + OQ-2-closed spec; structured-alert episode had no authority root). Fixed.
+- **Round 3 — codex**, episode `20260528-020158-reply-codex-to-20260528-020026-second-op-9d70`: **HOLD** — 1 P1 (residual "clamp to unknown" reference at the deadlock Class-1 row). Fixed (+ same-class sweep).
+- **Round 4 — codex**, episode `20260528-020458-reply-codex-to-20260528-020303-second-op-b089`: **ACCEPT** — no findings; `em-rfc-validate` passed. Consensus reached.
+
+| # | Sev | Finding | Resolution (v9) |
+|---|-----|---------|-----------------|
+| F1 | P1 | `validate-bp-contract.mjs` ~10% specified | Full normative assertion checklist (gate-completeness, action-enum closure, overridability equality, dup-id, extra-key, meta-schema) |
+| F2 | P1 | `stop` in `schema.json` per-label but only 3 per-label gates | `stop` is root-level pattern metadata; per-label = 3 classification gates |
+| F3 | P1 | runtime coerce→`unknown` is wrong | runtime HARD-REJECTS + structured alert; coercion prohibited |
+| F4 | P1 | OQ-2 open blocks Phase 4 | OQ-2 closed — classifier runtime-sources the taxonomy |
+| F5 | P1 | no meta-validation of validators | `taxonomy.schema.json` + `validate-taxonomy-schema.mjs` + golden tests |
+| F6 | P2 | vocabulary-closure gap (dangling labels) | closure assertion across bp-XXX / manifest / classifier |
+| F7 | P2 | stable-ID rename unprotected | add-never-rename git-diff assertion |
+| F8 | P2 | `taxonomy_version` hash undefined | `sha256` over sorted labels array; carried by contracts + manifests |
+| F9 | P3 | `overridable` double-sourced | per-label `overridable` canonical; `non_overridable` derived + CI-checked |
+| F10 | P3 | `stop` tier computation source unspecified | `stop.tier` root-level; `min(harness, pattern, config)`, no label term |
+
+### v4 → v9 change log (provenance of this RFC)
 
 | # | Change | Version | Reason |
 |---|--------|---------|--------|
@@ -684,6 +736,7 @@ graph TD
 | T10 | Runbook section in build priority + traceability matrix | v6 | Deployment paths, CI validation, scaffold stubs. |
 | T11 | Runbook content specification completed — all 6 sections, common + harness-specific | v7 | Self-trigger checklist, canonical invocation, failure-mode diagnosis, anti-patterns, trigger phrases, composes-with. |
 | T12 | Complete combined v8 spec — all sections unified | v8 | v4 (base) + v5 (R9, boundary, deadlock) + v6 (R10 structure) + v7 (R10 content). Architecture, phases, traceability, build priority, review findings, ground truth all updated. |
+| T13 | Validation-contract specification added — closes round-1 HOLD F1–F10 (normative assertion checklist, `stop` root-level, runtime hard-reject, OQ-2 closed, meta-validation, stable-ID integrity, `taxonomy_version` hash) | v9 | Champion flagged validators as thin; opencode/DeepSeek HOLD with 10 findings, all incorporated. |
 
 ---
 
@@ -692,7 +745,7 @@ graph TD
 | # | Question | Owner | Status |
 |---|---|---|---|
 | OQ-1 | Phase 9 (recall strategies, R7) destination: split between RFC-001 (semantic) and RFC-007 (graph), or a single new substrate RFC? | Charlton Ho | open |
-| OQ-2 | Does `command-classifier.sh` source `taxonomy.json` at runtime, or is the match validated only at CI (Phase 4 offers both)? | — | open |
+| OQ-2 | Does `command-classifier.sh` source `taxonomy.json` at runtime, or is the match validated only at CI? | Charlton Ho | **closed (v9)** — runtime-source via zero-dep node helper; CI validates the sourcing helper + label-set equality. Drift eliminated by construction. See §Validation-contract specification (F4). |
 | OQ-3 | Cursor/Windsurf are WEAK (prompt-injection advisory only) — do they get plugin directories at all, or only a rules-injection artifact? | — | open |
 
 ---
