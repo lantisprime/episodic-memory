@@ -1,0 +1,8 @@
+{
+  "_note": "Raw Claude Code PreToolUse stdin JSON (pre-translation). Replayed through good-manifest.json event_translations.pre_tool_use.field_bindings to produce a canonical event-pre-tool-use payload (F39 Layer 1, P1 gauntlet step 8).",
+  "session_id": "8157082d-1c2a-4c40-a3b1-4a8d50475042",
+  "cwd": "/Users/juan.delacruz/repo",
+  "tool_name": "Bash",
+  "tool_input": { "command": "git push origin main" },
+  "transcript": [{ "role": "user" }, { "role": "assistant" }, { "role": "user" }]
+}

@@ -1,0 +1,15 @@
+{
+  "_note": "Contract 4 negative (p0-schema via F62 conditional): both emitted_label and emitted_event_id are null. Neither branch is satisfied — a both-null payload fails validation.",
+  "alert_type": "classifier_out_of_vocabulary",
+  "plugin_id": "claude-code",
+  "harness": "claude-code",
+  "emitted_label": null,
+  "emitted_event_id": null,
+  "events_version": null,
+  "command": "git push origin main",
+  "timestamp_iso8601": "2026-05-29T16:30:00Z",
+  "project_root": "/Users/juan.delacruz/repo",
+  "store_root": "/Users/juan.delacruz/repo",
+  "store_scope": "local",
+  "episode_file": "/Users/juan.delacruz/repo/.episodic-memory/episodes/20260529-x-c4af.md"
+}

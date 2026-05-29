@@ -1,0 +1,48 @@
+{
+  "_note": "RFC-008 v11.8 detection-layer attribution for the golden corpus. P0 STAGES every fixture but detects only the failures expressible in pure JSON-Schema 2020-12; the rest are owned by later validators. _detected_by marks the layer that semantically owns each failure so the corpus never implies P0 catches a failure only a later layer can.",
+  "detected_by_vocabulary": ["p0-schema", "p1-registry-validator", "p2-cross-file-validator", "p3-runtime"],
+  "hash_serialization_contract": {
+    "_note": "Canonical serialization used to bake good-manifest.json's taxonomy_version/events_version (F8/F37). P2's scripts/validate-bp-contract.mjs MUST reuse these exact bytes to avoid two-hand-rolled-hash drift.",
+    "taxonomy_version": {
+      "input": "patterns/taxonomy.json -> labels",
+      "transform": "labels.slice().sort((a,b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)",
+      "serialize": "JSON.stringify(sortedLabels) with no whitespace; object key order preserved from source (parse -> re-stringify is byte-stable)",
+      "digest": "'sha256:' + sha256hex(serialized)",
+      "value": "sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4",
+      "helper": "tests/lib/version-hash.mjs#taxonomyVersion"
+    },
+    "events_version": {
+      "input": "patterns/events.json -> events",
+      "transform": "events.slice().sort(byId)",
+      "serialize": "JSON.stringify(sortedEvents) with no whitespace",
+      "digest": "'sha256:' + sha256hex(serialized)",
+      "value": "sha256:13f01e5a599272b349eabd66694b7898e68438e8aad6497e80a9b780bea34ab0",
+      "helper": "tests/lib/version-hash.mjs#eventsVersion"
+    }
+  },
+  "fixtures": {
+    "good-manifest.json": { "expect": "pass", "detected_by": null, "asserts": ["M2", "M4", "M5", "M5c", "M6"] },
+    "bad-extra-field.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M2 additionalProperties:false"] },
+    "bad-unknown-harness.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M3 harness enum closure"] },
+    "bad-invalid-tier.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M4 capability tier enum"] },
+    "bad-default-mode-with-override-path.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M5 mode/override consistency (default => no override_path)"] },
+    "bad-alert-both-vocab-fields-set.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["F62 structured-alert if/then/else"] },
+    "bad-alert-no-vocab-field.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["F62 structured-alert if/then/else"] },
+    "bad-stale-taxonomy-version.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M6 taxonomy_version equality"] },
+    "bad-dangling-label.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M5/F6 emits_labels subset of taxonomy"] },
+    "bad-renamed-harness.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M3 stable-ID (git-diff rename detection)"] },
+    "bad-missing-runbook.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7 runbook presence"] },
+    "bad-short-runbook.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7 MIN_RUNBOOK_BYTES"] },
+    "bad-override-suppresses-marker-write.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M5a non-overridable preservation"] },
+    "bad-capability-dishonest.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M4a bypass ceiling (codex pre_tool_use MEDIUM)"] },
+    "bad-missing-bypass-record.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M4a/F28 vacuity prevention"] },
+    "bad-runbook-path-traversal.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7b/F29 path containment"] },
+    "bad-override-path-traversal.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7b/F29 path containment"] },
+    "bad-runbook-symlink-escape.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7b symlink canonicalization"] },
+    "bad-override-emits-tsv.json": { "expect": "fail", "detected_by": "p3-runtime", "asserts": ["F27 override must emit NDJSON"] }
+  },
+  "harness_events": {
+    "_note": "Raw pre-translation harness events replayed through good-manifest.json event_translations (F39 Layer 1, P1 gauntlet step 8).",
+    "claude-code": ["pre-tool-use.json", "stop.json", "session-start.json", "session-end.json"]
+  }
+}

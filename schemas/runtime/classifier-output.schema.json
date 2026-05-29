@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/classifier-output.schema.json",
+  "title": "Contract 1 — classifier output (per command) (RFC-008 F21)",
+  "description": "One NDJSON line per classifier emission. label vocabulary closure (label in taxonomy.labels[].id) is a RUNTIME hard-reject (F3) — the meta-schema only constrains shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["label", "target", "reason", "taxonomy_version", "classifier_version", "verdict_source"],
+  "properties": {
+    "label": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "target": { "type": "string", "description": "path or URL the action targets; empty string for stateless commands" },
+    "reason": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "stable snake_case id; used as marker-cache key" },
+    "taxonomy_version": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "classifier_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "verdict_source": {
+      "type": "string",
+      "pattern": "^(default|override:[a-z][a-z0-9-]*|marker_cache:[^:]+:[0-9a-f]+)$",
+      "description": "default | override:<harness> | marker_cache:<sid>:<hash>"
+    }
+  }
+}

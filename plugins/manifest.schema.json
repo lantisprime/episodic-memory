@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/plugins/manifest.schema.json",
+  "title": "Per-plugin manifest meta-schema (RFC-008 M2, M3-M6, M4b, M5c)",
+  "description": "plugins/<harness>/manifest.json. additionalProperties:false at every level; closed enums for harness, event keys, capability tiers, classifier mode, invocation modality. Vocabulary closure (emits_labels in taxonomy, event_translations keys mirror capabilities), taxonomy/events version equality, and capability honesty are validate-plugin-registry.mjs (P1) checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "harness",
+    "version",
+    "invocation_modality",
+    "capabilities",
+    "classifier",
+    "taxonomy_ref",
+    "taxonomy_version",
+    "events_version",
+    "event_translations",
+    "runbook"
+  ],
+  "properties": {
+    "id": { "$ref": "#/$defs/harnessId" },
+    "harness": { "$ref": "#/$defs/harnessId" },
+    "version": { "$ref": "#/$defs/semver" },
+    "invocation_modality": { "type": "string", "enum": ["cli", "agent", "api", "static-rules"] },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "pre_tool_use": { "$ref": "#/$defs/tier" },
+        "tool_result": { "$ref": "#/$defs/tier" },
+        "stop": { "$ref": "#/$defs/tier" },
+        "session_start": { "$ref": "#/$defs/tier" },
+        "session_end": { "$ref": "#/$defs/tier" }
+      }
+    },
+    "classifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "emits_labels"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["default", "override"] },
+        "emits_labels": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/labelId" }
+        },
+        "override_path": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "override" } },
+            "required": ["mode"]
+          },
+          "then": { "required": ["override_path"] },
+          "else": { "not": { "required": ["override_path"] } }
+        }
+      ]
+    },
+    "taxonomy_ref": { "type": "string", "const": "patterns/taxonomy.json" },
+    "taxonomy_version": { "$ref": "#/$defs/sha256Version" },
+    "events_version": { "$ref": "#/$defs/sha256Version" },
+    "event_translations": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/eventTranslation" }
+    },
+    "runbook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full", "quickref"],
+      "properties": {
+        "full": { "type": "string", "minLength": 1 },
+        "quickref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "installed_state": {
+      "type": "object",
+      "description": "Optional (M9). When present, validated against installed-state.schema.json by validate-plugin-registry.mjs."
+    }
+  },
+  "$defs": {
+    "harnessId": {
+      "type": "string",
+      "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"]
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "sha256Version": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["STRONG", "MEDIUM", "WEAK", "TBD"]
+    },
+    "labelId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "eventTranslation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_format", "field_bindings"],
+      "properties": {
+        "source_format": { "type": "string", "minLength": 1 },
+        "field_bindings": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

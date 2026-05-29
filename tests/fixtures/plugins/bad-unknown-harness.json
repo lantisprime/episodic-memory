@@ -1,0 +1,13 @@
+{
+  "id": "vscode",
+  "harness": "vscode",
+  "version": "1.0.0",
+  "invocation_modality": "agent",
+  "capabilities": { "pre_tool_use": "STRONG" },
+  "classifier": { "mode": "default", "emits_labels": ["read_only", "nonsrc_write", "shared_write", "push_or_pr_create", "marker_write", "unsafe_complex", "unknown"] },
+  "taxonomy_ref": "patterns/taxonomy.json",
+  "taxonomy_version": "sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4",
+  "events_version": "sha256:13f01e5a599272b349eabd66694b7898e68438e8aad6497e80a9b780bea34ab0",
+  "event_translations": { "pre_tool_use": { "source_format": "x", "field_bindings": { "tool": "$.tool_name" } } },
+  "runbook": { "full": "plugins/vscode/runbooks/enforcement.md", "quickref": "plugins/vscode/runbooks/enforcement.quickref.md" }
+}

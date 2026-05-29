@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/structured-alert.schema.json",
+  "title": "Contract 4 — structured alert (F3 hard-reject) (RFC-008 F24, F62, F61)",
+  "description": "Serialized into an em-store episode body when the classifier/adapter emits an out-of-vocabulary label or event. F62: alert_type drives an exactly-one relation between the label and event vocab fields, expressed as a JSON-Schema conditional (not prose).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "alert_type",
+    "plugin_id",
+    "harness",
+    "emitted_label",
+    "emitted_event_id",
+    "events_version",
+    "command",
+    "timestamp_iso8601",
+    "project_root",
+    "store_root",
+    "store_scope",
+    "episode_file"
+  ],
+  "properties": {
+    "alert_type": { "type": "string", "enum": ["classifier_out_of_vocabulary", "event_out_of_vocabulary"] },
+    "plugin_id": { "type": "string", "minLength": 1 },
+    "harness": { "type": "string", "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"] },
+    "emitted_label": { "type": ["string", "null"], "description": "rejected label literal; non-null iff classifier_out_of_vocabulary" },
+    "emitted_event_id": { "type": ["string", "null"], "description": "rejected event id; non-null iff event_out_of_vocabulary" },
+    "events_version": { "type": ["string", "null"], "description": "loaded events.json sha256 at rejection time; non-null iff event_out_of_vocabulary" },
+    "command": { "type": "string", "description": "raw command (may be empty for non-Bash)" },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" },
+    "project_root": { "type": "string", "minLength": 1, "description": "adapter's resolved repo identity (worktree path for a linked worktree), F25" },
+    "store_root": { "type": "string", "minLength": 1, "description": "resolveRepoRoot(project_root); main checkout for a linked worktree (F61)" },
+    "store_scope": { "type": "string", "enum": ["local", "global"] },
+    "episode_file": { "type": "string", "minLength": 1, "description": "resolved absolute path to the written episode (under store_root for local scope)" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "alert_type": { "const": "classifier_out_of_vocabulary" } },
+        "required": ["alert_type"]
+      },
+      "then": {
+        "properties": {
+          "emitted_label": { "type": "string", "minLength": 1 },
+          "emitted_event_id": { "type": "null" },
+          "events_version": { "type": "null" }
+        },
+        "required": ["emitted_label"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "alert_type": { "const": "event_out_of_vocabulary" } },
+        "required": ["alert_type"]
+      },
+      "then": {
+        "properties": {
+          "emitted_label": { "type": "null" },
+          "emitted_event_id": { "type": "string", "minLength": 1 },
+          "events_version": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        },
+        "required": ["emitted_event_id", "events_version"]
+      }
+    }
+  ]
+}

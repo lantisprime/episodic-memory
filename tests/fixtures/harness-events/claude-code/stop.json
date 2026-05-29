@@ -1,0 +1,8 @@
+{
+  "_note": "Raw Claude Code Stop stdin JSON. Replayed through good-manifest.json event_translations.stop.field_bindings.",
+  "session_id": "8157082d-1c2a-4c40-a3b1-4a8d50475042",
+  "cwd": "/Users/juan.delacruz/repo",
+  "is_subagent": false,
+  "stop_hook_active": false,
+  "transcript": [{ "role": "user" }, { "role": "assistant" }]
+}

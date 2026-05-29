@@ -1,0 +1,35 @@
+{
+  "_note": "M5a golden inputs (RFC-008 §validate-plugin-registry assertion 9). Each command MUST classify to the stated non-overridable label through any plugin's override classifier; if an override suppresses or remaps either label, the registry validator fails. Staged in P0; exercised at P1/P3.",
+  "cases": [
+    {
+      "input": "node scripts/checkpoint-marker.mjs --target .pre-checkpoint-done --action touch --root .",
+      "expected_label": "marker_write",
+      "rationale": "writes a .checkpoints/.* marker at a canonical path"
+    },
+    {
+      "input": "node scripts/plan-marker.mjs --approve --root .",
+      "expected_label": "marker_write",
+      "rationale": "plan-approval marker mutation"
+    },
+    {
+      "input": "rm .checkpoints/.plan-approval-pending.abc123",
+      "expected_label": "marker_write",
+      "rationale": "removes a marker file (deadlock escape hatch)"
+    },
+    {
+      "input": "bash -c 'rm -rf $TMPDIR/x'",
+      "expected_label": "unsafe_complex",
+      "rationale": "bash -c cannot be tokenized safely"
+    },
+    {
+      "input": "eval \"$(some-cmd)\"",
+      "expected_label": "unsafe_complex",
+      "rationale": "eval + command substitution"
+    },
+    {
+      "input": "echo `whoami`",
+      "expected_label": "unsafe_complex",
+      "rationale": "backtick command substitution"
+    }
+  ]
+}

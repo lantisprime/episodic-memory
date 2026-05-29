@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/patterns/schema.json",
+  "title": "BP-XXX enforcement-contract meta-schema (RFC-008 R2, R3, R4)",
+  "description": "Meta-schema for patterns/bp-XXX.json contract instances (P2 data). Each contract declares three per-pattern classification gates (plan_approval, pre_checkpoint, post_checkpoint) as capability tiers, a root-level stop marker-state gate tier (F2/F10 — never per-label), and the taxonomy/events version bindings (F8/F37). enforce-contract.mjs computes effective_tier = min(harness_cap, contract_tier, project_config) per gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["gates", "stop", "taxonomy_ref", "taxonomy_version", "events_version"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^bp-[0-9]{3}$",
+      "description": "Stable contract identifier, e.g. bp-001. Optional at the P0 meta-schema level (the RFC normative contract shape omits it); validated when present. P2's validate-bp-contract.mjs MAY require it."
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_approval", "pre_checkpoint", "post_checkpoint"],
+      "description": "Exactly three classification gates. Per-gate value is the contract's declared capability tier (F2/F10).",
+      "properties": {
+        "plan_approval": { "$ref": "#/$defs/tier" },
+        "pre_checkpoint": { "$ref": "#/$defs/tier" },
+        "post_checkpoint": { "$ref": "#/$defs/tier" }
+      }
+    },
+    "stop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier"],
+      "description": "Root-level marker-state gate (reads marker state, not command labels — F2/F10). Never per-label.",
+      "properties": {
+        "tier": { "$ref": "#/$defs/tier" }
+      }
+    },
+    "taxonomy_ref": {
+      "type": "string",
+      "const": "patterns/taxonomy.json",
+      "description": "Literal constant; not configurable (M6)."
+    },
+    "taxonomy_version": { "$ref": "#/$defs/sha256Version" },
+    "events_version": { "$ref": "#/$defs/sha256Version" }
+  },
+  "$defs": {
+    "tier": {
+      "type": "string",
+      "enum": ["STRONG", "MEDIUM", "WEAK"]
+    },
+    "sha256Version": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "sha256: + hex digest over the canonical id-sorted source array (F8 for taxonomy, F37 for events)."
+    }
+  }
+}

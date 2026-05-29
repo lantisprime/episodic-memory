@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/events/event-pre-tool-use.schema.json",
+  "title": "Canonical pre_tool_use event payload (RFC-008 R3, R4)",
+  "description": "Post-translation payload an adapter MUST produce for the pre_tool_use event. Cross-event invariants per RFC-008 §Five canonical event-payload schemas.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "tool_args", "cwd", "session_id", "turn_index", "timestamp_iso8601"],
+  "properties": {
+    "tool": { "type": "string", "minLength": 1 },
+    "tool_args": { "type": ["object", "null"] },
+    "tool_args_raw": { "type": "string", "description": "Original harness-format string for forensic re-translation" },
+    "cwd": { "type": "string", "minLength": 1, "description": "canonicalized absolute, pwd -P equivalent (F25)" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "turn_index": { "type": "integer", "minimum": 0 },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" }
+  }
+}

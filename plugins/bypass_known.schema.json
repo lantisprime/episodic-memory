@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/plugins/bypass_known.schema.json",
+  "title": "Capability-honesty bypass registry meta-schema (RFC-008 M4a, F28, F34)",
+  "description": "plugins/bypass_known.json. Each record is EITHER a known-bypass ceiling for a {harness, event} pair OR a clean-audit attestation (no_known_bypass_evidence:true) — exactly one shape, enforced by oneOf. validate-plugin-registry.mjs asserts every {harness, event} declared by an installed manifest has exactly one matching record (F28 vacuity prevention).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["records"],
+  "properties": {
+    "records": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/record" }
+    }
+  },
+  "$defs": {
+    "harnessId": {
+      "type": "string",
+      "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"]
+    },
+    "eventId": {
+      "type": "string",
+      "enum": ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"]
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["STRONG", "MEDIUM", "WEAK"]
+    },
+    "record": {
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["harness", "event", "ceiling", "citation"],
+          "properties": {
+            "harness": { "$ref": "#/$defs/harnessId" },
+            "event": { "$ref": "#/$defs/eventId" },
+            "ceiling": { "$ref": "#/$defs/tier" },
+            "citation": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["harness", "event", "no_known_bypass_evidence", "last_audited_iso8601", "auditor"],
+          "properties": {
+            "harness": { "$ref": "#/$defs/harnessId" },
+            "event": { "$ref": "#/$defs/eventId" },
+            "no_known_bypass_evidence": { "const": true },
+            "last_audited_iso8601": { "type": "string", "format": "date-time" },
+            "auditor": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}
