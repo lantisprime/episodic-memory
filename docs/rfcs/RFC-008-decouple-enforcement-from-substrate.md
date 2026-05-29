@@ -1361,7 +1361,8 @@ graph TD
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| **P0** — PR #367 (`bf58e8f`) | 20 P0 files (17 schemas + 3 data) + test-only `tests/lib/mini-jsonschema.mjs` + `tests/lib/version-hash.mjs` + `tests/test-p0-schemas.mjs` + `tests/fixtures/plugins/*` (≥16 golden + `_corpus-index.json`) + `tests/fixtures/harness-events/claude-code/*` | `node tests/test-p0-schemas.mjs` → 89/0; `em-rfc-validate` consistent | Locked schema + data layer (R3, R4; F11–F51). NO shipped `.mjs` validators (T17). Validity gate = self-asserting keyword-grammar linter (closes R0b-R3 fail-open class). Plan reviewed 3 rounds; impl review ACCEPT-with-FU (4 FUs fixed inline). Post-merge FU: P2 shared negative corpus → issue #368. |
+| _P1+ pending_ | _pending_ | _pending_ | _pending_ |
 
 ---
 
