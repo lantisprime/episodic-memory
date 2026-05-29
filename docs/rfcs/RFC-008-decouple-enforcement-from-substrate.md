@@ -41,8 +41,8 @@ superseded_by: ~
   - [Enforcement plugin runbooks — content specification](#enforcement-plugin-runbooks--content-specification-maps-to-r10)
   - [Plugin authoring skill + taxonomy conformance](#plugin-authoring-skill--taxonomy-conformance-maps-to-r3-r4-r6-r8-r10)
   - [Scope](#scope)
-- [9 phases mapped to requirements](#9-phases-mapped-to-requirements)
-  - [Build priority](#build-priority-maps-to-r1r10)
+- [Build phases (P0–P9): manifest and boundaries](#build-phases-p0p9-manifest-and-boundaries)
+  - [Build order and Phase-to-P crosswalk](#build-order-and-phase-to-p-crosswalk)
 - [Requirement traceability matrix](#requirement-traceability-matrix)
 - [Deadlock analysis](#deadlock-analysis-maps-to-taxonomy-r3-r4-r9)
 - [Alternatives considered](#alternatives-considered)
@@ -1137,51 +1137,127 @@ The runtime layer is the spine: the thin waist treats `taxonomy.json` as the **o
 
 ---
 
-## 9 phases mapped to requirements
+## Build phases (P0–P9): manifest and boundaries
 
-| Phase | Name | New | Mod | Tokens | Deps | Maps to |
-|-------|------|-----|-----|--------|------|---------|
-| 1 | Plugin directory structure | 3 | 7 | ~25-30K | — | R1, R6, R8 |
-| 2 | BP contract JSONs + taxonomy | 5 | 3 | ~35K | P1 | R2, R3, R4 |
-| 3 | `enforce-contract.mjs` thin waist | 2 | 5 | ~55K | P1, P2 | R1, R2, R3, R5, R9 |
-| 4 | Classifier schema extraction | 1 | 5 | ~30K | P2 | R4, R5 |
-| 5 | Per-project `enforce-config.json` | 2 | 3 | ~25K | P3 | R3, R5 |
-| 6 | OpenCode plugin (TS, STRONG) | 5 | 0 | ~45K | P3 | R6, R10 |
-| 7 | Codex plugin (Python hooks) | 5 | 0 | ~40K | P3 | R6, R10 |
-| 8 | Pi Agent plugin | 5 | 0 | ~35K | P3 | R6, R10 |
-| 9 | Pluggable recall strategies | 5 | 1 | ~50K | — | R7 |
+**Canonical build order is P0 → P9.** P0 (the locked schema + data layer) was added in v11; the older "Phase 1–9" prose numbering is retired and mapped via the **[Build order and Phase-to-P crosswalk](#build-order-and-phase-to-p-crosswalk)** at the end of this section. Each phase below carries an exact file manifest and an explicit **Depends on / Done when** boundary, so the start and stop of every phase is unambiguous.
 
-**Phase 1 → R1, R6, R8:** create `plugins/` with subdirectories per harness; `git mv hooks/` → `plugins/claude-code/hooks/` (zero behavior change, byte-identical); create `plugins/_index.json` skeleton; update `install.mjs` to deploy from `plugins/<harness>/hooks/`. ~25-30K (pure git mv + path-reference patching).
+Summary (detail + file lists in the per-phase blocks that follow):
 
-**Phase 2 → R2, R3, R4:** convert Markdown patterns to JSON contracts `patterns/bp-001.json`..`bp-012.json`; create `patterns/taxonomy.json` (canonical 7-label set with per-gate allow/block, R3/R4); create `patterns/schema.json` (contract schema) + `patterns/taxonomy.schema.json` (meta-schema, F5); create `scripts/validate-bp-contract.mjs` (implements the full normative §Validation-contract specification assertion checklist — gate-completeness, action-enum closure, overridability equality, vocabulary closure, stable-ID integrity, `taxonomy_version` binding, golden tests — NOT merely "non-canonical label" detection) + `scripts/validate-taxonomy-schema.mjs` (meta-validation, F5). Contract schema shape: `{ gates: { plan_approval: {tier}, pre_checkpoint: {tier}, post_checkpoint: {tier} }, stop: { tier }, taxonomy_ref: "patterns/taxonomy.json", taxonomy_version: "sha256:…" }` — the three classification gates are per-pattern; `stop` is a root-level marker-state gate (NOT per-label, F2/F10); `taxonomy_version` binds the contract to a taxonomy hash (F8).
+| P | Phase | New | Mod | Est | Depends on | Serves |
+|---|-------|----:|----:|-----|-----------|--------|
+| **P0** | Locked schema + data contracts (no code) | 20 | 0 | ~20K | — | R3, R4 (+ F11–F51) |
+| **P1** | Plugin directory + registry + test gauntlet | 5 | 7 | ~25–30K | P0 | R1, R6, R8 |
+| **P2** | BP contract instances + contract validators | 12 | 2 | ~35K | P0 | R2, R3, R4 |
+| **P3** | Thin waist + classifier runtime-sourcing + em-recall purification | 3 | 6 | ~55K | P0, P2 | R1, R2, R3, R4, R5, R9 |
+| **P4** | Per-project `enforce-config.json` | 1 | 3 | ~25K | P3 | R3, R5 |
+| **P5** | OpenCode plugin (TS) | 5 | 0 | ~45K | P3 | R6, R10 |
+| **P6** | Codex plugin (Python) | 5 | 0 | ~40K | P3 | R6, R10 |
+| **P7** | Pi Agent plugin | 5 | 0 | ~35K | P3 | R6, R10 |
+| **P8** | Cursor (full adapter) + Windsurf (static-rules) plugins — added per F43 | 8 | 0 | ~45K | P3 | R6, R10 |
+| **P9** | Pluggable recall strategies — *deferred to its own RFC* | 5 | 1 | ~50K | — | R7 |
+| Bug | `plan-gate.sh:108–115` ordering fix (deadlock class 2) | 0 | 1 | small | — | R4 |
+| Follow | migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/` | 0 | 1 | small | P1 | R10 |
 
-**Phase 3 → R1, R2, R3, R5, R9 (v11 corrected):** `enforce-contract.mjs` + `scripts/lib/marker-state.mjs` — the thin waist + its marker-state companion. Validates against BP contracts; implementation-boundary detection (R9, lazy-arm on first repo-source write, silent during exploration/planning/architecture); ternary `min()` (R3); classifier dispatch (R4/R5); reads gate action from taxonomy (R3, contract-driven) + per-tier semantics from events.json (v11); reads marker state via `lib/marker-state.mjs` (v11 — was previously in em-recall, now lifted out). **v11 em-recall purification (load-bearing):** Phase 3 simultaneously DELETES from em-recall: the `--gate` flag + handler, the `stop-gate-helpers.mjs` import, all `.checkpoint-required` / `.post-checkpoint-required` / `.plan-approval-pending` marker reads, the `.checkpoints/` migration code. Net diff on em-recall is STRICT DELETION (negative LOC). em-recall returns to pure recall — no enforcement awareness. Two invocation modes for enforce-contract: plugin-native import (in-process, STRONG harnesses) + CLI spawn (degrade). Runtime out-of-vocabulary contract: labels not in the canonical set are HARD-REJECTED (fail-closed) with a structured alert — NOT coerced to `unknown` (F3; see §Validation-contract specification). The alert episode is written via `em-store` (pure append; the only substrate touch from enforcement) with `cwd: project_root` (F25 authority-root).
+#### P0 — Locked schema + data contracts · serves R3, R4 (+ closes F11–F51) · depends on: —
 
-**Phase 4 → R4, R5:** extract the 7-label taxonomy into `patterns/taxonomy.json`; refactor `command-classifier.sh` to source the taxonomy from JSON at runtime (OQ-2 closed — runtime-source; the CI-only alternative is rejected), with CI validating the sourcing helper + label-set equality (F4); plugin classifier override interface; override registration in `plugins/_index.json`; non-overridable labels enforced at scaffold + CI + runtime.
+**Ships — 20 files (17 JSON-Schema docs + 3 JSON data files). NO `.mjs` / runtime code (validators are P1/P2/P3 per T17).**
 
-**Phase 5 → R3, R5:** `enforce-config.json` per project (`{ "bp-001": { "plan_approval": "MEDIUM", ... } }`); can only LOWER effective tier (clamp down), never raise; controls classifier activation (`active`/`classifier`); if `active: false` for all plugins → classifier silent (R5).
+- `patterns/taxonomy.json` *(data)* · `patterns/taxonomy.schema.json`
+- `patterns/events.json` *(data, v11)* · `patterns/events.schema.json` *(v11)*
+- `patterns/schema.json` *(bp-XXX contract meta-schema)*
+- `plugins/manifest.schema.json` · `plugins/_index.schema.json` · `plugins/installed-state.schema.json` · `plugins/bypass_known.schema.json`
+- `plugins/bypass_known.json` *(data; pre-populated with Codex `pre_tool_use: { ceiling: "MEDIUM" }`)*
+- `schemas/runtime/`: `classifier-output.schema.json` · `adapter-call.schema.json` · `adapter-response.schema.json` · `structured-alert.schema.json`
+- `schemas/events/` *(v11)*: `event-pre-tool-use` · `event-tool-result` · `event-stop` · `event-session-start` · `event-session-end` *(`.schema.json`)*
+- `schemas/runbook-agent-manifest.schema.json` *(v11.2, F49)*
 
-**Phase 6 → R6, R10 (OpenCode):** `plugins/opencode/` TypeScript plugin wrapping `pre_tool_use` + `tool_result` + lifecycle hooks; manifest declares `pre_tool_use: STRONG, tool_result: STRONG, session_start: MEDIUM, stop: MEDIUM`; includes runbooks per R10.
+**Done when:** all 20 files exist; each schema is itself a valid JSON-Schema 2020-12 doc; the golden-corpus fixtures (`tests/fixtures/plugins/`, `tests/fixtures/harness-events/`) are staged. Cross-file validation runs once the P2 validators land.
 
-**Phase 7 → R6, R10 (Codex):** `plugins/codex/` Python hooks for PreToolUse + Stop; `pre_tool_use` MEDIUM (multi-edit bypass documented), `stop: STRONG`, `session_start: STRONG`; includes runbooks per R10.
+> **Count note:** authoritative total = **17 schemas + 3 data files = 20**. (The v11.2 changelog's "18 schema-class docs" shorthand counted `bypass_known.json` among the schema-class group; the enumeration above is authoritative.)
 
-**Phase 8 → R6, R10 (Pi Agent):** `plugins/pi-agent/` wrapping `tool_call` + `session_shutdown`/`turn_end`; `pre_tool_use: STRONG`, `stop: MEDIUM`, `session_start: STRONG`; includes runbooks per R10.
+#### P1 — Plugin directory + registry + test gauntlet · serves R1, R6, R8 · depends on: P0
 
-**Phase 9 → R7:** pluggable recall strategies for `em-recall.mjs` (lexical default zero-dep; semantic opt-in `requiresEmbeddings: true`; graph zero-dep; hybrid RRF). Registry `em-recall/strategies/_index.json`. **Caveat:** the only FEATURE phase — carve into its own RFC (semantic's embedding dependency is in tension with P6).
+**Ships:**
+- `plugins/` with per-harness subdirectories
+- `git mv hooks/` → `plugins/claude-code/hooks/` *(byte-identical; zero behavior change)*
+- `plugins/_index.json` *(registry skeleton; validated against P0 `_index.schema.json`)*
+- `plugins/claude-code/manifest.json` *(gains the `invocation_modality` field, M4b)*
+- `install.mjs` updated to deploy from `plugins/<harness>/hooks/`
+- `scripts/validate-plugin-registry.mjs` *(the M1–M10 + M7a–M7f assertion checklist)* + `scripts/test-plugin.mjs` *(the 9-step gauntlet)* + golden plugin/event fixtures
 
-### Build priority (maps to R1–R10)
+**Done when:** the git mv is byte-identical (existing hook behavior unchanged); `_index.json` + the claude-code `manifest.json` validate against the P0 schemas; author-time + schema gauntlet steps pass for claude-code. *(Gauntlet steps that round-trip through `enforce-contract.mjs` — steps 5/6 — are exercised once P3 lands.)* ~25–30K (pure git mv + path-reference patching).
 
-| Priority | What | Maps to | Rationale |
-|----------|------|---------|-----------|
-| **P0** | `patterns/taxonomy.json` + `patterns/events.json` + validator + all v10/v11/v11.2 schema docs | R3, R4 + F11–F51 | Canonize the 7 labels with per-gate allow/block (taxonomy.json) AND the 5 events with per-tier action semantics (events.json — v11). Cheapest fix, prevents downstream label/event drift + hardcoded gate logic. **v11.2 P0 final shape — 18 schema-class docs (was 17 in v11.1, 8 in v10 round-3):** `patterns/taxonomy.json` + `taxonomy.schema.json` + `events.json` (v11) + `events.schema.json` (v11) + `schema.json` for bp-XXX, plugin layer `plugins/{manifest, _index, installed-state, bypass_known}.schema.json` + `bypass_known.json` (pre-populated with Codex `pre_tool_use: MEDIUM`), four runtime wire contracts `schemas/runtime/{classifier-output, adapter-call, adapter-response, structured-alert}.schema.json`, five canonical event-payload schemas `schemas/events/event-{pre-tool-use, tool-result, stop, session-start, session-end}.schema.json` (v11), and `schemas/runbook-agent-manifest.schema.json` (v11.2, F49 — defines fenced JSON block under `## 🤖 Agent invocation manifest` sentinel including credentials sub-block for `api` modality). Cheap to land together; lets P1 wire validators + plugin manifests + runbook agent-manifests against locked schemas with zero invention. |
-| **P1** | Phase 1: Plugin directory structure | R1, R6, R8 | `git mv hooks/` → `plugins/claude-code/hooks/`; `plugins/_index.json` skeleton. Zero behavior change, ~25-30K. |
-| **P2** | Phase 2: BP contract JSONs | R2, R3, R4 | `patterns/bp-001.json`..`bp-012.json`. Contract schema that Phase 3 validates against. `patterns/schema.json` for scaffold generator. |
-| **P3** | Phase 3: `enforce-contract.mjs` + `scripts/lib/marker-state.mjs` + em-recall PURIFICATION | R1, R2, R3, R5, R9 + F38 | The thin waist. Validates against contracts, computes effective tier, implementation-boundary detection (R9), dispatches classifier, reads gate action from taxonomy + per-tier semantics from events.json. **v11 architectural correction:** P3 ALSO creates `scripts/lib/marker-state.mjs` (marker reads, owned by enforce-contract.mjs) AND simultaneously DELETES from `em-recall.mjs`: (a) the `--gate` flag + handler, (b) the `stop-gate-helpers.mjs` import, (c) all marker file reads, (d) the `.checkpoints/` migration code. Net diff on em-recall = STRICT DELETION; substrate restored to pure recall. `em-recall.mjs` is NEVER called from the enforcement path. Only substrate touch from enforcement = `em-store` writing F3 alert episodes (pure append). |
-| **P4** | Phase 5: `enforce-config.json` | R3, R5 | Per-project config clamping. Classifier activation gating. Ternary `min()`. |
-| **P5-P7** | Phase 6/7/8: Per-tool plugins | R6, R10 | OpenCode (TS), Codex (Python), Pi Agent. Each depends on P3. Each includes `runbooks/enforcement.md` per R10. |
-| **—** | Phase 9: Recall strategies | R7 | Carve into own RFC. Semantic has embedding dependency against P6. |
-| **Bug** | Fix `plan-gate.sh:108-115` ordering | R4 | Deadlock class 2 — F14 early-exit blocks the `marker_write` escape hatch. |
-| **Follow** | Migrate second-opinion runbook to `plugins/second-opinion/runbooks/` | R10 | Post-Phase 1: `hooks/runbooks/` → `plugins/second-opinion/runbooks/`. |
+#### P2 — BP contract instances + contract validators · serves R2, R3, R4 · depends on: P0
+
+**Ships:**
+- `patterns/bp-001.json` … `patterns/bp-012.json` *(the contract DATA; each carries `taxonomy_version` + `events_version` bindings)*
+- `scripts/validate-bp-contract.mjs` *(the full normative §Validation-contract assertion checklist — gate-completeness, action-enum closure, overridability equality, vocabulary closure, stable-ID integrity, version binding, events assertions 10–15)* + `scripts/validate-taxonomy-schema.mjs` *(meta-validation, F5)*
+
+Contract shape: `{ gates: { plan_approval, pre_checkpoint, post_checkpoint }, stop: { tier }, taxonomy_ref, taxonomy_version, events_version }` — three per-pattern classification gates; `stop` is a root-level marker-state gate (not per-label, F2/F10).
+
+**Done when:** every `bp-XXX.json` validates against `patterns/schema.json` and passes `validate-bp-contract.mjs` against the locked P0 schemas + golden corpus.
+
+#### P3 — Thin waist + classifier runtime-sourcing + em-recall purification · serves R1, R2, R3, R4, R5, R9 (+ F38) · depends on: P0, P2
+
+**Ships:**
+- `scripts/enforce-contract.mjs` *(the thin waist: validates contracts, ternary `min()` effective tier (R3), R9 implementation-boundary detection (lazy-arm on first repo-source write, silent during exploration/planning), classifier dispatch (R4/R5), reads gate action from taxonomy + per-tier semantics from `events.json`, reads marker state via `marker-state.mjs`; two invocation modes — in-process import for STRONG harnesses + CLI spawn for degrade; out-of-vocab labels HARD-REJECTED with a structured alert via `em-store`, F3)*
+- `scripts/lib/marker-state.mjs` *(marker reads, owned by the enforcement layer)*
+- **Classifier runtime-sourcing (legacy "Phase 4", folded here):** refactor `command-classifier.sh` to source the 7-label set from `taxonomy.json` at runtime (OQ-2 closed); plugin classifier-override interface; override registration in `_index.json`; non-overridable labels enforced at scaffold + CI + runtime
+- **em-recall purification — STRICT DELETION (F38, F60):** remove from `em-recall.mjs` the `--gate` flag + handler, the `stop-gate-helpers.mjs` import, all marker reads, and the `.checkpoints/` migration code *(net diff is negative LOC; substrate restored to pure recall)*
+- `install.mjs` deploys `lib/marker-state.mjs` + verifies em-recall is v11-purified (F45); `tests/test-install-em-recall-purified.mjs`
+
+**Done when:** `enforce-contract.mjs` passes contract validation + the full 9-step gauntlet against the P1 plugins; `em-recall.mjs` (and `em-store.mjs` / `em-search.mjs`) contain zero gate-vocabulary tokens (F60 CI grep guard green); the install-purification sentinel test passes.
+
+#### P4 — Per-project config · serves R3, R5 · depends on: P3 · (legacy "Phase 5")
+
+**Ships:** `enforce-config.json` per project (`{ "bp-001": { "plan_approval": "MEDIUM", ... }, "active": true/false }`).
+
+**Done when:** the ternary `min()` clamps effective tier DOWN only (never raises); `active: false` for all plugins makes the classifier silent (R5 — no hook spawn, no token cost).
+
+#### P5–P7 — Per-tool plugins · serves R6, R10 · depends on: P3 · (legacy "Phase 6/7/8")
+
+Each plugin ships `manifest.json` + `capabilities/enforcement.{mjs,ts,py}` adapter + `runbooks/enforcement.md` (the 10 required sections, R10) + harness-event fixtures.
+
+- **P5 — `plugins/opencode/`** (TypeScript): `pre_tool_use: STRONG, tool_result: STRONG, session_start: MEDIUM, stop: MEDIUM`
+- **P6 — `plugins/codex/`** (Python hooks): `pre_tool_use: MEDIUM` (multi-edit bypass documented), `stop: STRONG, session_start: STRONG`
+- **P7 — `plugins/pi-agent/`** (`tool_call` + `session_shutdown`/`turn_end`): `pre_tool_use: STRONG, stop: MEDIUM, session_start: STRONG`
+
+**Done when:** each passes the `test-plugin.mjs` 9-step gauntlet at its declared tiers.
+
+#### P8 — Cursor + Windsurf plugins · serves R6, R10 · depends on: P3 · (added per F43/OQ-3, v11.1)
+
+- **`plugins/cursor/`** — full adapter (Cursor is STRONG-capable, NOT WEAK; see §Capability-degradable enforcement): `pre_tool_use: STRONG, tool_result: MEDIUM, stop: MEDIUM, session_start: STRONG, session_end: STRONG`
+- **`plugins/windsurf/`** — static-rules (WEAK): installer + `.windsurf/rules/episodic-memory-enforcement.md` + `runbooks/enforcement.md` + manifest declaring `session_start: WEAK` only; NO runtime adapter
+
+**Done when:** Cursor passes the full gauntlet; Windsurf passes the static-rules gauntlet carve-out (steps 8/9 validate the deploy artifact, not adapter dispatch — F56).
+
+#### P9 — Pluggable recall strategies · serves R7 · DEFERRED to its own RFC
+
+**Ships (when carved out):** `em-recall/strategies/` (lexical default zero-dep; semantic opt-in `requiresEmbeddings: true`; graph zero-dep; hybrid RRF) + `em-recall/strategies/_index.json`.
+
+**Why deferred:** the only FEATURE phase; semantic's embedding dependency is in tension with the zero-dep principle, so it is carved into a separate RFC rather than landing here.
+
+#### Non-phase items
+
+- **Bug fix (any time):** `plan-gate.sh:108–115` ordering — F14 early-exit blocks the `marker_write` escape hatch (deadlock class 2, R4).
+- **Follow-up (post-P1):** migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/` (R10).
+
+### Build order and Phase-to-P crosswalk
+
+The per-phase manifest above is the single source of truth for what each phase ships. This table retires the older "Phase N" prose labels (which diverged from the P-numbers after P3) and records the dependency order.
+
+| Canonical | Legacy prose label | Serves | Depends on | Note |
+|-----------|--------------------|--------|-----------|------|
+| **P0** | *(none — added v11)* | R3, R4 | — | Locked schema + data layer; did not exist pre-v11. |
+| **P1** | Phase 1 | R1, R6, R8 | P0 | Plugin dir git mv + `_index.json` + registry validator + gauntlet. |
+| **P2** | Phase 2 *(contracts only)* | R2, R3, R4 | P0 | `bp-XXX.json` + validators; taxonomy/events/schemas moved to **P0** in v11. |
+| **P3** | Phase 3 **+ Phase 4** | R1, R2, R3, R4, R5, R9 | P0, P2 | Thin waist + em-recall purification; **Phase 4 (classifier runtime-sourcing) folds in here** — the thin waist dispatches the classifier. |
+| **P4** | **Phase 5** | R3, R5 | P3 | `enforce-config.json` (numbering diverges here: legacy "5" = P4). |
+| **P5 / P6 / P7** | **Phase 6 / 7 / 8** | R6, R10 | P3 | OpenCode / Codex / Pi Agent. |
+| **P8** | *(none — added v11.1)* | R6, R10 | P3 | Cursor (full adapter, F43) + Windsurf (static-rules); added after the OQ-3 closure. |
+| **P9** | Phase 9 | R7 | — | Recall strategies — **deferred to its own RFC**. |
+| Bug | — | R4 | — | `plan-gate.sh:108–115` ordering fix. |
+| Follow | — | R10 | P1 | Migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/`. |
 
 ---
 
@@ -1237,7 +1313,7 @@ Full analysis: episode `20260527-073522-deadlock-analysis-7-classes-traced-again
 
 ## Implementation plan
 
-> Concrete PR/phase breakdown is populated as the RFC moves to `accepted`. Build priority P0–P9 above is the ordering; sequencing graph below shows the dependency layers.
+> Concrete PR/phase breakdown is populated as the RFC moves to `accepted`. The P0–P9 manifest above (§"Build phases") is the ordering + per-phase file boundary; the sequencing graph below shows the dependency layers.
 
 ### Sequencing
 
@@ -1437,6 +1513,7 @@ Consolidated second-opinion review of the v11 + v11.1 + v11.2 spec edits (13 fin
 | T26 | v11.4 round-2 review fold (F61–F63): codex round-2 confirmed F52–F60 materially fixed + evidence files auditable, then HOLD with 3 new findings — F61 (linked-worktree authority root: `store_root = resolveRepoRoot(project_root)` added to Contract 4, worktree→main / submodule→own-toplevel, `episode_file` under `store_root`, + linked-worktree acceptance test), F62 (Contract 4 conditional alert schema as `if/then/else`/`oneOf` on `alert_type`, `emitted_label` retyped `string\|null`, +2 golden negatives), F63 (redaction invariant extended to adapter-owned log sinks: route through helper OR declare log paths for step-9 scan, +1 golden negative). All ACCEPT. | v11.4 | codex round-2 (reply `…231947…93fc`). F61 surfaced via a real worktree→main-checkout repro; grounded in `scripts/lib/local-dir.mjs` convergence. F62/F63 were pre-flagged in the round-2 second-order review table. Going to round 3 (of 4). |
 | T27 | v11.5 round-3 review fold (F64–F65): codex round-3 confirmed F61+F62 closed, HOLD on 2 internal-consistency drifts from the v11.4 edits — F64 (`log_paths` was prose-only; now a declared top-level §9 schema field with M7e presence-for-api + posix-path typing + gauntlet step-9 scan + `bad-runbook-api-missing-log-paths.json`), F65 (Contract 4 JSON example refreshed to the linked-worktree case with `store_root` + absolute `episode_file`). Both ACCEPT. | v11.5 | codex round-3 (reply `…232447…2a68`). Both findings were the "added a field to the table/prose but not the schema/example" drift class, traceable to the immediately-prior v11.4 fold; F64 was pre-flagged in the round-3 second-order review. Round 4 of 4 next. |
 | T28 | v11.6 round-4 (cap) review fold (F66–F67): codex round-4 confirmed F64+F65 closed, HOLD at the 4-round cap with 2 trivial drifts — F66 (`log_paths` authority root: entries absolute or relative-to-`project_root`, M7e-normalized; adapter writes ≡ step-9 scan root by construction), F67 (stale `<projectRoot>` alert-location line → `store_root/.episodic-memory/`). Both ACCEPT + folded. Codex instructed "do not spawn round 5; consult the champion" — escalated; no round 5 auto-dispatched. | v11.6 | codex round-4 (reply `…233020…42dc`). Round-cap discipline engaged (`20260528-082255-codex-round-cap-engagement-signal`): monotonic convergence (8→3→2→2), all post-round-1 findings were second-order-prefigured or prior-fix drift, never architectural — champion decides accept-as-folded vs one confirmation round. |
+| T29 | v11.7 phase-boundary restructure (no spec-content change): consolidated the three overlapping phase representations (the "9 phases" estimate table, the prose "Phase 1–9" blocks, and the "Build priority" P-table) into ONE per-phase manifest under §"Build phases (P0–P9): manifest and boundaries". Each phase is now a delimited block with an exact file manifest + explicit Depends-on / Done-when boundary; added a Phase-to-P crosswalk retiring the legacy-"Phase N" vs P-N numbering mismatch (legacy Phase 4 classifier folds into P3; Phase 5 = P4; Phase 6/7/8 = P5/6/7); surfaced P0 (schemas, no validators per T17) and P8 (Cursor+Windsurf per F43) as explicit slots that the old table lacked; pinned the P0 file count to an enumerated 20 (17 schemas + 3 data), superseding the "18 schema-class docs" shorthand. TOC anchors updated. | v11.7 | User: "in the rfc its hard for me to distinguish which belongs to which phases like p0, i cant immediately see the boundary where p0 starts and where it stops." Pure presentation/clarity refactor; no requirement or deliverable semantics changed. |
 
 ---
 
