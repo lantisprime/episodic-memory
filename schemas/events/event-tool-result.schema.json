@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/events/event-tool-result.schema.json",
+  "title": "Canonical tool_result event payload (RFC-008 R3, R4)",
+  "description": "Post-translation payload for tool_result. STRONG = modify/observe the result before the model sees it, so the result plus what produced it are required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "tool_args", "result", "cwd", "session_id", "turn_index", "timestamp_iso8601"],
+  "properties": {
+    "tool": { "type": "string", "minLength": 1 },
+    "tool_args": { "type": ["object", "null"] },
+    "result": { "type": ["string", "object", "null"], "description": "harness-specific tool result" },
+    "exit_code": { "type": ["integer", "null"] },
+    "is_error": { "type": "boolean" },
+    "cwd": { "type": "string", "minLength": 1, "description": "canonicalized absolute, pwd -P equivalent (F25)" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "turn_index": { "type": "integer", "minimum": 0 },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" }
+  }
+}

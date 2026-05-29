@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/plugins/_index.schema.json",
+  "title": "Plugin registry meta-schema (RFC-008 M1, M3, M8, R8)",
+  "description": "plugins/_index.json — single source of truth. additionalProperties:false at every level; closed enums for harness, status, capability tier, classifier mode. Bidirectional registry<->disk consistency and id==harness are validate-plugin-registry.mjs (P1) checks. The harness enum is git-diffed across schema versions for the M3 stable-ID rule.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plugins"],
+  "properties": {
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pluginEntry" }
+    },
+    "recall_strategies": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recallStrategy" }
+    }
+  },
+  "$defs": {
+    "harnessId": {
+      "type": "string",
+      "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"]
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["STRONG", "MEDIUM", "WEAK", "TBD"]
+    },
+    "pluginEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "harness", "directory", "capabilities", "classifier", "manifest", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/harnessId" },
+        "harness": { "$ref": "#/$defs/harnessId" },
+        "directory": { "type": "string", "pattern": "^plugins/[a-z][a-z0-9-]+$" },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "pre_tool_use": { "$ref": "#/$defs/tier" },
+            "tool_result": { "$ref": "#/$defs/tier" },
+            "stop": { "$ref": "#/$defs/tier" },
+            "session_start": { "$ref": "#/$defs/tier" },
+            "session_end": { "$ref": "#/$defs/tier" }
+          }
+        },
+        "classifier": { "type": "string", "enum": ["default", "override"] },
+        "manifest": { "type": "string", "pattern": "^plugins/[a-z][a-z0-9-]+/manifest\\.json$" },
+        "status": { "type": "string", "enum": ["active", "deprecated", "disabled"] },
+        "installed_state": {
+          "type": "object",
+          "description": "Optional (M9). When present, validated against installed-state.schema.json."
+        }
+      }
+    },
+    "recallStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "module", "requiresEmbeddings", "default"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "module": { "type": "string", "pattern": "^em-recall/strategies/[a-z0-9_-]+\\.mjs$" },
+        "requiresEmbeddings": { "type": "boolean" },
+        "default": { "type": "boolean" }
+      }
+    }
+  }
+}

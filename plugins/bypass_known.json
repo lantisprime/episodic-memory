@@ -1,0 +1,10 @@
+{
+  "records": [
+    {
+      "harness": "codex",
+      "event": "pre_tool_use",
+      "ceiling": "MEDIUM",
+      "citation": "multi-edit bypass per RFC-008 §Per-harness capability declarations"
+    }
+  ]
+}

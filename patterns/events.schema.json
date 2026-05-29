@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/patterns/events.schema.json",
+  "title": "Enforcement events vocabulary (RFC-008 R2, R3, R4; F37)",
+  "description": "Meta-schema for patterns/events.json — the events the enforcement layer reacts to, each event's canonical payload schema, and the per-tier action semantics. events_version is the sha256 over the id-sorted events array (F37 pattern).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "events"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/event" }
+    }
+  },
+  "$defs": {
+    "eventId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "actionId": {
+      "type": "string",
+      "description": "Closed action enum (F37 assertion 12).",
+      "enum": [
+        "block",
+        "warn",
+        "inject",
+        "modify",
+        "observe",
+        "refuse_stop",
+        "inject_context",
+        "inject_static",
+        "write_artifact",
+        "unsupported"
+      ]
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "semantics"],
+      "properties": {
+        "id": { "$ref": "#/$defs/actionId" },
+        "semantics": { "type": "string", "minLength": 1 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fires_on", "payload_schema", "actions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/eventId" },
+        "fires_on": { "type": "string", "minLength": 1 },
+        "payload_schema": {
+          "type": "string",
+          "pattern": "^schemas/events/[a-z0-9-]+\\.schema\\.json$"
+        },
+        "actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["STRONG", "MEDIUM", "WEAK"],
+          "properties": {
+            "STRONG": { "$ref": "#/$defs/action" },
+            "MEDIUM": { "$ref": "#/$defs/action" },
+            "WEAK": { "$ref": "#/$defs/action" }
+          }
+        }
+      }
+    }
+  }
+}

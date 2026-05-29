@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/events/event-stop.schema.json",
+  "title": "Canonical stop event payload (RFC-008 R3, R4)",
+  "description": "Post-translation payload for stop / SubagentStop. Stop-gate reads marker state but must resolve session+repo+turn; is_subagent distinguishes Stop vs SubagentStop (both gated); stop_hook_active prevents re-entry loops.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cwd", "session_id", "turn_index", "timestamp_iso8601", "is_subagent"],
+  "properties": {
+    "cwd": { "type": "string", "minLength": 1, "description": "canonicalized absolute, pwd -P equivalent (F25)" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "turn_index": { "type": "integer", "minimum": 0 },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" },
+    "is_subagent": { "type": "boolean" },
+    "stop_source": { "type": "string" },
+    "stop_hook_active": { "type": "boolean" }
+  }
+}

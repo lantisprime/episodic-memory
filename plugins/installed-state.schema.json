@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/plugins/installed-state.schema.json",
+  "title": "Installed-state meta-schema (RFC-008 M9; composes with RFC-003)",
+  "description": "The installed_state block on a registry entry / manifest. Schema only — validate-plugin-registry.mjs does NOT recompute sha256 at CI time because deployed files live outside the repo. Drives migration detection (registered-not-deployed vs deployed-not-registered).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["installer_version", "installed_at_iso8601", "files"],
+  "properties": {
+    "installer_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "installed_at_iso8601": { "type": "string", "format": "date-time" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

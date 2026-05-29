@@ -1,0 +1,55 @@
+{
+  "version": "1.0.0",
+  "events": [
+    {
+      "id": "pre_tool_use",
+      "fires_on": "About to invoke a tool (Bash/Edit/Write/etc.) — before side effects",
+      "payload_schema": "schemas/events/event-pre-tool-use.schema.json",
+      "actions": {
+        "STRONG": { "id": "block", "semantics": "Tool call refused. Harness returns non-zero exit from hook (Claude Code: exit 2; OpenCode: throw; Codex: dict {block:true})." },
+        "MEDIUM": { "id": "warn", "semantics": "Marker file written at canonical path; warning string surfaced via side-band log; tool call proceeds. Catches lifecycle-gated checks but cannot block real-time." },
+        "WEAK": { "id": "inject", "semantics": "Warning string injected into next model turn's system prompt (or harness equivalent). No programmatic effect this turn." }
+      }
+    },
+    {
+      "id": "tool_result",
+      "fires_on": "Tool call completed; result available — before model sees it",
+      "payload_schema": "schemas/events/event-tool-result.schema.json",
+      "actions": {
+        "STRONG": { "id": "modify", "semantics": "Result mutation/observation before model sees it. Harness returns modified result." },
+        "MEDIUM": { "id": "observe", "semantics": "Async log only; result delivered unchanged." },
+        "WEAK": { "id": "unsupported", "semantics": "This event is not available at WEAK tier; declarations of WEAK on tool_result fail M4 capability key closure." }
+      }
+    },
+    {
+      "id": "stop",
+      "fires_on": "Agent about to end a turn",
+      "payload_schema": "schemas/events/event-stop.schema.json",
+      "actions": {
+        "STRONG": { "id": "refuse_stop", "semantics": "Stop refused until marker condition met. Harness re-enters the agent loop." },
+        "MEDIUM": { "id": "warn", "semantics": "Warning logged; stop proceeds. Useful for post-hoc lifecycle audit." },
+        "WEAK": { "id": "unsupported", "semantics": "stop at WEAK is not meaningful — by definition the harness has already decided to stop and there's no next turn to inject into." }
+      }
+    },
+    {
+      "id": "session_start",
+      "fires_on": "New session beginning",
+      "payload_schema": "schemas/events/event-session-start.schema.json",
+      "actions": {
+        "STRONG": { "id": "inject_context", "semantics": "Context (string/JSON) appended to system prompt; presence verifiable in transcript." },
+        "MEDIUM": { "id": "inject_context", "semantics": "Best-effort inject; harness may or may not surface (no verification path)." },
+        "WEAK": { "id": "inject_static", "semantics": "Inject via static rules/config file deployed at install time (Windsurf .windsurf/rules/). No dynamic per-session content. (Cursor is NOT WEAK — see F43 correction.)" }
+      }
+    },
+    {
+      "id": "session_end",
+      "fires_on": "Session terminating",
+      "payload_schema": "schemas/events/event-session-end.schema.json",
+      "actions": {
+        "STRONG": { "id": "write_artifact", "semantics": "Hook fires deterministically; can write final-state artifacts (handoff files, session summary episodes)." },
+        "MEDIUM": { "id": "write_artifact", "semantics": "Best-effort fire; artifact may be missing on abnormal termination." },
+        "WEAK": { "id": "unsupported", "semantics": "Not available at WEAK." }
+      }
+    }
+  ]
+}

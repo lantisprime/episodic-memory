@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/adapter-response.schema.json",
+  "title": "Contract 3 — thin waist -> adapter response (per hook fire) (RFC-008 F23)",
+  "description": "The decision enforce-contract.mjs returns to the adapter. harness_format_hint is an optional harness-specific translation aid; the thin waist stays harness-agnostic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "reason", "label", "effective_tier", "structured_alert_episode"],
+  "properties": {
+    "action": { "type": "string", "enum": ["block", "allow", "warn"] },
+    "reason": { "type": "string", "minLength": 1, "description": "human-readable; shown to the agent" },
+    "label": { "type": "string", "minLength": 1, "description": "classifier's label; 'n/a' for the stop-gate (reads marker state, not commands)" },
+    "effective_tier": { "type": "string", "enum": ["STRONG", "MEDIUM", "WEAK"] },
+    "structured_alert_episode": { "type": ["string", "null"], "description": "episode id if an F3 hard-reject fired, else null" },
+    "harness_format_hint": {
+      "type": "object",
+      "description": "harness-specific translation aid (e.g. Claude Code {decision, exit_code}); intentionally open."
+    }
+  }
+}

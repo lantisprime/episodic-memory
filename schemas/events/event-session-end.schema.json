@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/events/event-session-end.schema.json",
+  "title": "Canonical session_end event payload (RFC-008 R3, R4)",
+  "description": "Post-translation payload for session_end. write_artifact at end; MEDIUM 'artifact may be missing on abnormal termination' so end_reason is required to branch on clean vs abnormal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cwd", "session_id", "timestamp_iso8601", "end_reason"],
+  "properties": {
+    "cwd": { "type": "string", "minLength": 1, "description": "canonicalized absolute, pwd -P equivalent (F25)" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" },
+    "end_reason": { "type": "string", "enum": ["clear", "logout", "error", "other"] },
+    "project_root": { "type": "string", "minLength": 1 },
+    "turn_index": { "type": "integer", "minimum": 0 }
+  }
+}

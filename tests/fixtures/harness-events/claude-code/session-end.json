@@ -1,0 +1,6 @@
+{
+  "_note": "Raw Claude Code SessionEnd stdin JSON. Replayed through good-manifest.json event_translations.session_end.field_bindings.",
+  "session_id": "8157082d-1c2a-4c40-a3b1-4a8d50475042",
+  "cwd": "/Users/juan.delacruz/repo",
+  "reason": "clear"
+}

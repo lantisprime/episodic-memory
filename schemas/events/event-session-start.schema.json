@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/events/event-session-start.schema.json",
+  "title": "Canonical session_start event payload (RFC-008 R3, R4)",
+  "description": "Post-translation payload for session_start. inject_context binds at session start; project_root optional because it may require resolution from cwd. harness reuses the closed M3 enum.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cwd", "session_id", "timestamp_iso8601", "harness"],
+  "properties": {
+    "cwd": { "type": "string", "minLength": 1, "description": "canonicalized absolute, pwd -P equivalent (F25)" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" },
+    "harness": {
+      "type": "string",
+      "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"]
+    },
+    "project_root": { "type": "string", "minLength": 1 },
+    "source": { "type": "string", "enum": ["startup", "resume", "clear"] }
+  }
+}

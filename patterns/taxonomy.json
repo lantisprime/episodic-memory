@@ -1,0 +1,52 @@
+{
+  "version": "1.0.0",
+  "labels": [
+    {
+      "id": "read_only",
+      "meaning": "Pure observation — ls, cat, git status, gh pr view, grep, find",
+      "overridable": true,
+      "gates": { "plan_approval": "allow", "pre_checkpoint": "allow", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "nonsrc_write",
+      "meaning": "Writes but NOT repo source — .git internals, npm/yarn install, mkdir/rmdir, em-store episode writes",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "allow", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "shared_write",
+      "meaning": "Repo-source content write or cannot-tell — redirect-to-file, non-allowlisted node/python/ruby, cp/mv/dd, worktree-mutating git, curl -o, tee",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "push_or_pr_create",
+      "meaning": "Publishes/mutates shared external state — git push, gh pr create/merge/close, gh issue create/close, gh release, gh api POST/PUT/PATCH/DELETE",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "allow", "post_checkpoint": "block" }
+    },
+    {
+      "id": "marker_write",
+      "meaning": "Gate-control deadlock-prevention — writes/removes .checkpoints/.* marker files at canonical paths",
+      "overridable": false,
+      "gates": { "plan_approval": "allow", "pre_checkpoint": "allow", "post_checkpoint": "allow" }
+    },
+    {
+      "id": "unsafe_complex",
+      "meaning": "Cannot tokenize safely — bash -c, eval, $(), backticks, unbalanced quotes, ambiguous heredoc",
+      "overridable": false,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "block" }
+    },
+    {
+      "id": "unknown",
+      "meaning": "Parsed cleanly but unrecognized command shape — default_write or interpreter_other reason",
+      "overridable": true,
+      "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "block" }
+    }
+  ],
+  "non_overridable": ["marker_write", "unsafe_complex"],
+  "non_overridable_rationale": {
+    "unsafe_complex": "Safety fail-closed. A plugin that redefines unsafe_complex as read_only would allow eval/bash -c/subshells through the gate unexamined.",
+    "marker_write": "Gate infrastructure deadlock-prevention. marker_write is the escape hatch that allows agents to write .pre-checkpoint-done / .post-checkpoint-done / .plan-approval-pending markers. A plugin that misclassifies a marker write as shared_write creates an unrecoverable deadlock (deadlock class 1)."
+  }
+}

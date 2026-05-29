@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runbook-agent-manifest.schema.json",
+  "title": "Runbook §9 agent invocation manifest (RFC-008 F49, F50, F57, F58, F64, F66)",
+  "description": "Machine-parseable block under '## Agent invocation manifest'. A harness agent reads enforcement.md, parses this one JSON block, and knows how to invoke the plugin including credentials shape and where it logs. credentials REQUIRED iff invocation_modality == 'api'; log_paths REQUIRED for api. All posix-path-typed slots carry the forward-slash (no-backslash) invariant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invocation_modality",
+    "command_shapes",
+    "required_args",
+    "optional_args",
+    "expected_outputs",
+    "env_requirements",
+    "return_codes",
+    "dispatch_examples"
+  ],
+  "properties": {
+    "invocation_modality": { "$ref": "#/$defs/modality" },
+    "command_shapes": {
+      "type": "array",
+      "description": "Each entry is an argv array (F58); [] for static-rules.",
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": { "$ref": "#/$defs/posixSafeString" }
+      }
+    },
+    "required_args": { "type": "array", "items": { "$ref": "#/$defs/arg" } },
+    "optional_args": { "type": "array", "items": { "$ref": "#/$defs/arg" } },
+    "expected_outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape"],
+      "properties": {
+        "shape": { "type": "string", "enum": ["ndjson-per-line", "json-object", "exit-code-only"] },
+        "schema_ref": { "type": "string", "description": "optional pointer at one of the runtime contract schemas" }
+      }
+    },
+    "env_requirements": { "type": "array", "items": { "$ref": "#/$defs/envRequirement" } },
+    "return_codes": {
+      "type": "object",
+      "description": "closed map of exit code -> meaning",
+      "propertyNames": { "pattern": "^[0-9]+$" },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "dispatch_examples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description"],
+        "properties": {
+          "description": { "type": "string", "minLength": 1 },
+          "argv": { "type": "array", "items": { "$ref": "#/$defs/posixSafeString" } }
+        }
+      }
+    },
+    "log_paths": {
+      "type": "array",
+      "description": "Adapter-local log sinks written OUTSIDE the thin waist (F63/F64). REQUIRED (possibly empty) for api modality. Each entry is an absolute or project_root-relative posix-path (F66).",
+      "items": { "$ref": "#/$defs/posixPath" }
+    },
+    "credentials": { "$ref": "#/$defs/credentials" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "invocation_modality": { "const": "api" } },
+        "required": ["invocation_modality"]
+      },
+      "then": {
+        "required": ["credentials", "log_paths"]
+      },
+      "else": {
+        "if": { "required": ["credentials"] },
+        "then": {
+          "properties": {
+            "credentials": {
+              "properties": { "mechanism": { "const": "none" } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "invocation_modality": { "const": "static-rules" } },
+        "required": ["invocation_modality"]
+      },
+      "then": {
+        "properties": { "command_shapes": { "maxItems": 0 } }
+      }
+    }
+  ],
+  "$defs": {
+    "modality": {
+      "type": "string",
+      "enum": ["cli", "agent", "api", "static-rules"]
+    },
+    "posixSafeString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "posixPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\\\]+$",
+      "description": "rejects any backslash (the cross-platform path invariant, F58); does not otherwise validate path structure"
+    },
+    "arg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "pattern": "^(string|int|posix-path|enum<.+>)$" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "envRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "required"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "required": { "type": "boolean" },
+        "redaction_pattern": { "type": "string", "minLength": 1 }
+      }
+    },
+    "credentials": {
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["mechanism", "env_vars"],
+          "properties": {
+            "mechanism": { "const": "env_var" },
+            "env_vars": { "type": "array", "items": { "$ref": "#/$defs/envRequirement" } }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["mechanism", "config_path"],
+          "properties": {
+            "mechanism": { "const": "config_file" },
+            "config_path": { "$ref": "#/$defs/posixPath" },
+            "schema_fragment": { "type": "object" },
+            "required_fields": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["mechanism", "auth_endpoint", "token_endpoint"],
+          "properties": {
+            "mechanism": { "const": "oauth2" },
+            "auth_endpoint": { "type": "string", "minLength": 1 },
+            "token_endpoint": { "type": "string", "minLength": 1 },
+            "scopes": { "type": "array", "items": { "type": "string" } },
+            "token_cache_path": { "$ref": "#/$defs/posixPath" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["mechanism", "provider", "ref"],
+          "properties": {
+            "mechanism": { "const": "secret_manager" },
+            "provider": { "type": "string", "enum": ["1password", "aws-secretsmanager", "vault", "gcp-secretmanager"] },
+            "ref": { "type": "string", "minLength": 1, "description": "provider resource identifier, NOT an inline secret (F57)" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["mechanism"],
+          "properties": {
+            "mechanism": { "const": "none" }
+          }
+        }
+      ]
+    }
+  }
+}

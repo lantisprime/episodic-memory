@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/adapter-call.schema.json",
+  "title": "Contract 2 — adapter -> thin waist call (per hook fire) (RFC-008 F22, F55/F44)",
+  "description": "The call the plugin adapter makes into enforce-contract.mjs. command is required for Bash; tool_args is required for non-Bash tools. event_id/events_version drive the F44 runtime event-vocabulary hard-reject.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "session_id", "project_root", "gate", "event_id", "events_version", "harness", "timestamp_iso8601", "manifest_version"],
+  "properties": {
+    "tool": { "type": "string", "minLength": 1, "description": "harness-specific tool name (Bash, Edit, Write, MultiEdit, ...)" },
+    "command": { "type": "string", "description": "raw command text; required for Bash" },
+    "tool_args": { "type": ["object", "null"], "description": "raw tool args; required for non-Bash" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "project_root": { "type": "string", "minLength": 1, "description": "canonicalized absolute (pwd -P equivalent), F25" },
+    "gate": { "type": "string", "enum": ["plan_approval", "pre_checkpoint", "post_checkpoint", "stop"] },
+    "event_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "harness event that fired; event_id in events[].id (F44 runtime hard-reject)" },
+    "events_version": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "sha256 matching loaded events.json (F44 drift check)" },
+    "harness": { "type": "string", "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"] },
+    "timestamp_iso8601": { "type": "string", "format": "date-time" },
+    "manifest_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "tool": { "const": "Bash" } },
+        "required": ["tool"]
+      },
+      "then": { "required": ["command"] },
+      "else": { "required": ["tool_args"] }
+    }
+  ]
+}
