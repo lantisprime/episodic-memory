@@ -1,22 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://episodic-memory/plugins/_index.schema.json",
-  "title": "Plugin registry meta-schema (RFC-008 M1, M3, M8, R8)",
-  "description": "plugins/_index.json — single source of truth. additionalProperties:false at every level; closed enums for harness, status, capability tier, classifier mode. Bidirectional registry<->disk consistency and id==harness are validate-plugin-registry.mjs (P1) checks. The harness enum is git-diffed across schema versions for the M3 stable-ID rule.",
+  "title": "Plugin registry meta-schema (RFC-008 M1, M3, M8, R8 typed+versioned)",
+  "description": "plugins/_index.json — single source of truth. additionalProperties:false at every level; closed enums for harness, status, capability tier, classifier mode, and plugin type. Every entry declares a closed `type` (R8 typed-registry, RFC-008 L116); the registry carries a REQUIRED semver `schema_version` (R8 versioned-contract, RFC-008 L118). Per-type dispatch, schema_version range enforcement (backward validate / fail-closed-forward when a registry version exceeds the validator max — MAJOR OR MINOR), id==harness, and bidirectional registry<->disk are validate-plugin-registry.mjs (P1) checks. Top-level additionalProperties:false is the STATIC fail-closed for unknown future top-level keys; a new substrate-capability type (store-strategy/learning) is added as an additive-MINOR superset bump that ships its own slot + descriptor (CAPABILITIES.md).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["plugins"],
+  "required": ["schema_version", "plugins"],
   "properties": {
+    "schema_version": { "$ref": "#/$defs/semver" },
     "plugins": {
       "type": "array",
-      "items": { "$ref": "#/$defs/pluginEntry" }
+      "items": { "$ref": "#/$defs/enforcementDescriptor" }
     },
     "recall_strategies": {
       "type": "array",
-      "items": { "$ref": "#/$defs/recallStrategy" }
+      "items": { "$ref": "#/$defs/recallStrategyDescriptor" }
     }
   },
   "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "pluginType": {
+      "description": "Closed plugin-type space — the R8 typed-registry discriminator (RFC-008 L116). `enforcement` is the sole enforcement-layer type (bound to bp-XXX, R2); `recall-strategy` / `store-strategy` / `learning` are substrate capabilities (CAPABILITIES.md) that USE episodes and contain no gate/marker/workflow logic (R1). store-strategy and learning have NO descriptor or registry slot yet — each is added later as an additive-MINOR superset bump that ships its own registry sub-schema, descriptor schema, runtime-IO schema, and conformance gauntlet (R11 -> RFC-007 store; R12 -> RFC-001 learning).",
+      "type": "string",
+      "enum": ["enforcement", "recall-strategy", "store-strategy", "learning"]
+    },
     "harnessId": {
       "type": "string",
       "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"]
@@ -25,11 +35,12 @@
       "type": "string",
       "enum": ["STRONG", "MEDIUM", "WEAK", "TBD"]
     },
-    "pluginEntry": {
+    "enforcementDescriptor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "harness", "directory", "capabilities", "classifier", "manifest", "status"],
+      "required": ["type", "id", "harness", "directory", "capabilities", "classifier", "manifest", "status"],
       "properties": {
+        "type": { "allOf": [{ "$ref": "#/$defs/pluginType" }, { "const": "enforcement" }] },
         "id": { "$ref": "#/$defs/harnessId" },
         "harness": { "$ref": "#/$defs/harnessId" },
         "directory": { "type": "string", "pattern": "^plugins/[a-z][a-z0-9-]+$" },
@@ -54,11 +65,12 @@
         }
       }
     },
-    "recallStrategy": {
+    "recallStrategyDescriptor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "module", "requiresEmbeddings", "default"],
+      "required": ["type", "id", "module", "requiresEmbeddings", "default"],
       "properties": {
+        "type": { "allOf": [{ "$ref": "#/$defs/pluginType" }, { "const": "recall-strategy" }] },
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
         "module": { "type": "string", "pattern": "^em-recall/strategies/[a-z0-9_-]+\\.mjs$" },
         "requiresEmbeddings": { "type": "boolean" },

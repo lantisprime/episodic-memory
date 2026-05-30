@@ -1,0 +1,14 @@
+{
+  "plugins": [
+    {
+      "type": "enforcement",
+      "id": "claude-code",
+      "harness": "claude-code",
+      "directory": "plugins/claude-code",
+      "capabilities": { "pre_tool_use": "STRONG" },
+      "classifier": "default",
+      "manifest": "plugins/claude-code/manifest.json",
+      "status": "active"
+    }
+  ]
+}

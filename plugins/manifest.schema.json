@@ -1,11 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://episodic-memory/plugins/manifest.schema.json",
-  "title": "Per-plugin manifest meta-schema (RFC-008 M2, M3-M6, M4b, M5c)",
-  "description": "plugins/<harness>/manifest.json. additionalProperties:false at every level; closed enums for harness, event keys, capability tiers, classifier mode, invocation modality. Vocabulary closure (emits_labels in taxonomy, event_translations keys mirror capabilities), taxonomy/events version equality, and capability honesty are validate-plugin-registry.mjs (P1) checks.",
+  "title": "Per-plugin manifest meta-schema (RFC-008 M2, M3-M6, M4b, M5c, R8 typed+versioned)",
+  "description": "plugins/<harness>/manifest.json — the enforcement-plugin descriptor (R8 typed-registry, RFC-008 L116; `type` const enforcement). additionalProperties:false at every level; closed enums for harness, event keys, capability tiers, classifier mode, invocation modality. Carries a REQUIRED semver `schema_version` (R8 versioned-contract, RFC-008 L118) declaring the CONTRACT version this manifest is written against — distinct from `version`, which is this plugin's OWN release version. `schema_version` is a semver PATTERN, not a pinned const, so a newer same-major validator reads older manifests (backward); a manifest whose version exceeds the validator max — MAJOR OR MINOR — fails closed at P1. Vocabulary closure, taxonomy/events version equality, and capability honesty are validate-plugin-registry.mjs (P1) checks.",
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "type",
+    "schema_version",
     "id",
     "harness",
     "version",
@@ -19,6 +21,8 @@
     "runbook"
   ],
   "properties": {
+    "type": { "const": "enforcement" },
+    "schema_version": { "$ref": "#/$defs/semver" },
     "id": { "$ref": "#/$defs/harnessId" },
     "harness": { "$ref": "#/$defs/harnessId" },
     "version": { "$ref": "#/$defs/semver" },

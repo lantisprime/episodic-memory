@@ -213,6 +213,97 @@ for (const f of ["pre-tool-use.json", "stop.json", "session-start.json", "sessio
 }
 
 // ---------------------------------------------------------------------------
+// 7. R8 typed + versioned registry contract (R0b' amendment).
+//    Schema-shape assertions (P0-runnable; instance validation is P1) + the
+//    Rule-14 CURRENT_SCHEMA_VERSION drift guard, asserted NON-VACUOUSLY.
+// ---------------------------------------------------------------------------
+const idxSchema = parsed["plugins/_index.schema.json"];
+const manSchema = parsed["plugins/manifest.schema.json"];
+
+if (idxSchema && manSchema) {
+  // --- typed-registry (R8 line 116): closed pluginType + per-type type discriminator
+  const pt = idxSchema.$defs && idxSchema.$defs.pluginType;
+  assert(
+    pt && Array.isArray(pt.enum) && pt.enum.length === 4 &&
+      ["enforcement", "recall-strategy", "store-strategy", "learning"].every((v) => pt.enum.includes(v)),
+    "_index $defs.pluginType is the closed 4-value type space (R8-116)",
+    `got ${pt && JSON.stringify(pt.enum)}`,
+  );
+  assert(
+    idxSchema.$defs.enforcementDescriptor &&
+      idxSchema.$defs.enforcementDescriptor.required.includes("type"),
+    "_index enforcementDescriptor requires `type` (R8-116)",
+  );
+  assert(
+    idxSchema.$defs.recallStrategyDescriptor &&
+      idxSchema.$defs.recallStrategyDescriptor.required.includes("type"),
+    "_index recallStrategyDescriptor requires `type` (R8-116)",
+  );
+  assert(
+    manSchema.required.includes("type") &&
+      manSchema.properties.type && manSchema.properties.type.const === "enforcement",
+    "manifest requires `type` const enforcement (R8-116, enforcement descriptor)",
+  );
+
+  // --- versioned-contract (R8 line 118): required schema_version, semver PATTERN not const
+  assert(idxSchema.required.includes("schema_version"), "_index requires schema_version (R8-118)");
+  assert(manSchema.required.includes("schema_version"), "manifest requires schema_version (R8-118)");
+  for (const [label, sch] of [["_index", idxSchema], ["manifest", manSchema]]) {
+    const sv = sch.properties.schema_version;
+    assert(sv && sv.$ref === "#/$defs/semver", `${label} schema_version is {$ref: semver} (R8-118)`, JSON.stringify(sv));
+    const semver = sch.$defs && sch.$defs.semver;
+    // PATTERN, not pinned const — pinning would break backward-compat (a const-1.0.0
+    // schema could not read a 1.1.0 registry the newer validator must accept).
+    assert(
+      semver && typeof semver.pattern === "string" && semver.const === undefined,
+      `${label} $defs.semver is a pattern, NOT a pinned const (R8-118 backward-compat)`,
+      JSON.stringify(semver),
+    );
+  }
+
+  // --- top-level closure is the STATIC fail-closed for unknown future keys (R8-118 forward)
+  assert(
+    idxSchema.additionalProperties === false,
+    "_index keeps top-level additionalProperties:false (static fail-closed for unknown future top-level keys)",
+  );
+
+  // --- Rule-14 CURRENT_SCHEMA_VERSION drift guard, asserted NON-VACUOUSLY (codex R2-FU).
+  if (corpusIndex) {
+    const oracle =
+      corpusIndex.current_schema_version && corpusIndex.current_schema_version.value;
+    assert(typeof oracle === "string", "_corpus-index declares current_schema_version oracle", `got ${oracle}`);
+    // Every EXPECT-PASS fixture instance declaring schema_version must byte-equal the oracle.
+    // Negative fixtures intentionally carry wrong/missing versions and are excluded.
+    let versionedPassInstances = 0;
+    for (const [name, meta] of Object.entries(corpusIndex.fixtures || {})) {
+      if (!meta || meta.expect !== "pass") continue;
+      let inst;
+      try {
+        inst = JSON.parse(readFileSync(join(FIXDIR, name), "utf8"));
+      } catch {
+        continue; // existence/parse already reported in section 6
+      }
+      if (typeof inst.schema_version === "string") {
+        versionedPassInstances++;
+        assert(
+          inst.schema_version === oracle,
+          `CURRENT_SCHEMA_VERSION drift: ${name}.schema_version == oracle`,
+          `instance=${inst.schema_version} oracle=${oracle}`,
+        );
+      }
+    }
+    // Non-vacuity: the manifest side must be covered by >=1 real instance, else the
+    // equality silently passes against an empty set. (Registry-instance non-vacuity is
+    // a P1 obligation, since plugins/_index.json does not exist until P1.)
+    assert(
+      versionedPassInstances >= 1,
+      "drift guard is non-vacuous: >=1 expect-pass instance declares schema_version (R8-118; codex R2-FU)",
+      `got ${versionedPassInstances}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Summary.
 // ---------------------------------------------------------------------------
 console.log(`\ntest-p0-schemas: ${pass} passed, ${fail} failed`);

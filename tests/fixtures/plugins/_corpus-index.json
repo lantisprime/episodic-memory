@@ -1,6 +1,10 @@
 {
   "_note": "RFC-008 v11.8 detection-layer attribution for the golden corpus. P0 STAGES every fixture but detects only the failures expressible in pure JSON-Schema 2020-12; the rest are owned by later validators. _detected_by marks the layer that semantically owns each failure so the corpus never implies P0 catches a failure only a later layer can.",
   "detected_by_vocabulary": ["p0-schema", "p1-registry-validator", "p2-cross-file-validator", "p3-runtime"],
+  "current_schema_version": {
+    "_note": "CURRENT_SCHEMA_VERSION — single P0 oracle (R8 versioned-contract, RFC-008 L118). Every fixture INSTANCE declaring schema_version MUST byte-equal this value; test-p0-schemas.mjs asserts that equality non-vacuously (>=1 manifest instance). P1 promotes this to a production constant (validate-plugin-registry.mjs MAX_SUPPORTED) byte-equal'd against this oracle, and adds a non-vacuous REGISTRY-instance assertion once plugins/_index.json exists.",
+    "value": "1.0.0"
+  },
   "hash_serialization_contract": {
     "_note": "Canonical serialization used to bake good-manifest.json's taxonomy_version/events_version (F8/F37). P2's scripts/validate-bp-contract.mjs MUST reuse these exact bytes to avoid two-hand-rolled-hash drift.",
     "taxonomy_version": {
@@ -21,7 +25,11 @@
     }
   },
   "fixtures": {
-    "good-manifest.json": { "expect": "pass", "detected_by": null, "asserts": ["M2", "M4", "M5", "M5c", "M6"] },
+    "good-manifest.json": { "expect": "pass", "detected_by": null, "asserts": ["M2", "M4", "M5", "M5c", "M6", "R8 type+schema_version accepted"] },
+    "bad-missing-schema-version.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-118 registry schema_version REQUIRED"] },
+    "bad-bad-schema-version.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-118 schema_version semver pattern"] },
+    "bad-missing-type.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-116 entry type REQUIRED (missing => hard-reject)"] },
+    "bad-unknown-type.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-116 type closure (unknown => hard-reject)"] },
     "bad-extra-field.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M2 additionalProperties:false"] },
     "bad-unknown-harness.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M3 harness enum closure"] },
     "bad-invalid-tier.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M4 capability tier enum"] },
