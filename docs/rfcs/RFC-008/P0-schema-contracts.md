@@ -91,6 +91,47 @@ linter); the golden-corpus fixtures are staged. Cross-file validation (vocabular
 hash equality, realpath/symlink containment, regex try-compile, adapter-write observation)
 runs once the P1/P2/P3 validators land — P0 only **stages** the fixtures that exercise them.
 
+## R0b′ amendment — typed + versioned registry (R8)
+
+After P0 merged, R8 grew two v11.9 clauses (RFC-008 L116 typed-registry, L118
+versioned-contract). R0b′ amends the P0 contracts — **schema / fixtures / test only, no
+validator** (per-type dispatch + `schema_version` range enforcement remain P1):
+
+- `plugins/_index.schema.json`: closed `$defs.pluginType` enum
+  `[enforcement, recall-strategy, store-strategy, learning]`; top-level **required**
+  `schema_version` (`$defs.semver` **pattern**, *not* a pinned const — pinning would break
+  backward-compat); per-type descriptor `$defs` (`enforcementDescriptor`,
+  `recallStrategyDescriptor`) each with a required `type` const. Top-level
+  `additionalProperties:false` is **kept** as the static fail-closed for unknown future
+  top-level keys. No `store_strategies` / `learning_strategies` slots yet — each is an
+  additive-MINOR superset bump when R11/R12 land.
+- `plugins/manifest.schema.json`: required `type` const `enforcement` + required
+  `schema_version` (the *contract* version; distinct from the plugin's own `version`).
+- `_corpus-index.json`: single `current_schema_version` oracle (`1.0.0`).
+- `tests/test-p0-schemas.mjs` §7: asserts the schema shapes + a **non-vacuous** Rule-14
+  drift guard (every expect-pass instance's `schema_version` byte-equals the oracle; ≥1
+  such instance). 89 → 107 checks, 0 fail.
+
+**Versioning semantics (forward-superset):** backward = newer superset schema/validator
+reads older same-major registries; forward = a registry whose version exceeds the validator
+max (MAJOR **or** MINOR) **fails closed**; top-level closure is the static enforcement (R8-118).
+
+**Deferred to each type's own home** — every not-yet-contracted type must define its (a)
+registry sub-schema, (b) descriptor schema, (c) runtime-IO schema, (d) conformance gauntlet
+as additive-MINOR bumps ("supported" = schema-validated AND test-covered, CAPABILITIES.md):
+`recall-strategy` validator/IO/gauntlet → P9 + RFC-001/007; `store-strategy` → R11 / RFC-007;
+`learning` → R12 / RFC-001.
+
+**P1 carry-forwards (from the codex review):** (a) backfill `type` + `schema_version` into
+the existing manifest-shaped negative fixtures so each isolates its single failure once the
+P1 validator instance-validates them; (b) add a **registry-instance** non-vacuous
+`schema_version` assertion once `plugins/_index.json` exists; (c) promote
+`CURRENT_SCHEMA_VERSION` to a production constant (validator `MAX_SUPPORTED`) byte-equal'd
+against the corpus oracle; (d) bind `cwd: projectRoot` on every P1 subprocess spawn.
+
+Plan reviewed cross-tool (codex, 3 rounds → ACCEPT): request `…044435…2fe8`; replies
+`…044705…43a9` (HOLD, 2 findings) → `…045236…7fc8` (ACCEPT-with-FU) → `…045704…a56a` (ACCEPT).
+
 ## Follow-up
 
 **Issue [#368](https://github.com/lantisprime/episodic-memory/issues/368)** — P2 must share
@@ -99,5 +140,6 @@ ONE negative corpus between the P0 linter (`tests/lib/mini-jsonschema.mjs`) and 
 
 ## Maps to
 
-R3 (capability mapping contract), R4 (default classifier + plugin override). Principle
-anchors: P2, P11.
+R3 (capability mapping contract), R4 (default classifier + plugin override), **R8**
+(typed-registry `type` discriminator + versioned-contract `schema_version` — added in the
+R0b′ amendment above). Principle anchors: P2, P11.
