@@ -25,8 +25,17 @@ RFCs document proposed changes to the episodic-memory system. Every non-trivial 
 docs/rfcs/
   README.md       <- this file
   TEMPLATE.md     <- copy this when creating a new RFC
+  RFC-NNN-<slug>.md
+  RFC-008/        <- per-phase architecture + implementation plans for a large RFC
+                     (one file per build phase; linked from the RFC's TOC)
   archived/       <- closed RFCs (implemented, withdrawn, superseded)
 ```
+
+> **Companion phase directories.** When an `accepted` RFC's build-phase detail grows large
+> enough to crowd the RFC body (architecture diagrams, per-phase file manifests, hazards),
+> extract it into a sibling `RFC-NNN/` directory — one file per phase — and link each from
+> the RFC's table of contents. The RFC body keeps the summary table, crosswalk, traceability
+> matrix, and the live implementation ledger. First instance: `RFC-008/`.
 
 ---
 

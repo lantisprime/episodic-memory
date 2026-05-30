@@ -15,6 +15,7 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - Per-project: `.episodic-memory/` (local episodes + index)
 - `docs/rfcs/` — RFC specs; implement from those with status `ACCEPTED`. Index: `docs/rfcs/README.md` + `_index.json`.
 - `PRINCIPLES.md` — governing principles (memory-as-substrate, JSON-defs/`.mjs`-adapters, explicit activation, etc.). Read before planning/designing/implementing; new features that violate a principle either revise it or get rejected.
+- `CAPABILITIES.md` — capability charter (the guiding post): the substrate capability families the project supports — memory-store strategy, recall strategy, learning strategy — and the rule for adding new ones as plugin types. Capabilities *use* the memory substrate; they do NOT enforce workflows (that is behavior patterns' job, a decoupled layer). Read alongside `PRINCIPLES.md` before adding any capability or plugin type.
 
 ## Development conventions
 - Scripts are `.mjs` (ESM) with zero external dependencies
