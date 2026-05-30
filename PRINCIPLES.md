@@ -14,6 +14,8 @@ Episodic memory — store and recall episodes — is the only data layer. If a f
 
 **How to apply:** When you reach for a queue, daemon, IPC channel, or "let's just spin up a small server," stop. Express it as episodes first. If the episode model genuinely cannot carry the use case, that is the moment for a new RFC, not a workaround.
 
+**Capability families.** The sanctioned ways to *use* the substrate — memory-store strategy, recall strategy, learning strategy — and the rule for adding new ones are enumerated in [CAPABILITIES.md](CAPABILITIES.md). Capabilities *use* memory; they do **not** enforce workflows — that is the job of behavior patterns (`bp-XXX`), a separate decoupled layer (RFC-008). A capability that cannot be expressed as an operation over episodes does not belong to the substrate.
+
 ---
 
 ## 2. Behavior definitions are data; execution belongs behind stable adapter contracts
