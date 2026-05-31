@@ -1181,7 +1181,7 @@ Summary (full file lists + architecture in the linked per-phase files):
 | P | Phase | New | Mod | Est | Depends on | Serves |
 |---|-------|----:|----:|-----|-----------|--------|
 | **P0** | Locked schema + data contracts (no code) | 20 | 0 | ~20K | — | R3, R4 (+ F11–F51) |
-| **P1** | Plugin directory + registry + test gauntlet | 5 | 7 | ~25–30K | P0 | R1, R6, R8 |
+| **P1** | Plugin directory + registry + test gauntlet | 5 | 7 | ~84–104K (4 PRs) | P0, R0b′ | R1, R6, R8 |
 | **P2** | BP contract instances + contract validators | 12 | 2 | ~35K | P0 | R2, R3, R4 |
 | **P3** | Thin waist + classifier runtime-sourcing + em-recall purification | 3 | 6 | ~55K | P0, P2 | R1, R2, R3, R4, R5, R9 |
 | **P4** | Per-project `enforce-config.json` | 1 | 3 | ~25K | P3 | R3, R5 |
@@ -1201,7 +1201,7 @@ Serves R3, R4 (+ closes F11–F51) · depends on: — · **DONE — PR #367 (`d0
 
 #### P1 — Plugin directory + registry + test gauntlet → [RFC-008/P1-plugin-registry.md](RFC-008/P1-plugin-registry.md)
 
-Serves R1, R6, R8 · depends on: P0 · **NEXT.** `git mv hooks/` → `plugins/claude-code/hooks/` (byte-identical) + `_index.json` registry + `manifest.json` + `validate-plugin-registry.mjs` + `test-plugin.mjs` 9-step gauntlet. ~25–30K.
+Serves R1, R6, R8 · depends on: P0, R0b′ · **NEXT.** `git mv hooks/` → `plugins/claude-code/hooks/` (byte-identical) + `_index.json` registry + `manifest.json` + `validate-plugin-registry.mjs` + `test-plugin.mjs` 9-step gauntlet + net-new `field_bindings` interpreter. **~84–104K across 4 PRs** (P1a/P1b/P1c + Follow); P1a ships standalone first.
 
 #### P2 — BP contract instances + contract validators → [RFC-008/P2-bp-contracts.md](RFC-008/P2-bp-contracts.md)
 
