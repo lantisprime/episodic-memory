@@ -335,7 +335,7 @@ assert_allowed "32. Bash writing post-checkpoint-done allowed under push-gate" \
 
 # ============================================================================
 echo ""
-echo "--- Push allowed cleans all 4 markers ---"
+echo "--- Push allowed sweeps PRE pair, keeps POST pair sticky (delivery) ---"
 # ============================================================================
 reset_state
 touch "$PRE_REQ"
@@ -347,18 +347,23 @@ assert_allowed "33. git push allowed when post-done non-empty" \
   "$(mock_json 'Bash' 'git push origin main')"
 assert_marker_absent "34. checkpoint-required cleaned after push" "$PRE_REQ"
 assert_marker_absent "35. pre-checkpoint-done cleaned after push" "$PRE_DONE"
-assert_marker_absent "36. post-checkpoint-required cleaned after push" "$POST_REQ"
-assert_marker_absent "37. post-checkpoint-done cleaned after push" "$POST_DONE"
+# Post pair is now own-session-sticky across a delivery's push-class actions
+# (git push -> gh pr create -> gh pr review). The prior blanket sweep wiped the
+# satisfied post-checkpoint on the first push, forcing a redundant
+# post-checkpoint for the 2nd/3rd action of the SAME delivery.
+assert_marker_exists "36. post-checkpoint-required KEPT after push (sticky)" "$POST_REQ"
+assert_marker_exists "37. post-checkpoint-done KEPT after push (sticky)" "$POST_DONE"
 
-# gh pr create also cleans
+# gh pr create also keeps the POST pair (same delivery) while sweeping PRE.
 reset_state
 touch "$PRE_REQ"
 echo "pre" > "$PRE_DONE"
 touch "$POST_REQ"
 echo "post" > "$POST_DONE"
-assert_allowed "38. gh pr create allowed cleans all markers" \
+assert_allowed "38. gh pr create allowed (PRE swept, POST sticky)" \
   "$(mock_json 'Bash' 'gh pr create --title x --body y')"
-assert_marker_absent "39. all markers cleaned after gh pr create" "$POST_REQ"
+assert_marker_absent "38b. gh pr create swept .checkpoint-required (PRE)" "$PRE_REQ"
+assert_marker_exists "39. post-checkpoint-required KEPT after gh pr create (sticky)" "$POST_REQ"
 
 # ============================================================================
 echo ""
@@ -2044,12 +2049,14 @@ reset_state
 assert_blocked "B1-1. push self-arms + blocks (no prior checkpoint)" \
   "$(mock_json 'Bash' 'git push origin main')" "Post-implementation checkpoint required"
 assert_marker_exists "B1-2. push self-armed .post-checkpoint-required" "$POST_REQ"
-# Write the post-checkpoint, then the push is allowed + sweeps markers.
+# Write the post-checkpoint, then the push is allowed. The POST pair is now
+# own-session-sticky (kept across a delivery's push-class actions), so it is NOT
+# swept here — a follow-on gh pr create / pr review reuses it without re-block.
 echo "e2e done" > "$POST_DONE"
 assert_allowed "B1-3. push allowed after post-checkpoint written" \
   "$(mock_json 'Bash' 'git push origin main')"
-assert_marker_absent "B1-4. allowed push swept .post-checkpoint-required" "$POST_REQ"
-assert_marker_absent "B1-5. allowed push swept .post-checkpoint-done" "$POST_DONE"
+assert_marker_exists "B1-4. allowed push KEPT .post-checkpoint-required (sticky)" "$POST_REQ"
+assert_marker_exists "B1-5. allowed push KEPT .post-checkpoint-done (sticky)" "$POST_DONE"
 
 # ============================================================================
 echo ""
@@ -2263,8 +2270,9 @@ assert_marker_exists "DL-8. consume did NOT clobber prefix-collision sibling .pl
 # token must SURVIVE another session's push sweep. `.plan-approved` is
 # deliberately excluded from CHECKPOINT_CLEANUP_MARKERS so the push glob
 # (`<marker>.*`, all sessions) does NOT delete it — otherwise session B would
-# silently skip its pre-checkpoint after session A pushes. The quartet IS still
-# swept (convergence semantics preserved).
+# silently skip its pre-checkpoint after session A pushes. The PRE pair is still
+# swept on push; the POST pair is now own-session-sticky and intentionally KEPT
+# (see DL-10 + the "Push allowed sweeps PRE pair, keeps POST pair sticky" block).
 reset_state
 DL_SID_B="eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
 : > "$MARKER_DIR/.plan-approved.$DL_SID_B"     # session B's live approval token (pre-arm)
@@ -2273,7 +2281,7 @@ echo "e2e done" > "$POST_DONE"                  # and satisfied → push is allo
 echo "$(mock_json 'Bash' 'git push origin main')" | run_hook >/dev/null 2>&1   # allowed push → cleanup sweep
 assert_marker_exists "DL-9. concurrent session's .plan-approved token SURVIVED another session's push sweep (F1)" \
   "$MARKER_DIR/.plan-approved.$DL_SID_B"
-assert_marker_absent "DL-10. push sweep still cleared the satisfied quartet (.post-checkpoint-done) — convergence intact" \
+assert_marker_exists "DL-10. push KEPT the satisfied .post-checkpoint-done (POST pair sticky across a delivery)" \
   "$POST_DONE"
 
 # DL-11/12/13: codex PR-review P1 regression — a FAILING installed arm helper
@@ -2425,18 +2433,32 @@ assert_marker_exists "DL-EX-A.3b step3a self-armed .post-checkpoint-required.<si
   "$MARKER_DIR/.post-checkpoint-required.$DL_EX_SID"
 
 # Step 3c: agent retries push. POST_REQ exists from step 3a, POST_DONE is
-# non-empty from step 2 → :1524-1525 check passes, push allowed, cleanup
-# sweep at :1546 clears the quartet. Workflow converges in 4 tool calls
-# (pre → post → push → push) WITHOUT requiring any intervening work-write to
-# arm POST_REQ. Pre-fix the equivalent sequence would have been: pre →
-# (post BLOCKED, misleading message) → push BLOCKED (self-arm) → post → push.
+# non-empty from step 2 → push allowed. The PRE pair is swept (convergence for a
+# future NEW task's fresh pre-checkpoint), but the POST pair is now
+# own-session-STICKY — NOT swept — so the rest of this delivery (gh pr create /
+# pr review) reuses it without re-block. Pre-fix the equivalent sequence was:
+# pre → (post BLOCKED, misleading message) → push BLOCKED (self-arm) → post → push.
 assert_allowed "DL-EX-A.3c step3b: retried git push with POST_REQ armed + POST_DONE non-empty — ALLOWED (workflow converges)" \
   "$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$DL_EX_SID" \
     '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')"
-# Verify cleanup ran (push-gate sweeps the quartet at :1546).
-assert_marker_absent "DL-EX-A.4 push sweep cleared .pre-checkpoint-done.<sid> (convergence)" \
+# Verify the PRE/POST asymmetry: push sweeps the PRE pair (convergence) but KEEPS
+# the POST pair sticky for the rest of the delivery.
+assert_marker_absent "DL-EX-A.4 push sweep cleared .pre-checkpoint-done.<sid> (PRE convergence)" \
   "$MARKER_DIR/.pre-checkpoint-done.$DL_EX_SID"
-assert_marker_absent "DL-EX-A.5 push sweep cleared .post-checkpoint-done.<sid> (convergence)" \
+assert_marker_exists "DL-EX-A.5 push KEPT .post-checkpoint-done.<sid> (POST sticky across delivery)" \
+  "$MARKER_DIR/.post-checkpoint-done.$DL_EX_SID"
+assert_marker_exists "DL-EX-A.6 push KEPT .post-checkpoint-required.<sid> (POST sticky)" \
+  "$MARKER_DIR/.post-checkpoint-required.$DL_EX_SID"
+# Step 4: the SAME delivery continues with a SECOND push-class action (gh pr
+# create) — NO intervening edit. Pre-fix this re-blocked because the first push
+# swept POST_DONE and the 2nd action self-armed POST_REQ + _block_post. Now the
+# sticky post-checkpoint satisfies the gate → ALLOWED, no re-block. This is the
+# exact reported symptom (push -> gh pr create -> gh pr review each re-demanding
+# a post-checkpoint), now fixed.
+assert_allowed "DL-EX-A.7 step4: gh pr create in the SAME delivery — ALLOWED, no re-block (symptom fixed)" \
+  "$(jq -n --arg cmd 'gh pr create --title x --body y' --arg cwd "$TEST_DIR" --arg sid "$DL_EX_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')"
+assert_marker_exists "DL-EX-A.8 gh pr create KEPT the sticky post-checkpoint (delivery continues)" \
   "$MARKER_DIR/.post-checkpoint-done.$DL_EX_SID"
 
 # DL-EX-B: Edit-branch parity — same workflow but the agent uses Write/Edit
@@ -2817,6 +2839,174 @@ else
   echo "  ✓ I364-11c (codex R4 P1, helper): no marker leaked outside the project"; ((passed++))
 fi
 rm -rf "$I364_OUTSIDE_DIR" "$I364_FAKE_HOME5"
+
+# ============================================================================
+echo ""
+echo "--- POST-pair sticky across a delivery + per-delivery E2E backstop ---"
+# ============================================================================
+# Fix: the push sweep no longer clears the POST pair, so push -> gh pr create ->
+# gh pr review in ONE delivery need the post-checkpoint only ONCE (see DL-EX-A.7).
+# A NEW task re-requires it via two mechanisms: fix (B) clears POST_DONE when a
+# fresh .checkpoint-required is armed, and EDIT 3 clears POST_DONE when new
+# repo-source work follows a satisfied post within the same approved plan.
+
+# PPS-1..5 (fix B): a NEW planned task clears the prior delivery's POST_DONE.
+reset_state
+PPS_SID="aaaa1111-2222-4333-8444-aaaa55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_SID"          # sticky from a prior delivery
+echo "old e2e" > "$MARKER_DIR/.post-checkpoint-done.$PPS_SID"
+seed_approval "$MARKER_DIR" "$PPS_SID"                          # NEW plan approved
+assert_blocked "PPS-1. new task: first repo-source Edit arms CR + blocks (new plan)" \
+  "$(jq -n --arg fp "$TEST_DIR/scripts/impl.mjs" --arg cwd "$TEST_DIR" --arg sid "$PPS_SID" \
+    '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" "Checkpoint required"
+assert_marker_exists "PPS-2. fresh .checkpoint-required.<sid> armed" \
+  "$MARKER_DIR/.checkpoint-required.$PPS_SID"
+assert_marker_absent "PPS-3. fix (B) cleared the stale .post-checkpoint-done.<sid> (new task needs fresh E2E)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_SID"
+assert_marker_absent "PPS-4. arm consumed the approval token" \
+  "$MARKER_DIR/.plan-approved.$PPS_SID"
+assert_blocked "PPS-5. new task push BLOCKED — sticky POST_REQ + (B)-cleared POST_DONE" \
+  "$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$PPS_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Post-implementation checkpoint required"
+
+# PPS-6..8 (fix B fail-closed): a FAILED arm must NOT clear POST_DONE.
+reset_state
+PPS_FAIL_HOME=$(mktemp -d)
+mkdir -p "$PPS_FAIL_HOME/.episodic-memory/scripts"
+printf '#!/usr/bin/env node\nprocess.exit(1)\n' > "$PPS_FAIL_HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+PPS_FAIL_SID="bbbb1111-2222-4333-8444-bbbb55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_FAIL_SID"
+echo "good e2e" > "$MARKER_DIR/.post-checkpoint-done.$PPS_FAIL_SID"
+seed_approval "$MARKER_DIR" "$PPS_FAIL_SID"
+PPS_FAIL_OUT=$(echo "$(jq -n --arg fp "$TEST_DIR/scripts/impl2.mjs" --arg cwd "$TEST_DIR" --arg sid "$PPS_FAIL_SID" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" | HOME="$PPS_FAIL_HOME" bash "$HOOK" 2>/dev/null)
+if echo "$PPS_FAIL_OUT" | grep -q '"decision".*"block"'; then
+  echo "  ✓ PPS-6. failed arm → Edit FAILS CLOSED (still blocked)"; ((passed++))
+else
+  echo "  ✗ PPS-6. failed arm → expected block, got: $PPS_FAIL_OUT"; ((failed++))
+fi
+assert_marker_absent "PPS-7. failed arm did NOT create .checkpoint-required.<sid>" \
+  "$MARKER_DIR/.checkpoint-required.$PPS_FAIL_SID"
+assert_marker_exists "PPS-8. fix (B) did NOT clear POST_DONE when arm FAILED (fail-closed — no fail-open bypass)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_FAIL_SID"
+rm -rf "$PPS_FAIL_HOME"
+
+# PPS-9..12 (EDIT 3): new repo-source work after a satisfied post re-gates the push.
+reset_state
+PPS_E3_SID="cccc1111-2222-4333-8444-cccc55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_E3_SID"
+echo "e2e done" > "$MARKER_DIR/.post-checkpoint-done.$PPS_E3_SID"
+assert_allowed "PPS-9. new repo-source Edit after satisfied post — ALLOWED (no-plan gate-free)" \
+  "$(jq -n --arg fp "$TEST_DIR/scripts/more.mjs" --arg cwd "$TEST_DIR" --arg sid "$PPS_E3_SID" \
+    '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_absent "PPS-10. EDIT 3 cleared .post-checkpoint-done.<sid> on new repo-source work" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_E3_SID"
+assert_marker_exists "PPS-11. EDIT 3 left .post-checkpoint-required.<sid> untouched" \
+  "$MARKER_DIR/.post-checkpoint-required.$PPS_E3_SID"
+assert_blocked "PPS-12. push after new work BLOCKED — per-delivery E2E backstop restored" \
+  "$(jq -n --arg cmd 'git push origin main' --arg cwd "$TEST_DIR" --arg sid "$PPS_E3_SID" \
+    '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" "Post-implementation checkpoint required"
+
+# PPS-13..14 (EDIT 3 scope): an OFF-REPO write must NOT clear POST_DONE.
+reset_state
+PPS_OFF_SID="dddd1111-2222-4333-8444-dddd55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_OFF_SID"
+echo "e2e done" > "$MARKER_DIR/.post-checkpoint-done.$PPS_OFF_SID"
+assert_allowed "PPS-13. off-repo Edit after satisfied post — ALLOWED" \
+  "$(jq -n --arg fp "$TEST_HOME/.claude/settings.json" --arg cwd "$TEST_DIR" --arg sid "$PPS_OFF_SID" \
+    '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_exists "PPS-14. EDIT 3 did NOT clear POST_DONE on an OFF-REPO write (scoped to repo source)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_OFF_SID"
+
+# PPS-15..16 (EDIT 3 vs marker write): writing the post-checkpoint must not self-clear.
+reset_state
+PPS_MW_SID="eeee1111-2222-4333-8444-eeee55556666"
+echo "pre" > "$MARKER_DIR/.pre-checkpoint-done.$PPS_MW_SID"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_MW_SID"
+echo "existing post" > "$MARKER_DIR/.post-checkpoint-done.$PPS_MW_SID"
+assert_allowed "PPS-15. Write to .post-checkpoint-done marker — ALLOWED (marker write)" \
+  "$(jq -n --arg fp "$MARKER_DIR/.post-checkpoint-done.$PPS_MW_SID" --arg cwd "$TEST_DIR" --arg sid "$PPS_MW_SID" \
+    '{tool_name:"Write",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_exists "PPS-16. the post-checkpoint marker write did NOT self-clear via EDIT 3 (exits at :1379)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_MW_SID"
+
+# PPS-17 (cross-session scope of fix B): another session's suffixed POST_DONE survives this session's arm.
+reset_state
+PPS_XA="11110000-2222-4333-8444-aaaa00001111"
+PPS_XB="22220000-2222-4333-8444-bbbb00002222"
+echo "B satisfied" > "$MARKER_DIR/.post-checkpoint-done.$PPS_XB"   # concurrent session B's post-done
+seed_approval "$MARKER_DIR" "$PPS_XA"
+echo "$(jq -n --arg fp "$TEST_DIR/scripts/a.mjs" --arg cwd "$TEST_DIR" --arg sid "$PPS_XA" \
+  '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')" | run_hook >/dev/null 2>&1
+assert_marker_exists "PPS-17. fix (B) own-session-scoped: session B's .post-checkpoint-done.<sidB> SURVIVED session A's arm" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_XB"
+
+# PPS-18 (EDIT 3 scope — Bash exclusion): a Bash repo-source write must NOT clear
+# POST_DONE. EDIT 3 is Edit/Write/MultiEdit/NotebookEdit only so git commit/push
+# plumbing can never falsely clear it. The marker side-effect is the invariant
+# whether the Bash is allowed through or held for classification. This is a
+# regression guard against accidentally re-adding Bash to the EDIT 3 case (which
+# would reintroduce the redundant-post-checkpoint friction this fix removes).
+reset_state
+PPS_BASH_SID="ffff1111-2222-4333-8444-ffff55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_BASH_SID"
+echo "e2e done" > "$MARKER_DIR/.post-checkpoint-done.$PPS_BASH_SID"
+echo "$(jq -n --arg cmd "echo x > $TEST_DIR/scripts/foo.mjs" --arg cwd "$TEST_DIR" --arg sid "$PPS_BASH_SID" \
+  '{tool_name:"Bash",tool_input:{command:$cmd},cwd:$cwd,session_id:$sid}')" | run_hook >/dev/null 2>&1
+assert_marker_exists "PPS-18. Bash repo-source write did NOT clear POST_DONE (EDIT 3 excludes Bash)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_BASH_SID"
+
+# PPS-19 (EDIT 3 scope — .review-store/ carve-out): a second-opinion review
+# artifact write under .review-store/ is in-repo but NOT repo source, so
+# _tool_call_targets_repo_source returns 1 and EDIT 3 must NOT clear POST_DONE.
+reset_state
+PPS_RS_SID="abcd1111-2222-4333-8444-abcd55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_RS_SID"
+echo "e2e done" > "$MARKER_DIR/.post-checkpoint-done.$PPS_RS_SID"
+assert_allowed "PPS-19a. Edit under .review-store/ after satisfied post — ALLOWED" \
+  "$(jq -n --arg fp "$TEST_DIR/.review-store/my-review.md" --arg cwd "$TEST_DIR" --arg sid "$PPS_RS_SID" \
+    '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_exists "PPS-19b. EDIT 3 did NOT clear POST_DONE on a .review-store/ write (in-repo, not source)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_RS_SID"
+
+# PPS-20 (EDIT 3 AND-predicate): with POST_DONE present but POST_REQ absent, EDIT
+# 3 must NOT clear — the backstop fires only inside an armed post-checkpoint
+# (POST_REQ exists AND POST_DONE non-empty). Proves the conjunction, not a lone
+# POST_DONE read.
+reset_state
+PPS_NOREQ_SID="99991111-2222-4333-8444-999955556666"
+echo "stale" > "$MARKER_DIR/.post-checkpoint-done.$PPS_NOREQ_SID"   # POST_DONE present, POST_REQ absent
+assert_allowed "PPS-20a. repo-source Edit with POST_DONE but no POST_REQ — ALLOWED" \
+  "$(jq -n --arg fp "$TEST_DIR/scripts/x.mjs" --arg cwd "$TEST_DIR" --arg sid "$PPS_NOREQ_SID" \
+    '{tool_name:"Edit",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_exists "PPS-20b. EDIT 3 did NOT fire without POST_REQ armed (AND-predicate holds)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_NOREQ_SID"
+
+# PPS-21 (EDIT 3 scope — .git/ carve-out): a write under .git/ (commit-msg/PR-body
+# scratch, git internals) is NOT repo source, so EDIT 3 must NOT clear POST_DONE.
+# Regression for the live-E2E miss: writing the PR body to .git/ cleared the
+# satisfied post-checkpoint between the push and gh pr create.
+reset_state
+PPS_GIT_SID="cafe1111-2222-4333-8444-cafe55556666"
+touch "$MARKER_DIR/.post-checkpoint-required.$PPS_GIT_SID"
+echo "e2e done" > "$MARKER_DIR/.post-checkpoint-done.$PPS_GIT_SID"
+assert_allowed "PPS-21a. Write under .git/ after satisfied post — ALLOWED" \
+  "$(jq -n --arg fp "$TEST_DIR/.git/CKPT_PR_BODY.md" --arg cwd "$TEST_DIR" --arg sid "$PPS_GIT_SID" \
+    '{tool_name:"Write",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_exists "PPS-21b. EDIT 3 did NOT clear POST_DONE on a .git/ write (git internals, not source)" \
+  "$MARKER_DIR/.post-checkpoint-done.$PPS_GIT_SID"
+
+# PPS-22 (pre-gate — .git/ carve-out under an approved plan): a .git/ write must
+# not arm the pre-checkpoint even with an approval token present (git internals
+# are never implementation).
+reset_state
+PPS_GIT2_SID="beef1111-2222-4333-8444-beef55556666"
+seed_approval "$MARKER_DIR" "$PPS_GIT2_SID"
+assert_allowed "PPS-22a. Write under .git/ with approval token — ALLOWED (not implementation)" \
+  "$(jq -n --arg fp "$TEST_DIR/.git/COMMIT_EDITMSG" --arg cwd "$TEST_DIR" --arg sid "$PPS_GIT2_SID" \
+    '{tool_name:"Write",tool_input:{file_path:$fp},cwd:$cwd,session_id:$sid}')"
+assert_marker_absent "PPS-22b. .git/ write did NOT arm .checkpoint-required.<sid> (carve-out)" \
+  "$MARKER_DIR/.checkpoint-required.$PPS_GIT2_SID"
 
 echo ""
 echo "Passed: $passed"
