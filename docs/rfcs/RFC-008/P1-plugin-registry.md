@@ -3,10 +3,10 @@
 > Part of [RFC-008](../RFC-008-decouple-enforcement-from-substrate.md). Index:
 > [RFC-008/README.md](README.md).
 
-**Status:** **NEXT.** Rule-18 plan → second-opinion → approval → implement.
+**Status:** **NEXT.** Rule-18 plan converged (codex ACCEPT-with-FU, 4 rounds) → awaiting approval → implement. Sliced into **4 PRs + a docs pre-step** (see [Build order](#build-order)).
 **Serves:** R1 (memory is substrate), R6 (plugin-to-harness binding), R8 (plugin registry).
-**Depends on:** P0 (met — PR #367).
-**Estimate:** ~25–30K (mostly `git mv` + path-reference patching).
+**Depends on:** P0 (met — PR #367) **+ R0b′** typed/versioned plugin registry (met — PR #370).
+**Estimate:** **~84–104K across 4 PRs** (P1a/P1b/P1c + a post-P1 Follow) — ~2× the original single-PR estimate once the validator + runbook authoring + 9-step gauntlet + a **net-new `field_bindings` interpreter** are counted. The slicing is not optional; P1a (the byte-move) ships standalone first to de-risk.
 
 ## What P1 is
 
@@ -14,6 +14,20 @@ P1 is the **structural move** that turns `hooks/` (a Claude-Code-specific pile) 
 first entry of a **harness-agnostic plugin registry** — plus the two validators that make
 "a plugin" a checkable contract rather than a convention. **Zero runtime behavior change:**
 the hooks do exactly what they do now, just from a new path, registered and validated.
+
+## Build order
+
+Sliced into **4 PRs + a docs pre-step**. Round-1 review (3 reviewers) confirmed P1-as-specified is **~2× the original estimate** — the
+slicing below is load-bearing, not cosmetic. Each slice is its own PR (≤ one comfortable session)
+with its own review → E2E → bug-disposition cycle.
+
+| Slice | Scope | Est. | Done-when |
+|---|---|---|---|
+| **P1-pre** | Sync this spec + the RFC body P1 row to the converged v4 plan (deps, estimate, `RESERVED_DIRS`, binding-test matrices, `field_bindings` scope, this build order). Docs only. | small | spec == plan v4; `em-rfc-validate` 8/8. |
+| **P1a** | The move only: `git mv hooks/ → plugins/claude-code/hooks/` (link-text-identical) + repoint 2 symlinks + `install.mjs` (`REPO_HOOKS` :43, `repoRunbookSrc` :1407) + `scripts/lib/install-manifest.mjs` (:123/:133/:136) + **>100** repo-side test path-refs. **No new contracts.** | ~24–30K | every suite green from the new path; `test-migration-cutover.mjs` green; `install --install-hooks-force` byte-identical (shasum); live gate fires. |
+| **P1b** | `plugins/_index.json` + `claude-code/manifest.json` (= the P0 `good-manifest.json`) + `validate-plugin-registry.mjs` (M1–M10/M7a–M7f + typed/versioned `MAX_SUPPORTED` gate + **M8 `RESERVED_DIRS`** + the **6-axis validator project-root binding matrix**) + COMMON-rows template + enforcement runbook + fixtures (version/symlink) + `bypass_known.json` claude-code records. | ~28–34K | validator PASS for claude-code; all fixtures behave per `detected_by`; `claude-code-as-override.json` proves the override branch is live; `test-p0-schemas.mjs` green. |
+| **P1c** | `test-plugin.mjs` 9-step gauntlet (5/6 report *deferred-P3*, not pass) + **net-new `field_bindings` interpreter** + `test-plugin-harness-binding.mjs` (**F31/F36/F61**) + a P1-local structured-alert probe with a pinned output contract (`input_project_root` vs `store_root`). | ~26–32K | gauntlet steps 1–4,7,8,9 green; 4 binding tests pass. |
+| **Follow** | `hooks/runbooks/ → plugins/second-opinion/runbooks/` (the second-opinion runbooks, kept out of P1a so the move stays single-destination; `second-opinion` is already in `RESERVED_DIRS`). | ~6–8K | runbooks deploy from the new path; M8 does not flag `second-opinion`. |
 
 ## Architecture
 
@@ -33,7 +47,7 @@ graph TB
         MAN["plugins/claude-code/manifest.json<br/>(+ invocation_modality: agent)"]
         VPR["scripts/validate-plugin-registry.mjs<br/>(M1-M10 + M7a-M7f)"]
         TP["scripts/test-plugin.mjs<br/>(9-step gauntlet)"]
-        HB["tests/test-plugin-harness-binding.mjs<br/>(F31/F36 - 3 acceptance tests)"]
+        HB["tests/test-plugin-harness-binding.mjs<br/>(F31/F36/F61 - 4 acceptance tests)"]
     end
 
     subgraph MOVE["P1 - git mv (byte-identical)"]
@@ -71,7 +85,7 @@ regions plus one free-standing node, and the *line style carries meaning*: a **d
   (`plugins/_index.json`, the harness→plugin registry) and `MAN`
   (`plugins/claude-code/manifest.json`, newly carrying `invocation_modality: agent`). Three
   are *code*: `VPR` (`validate-plugin-registry.mjs`, the static M1–M10 + M7a–M7f checker),
-  `TP` (`test-plugin.mjs`, the 9-step gauntlet), and `HB` (the three F31/F36 project-root
+  `TP` (`test-plugin.mjs`, the 9-step gauntlet), and `HB` (the four F31/F36/F61 project-root
   binding acceptance tests).
 - **Bottom region — `MOVE` (the structural `git mv`).** `OLD` (`hooks/*.sh`, `hooks/lib/`,
   `*.mjs`) moves byte-identically to `NEW` (`plugins/claude-code/hooks/`). That single solid
@@ -201,7 +215,7 @@ where a single script is just doing its own bookkeeping.
 - `install.mjs` updated to deploy from `plugins/<harness>/hooks/`
 - `scripts/validate-plugin-registry.mjs` *(M1–M10 + M7a–M7f assertion checklist)*
 - `scripts/test-plugin.mjs` *(the 9-step gauntlet)* + golden plugin/event fixtures
-- `tests/test-plugin-harness-binding.mjs` *(F31/F36 — 3 acceptance tests)*
+- `tests/test-plugin-harness-binding.mjs` *(F31/F36/F61 — 4 acceptance tests)*
 
 ## The two new scripts (the real work)
 
@@ -211,6 +225,7 @@ Walks every `_index.json` entry + `manifest.json` and asserts:
 
 | Assertion | Check |
 |---|---|
+| **typed / versioned (R8)** | read `_index.schema_version`; missing → hard-reject. Forward gate on **(major, minor) only** (`const MAX_SUPPORTED` byte-equal'd to the oracle `current_schema_version`; PATCH > max still accepts): `major > MAX_major` or (`= major`, `minor > MAX_minor`) → fail-closed-forward. Per-entry `type` switch: `enforcement` → full checks; `recall-strategy`/`store-strategy`/`learning` → descriptor-only (gauntlet deferred); unknown/missing `type` → hard-reject. *(R0b′ merged the schema-layer fields in #370; this is their runtime enforcement.)* |
 | **M1 / M2** | every `_index.json` and `manifest.json` validates against its P0 `*.schema.json` (`additionalProperties:false` everywhere) |
 | **M6** | `manifest.taxonomy_version` byte-equals the live `sha256(sortedLabels)` hash → else "built against stale taxonomy" |
 | **M7** | vocabulary closure — `emits_labels ⊆ taxonomy.labels`, no dangling references |
@@ -220,7 +235,17 @@ Walks every `_index.json` entry + `manifest.json` and asserts:
 | **M7d** | §8 modality line byte-equals `manifest.invocation_modality` |
 | **M7e** | §9 agent-manifest sentinel + JSON parse + validate against `runbook-agent-manifest.schema.json` + cross-field consistency (credentials-iff-api, redaction regex compile, env-var name regex, posix-path forward-slash, `log_paths` presence-for-api) |
 | **M7f** | §10 config/taxonomy cross-binding — every value byte-equals its derived source-of-truth |
-| **bidirectional** | every `plugins/<harness>/` dir has a registry entry; every entry has a dir |
+| **M8 (bidirectional)** | every `plugins/<harness>/` dir has a registry entry and vice-versa — **excluding a closed `RESERVED_DIRS = {episodic-memory, second-opinion}` allowlist**. `plugins/episodic-memory/` is Claude-Code plugin *packaging* (`.claude-plugin/`, `scripts/`, `skills/`) and already exists on `main`, so a naive check fails on today's tree; `second-opinion` is reserved for the post-P1 runbooks fork. Positive test: each reserved dir is skipped. Negative test: a non-reserved orphan dir still fails. |
+
+**Validator project-root binding (its own surface, separate from the gauntlet's).**
+`validate-plugin-registry.mjs` is itself cwd-sensitive: `--project` is **required** — the explicit
+repo root, or `git rev-parse --show-toplevel` discovery failing clearly on a non-git cwd —
+canonicalized via Node `fs.realpathSync`. **Every** registry read (`_index.json`, manifests, runbooks,
+fixtures, schemas) resolves under that root, and the stdout JSON's `project_root` reports that same
+resolved root, never the caller cwd. A read-path trace (the absolute paths opened) is emitted so tests
+can assert each `startsWith realpath(projectRoot)+sep`. P1b ships the full **6-axis temp-dir matrix**:
+caller-cwd ≠ `--project`; nested cwd inside target; non-git cwd *with* `--project` (succeeds); non-git
+cwd *without* (fails clear); linked worktree; `HOME`/config elsewhere — plus the trace assertion on each.
 
 ### `test-plugin.mjs` — the 9-step gauntlet
 
@@ -232,16 +257,22 @@ round-trip through `enforce-contract.mjs`, which does not exist until P3. What r
 | 1–4 | ✅ | schema validation, runbook present + sentinel + COMMON-row byte-equality |
 | 5–6 | ⏸ P3 | thin-waist round-trip + F3 hard-reject simulator |
 | 7 | ✅ | author-time conformance |
-| 8 | ✅ | **synthetic event replay (F39)** — feed each `tests/fixtures/harness-events/claude-code/*` through the adapter; assert canonical payload validates against `schemas/events/*`, field bindings produced expected values, tier-vs-outcome matches `manifest.capabilities` |
+| 8 | ✅ | **synthetic event replay (F39)** — feed each `tests/fixtures/harness-events/claude-code/*` through the adapter; assert canonical payload validates against `schemas/events/*`, field bindings produced expected values, tier-vs-outcome matches `manifest.capabilities`. **The adapter requires a net-new `field_bindings` interpreter** (P1c) — `good-manifest.json` commits to a directive grammar (`$.path` dotted-JSONPath subset, `$.x.length`, `$$now`, `$$const:VALUE`) that no interpreter in the repo implements yet; it is specced as a closed set, unit-tested, then wired as the claude-code step-8 adapter. |
 | 9 | ✅ | **runbook-derived invocation parity (F47)** — read `command_shapes` + `dispatch_examples` from runbook §9, dispatch each, assert output shape + return code |
 
-**Project-root binding (F31/F36).** `--project <root>` is **required** (or `git rev-parse
+**Project-root binding (F31/F36/F61).** `--project <root>` is **required** (or `git rev-parse
 --show-toplevel` discovery, failing clearly on non-git cwd). Every spawned subprocess gets
 `cwd: projectRoot` + `EPISODIC_MEMORY_PROJECT_ROOT=<projectRoot>`. **`--project` wins** over
 an inherited `EPISODIC_MEMORY_PROJECT_ROOT`. Structured-alert episodes land under
-`store_root/.episodic-memory/` where `store_root = resolveRepoRoot(projectRoot)`. The 3
-acceptance tests in `tests/test-plugin-harness-binding.mjs`: inherited-env override; non-git
-cwd discovery failure; on-disk artifact location.
+`store_root/.episodic-memory/` where `store_root = resolveRepoRoot(projectRoot)`. Because the real
+writer (step 6) is P3-stubbed, P1c ships a **minimal P1-local structured-alert probe** to exercise the
+path-resolution logic, with a **pinned output contract**: it reports `input_project_root` (the
+`--project`/discovered input) and `store_root` (where the alert actually lands — for a linked worktree,
+this converges to the main checkout) as **two distinct fields, never conflated**. The 4 acceptance tests
+in `tests/test-plugin-harness-binding.mjs` assert all three together — exit signal, the alert file
+**exists** under the reported `store_root`, and is **absent** under `input_project_root`/caller-cwd when
+convergence targets a different root: inherited-env override; non-git cwd discovery failure; on-disk
+location == reported `store_root`; linked-worktree convergence.
 
 ## Hazards — where "byte-identical git mv" quietly isn't
 

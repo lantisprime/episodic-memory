@@ -15,7 +15,7 @@ requirement parent. Each phase file carries its own R-anchors and back-links to 
 | Phase | File | Serves | Depends on | Status |
 |-------|------|--------|-----------|--------|
 | **P0** | [P0-schema-contracts.md](P0-schema-contracts.md) | R3, R4 | — | **DONE** — PR #367 (`d078fdc`) |
-| **P1** | [P1-plugin-registry.md](P1-plugin-registry.md) | R1, R6, R8 | P0 | **NEXT** |
+| **P1** | [P1-plugin-registry.md](P1-plugin-registry.md) | R1, R6, R8 | P0, R0b′ | **NEXT** (4 slices: P1a/P1b/P1c + Follow) |
 | **P2** | [P2-bp-contracts.md](P2-bp-contracts.md) | R2, R3, R4 | P0 | queued |
 | **P3** | [P3-thin-waist.md](P3-thin-waist.md) | R1, R2, R3, R4, R5, R9 | P0, P2 | queued |
 | **P4** | [P4-enforce-config.md](P4-enforce-config.md) | R3, R5 | P3 | queued |
