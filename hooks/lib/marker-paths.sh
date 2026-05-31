@@ -71,13 +71,22 @@ TASK_SIGNAL_MARKERS=(
   ".plan-approval-pending"
 )
 
-# Push-gate cleanup class — markers cleared on a successful push that has
-# satisfied the post-checkpoint. The push sweep glob-deletes ALL sessions'
-# suffixed forms — convergence semantics for the quartet. .plan-approval-pending
-# is NOT here (plan-gate owns it). .plan-approved is NOT here either (review F1):
-# it is the per-session authorization-to-arm token, so cross-session glob-
-# deletion would skip a concurrent session's pre-checkpoint. It is consumed at
-# arm in the normal flow; own-session orphans are cleaned at SessionEnd.
+# Push-gate cleanup class — the markers the push sweep considers at the
+# convergence (task-complete) moment. IMPORTANT: only the PRE pair
+# (.checkpoint-required, .pre-checkpoint-done) is actually glob-deleted on a
+# successful push. The checkpoint-gate sweep DELIBERATELY skips the POST pair
+# (.post-checkpoint-required, .post-checkpoint-done) via a per-marker `continue`
+# so a single delivery's sequence of push-class actions (git push -> gh pr
+# create -> gh pr review) does not re-demand a fresh post-checkpoint each time.
+# The POST pair is own-session-sticky across a delivery: reaped by SessionEnd
+# and dominated by the SessionStart force-monotonic baseline; crashed-session
+# POST orphans fall under the operator-cleanup FU. See the convergence-sweep
+# comment in hooks/checkpoint-gate.sh. The array still lists all four (it is the
+# full cleanup CLASS; the per-marker skip lives at the sweep site).
+# .plan-approval-pending is NOT here (plan-gate owns it). .plan-approved is NOT
+# here either (review F1): it is the per-session authorization-to-arm token, so
+# cross-session glob-deletion would skip a concurrent session's pre-checkpoint.
+# It is consumed at arm in the normal flow; own-session orphans cleaned at SessionEnd.
 CHECKPOINT_CLEANUP_MARKERS=(
   ".checkpoint-required"
   ".pre-checkpoint-done"

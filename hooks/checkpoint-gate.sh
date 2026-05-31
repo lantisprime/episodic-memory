@@ -758,6 +758,21 @@ _arm_checkpoint_required_if_missing() {
   # arm — never consume the approval AND leave the implementation ungated.
   if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID"; then
     _consume_plan_approved "$MY_SID"
+    # Fix (B) — a NEW planned task just armed a fresh .checkpoint-required:
+    # invalidate any prior delivery's satisfied .post-checkpoint-done so this
+    # task requires its OWN E2E before push. The push sweep no longer clears the
+    # POST pair (see the convergence-sweep comment), so without this a new task
+    # would ride the previous task's post-checkpoint. Placed INSIDE this
+    # arm-success block (alongside the transactional _consume_plan_approved) so a
+    # FAILED arm does NOT wipe POST_DONE (fail-closed). Clear ALL FOUR locations
+    # checkpoint_marker_nonempty_for_session inspects (PRIMARY+LEGACY x
+    # legacy-literal + <sid>-suffixed) — a stale literal POST_DONE would
+    # otherwise let the new task push without a fresh post-checkpoint. Fires once
+    # per task (line 728 early-returns once .checkpoint-required exists).
+    local _pcd_sfx
+    _pcd_sfx="$(namespaced_marker_basename_for_session .post-checkpoint-done "$MY_SID")"
+    rm -f "$PRIMARY_DIR/$_pcd_sfx" "$LEGACY_DIR/$_pcd_sfx" 2>/dev/null || true
+    rm -f "$PRIMARY_DIR/.post-checkpoint-done" "$LEGACY_DIR/.post-checkpoint-done" 2>/dev/null || true
   fi
 }
 
@@ -956,6 +971,22 @@ _tool_call_targets_repo_source() {
   #      its own substrate even if a user edits .gitignore).
   case "$fp_canon" in
     "$repo_canon"/.checkpoints|"$repo_canon"/.checkpoints/*) return 1 ;;
+  esac
+  #
+  #  (1b') .git/ carve-out — git internals (commit-message scratch, PR-body files,
+  #      rebase/merge todo lists, hooks, refs, index) are never tracked repo
+  #      source. git check-ignore does NOT flag .git/ (it is structurally excluded
+  #      from the worktree, not via .gitignore — verified: `git check-ignore
+  #      .git/<f>` exits 1), so without this an Edit/Write under .git/ returns 0
+  #      (repo source) and would arm the pre-checkpoint AND let EDIT 3 clear a
+  #      satisfied post-checkpoint on a NON-source write. Live E2E (this PR) hit
+  #      exactly that: writing the PR body to .git/ cleared POST_DONE between the
+  #      push and gh pr create. Canonical-anchored; a hard infra invariant
+  #      independent of .gitignore (git never tracks its own dir). No bypass:
+  #      .git/ content is not the worktree, so this cannot smuggle tracked source
+  #      past the gate, and the push-gate still independently blocks pushes.
+  case "$fp_canon" in
+    "$repo_canon"/.git|"$repo_canon"/.git/*) return 1 ;;
   esac
   #
   #  (1c) .gitignore carve-out — a gitignored target is by definition NOT tracked
@@ -1598,10 +1629,38 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   # no plan-pending. Other sessions' suffixed markers do not block cleanup.
   if ! plan_pending_blocks_this_session "$MY_SID"; then
     # Rank-2: sweep BOTH legacy literal AND ALL suffixed forms `<X>.<*>` at
-    # both roots. push is the convergence moment — all sessions' progress
-    # rolls up. Cross-session orphans from crashed sessions also get
+    # both roots. push is the convergence moment for the PRE pair
+    # (.checkpoint-required, .pre-checkpoint-done) — a new task re-arms a fresh
+    # pre-checkpoint. Cross-session PRE orphans from crashed sessions also get
     # cleared here.
+    #
+    # The POST pair (.post-checkpoint-required, .post-checkpoint-done) is
+    # DELIBERATELY NOT swept here. A single logical delivery is a SEQUENCE of
+    # push-class actions (git push -> gh pr create -> gh pr review); the prior
+    # blanket sweep wiped THIS session's satisfied .post-checkpoint-done on the
+    # FIRST push, so the 2nd/3rd action self-armed POST_REQ (:1540) and
+    # re-blocked (:1578), demanding a redundant post-checkpoint for the SAME
+    # delivery. POST markers are now own-session-sticky across a delivery:
+    #   - reaped by SessionEnd for clean sessions (em-session-end-prompt.mjs
+    #     CHECKPOINT_QUARTET branch);
+    #   - dominated by SessionStart's force-monotonic baseline
+    #     (em-recall.mjs:875) so crashed-session orphans never deadlock a future
+    #     session's Stop-gate carve-out;
+    #   - invalidated for a NEW task by _arm_checkpoint_required_if_missing
+    #     (re-arm clears POST_DONE) and by the post-write tail (new repo-source
+    #     work after a satisfied post clears POST_DONE).
+    # Keeping .checkpoint-required IN the sweep is load-bearing: it is what makes
+    # a sticky POST_REQ unreachable by the Stop-gate block predicate
+    # (em-recall.mjs:355 keys on .checkpoint-required + empty .post-checkpoint-done).
+    # Crashed-session POST orphans fall under the existing operator-cleanup FU
+    # (em-recall.mjs:726); they are correctness-inert (all consumers own-session).
     for _m in "${CHECKPOINT_CLEANUP_MARKERS[@]}"; do
+      case "$_m" in
+        .post-checkpoint-required|.post-checkpoint-done)
+          # Own-session-sticky across a delivery — see the block comment above.
+          continue
+          ;;
+      esac
       # Legacy literal at both roots.
       rm -f "$PRIMARY_DIR/$_m" "$LEGACY_DIR/$_m" 2>/dev/null || true
       # Suffixed forms `<X>.<*>` at both roots.
@@ -1650,6 +1709,53 @@ case "$TOOL_NAME" in
         # still works for old hooks). Symlink-safe (#364).
         _arm_marker_via_touch_safely "$(write_marker_path "$REPO_ROOT" .post-checkpoint-required)"
       fi
+    fi
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Per-delivery E2E backstop (EDIT 3). New repo-source work AFTER a satisfied
+# post-checkpoint invalidates the prior E2E confirmation for THIS delivery, so
+# the next push requires a fresh post-checkpoint. The push sweep no longer
+# clears the POST pair (sticky across one delivery's push-class actions), and
+# the re-arm clear (fix B) only fires at a NEW plan-approval boundary — so
+# without this, more source edits under the SAME approved plan would push with a
+# stale satisfied POST_DONE and no fresh E2E.
+#
+# Scope (deliberate): Edit/Write/MultiEdit/NotebookEdit to REPO SOURCE only, as
+# decided by _tool_call_targets_repo_source (the same authority the pre-gate
+# uses) — off-repo (memory/settings), .review-store/, .checkpoints/, gitignored,
+# and nonsrc paths return 1 and never clear. Bash is EXCLUDED so git commit /
+# git push plumbing can never falsely clear POST_DONE and reintroduce the
+# redundant-post-checkpoint friction this change exists to remove. Excluding
+# Bash leaves no hole: a repo-source Bash write under an armed .checkpoint-required
+# is already pre-gate-blocked (_bash_label_arms_pre_checkpoint), and off-task
+# untracked Bash with no plan pending is the documented F1 residual (see the F1
+# RESIDUAL note above _bash_label_arms_pre_checkpoint), closed on retry by the
+# PR-B2 agent-classifier nonsrc_write verdict (#351). A .post-checkpoint-done
+# marker write already exited at :1241/:1379, so writing the post-checkpoint
+# itself never reaches here and cannot self-clear. 4-path clear matches
+# checkpoint_marker_nonempty_for_session's full read set.
+#
+# Own-session-scoped: the checkpoint_marker_*_for_session predicates inspect only
+# THIS session's markers, so a crashed session's orphaned POST_REQ/POST_DONE is
+# never touched here. Such orphans are correctness-inert — unreachable by the
+# Stop-gate block (em-recall.mjs:355 requires .checkpoint-required present) and
+# dominated by the SessionStart force-monotonic baseline (em-recall.mjs:875).
+# FILE_PATH and LABEL are guaranteed initialized for these tool types by the
+# allowed-write arming case block above. An empty FILE_PATH — which these tools
+# never emit in practice — makes _tool_call_targets_repo_source return 0 via its
+# conservative empty-path branch, so EDIT 3 proceeds only when the POST markers
+# are also present; that errs toward MORE E2E gating, never less.
+case "$TOOL_NAME" in
+  Edit|Write|MultiEdit|NotebookEdit)
+    if _tool_call_targets_repo_source "$REPO_ROOT" "$TOOL_NAME" "$FILE_PATH" "$LABEL" \
+       && checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+       && checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
+      _pcd_sfx2="$(namespaced_marker_basename_for_session .post-checkpoint-done "$MY_SID")"
+      rm -f "$PRIMARY_DIR/$_pcd_sfx2" "$LEGACY_DIR/$_pcd_sfx2" 2>/dev/null || true
+      rm -f "$PRIMARY_DIR/.post-checkpoint-done" "$LEGACY_DIR/.post-checkpoint-done" 2>/dev/null || true
+      unset _pcd_sfx2
     fi
     ;;
 esac
