@@ -40,7 +40,7 @@ const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
 const installSecondOpinion = argv.includes('--install-second-opinion')
 const bootstrapLastPrompt = argv.includes('--bootstrap-last-prompt')
-const REPO_HOOKS = path.join(REPO_DIR, 'hooks')
+const REPO_HOOKS = path.join(REPO_DIR, 'plugins', 'claude-code', 'hooks')
 const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
 
 // I-NEW-C: --install-second-opinion is atomic w.r.t. its own validation.
@@ -111,7 +111,7 @@ Tools:
   all          Install for all supported tools except opencode (avoids duplicate OpenCode-visible skills)
 
 Hook flags (claude-code / Phase 3b):
-  --install-hooks         Copy hooks/*.sh into ~/.claude/hooks/ and register
+  --install-hooks         Copy plugins/claude-code/hooks/*.sh into ~/.claude/hooks/ and register
                           checkpoint-gate + plan-gate (PreToolUse),
                           em-recall-sessionstart (SessionStart), and
                           em-session-end-prompt (SessionEnd) in
@@ -987,10 +987,10 @@ function buildHookFreshnessManifest(hookSpecs, libFiles, userHooksDir, userHooks
   }
 
   for (const spec of hookSpecs) {
-    add(path.join('hooks', spec.file), path.join(userHooksDir, spec.file))
+    add(path.join('plugins', 'claude-code', 'hooks', spec.file), path.join(userHooksDir, spec.file))
   }
   for (const file of libFiles) {
-    add(path.join('hooks', 'lib', file), path.join(userHooksLibDir, file))
+    add(path.join('plugins', 'claude-code', 'hooks', 'lib', file), path.join(userHooksLibDir, file))
   }
 
   return {
@@ -1404,7 +1404,10 @@ if (installSecondOpinion) {
   const repoValidatorSrc    = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
   const repoLocalDirSrc     = path.join(REPO_DIR, 'scripts', 'lib', 'local-dir.mjs')
   const repoTimeoutFloorSrc = path.join(REPO_HOOKS, 'lib', 'so-timeout-floor.mjs')
-  const repoRunbookSrc      = path.join(REPO_HOOKS, 'runbooks', 'second-opinion-harness.md')
+  // RFC-008 P1a: hooks/ moved to plugins/claude-code/hooks/, but hooks/runbooks/
+  // stays at the repo root until the second-opinion Follow PR. Point at REPO_DIR
+  // explicitly (NOT REPO_HOOKS, which now resolves under plugins/claude-code/).
+  const repoRunbookSrc      = path.join(REPO_DIR, 'hooks', 'runbooks', 'second-opinion-harness.md')
 
   const userGateDst         = path.join(userHooksDir, 'second-opinion-gate.mjs')
   const userValidatorDst    = path.join(userHooksLibDir, 'registry-validator.mjs')

@@ -38,7 +38,7 @@ __agent_classifier_deny_resolve_helper() {
   if [ -f "$global" ]; then printf '%s' "$global"; return 0; fi
   local self_dir
   self_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  local repo="$self_dir/../../scripts/classifier-marker.mjs"
+  local repo="$self_dir/../../../../scripts/classifier-marker.mjs"
   if [ -f "$repo" ]; then printf '%s' "$repo"; return 0; fi
   printf '%s' "classifier-marker.mjs"
   return 0

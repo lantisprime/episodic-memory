@@ -31,7 +31,7 @@ import os from 'os'
 import { spawnSync } from 'child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const PLAN_GATE = path.join(REPO, 'hooks', 'plan-gate.sh')
+const PLAN_GATE = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'plan-gate.sh')
 const HELPER = path.join(REPO, 'scripts', 'plan-marker.mjs')
 const EM_RECALL = path.join(REPO, 'scripts', 'em-recall.mjs')
 const SESSION_END = path.join(REPO, 'scripts', 'em-session-end-prompt.mjs')
@@ -51,9 +51,9 @@ function mkTmpRepo() {
   // Stage the hook + libs the gate sources.
   const hooksLib = path.join(real, 'hooks', 'lib')
   fs.mkdirSync(hooksLib, { recursive: true })
-  fs.cpSync(path.join(REPO, 'hooks', 'plan-gate.sh'), path.join(real, 'hooks', 'plan-gate.sh'))
+  fs.cpSync(path.join(REPO, 'plugins', 'claude-code', 'hooks', 'plan-gate.sh'), path.join(real, 'hooks', 'plan-gate.sh'))
   for (const lib of ['command-classifier.sh', 'repo-root.sh', 'marker-paths.sh', 'session-id.sh']) {
-    fs.cpSync(path.join(REPO, 'hooks', 'lib', lib), path.join(hooksLib, lib))
+    fs.cpSync(path.join(REPO, 'plugins', 'claude-code', 'hooks', 'lib', lib), path.join(hooksLib, lib))
   }
   cleanups.push(() => fs.rmSync(real, { recursive: true, force: true }))
   return real

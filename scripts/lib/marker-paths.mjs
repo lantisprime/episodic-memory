@@ -464,24 +464,24 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
   // E1-E5: classifier basename allowlists (5 case-arms in command-classifier.sh).
   // Each routes shell verb (rm/redirect/tee/touch) + classify_path through
   // marker_write classification when target matches plan-marker basename.
-  { file: 'hooks/lib/command-classifier.sh', line: 516, role: 'rm-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
-  { file: 'hooks/lib/command-classifier.sh', line: 640, role: 'redirect-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
-  { file: 'hooks/lib/command-classifier.sh', line: 685, role: 'tee-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
-  { file: 'hooks/lib/command-classifier.sh', line: 725, role: 'touch-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
-  { file: 'hooks/lib/command-classifier.sh', line: 1310, role: 'classify_path marker_write basename', kind: 'shell-case', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 516, role: 'rm-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 640, role: 'redirect-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 685, role: 'tee-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 725, role: 'touch-target basename allowlist', kind: 'shell-case', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 1310, role: 'classify_path marker_write basename', kind: 'shell-case', semantic_role: 'read-any' },
 
   // E5b: classifier helper-invocation recognition (NEW in #268 fix commit 6).
   // F17+F18 reject leading POSIX-name env assignment before classifying as marker_write.
-  { file: 'hooks/lib/command-classifier.sh', line: 0, role: 'plan-marker.mjs helper invocation classification (F13+F17+F18)', kind: 'shell-case-helper-invocation-strict', semantic_role: 'read-own-session' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 0, role: 'plan-marker.mjs helper invocation classification (F13+F17+F18)', kind: 'shell-case-helper-invocation-strict', semantic_role: 'read-own-session' },
 
   // E6-E9: checkpoint-gate.sh detector patterns/predicates (4 sites).
-  { file: 'hooks/checkpoint-gate.sh', line: 99, role: 'marker_basename_for_target exact-equality', kind: 'shell-equality', semantic_role: 'read-any' },
-  { file: 'hooks/checkpoint-gate.sh', line: 120, role: '_marker_basename_in_set closed set', kind: 'shell-case', semantic_role: 'read-any' },
-  { file: 'hooks/checkpoint-gate.sh', line: 196, role: '_command_has_relative_marker_path grep-E alternation', kind: 'grep-E-alternation', semantic_role: 'read-any' },
-  { file: 'hooks/checkpoint-gate.sh', line: 276, role: '_command_first_absolute_noncanonical_marker three-pass detector (token-equality + key=path walk + substring grep with relative-occurrence disambiguation; canonical short-circuit; path-with-spaces safe)', kind: 'shell-tokenizer-three-pass', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 99, role: 'marker_basename_for_target exact-equality', kind: 'shell-equality', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 120, role: '_marker_basename_in_set closed set', kind: 'shell-case', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 196, role: '_command_has_relative_marker_path grep-E alternation', kind: 'grep-E-alternation', semantic_role: 'read-any' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 276, role: '_command_first_absolute_noncanonical_marker three-pass detector (token-equality + key=path walk + substring grep with relative-occurrence disambiguation; canonical short-circuit; path-with-spaces safe)', kind: 'shell-tokenizer-three-pass', semantic_role: 'read-any' },
 
   // E10: plan-gate.sh existence check + marker_write allowlist.
-  { file: 'hooks/plan-gate.sh', line: 57, role: 'PLAN_PENDING_W resolution + existence check + marker_write allowlist (session-aware after #268 fix)', kind: 'shell-equality', semantic_role: 'read-own-session' },
+  { file: 'plugins/claude-code/hooks/plan-gate.sh', line: 57, role: 'PLAN_PENDING_W resolution + existence check + marker_write allowlist (session-aware after #268 fix)', kind: 'shell-equality', semantic_role: 'read-own-session' },
 
   // E11: scripts/em-recall.mjs TASK_SIGNAL_MARKERS array literal (consumer).
   { file: 'scripts/em-recall.mjs', line: 97, role: 'TASK_SIGNAL_MARKERS array literal (consumer)', kind: 'js-array', semantic_role: 'read-any' },
@@ -490,17 +490,17 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
   { file: 'scripts/em-audit-compliance.mjs', line: 111, role: 'compliance audit regex (\\.plan-approval-pending\\b accepts both forms)', kind: 'js-regex', semantic_role: 'read-any' },
 
   // E13: NEW plan_marker_exists_for_session helper definition (checkpoint-gate.sh).
-  { file: 'hooks/checkpoint-gate.sh', line: 82, role: 'plan_marker_exists_for_session helper definition (NEW in #268 fix)', kind: 'shell-function', semantic_role: 'read-own-session' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 82, role: 'plan_marker_exists_for_session helper definition (NEW in #268 fix)', kind: 'shell-function', semantic_role: 'read-own-session' },
 
   // E14, E15, E17: cross-gate decision call-sites in checkpoint-gate.sh (3 sites).
   // Swap `marker_exists .plan-approval-pending` → `plan_marker_exists_for_session "$MY_SID"`.
-  { file: 'hooks/checkpoint-gate.sh', line: 376, role: 'cross-gate plan-pending check (Bash marker_write branch)', kind: 'shell-predicate-call', semantic_role: 'read-own-session' },
-  { file: 'hooks/checkpoint-gate.sh', line: 436, role: 'cross-gate plan-pending check (Write/Edit branch)', kind: 'shell-predicate-call', semantic_role: 'read-own-session' },
-  { file: 'hooks/checkpoint-gate.sh', line: 481, role: 'push-gate plan-pending cleanup guard', kind: 'shell-predicate-call', semantic_role: 'read-own-session' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 376, role: 'cross-gate plan-pending check (Bash marker_write branch)', kind: 'shell-predicate-call', semantic_role: 'read-own-session' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 436, role: 'cross-gate plan-pending check (Write/Edit branch)', kind: 'shell-predicate-call', semantic_role: 'read-own-session' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 481, role: 'push-gate plan-pending cleanup guard', kind: 'shell-predicate-call', semantic_role: 'read-own-session' },
 
   // E16, E18: decoupled gate sites (DIFFERENT markers; validator asserts no coupling).
-  { file: 'hooks/checkpoint-gate.sh', line: 459, role: 'pre-checkpoint gate (.checkpoint-required — DIFFERENT marker)', kind: 'shell-decoupled', semantic_role: 'decoupled' },
-  { file: 'hooks/checkpoint-gate.sh', line: 497, role: 'pre→post arming gate (.checkpoint-required — DIFFERENT marker)', kind: 'shell-decoupled', semantic_role: 'decoupled' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 459, role: 'pre-checkpoint gate (.checkpoint-required — DIFFERENT marker)', kind: 'shell-decoupled', semantic_role: 'decoupled' },
+  { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 497, role: 'pre→post arming gate (.checkpoint-required — DIFFERENT marker)', kind: 'shell-decoupled', semantic_role: 'decoupled' },
 
   // E19-E20: em-recall.mjs iteration consumers.
   { file: 'scripts/em-recall.mjs', line: 170, role: 'TASK_SIGNAL_MARKERS carve-out loop (glob-expands suffixed forms)', kind: 'js-array-iter', semantic_role: 'read-any' },
@@ -517,5 +517,5 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
   { file: 'scripts/em-session-end-prompt.mjs', line: 19, role: 'SessionEnd cleanup (own-session-only — F12)', kind: 'js-array-iter-own-session', semantic_role: 'remove-own-session' },
 
   // E22: command-classifier.sh push-cleanup loop (DECOUPLED — plan-pending not in CHECKPOINT_CLEANUP_MARKERS).
-  { file: 'hooks/lib/command-classifier.sh', line: 482, role: 'push-cleanup loop over CHECKPOINT_CLEANUP_MARKERS (REFERENCE — plan-pending intentionally excluded)', kind: 'shell-loop-decoupled', semantic_role: 'decoupled' },
+  { file: 'plugins/claude-code/hooks/lib/command-classifier.sh', line: 482, role: 'push-cleanup loop over CHECKPOINT_CLEANUP_MARKERS (REFERENCE — plan-pending intentionally excluded)', kind: 'shell-loop-decoupled', semantic_role: 'decoupled' },
 ]

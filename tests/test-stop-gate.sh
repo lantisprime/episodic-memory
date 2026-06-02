@@ -17,7 +17,7 @@
 set -e
 
 REPO_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/stop-gate.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/stop-gate.sh"
 EM_RECALL="$REPO_ROOT/scripts/em-recall.mjs"
 
 PASS=0
@@ -401,7 +401,7 @@ else
 fi
 
 # E2: Writer-gate BLOCKS various tool surfaces — marker is on disk.
-CHECKPOINT_HOOK="$REPO_ROOT/hooks/checkpoint-gate.sh"
+CHECKPOINT_HOOK="$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh"
 if [ ! -x "$CHECKPOINT_HOOK" ]; then
   echo "  (skip E2: checkpoint-gate.sh not executable)"
 else

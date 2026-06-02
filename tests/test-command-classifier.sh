@@ -6,7 +6,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LIB="$REPO_ROOT/hooks/lib/command-classifier.sh"
+LIB="$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh"
 
 if [ ! -f "$LIB" ]; then
   echo "FAIL: $LIB not found"

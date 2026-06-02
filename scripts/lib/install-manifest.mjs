@@ -9,8 +9,8 @@
  *
  * Manifest entry shape:
  *   {
- *     relativePath: 'hooks/checkpoint-gate.sh',  // path under repo root
- *     repoPath: '<repoDir>/hooks/checkpoint-gate.sh',
+ *     relativePath: 'plugins/claude-code/hooks/checkpoint-gate.sh',  // path under repo root
+ *     repoPath: '<repoDir>/plugins/claude-code/hooks/checkpoint-gate.sh',
  *     installedPath: '<homeDir>/.claude/hooks/checkpoint-gate.sh',
  *     kind: 'hook' | 'hook-lib' | 'script' | 'script-lib' | 'pattern' | 'config',
  *     // hook-only:
@@ -120,7 +120,7 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
   for (const spec of HOOK_SPECS) {
     if (hookFiles.has(spec.file)) continue
     hookFiles.add(spec.file)
-    const rel = `hooks/${spec.file}`
+    const rel = `plugins/claude-code/hooks/${spec.file}`
     entries.push({
       relativePath: rel,
       repoPath: path.join(repoDir, rel),
@@ -130,10 +130,10 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
   }
 
   // Hook lib — every .sh under hooks/lib/.
-  const repoHooksLib = path.join(repoDir, 'hooks', 'lib')
+  const repoHooksLib = path.join(repoDir, 'plugins', 'claude-code', 'hooks', 'lib')
   if (fs.existsSync(repoHooksLib)) {
     for (const f of fs.readdirSync(repoHooksLib).filter(n => n.endsWith('.sh'))) {
-      const rel = `hooks/lib/${f}`
+      const rel = `plugins/claude-code/hooks/lib/${f}`
       entries.push({
         relativePath: rel,
         repoPath: path.join(repoDir, rel),

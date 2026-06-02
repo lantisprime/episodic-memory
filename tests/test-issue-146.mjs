@@ -529,7 +529,7 @@ console.log('\n=== L4 — Runtime-integration E2E (hook chain via real shell) ==
 // with empty .episodic-memory/. Closes the BP-1 step 8 gap flagged in
 // violation episode 20260505-123354-...-0088.
 
-const HOOK_DIR = path.join(REPO_ROOT, 'hooks')
+const HOOK_DIR = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks')
 const SESSIONSTART_HOOK = path.join(HOOK_DIR, 'em-recall-sessionstart.sh')
 const STOP_HOOK = path.join(HOOK_DIR, 'stop-gate.sh')
 const CHECKPOINT_HOOK = path.join(HOOK_DIR, 'checkpoint-gate.sh')

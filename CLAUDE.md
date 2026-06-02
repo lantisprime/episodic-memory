@@ -41,7 +41,7 @@ Consensus-loop variant: pass `--consensus --max-rounds N --rebuttal-cb <script>`
 
 Providers: `codex`, `claude-subagent`, `gemini`, `stub`. Storage: `files` (`.review-store/`) or `episodic`. Preambles default to `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
 
-Run `node install.mjs --tool claude-code --install-second-opinion` to write the registry snapshot at `~/.claude/hooks/second-opinion-providers.json`. The PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks direct Bash + Agent provider invocations so all reviews route through the harness; fail-closed on missing/malformed snapshot.
+Run `node install.mjs --tool claude-code --install-second-opinion` to write the registry snapshot at `~/.claude/hooks/second-opinion-providers.json`. The PreToolUse hook (`plugins/claude-code/hooks/second-opinion-gate.mjs`) blocks direct Bash + Agent provider invocations so all reviews route through the harness; fail-closed on missing/malformed snapshot.
 
 ## Discovering active priorities (read on session start)
 Before recommending or starting work, fetch the latest workplan:

@@ -253,7 +253,7 @@ export function validate({ memoryRoot, repoRoot }) {
   result.checks.inventory = inventoryResults
 
   // ----- Check 4: installed-runtime ↔ committed-source sha sync (T9 / F10)
-  const sourceHook = path.join(repoRoot, 'hooks', 'session-handoff-prompt.sh')
+  const sourceHook = path.join(repoRoot, 'plugins', 'claude-code', 'hooks', 'session-handoff-prompt.sh')
   const installedHook = path.join(os.homedir(), '.claude', 'hooks', 'session-handoff-prompt.sh')
   const syncResult = { source: sourceHook, installed: installedHook }
   if (!fs.existsSync(sourceHook)) {

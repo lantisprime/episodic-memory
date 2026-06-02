@@ -11,7 +11,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/plan-gate.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh"
 
 if [ ! -f "$HOOK" ]; then
   echo "FAIL: $HOOK not found in repo. Issue #86 PR-A canonicalizes plan-gate.sh into hooks/."

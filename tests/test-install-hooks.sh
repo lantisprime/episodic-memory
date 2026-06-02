@@ -92,7 +92,7 @@ assert_eq "T1b6 hook freshness manifest written (#103)" "true" "$r"
 manifest_source=$(jq -r '.source_repo' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT" "$manifest_source"
 
-managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
+managed_count=$(jq '[.files[]? | select(.relative_path | test("^plugins/claude-code/hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
 # 6 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
 # preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 6
 # hooks/lib/.sh files (command-classifier, repo-root, marker-paths,
@@ -103,7 +103,7 @@ managed_count=$(jq '[.files[]? | select(.relative_path | test("^hooks/.*\\.sh$")
 # The test is wired into CI (plan-marker-validate.yml) to catch future drift.
 assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "12" "$managed_count"
 
-pg_manifest=$(jq -r '.files[] | select(.relative_path == "hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
+pg_manifest=$(jq -r '.files[] | select(.relative_path == "plugins/claude-code/hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"
 
 cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
@@ -295,7 +295,7 @@ echo "# user-customized" >> "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
 chmod +x "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
 run_installer --install-hooks --install-hooks-force
 
-sha_repo=$(shasum "$REPO_ROOT/hooks/checkpoint-gate.sh" | awk '{print $1}')
+sha_repo=$(shasum "$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh" | awk '{print $1}')
 sha_dest=$(shasum "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
 assert_eq "T6a --install-hooks-force overwrites divergent hook with repo version" "$sha_repo" "$sha_dest"
 
@@ -481,7 +481,7 @@ if [[ "$TEST_HOME" == *" "* ]]; then
   # First place a copy of the canonical hook so installHookFile reports
   # 'unchanged' (file install eligibility succeeds) — so addHookEntry's
   # idempotence check is what determines whether we duplicate.
-  cp "$REPO_ROOT/hooks/checkpoint-gate.sh" "$legacy_cmd"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh" "$legacy_cmd"
   chmod +x "$legacy_cmd"
   cat > "$TEST_HOME/.claude/settings.json" <<JSON
 {
@@ -567,7 +567,7 @@ echo "# user-customized" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
 chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
 run_installer --install-hooks --install-hooks-force
 
-sha_repo=$(shasum "$REPO_ROOT/hooks/plan-gate.sh" | awk '{print $1}')
+sha_repo=$(shasum "$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh" | awk '{print $1}')
 sha_dest=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
 assert_eq "T16a --install-hooks-force overwrites divergent plan-gate with repo version" "$sha_repo" "$sha_dest"
 

@@ -50,7 +50,7 @@ const REPO = path.resolve(HERE, '..')
 const SCRIPTS = path.join(REPO, 'scripts')
 const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
 const STORE = path.join(SCRIPTS, 'em-store.mjs')
-const HOOK = path.join(REPO, 'hooks', 'em-recall-sessionstart.sh')
+const HOOK = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'em-recall-sessionstart.sh')
 
 let passed = 0
 let failed = 0

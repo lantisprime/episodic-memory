@@ -1,1 +1,0 @@
-../../scripts/second-opinion/lib/registry-validator.mjs

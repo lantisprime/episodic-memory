@@ -40,8 +40,8 @@ const CONFIG_LOADER = path.join(SCRIPTS, 'classifier-config-loader.mjs')
 const LLM_CLASSIFY = path.join(SCRIPTS, 'llm-classify.mjs')
 const DISPATCH = path.join(SCRIPTS, 'agent-classifier-dispatch.mjs')
 const CORRECTION = path.join(SCRIPTS, 'classify-correction.mjs')
-const WRAPPER = path.join(REPO, 'hooks', 'lib', 'agent-classifier.sh')
-const COMMAND_CLASSIFIER = path.join(REPO, 'hooks', 'lib', 'command-classifier.sh')
+const WRAPPER = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'lib', 'agent-classifier.sh')
+const COMMAND_CLASSIFIER = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'lib', 'command-classifier.sh')
 
 let passed = 0
 let failed = 0

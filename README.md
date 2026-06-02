@@ -91,7 +91,7 @@ The installer:
 2. Copies `patterns/_index.json` to `~/.episodic-memory/patterns/` for global pattern validation
 3. Creates `.episodic-memory/` in the target project for local episodes
 4. Copies the appropriate instruction file for your tool
-5. With `--install-hooks`: copies `hooks/*.sh` into `~/.claude/hooks/` and `hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
+5. With `--install-hooks`: copies `plugins/claude-code/hooks/*.sh` into `~/.claude/hooks/` and `plugins/claude-code/hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
 
 ## Supported Tools
 
@@ -432,7 +432,7 @@ Bootstrap (writes the install snapshot consumed by validators + the Claude Code 
 node install.mjs --tool claude-code --install-second-opinion
 ```
 
-The PreToolUse hook (`hooks/second-opinion-gate.mjs`) blocks direct provider invocations (Bash + Agent variants) so reviews route through the harness. Fail-closed cases:
+The PreToolUse hook (`plugins/claude-code/hooks/second-opinion-gate.mjs`) blocks direct provider invocations (Bash + Agent variants) so reviews route through the harness. Fail-closed cases:
 
 - Missing or malformed snapshot (parse error, missing `source_hash`).
 - Invalid providers — empty `providers[]`, duplicate `id`, missing/non-compilable `cli_match` regex, missing `binary`, or non-array `agent_block_patterns` / `agent_allow_patterns`. Hook blocks with reason `snapshot-invalid-providers`.

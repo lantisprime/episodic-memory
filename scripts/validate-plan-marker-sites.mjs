@@ -76,7 +76,7 @@ function info(msg) {
 // ---------------------------------------------------------------------------
 function checkLibParity() {
   checks++
-  const shPath = path.join(REPO, 'hooks', 'lib', 'marker-paths.sh')
+  const shPath = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'lib', 'marker-paths.sh')
   let shSource
   try {
     shSource = fs.readFileSync(shPath, 'utf8')
@@ -152,7 +152,7 @@ function checkBidirectionalDrift() {
     '.gitignore',
     // Validator self-exclusion (the JS + shell registry sources + validator itself).
     'scripts/lib/marker-paths.mjs',
-    'hooks/lib/marker-paths.sh',
+    'plugins/claude-code/hooks/lib/marker-paths.sh',
     'scripts/validate-plan-marker-sites.mjs',
   ])
   // Any .md file (doc-class) is excluded regardless of path.

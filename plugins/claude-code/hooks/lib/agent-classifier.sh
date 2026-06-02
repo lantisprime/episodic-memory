@@ -47,7 +47,7 @@ __agent_classifier_resolve_marker_helper() {
   # Repo-source fallback (dev / pre-install).
   local self_dir
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local repo="$self_dir/../../scripts/classifier-marker.mjs"
+  local repo="$self_dir/../../../../scripts/classifier-marker.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"
     return 0
@@ -66,7 +66,7 @@ __agent_classifier_resolve_persist_helper() {
   fi
   local self_dir
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local repo="$self_dir/../../scripts/classifier-override-persist.mjs"
+  local repo="$self_dir/../../../../scripts/classifier-override-persist.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"
     return 0
@@ -135,7 +135,7 @@ __agent_classifier_resolve_legacy_dispatcher() {
   fi
   local self_dir
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local repo="$self_dir/../../scripts/agent-classifier-dispatch.mjs"
+  local repo="$self_dir/../../../../scripts/agent-classifier-dispatch.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"
     return 0

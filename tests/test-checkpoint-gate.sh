@@ -9,7 +9,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/checkpoint-gate.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh"
 
 if [ ! -x "$HOOK" ]; then
   echo "FAIL: $HOOK is not executable"
@@ -725,7 +725,7 @@ echo "--- Hook composition with plan-gate.sh (RFC-002:215) ---"
 # This test exercises both hooks sequentially against a shared cwd to
 # verify no cross-hook marker contamination and that error messages are
 # distinguishable.
-PLAN_GATE_REPO="$REPO_ROOT/hooks/plan-gate.sh"
+PLAN_GATE_REPO="$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh"
 PLAN_GATE_USER="$HOME/.claude/hooks/plan-gate.sh"
 # Prefer a repo-staged copy if one ever lands at hooks/plan-gate.sh; otherwise
 # fall back to the user-installed hook (same convention as tests/test-plan-gate.sh:10).
@@ -1730,7 +1730,10 @@ echo "--- PR-A P1.1: authority-root threading (caller_cwd != hook \$PWD) ---"
 
 # Skip if the real classifier-marker.mjs isn't reachable from this repo
 # (e.g., extracted fixture). The integration test needs the real helper.
-REAL_HELPER="$(cd "$(dirname "$HOOK")/.." 2>/dev/null && pwd)/scripts/classifier-marker.mjs"
+# Resolve from $REPO_ROOT (depth-independent) rather than $HOOK-relative
+# arithmetic, which would silently break on any future hooks/ relocation
+# (RFC-008 P1a moved hooks/ → plugins/claude-code/hooks/, 2 levels deeper).
+REAL_HELPER="$REPO_ROOT/scripts/classifier-marker.mjs"
 if [ -f "$REAL_HELPER" ]; then
   P11_REPO="$(mktemp -d)"
   P11_REPO="$(cd -P "$P11_REPO" && pwd)"

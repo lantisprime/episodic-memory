@@ -34,7 +34,7 @@ import { computeSourceHash } from '../scripts/second-opinion/lib/source-hash.mjs
 import { writeSnapshot } from '../scripts/second-opinion/lib/install-snapshot.mjs'
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const HOOK = path.join(REPO_ROOT, 'hooks', 'second-opinion-gate.mjs')
+const HOOK = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'second-opinion-gate.mjs')
 const SECOND_OPINION_ROOT = path.join(REPO_ROOT, 'scripts', 'second-opinion')
 
 let passed = 0
