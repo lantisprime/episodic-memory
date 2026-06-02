@@ -19,11 +19,11 @@ set -u
 
 REPO="$(cd -P "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
-source "$REPO/hooks/lib/command-classifier.sh"
+source "$REPO/plugins/claude-code/hooks/lib/command-classifier.sh"
 # shellcheck disable=SC1091
-source "$REPO/hooks/lib/marker-paths.sh"
+source "$REPO/plugins/claude-code/hooks/lib/marker-paths.sh"
 # shellcheck disable=SC1091
-source "$REPO/hooks/lib/session-id.sh"
+source "$REPO/plugins/claude-code/hooks/lib/session-id.sh"
 
 export CLAUDE_CODE_SESSION_ID="test-sid-abc"
 

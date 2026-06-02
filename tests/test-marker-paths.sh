@@ -12,7 +12,7 @@
 set -e
 
 REPO_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIB="$REPO_ROOT/hooks/lib/marker-paths.sh"
+LIB="$REPO_ROOT/plugins/claude-code/hooks/lib/marker-paths.sh"
 
 if [ ! -f "$LIB" ]; then
   echo "FAIL: $LIB not found"

@@ -18,7 +18,7 @@
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/preflight-gate.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/preflight-gate.sh"
 HELPER="$REPO_ROOT/scripts/preflight-marker-write.mjs"
 GATE_INPUT_TMPL='{"tool_name":"%s","tool_input":%s,"cwd":"%s","session_id":"%s","transcript_path":"/tmp/x"}'
 
@@ -47,10 +47,10 @@ stage_fixture() {
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$tmp/scripts/lib/"
-  cp "$REPO_ROOT/hooks/preflight-gate.sh" "$tmp/hooks/"
-  cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$tmp/hooks/lib/"
-  cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$tmp/hooks/lib/"
-  cp "$REPO_ROOT/hooks/lib/marker-paths.sh" "$tmp/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/preflight-gate.sh" "$tmp/hooks/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" "$tmp/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/repo-root.sh" "$tmp/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/marker-paths.sh" "$tmp/hooks/lib/"
   cp "$REPO_ROOT/bundles/codex-review-channel-current.md" "$tmp/bundles/"
 }
 

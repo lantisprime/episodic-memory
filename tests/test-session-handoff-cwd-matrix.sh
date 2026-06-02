@@ -23,7 +23,7 @@
 
 set -u
 
-HOOK="$(cd "$(dirname "$0")/../hooks" && pwd)/session-handoff-prompt.sh"
+HOOK="$(cd "$(dirname "$0")/../plugins/claude-code/hooks" && pwd)/session-handoff-prompt.sh"
 INSTALLED_HOOK="${HOME}/.claude/hooks/session-handoff-prompt.sh"
 MAIN_REPO="$(cd "$(dirname "$0")/.." && pwd)"
 

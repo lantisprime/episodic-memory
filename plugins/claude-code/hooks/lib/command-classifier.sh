@@ -1639,7 +1639,7 @@ _classify_segment() {
     else
       local __t0_self_dir
       __t0_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-      local __t0_repo="$__t0_self_dir/../../scripts/classifier-override-lookup.mjs"
+      local __t0_repo="$__t0_self_dir/../../../../scripts/classifier-override-lookup.mjs"
       if [ -f "$__t0_repo" ]; then
         __t0_helper="$__t0_repo"
       fi

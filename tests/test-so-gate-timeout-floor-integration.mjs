@@ -17,8 +17,8 @@ import crypto from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const REPO_GATE = path.join(REPO_ROOT, 'hooks', 'second-opinion-gate.mjs')
-const REPO_LIB_DIR = path.join(REPO_ROOT, 'hooks', 'lib')
+const REPO_GATE = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'second-opinion-gate.mjs')
+const REPO_LIB_DIR = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'lib')
 const REPO_TIMEOUT_FLOOR = path.join(REPO_LIB_DIR, 'so-timeout-floor.mjs')
 const REPO_LOCAL_DIR = path.join(REPO_ROOT, 'scripts', 'lib', 'local-dir.mjs')
 const REPO_VALIDATOR = path.join(REPO_ROOT, 'scripts', 'second-opinion', 'lib', 'registry-validator.mjs')

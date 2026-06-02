@@ -24,7 +24,7 @@ const LOOKUP = path.join(ROOT, 'scripts', 'classifier-override-lookup.mjs')
 const PERSIST = path.join(ROOT, 'scripts', 'classifier-override-persist.mjs')
 const CORRECTION = path.join(ROOT, 'scripts', 'classify-correction.mjs')
 const MARKER = path.join(ROOT, 'scripts', 'classifier-marker.mjs')
-const SHELL_LIB = path.join(ROOT, 'hooks', 'lib', 'command-classifier.sh')
+const SHELL_LIB = path.join(ROOT, 'plugins', 'claude-code', 'hooks', 'lib', 'command-classifier.sh')
 
 function mkrepo(name) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `t0-${name}-`)))

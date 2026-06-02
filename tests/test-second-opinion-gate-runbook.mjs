@@ -36,13 +36,13 @@ import crypto from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const HOOK = path.join(REPO_ROOT, 'hooks', 'second-opinion-gate.mjs')
+const HOOK = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'second-opinion-gate.mjs')
 const RUNBOOK_SRC = path.join(REPO_ROOT, 'hooks', 'runbooks', 'second-opinion-harness.md')
 // Orphan-install fixtures below copy HOOK alone; the gate's harness branch
 // now also dynamic-imports lib/so-timeout-floor.mjs, so fixtures must
 // colocate it or they fail-closed with so-timeout-floor-load-failed before
 // the local-dir layer this suite is testing.
-const TIMEOUT_FLOOR_SRC = path.join(REPO_ROOT, 'hooks', 'lib', 'so-timeout-floor.mjs')
+const TIMEOUT_FLOOR_SRC = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'lib', 'so-timeout-floor.mjs')
 
 let passed = 0
 let failed = 0

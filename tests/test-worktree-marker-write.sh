@@ -15,7 +15,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/checkpoint-gate.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh"
 
 passed=0
 failed=0

@@ -10,7 +10,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/em-recall-sessionstart.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/em-recall-sessionstart.sh"
 
 if [ ! -x "$HOOK" ]; then
   echo "FAIL: $HOOK is not executable"
@@ -176,9 +176,9 @@ echo "--- #103 hook freshness warnings ---"
 FRESH_SRC="$TEST_DIR/fresh-source-repo"
 FRESH_INSTALLED="$TEST_HOME/.claude/hooks"
 mkdir -p "$FRESH_SRC/hooks/lib" "$FRESH_INSTALLED/lib" "$TEST_HOME/.episodic-memory"
-cp "$REPO_ROOT/hooks/plan-gate.sh" "$FRESH_SRC/hooks/plan-gate.sh"
-cp "$REPO_ROOT/hooks/em-recall-sessionstart.sh" "$FRESH_SRC/hooks/em-recall-sessionstart.sh"
-cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$FRESH_SRC/hooks/lib/command-classifier.sh"
+cp "$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh" "$FRESH_SRC/hooks/plan-gate.sh"
+cp "$REPO_ROOT/plugins/claude-code/hooks/em-recall-sessionstart.sh" "$FRESH_SRC/hooks/em-recall-sessionstart.sh"
+cp "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" "$FRESH_SRC/hooks/lib/command-classifier.sh"
 cp "$FRESH_SRC/hooks/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
 cp "$FRESH_SRC/hooks/em-recall-sessionstart.sh" "$FRESH_INSTALLED/em-recall-sessionstart.sh"
 cp "$FRESH_SRC/hooks/lib/command-classifier.sh" "$FRESH_INSTALLED/lib/command-classifier.sh"
@@ -190,19 +190,19 @@ cat > "$TEST_HOME/.episodic-memory/hook-install.json" <<EOF
   "hooks_dir": "$FRESH_INSTALLED",
   "files": [
     {
-      "relative_path": "hooks/plan-gate.sh",
+      "relative_path": "plugins/claude-code/hooks/plan-gate.sh",
       "installed_path": "$FRESH_INSTALLED/plan-gate.sh",
       "source_sha256": "unused-in-runtime",
       "source_version": "2026-05-08.1"
     },
     {
-      "relative_path": "hooks/em-recall-sessionstart.sh",
+      "relative_path": "plugins/claude-code/hooks/em-recall-sessionstart.sh",
       "installed_path": "$FRESH_INSTALLED/em-recall-sessionstart.sh",
       "source_sha256": "unused-in-runtime",
       "source_version": "2026-05-08.1"
     },
     {
-      "relative_path": "hooks/lib/command-classifier.sh",
+      "relative_path": "plugins/claude-code/hooks/lib/command-classifier.sh",
       "installed_path": "$FRESH_INSTALLED/lib/command-classifier.sh",
       "source_sha256": "unused-in-runtime",
       "source_version": "2026-05-08.1"
@@ -224,7 +224,7 @@ fi
 
 printf '\n# local edit without version bump\n' >> "$FRESH_INSTALLED/plan-gate.sh"
 output="$(run_hook_capture)"
-if echo "$output" | grep -q "hooks/plan-gate.sh" \
+if echo "$output" | grep -q "plugins/claude-code/hooks/plan-gate.sh" \
   && echo "$output" | grep -q -- "--install-hooks-force"; then
   echo "  ✓ 11. Manual installed hook edit is reported without overwrite"
   ((passed++))
@@ -237,7 +237,7 @@ fi
 cp "$FRESH_SRC/hooks/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
 printf '\n# local lib edit without version bump\n' >> "$FRESH_INSTALLED/lib/command-classifier.sh"
 output="$(run_hook_capture)"
-if echo "$output" | grep -q "hooks/lib/command-classifier.sh"; then
+if echo "$output" | grep -q "plugins/claude-code/hooks/lib/command-classifier.sh"; then
   echo "  ✓ 12. Managed hook lib drift is reported"
   ((passed++))
 else

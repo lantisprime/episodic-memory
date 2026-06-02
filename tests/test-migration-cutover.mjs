@@ -65,13 +65,13 @@ function mkfile(p, content = 'x') {
 }
 
 // Mirror real hook + lib + script + script-lib + pattern files.
-mkfile(path.join(synthRepo, 'hooks/checkpoint-gate.sh'), 'cp\n')
-mkfile(path.join(synthRepo, 'hooks/plan-gate.sh'), 'plan\n')
-mkfile(path.join(synthRepo, 'hooks/stop-gate.sh'), 'stop\n')
-mkfile(path.join(synthRepo, 'hooks/em-recall-sessionstart.sh'), 'sess\n')
-mkfile(path.join(synthRepo, 'hooks/lib/marker-paths.sh'), 'mp\n')
-mkfile(path.join(synthRepo, 'hooks/lib/repo-root.sh'), 'rr\n')
-mkfile(path.join(synthRepo, 'hooks/lib/command-classifier.sh'), 'cc\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/checkpoint-gate.sh'), 'cp\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/plan-gate.sh'), 'plan\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/stop-gate.sh'), 'stop\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/em-recall-sessionstart.sh'), 'sess\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/lib/marker-paths.sh'), 'mp\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/lib/repo-root.sh'), 'rr\n')
+mkfile(path.join(synthRepo, 'plugins/claude-code/hooks/lib/command-classifier.sh'), 'cc\n')
 mkfile(path.join(synthRepo, 'scripts/em-recall.mjs'), 'er\n')
 mkfile(path.join(synthRepo, 'scripts/em-store.mjs'), 'es\n')
 mkfile(path.join(synthRepo, 'scripts/lib/local-dir.mjs'), 'ld\n')
@@ -133,7 +133,7 @@ test('buildInstallManifest sorts entries by relativePath', () => {
 
 test('buildInstallManifest installedPath uses HOME_DIR for hook + script roots', () => {
   const m = buildInstallManifest(synthRepo, synthHome)
-  const checkpoint = m.find(e => e.relativePath === 'hooks/checkpoint-gate.sh')
+  const checkpoint = m.find(e => e.relativePath === 'plugins/claude-code/hooks/checkpoint-gate.sh')
   eq(checkpoint.installedPath, path.join(synthHome, '.claude', 'hooks', 'checkpoint-gate.sh'))
   const recall = m.find(e => e.relativePath === 'scripts/em-recall.mjs')
   eq(recall.installedPath, path.join(synthHome, '.episodic-memory', 'scripts', 'em-recall.mjs'))
@@ -230,12 +230,12 @@ test('one MISSING surfaces correctly → exit 1', () => {
   fs.unlinkSync(installedClassifier)
   const result = runCutoverExpectFail(synthRepo, synthHome)
   eq(result.counts.MISSING, 1)
-  const cc = result.results.find(r => r.relativePath === 'hooks/lib/command-classifier.sh')
+  const cc = result.results.find(r => r.relativePath === 'plugins/claude-code/hooks/lib/command-classifier.sh')
   if (!cc || cc.status !== 'MISSING') {
     throw new Error(`expected MISSING for command-classifier, got ${JSON.stringify(cc)}`)
   }
   // Restore.
-  fs.copyFileSync(path.join(synthRepo, 'hooks/lib/command-classifier.sh'), installedClassifier)
+  fs.copyFileSync(path.join(synthRepo, 'plugins/claude-code/hooks/lib/command-classifier.sh'), installedClassifier)
 })
 
 console.log()

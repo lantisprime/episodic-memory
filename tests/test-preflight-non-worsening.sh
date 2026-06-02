@@ -41,15 +41,15 @@ stage_full_fixture() {
   cp "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/local-dir.mjs" "$tmp/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$tmp/scripts/lib/"
-  cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$tmp/hooks/lib/"
-  cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$tmp/hooks/lib/"
-  cp "$REPO_ROOT/hooks/lib/marker-paths.sh" "$tmp/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" "$tmp/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/repo-root.sh" "$tmp/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/marker-paths.sh" "$tmp/hooks/lib/"
   for h in checkpoint-gate.sh plan-gate.sh stop-gate.sh; do
-    cp "$REPO_ROOT/hooks/$h" "$tmp/hooks/"
+    cp "$REPO_ROOT/plugins/claude-code/hooks/$h" "$tmp/hooks/"
   done
   # second-opinion-gate.mjs depends on its lib; copy whole dir.
-  if [ -d "$REPO_ROOT/hooks/second-opinion-gate.mjs" ] || [ -f "$REPO_ROOT/hooks/second-opinion-gate.mjs" ]; then
-    cp "$REPO_ROOT/hooks/second-opinion-gate.mjs" "$tmp/hooks/"
+  if [ -d "$REPO_ROOT/plugins/claude-code/hooks/second-opinion-gate.mjs" ] || [ -f "$REPO_ROOT/plugins/claude-code/hooks/second-opinion-gate.mjs" ]; then
+    cp "$REPO_ROOT/plugins/claude-code/hooks/second-opinion-gate.mjs" "$tmp/hooks/"
   fi
 }
 

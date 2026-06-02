@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../hooks/lib" && pwd)"
+LIB_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../plugins/claude-code/hooks/lib" && pwd)"
 # shellcheck disable=SC1091
 source "$LIB_DIR/command-classifier.sh"
 

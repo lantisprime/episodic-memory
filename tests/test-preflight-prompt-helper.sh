@@ -16,7 +16,7 @@
 set -u
 
 REPO_ROOT="$(cd -P "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/preflight-prompt-helper.sh"
+HOOK="$REPO_ROOT/plugins/claude-code/hooks/preflight-prompt-helper.sh"
 
 passed=0
 failed=0
@@ -59,10 +59,10 @@ stage_repo() {
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$target/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/marker-root-validation.mjs" "$target/scripts/lib/"
-  cp "$REPO_ROOT/hooks/preflight-gate.sh" "$target/hooks/"
-  cp "$REPO_ROOT/hooks/lib/command-classifier.sh" "$target/hooks/lib/"
-  cp "$REPO_ROOT/hooks/lib/marker-paths.sh" "$target/hooks/lib/"
-  cp "$REPO_ROOT/hooks/lib/repo-root.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/preflight-gate.sh" "$target/hooks/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/marker-paths.sh" "$target/hooks/lib/"
+  cp "$REPO_ROOT/plugins/claude-code/hooks/lib/repo-root.sh" "$target/hooks/lib/"
   cp "$REPO_ROOT/bundles/codex-review-channel-current.md" "$target/bundles/"
   # Stage the 7 review-channel components at the local memory_root +
   # a config.json that points the hook there. Stub content per file —

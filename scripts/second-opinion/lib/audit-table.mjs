@@ -47,7 +47,7 @@ export const AUDIT_TABLE = {
       risk_class: 'Worktree write to non-canonical settings (PR #214 class)',
       mitigation: 'Install writes via canonical-resolved HOME (os.homedir()); install snapshot path constant in install-snapshot.mjs',
       verifying_paths: [
-        'hooks/second-opinion-gate.mjs',
+        'plugins/claude-code/hooks/second-opinion-gate.mjs',
         'install.mjs',
         'scripts/second-opinion/lib/install-snapshot.mjs',
       ],
@@ -60,7 +60,7 @@ export const AUDIT_TABLE = {
       risk_class: 'Hook process cwd ≠ harness projectRoot',
       mitigation: 'Hook reads cwd from PreToolUse stdin tool_input.cwd if present, else process.cwd(). Agreement with resolveRepoRoot verified by I-22 algorithm-parity test.',
       verifying_paths: [
-        'hooks/second-opinion-gate.mjs',
+        'plugins/claude-code/hooks/second-opinion-gate.mjs',
         'tests/test-second-opinion-i22-algorithm-parity.mjs',
       ],
     },
@@ -124,8 +124,8 @@ export const AUDIT_TABLE = {
         'scripts/second-opinion/lib/registry-validator.mjs',
         'scripts/second-opinion/lib/install-snapshot.mjs',
         'install.mjs',
-        'hooks/second-opinion-gate.mjs',
-        'hooks/lib/registry-validator.mjs',
+        'plugins/claude-code/hooks/second-opinion-gate.mjs',
+        'plugins/claude-code/hooks/lib/registry-validator.mjs',
         'tests/test-second-opinion-preamble.mjs',
         'tests/test-second-opinion-install-snapshot.mjs',
         'tests/test-second-opinion-gate.mjs',
@@ -156,7 +156,7 @@ export const AUDIT_TABLE = {
       risk_class: 'Drift between in-tree validator (via symlink) and installed copy',
       mitigation: 'Single canonical source at scripts/second-opinion/lib/registry-validator.mjs. In-tree hook tests resolve through symlink; installed hook reads copy. Both paths verified by test-second-opinion-gate.mjs (in-tree) + test-install-second-opinion-e2e.mjs (installed copy).',
       verifying_paths: [
-        'hooks/lib/registry-validator.mjs',
+        'plugins/claude-code/hooks/lib/registry-validator.mjs',
         'install.mjs',
         'tests/test-second-opinion-gate.mjs',
         'tests/test-install-second-opinion-e2e.mjs',
@@ -172,7 +172,7 @@ export const AUDIT_TABLE = {
       mitigation: 'Both readers (snapshotPath + hook SNAPSHOT_PATH) check the same env var name. Existing test-second-opinion-install-snapshot tests assert override is honored end-to-end.',
       verifying_paths: [
         'scripts/second-opinion/lib/install-snapshot.mjs',
-        'hooks/second-opinion-gate.mjs',
+        'plugins/claude-code/hooks/second-opinion-gate.mjs',
         'tests/test-second-opinion-install-snapshot.mjs',
       ],
     },

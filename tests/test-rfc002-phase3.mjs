@@ -525,7 +525,7 @@ test('T7j. End-to-end: real SessionStart hook arms marker without --task-type (P
   // Backdate to today (already today) and rebuild index just in case.
   execSync(`node "${REBUILD}" --scope all`, { cwd: sessionProject, env: sessionEnv })
 
-  const hookPath = path.join(REPO_ROOT, 'hooks', 'em-recall-sessionstart.sh')
+  const hookPath = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'em-recall-sessionstart.sh')
   // .checkpoints/ migration: hook arms at PRIMARY (.checkpoints/).
   const markerOut = path.join(sessionProject, '.checkpoints', '.checkpoint-required')
   const markerOutLegacy = path.join(sessionProject, '.claude', '.checkpoint-required')
@@ -609,7 +609,7 @@ test('T7k. Round-trip: advisory → (gate) arm → Stop blocks → SessionEnd sw
   })
   execSync(`node "${REBUILD}" --scope all`, { cwd: sessionProject, env: sessionEnv })
 
-  const hookPath = path.join(REPO_ROOT, 'hooks', 'em-recall-sessionstart.sh')
+  const hookPath = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'em-recall-sessionstart.sh')
   // .checkpoints/ migration: hook arms markers at PRIMARY (.checkpoints/);
   // SessionEnd sweeps both PRIMARY and LEGACY. Tests assert at primary
   // for arming; sweep negative assertion at primary suffices because

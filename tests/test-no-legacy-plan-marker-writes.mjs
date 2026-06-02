@@ -28,7 +28,7 @@ import path from 'path'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 
-const SCAN_DIRS = ['scripts', 'hooks']
+const SCAN_DIRS = ['scripts', 'plugins/claude-code/hooks']
 const SCAN_FILES = ['install.mjs']
 
 const LEGACY_BASENAME = '.plan-approval-pending'

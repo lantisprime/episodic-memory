@@ -18,7 +18,7 @@
 set -u
 
 REPO="$(cd -P "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO/hooks/em-recall-sessionstart.sh"
+HOOK="$REPO/plugins/claude-code/hooks/em-recall-sessionstart.sh"
 
 passed=0
 failed=0

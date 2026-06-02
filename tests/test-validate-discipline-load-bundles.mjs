@@ -59,7 +59,7 @@ function buildFakeRepo({ withBundle = true, bundleManifestBody = null, withHook 
     writeFile(path.join(repoRoot, 'bundles', 'codex-review-channel-current.md'), body)
   }
   if (withHook) {
-    writeFile(path.join(repoRoot, 'hooks', 'session-handoff-prompt.sh'), '#!/usr/bin/env bash\n# test stub\nexit 0\n')
+    writeFile(path.join(repoRoot, 'plugins', 'claude-code', 'hooks', 'session-handoff-prompt.sh'), '#!/usr/bin/env bash\n# test stub\nexit 0\n')
   }
   return repoRoot
 }

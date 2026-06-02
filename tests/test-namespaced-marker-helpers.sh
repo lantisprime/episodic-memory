@@ -15,7 +15,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
-source "$REPO_ROOT/hooks/lib/marker-paths.sh"
+source "$REPO_ROOT/plugins/claude-code/hooks/lib/marker-paths.sh"
 
 pass=0
 fail=0

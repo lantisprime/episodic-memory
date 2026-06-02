@@ -37,7 +37,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const ROOT = path.resolve(__dirname, '..')
 const MARKER = path.join(ROOT, 'scripts', 'classifier-marker.mjs')
-const SHELL_LIB = path.join(ROOT, 'hooks', 'lib', 'command-classifier.sh')
+const SHELL_LIB = path.join(ROOT, 'plugins', 'claude-code', 'hooks', 'lib', 'command-classifier.sh')
 
 const tests = []
 function test(name, fn) { tests.push({ name, fn }) }
@@ -221,7 +221,7 @@ test('SI-A01 agent_classify_command: env-prefix command returns 1 (FU-1)', () =>
     set -e
     source "${SHELL_LIB}"
     # source emits agent-classifier.sh too via internal sourcing; call directly.
-    source "${path.join(ROOT, 'hooks/lib/agent-classifier.sh')}"
+    source "${path.join(ROOT, 'plugins', 'claude-code', 'hooks/lib/agent-classifier.sh')}"
     # FU-1 guard: env-prefix command returns 1 (no decision).
     if agent_classify_command "FOO=bar node scripts/hello.mjs" "${repo}" "${repo}"; then
       echo "UNEXPECTED_HIT"

@@ -13,7 +13,7 @@ import {
   tokenizeCommand,
   splitTopLevelSegments,
   checkTimeoutFloor,
-} from '../hooks/lib/so-timeout-floor.mjs'
+} from '../plugins/claude-code/hooks/lib/so-timeout-floor.mjs'
 
 let passes = 0
 let failures = 0
