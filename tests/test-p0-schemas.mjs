@@ -19,6 +19,7 @@ import {
   VALUE_GRAMMAR,
 } from "./lib/mini-jsonschema.mjs";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
+import { validateInstance } from "../scripts/lib/json-instance-validate.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -300,6 +301,25 @@ if (idxSchema && manSchema) {
       "drift guard is non-vacuous: >=1 expect-pass instance declares schema_version (R8-118; codex R2-FU)",
       `got ${versionedPassInstances}`,
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. Carry-forward b (P1b): registry-instance non-vacuity. P0 deferred this
+//    because plugins/_index.json did not exist until P1; it does now, so assert
+//    the live _index INSTANCE validates against _index.schema and its
+//    schema_version byte-equals the CURRENT_SCHEMA_VERSION oracle (R8-118).
+// ---------------------------------------------------------------------------
+if (idxSchema && corpusIndex) {
+  const idxPath = join(REPO_ROOT, "plugins/_index.json");
+  if (!existsSync(idxPath)) {
+    bad("carry-fwd-b: plugins/_index.json exists", "missing (P1b should have authored it)");
+  } else {
+    const idx = JSON.parse(readFileSync(idxPath, "utf8"));
+    const { valid, errors } = validateInstance(idx, idxSchema);
+    assert(valid, "carry-fwd-b: plugins/_index.json instance validates against _index.schema (M1 non-vacuity)", errors.slice(0, 3).map((e) => `${e.path}:${e.keyword}`).join(" | "));
+    const oracle = corpusIndex.current_schema_version && corpusIndex.current_schema_version.value;
+    assert(idx.schema_version === oracle, "carry-fwd-b: _index.schema_version byte-equals the CURRENT_SCHEMA_VERSION oracle (R8-118)", `instance=${idx.schema_version} oracle=${oracle}`);
   }
 }
 

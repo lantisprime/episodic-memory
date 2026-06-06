@@ -1,5 +1,7 @@
 {
   "_note": "Defect (p1, M7b symlink edge): runbook.full is an in-plugin path but on disk plugins/claude-code/runbooks/enforcement.md is a symlink whose realpath resolves OUTSIDE plugins/claude-code/. Caught by realpath containment, not by JSON-Schema. Staged for the P1 registry validator's symlink-canonicalization check.",
+  "type": "enforcement",
+  "schema_version": "1.0.0",
   "id": "claude-code",
   "harness": "claude-code",
   "version": "1.0.0",

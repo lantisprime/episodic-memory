@@ -1,4 +1,6 @@
 {
+  "type": "enforcement",
+  "schema_version": "1.0.0",
   "id": "opencode",
   "harness": "opencode",
   "version": "1.0.0",

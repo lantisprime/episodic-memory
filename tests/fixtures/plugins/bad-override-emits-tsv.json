@@ -1,5 +1,7 @@
 {
   "_note": "Defect is RUNTIME (p3): mode=override but the override classifier emits legacy TSV instead of NDJSON. The thin waist HARD-REJECTS TSV from an override (F27). Manifest below is otherwise valid; the violation surfaces only when test-plugin.mjs dispatches the override at runtime.",
+  "type": "enforcement",
+  "schema_version": "1.0.0",
   "id": "claude-code",
   "harness": "claude-code",
   "version": "1.0.0",
