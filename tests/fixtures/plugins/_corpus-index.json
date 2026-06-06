@@ -1,5 +1,6 @@
 {
   "_note": "RFC-008 v11.8 detection-layer attribution for the golden corpus. P0 STAGES every fixture but detects only the failures expressible in pure JSON-Schema 2020-12; the rest are owned by later validators. _detected_by marks the layer that semantically owns each failure so the corpus never implies P0 catches a failure only a later layer can.",
+  "_routing_note": "P1b (R0c) routing fields, consumed by tests/test-plugin-registry.mjs: `target_schema` = which P0 schema the fixture is shaped as (manifest|_index|structured-alert|bypass_known); `inject` = how the corpus runner feeds it (schema=validate directly vs target_schema; manifest|index|bypass-known=inject into validate-plugin-registry; symlink-temp=temp-dir symlink plant; deferred=p3, recorded NOT run); `attributed_check`/`attributed_reason` = the M-check (and reason code) that MUST appear in violations for a p1 fail-fixture (the F1 'fails at the ATTRIBUTED check, not merely non-zero' stop-rule).",
   "detected_by_vocabulary": ["p0-schema", "p1-registry-validator", "p2-cross-file-validator", "p3-runtime"],
   "current_schema_version": {
     "_note": "CURRENT_SCHEMA_VERSION — single P0 oracle (R8 versioned-contract, RFC-008 L118). Every fixture INSTANCE declaring schema_version MUST byte-equal this value; test-p0-schemas.mjs asserts that equality non-vacuously (>=1 manifest instance). P1 promotes this to a production constant (validate-plugin-registry.mjs MAX_SUPPORTED) byte-equal'd against this oracle, and adds a non-vacuous REGISTRY-instance assertion once plugins/_index.json exists.",
@@ -13,7 +14,7 @@
       "serialize": "JSON.stringify(sortedLabels) with no whitespace; object key order preserved from source (parse -> re-stringify is byte-stable)",
       "digest": "'sha256:' + sha256hex(serialized)",
       "value": "sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4",
-      "helper": "tests/lib/version-hash.mjs#taxonomyVersion"
+      "helper": "scripts/lib/version-hash.mjs#taxonomyVersion (promoted from tests/lib/ in P1b; tests/lib/ is a re-export shim)"
     },
     "events_version": {
       "input": "patterns/events.json -> events",
@@ -21,36 +22,45 @@
       "serialize": "JSON.stringify(sortedEvents) with no whitespace",
       "digest": "'sha256:' + sha256hex(serialized)",
       "value": "sha256:13f01e5a599272b349eabd66694b7898e68438e8aad6497e80a9b780bea34ab0",
-      "helper": "tests/lib/version-hash.mjs#eventsVersion"
+      "helper": "scripts/lib/version-hash.mjs#eventsVersion"
     }
   },
   "fixtures": {
-    "good-manifest.json": { "expect": "pass", "detected_by": null, "asserts": ["M2", "M4", "M5", "M5c", "M6", "R8 type+schema_version accepted"] },
-    "bad-missing-schema-version.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-118 registry schema_version REQUIRED"] },
-    "bad-bad-schema-version.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-118 schema_version semver pattern"] },
-    "bad-missing-type.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-116 entry type REQUIRED (missing => hard-reject)"] },
-    "bad-unknown-type.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["R8-116 type closure (unknown => hard-reject)"] },
-    "bad-extra-field.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M2 additionalProperties:false"] },
-    "bad-unknown-harness.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M3 harness enum closure"] },
-    "bad-invalid-tier.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M4 capability tier enum"] },
-    "bad-default-mode-with-override-path.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["M5 mode/override consistency (default => no override_path)"] },
-    "bad-alert-both-vocab-fields-set.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["F62 structured-alert if/then/else"] },
-    "bad-alert-no-vocab-field.json": { "expect": "fail", "detected_by": "p0-schema", "asserts": ["F62 structured-alert if/then/else"] },
-    "bad-stale-taxonomy-version.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M6 taxonomy_version equality"] },
-    "bad-dangling-label.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M5/F6 emits_labels subset of taxonomy"] },
-    "bad-renamed-harness.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M3 stable-ID (git-diff rename detection)"] },
-    "bad-missing-runbook.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7 runbook presence"] },
-    "bad-short-runbook.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7 MIN_RUNBOOK_BYTES"] },
-    "bad-override-suppresses-marker-write.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M5a non-overridable preservation"] },
-    "bad-capability-dishonest.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M4a bypass ceiling (codex pre_tool_use MEDIUM)"] },
-    "bad-missing-bypass-record.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M4a/F28 vacuity prevention"] },
-    "bad-runbook-path-traversal.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7b/F29 path containment"] },
-    "bad-override-path-traversal.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7b/F29 path containment"] },
-    "bad-runbook-symlink-escape.json": { "expect": "fail", "detected_by": "p1-registry-validator", "asserts": ["M7b symlink canonicalization"] },
-    "bad-override-emits-tsv.json": { "expect": "fail", "detected_by": "p3-runtime", "asserts": ["F27 override must emit NDJSON"] }
+    "good-manifest.json": { "expect": "pass", "detected_by": null, "target_schema": "manifest", "inject": "manifest", "asserts": ["M2", "M4", "M5", "M5c", "M6", "M6b", "M7", "M4a", "R8 type+schema_version accepted"] },
+
+    "bad-missing-schema-version.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "_index", "inject": "schema", "asserts": ["R8-118 registry schema_version REQUIRED"] },
+    "bad-bad-schema-version.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "_index", "inject": "schema", "asserts": ["R8-118 schema_version semver pattern (two-part 1.0)"] },
+    "bad-missing-type.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "_index", "inject": "schema", "asserts": ["R8-116 entry type REQUIRED (missing => hard-reject)"] },
+    "bad-unknown-type.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "_index", "inject": "schema", "asserts": ["R8-116 type closure (unknown => hard-reject)"] },
+    "bad-extra-field.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "manifest", "inject": "schema", "asserts": ["M2 additionalProperties:false"] },
+    "bad-unknown-harness.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "manifest", "inject": "schema", "asserts": ["M3 harness enum closure"] },
+    "bad-invalid-tier.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "manifest", "inject": "schema", "asserts": ["M4 capability tier enum"] },
+    "bad-default-mode-with-override-path.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "manifest", "inject": "schema", "asserts": ["M5 mode/override consistency (default => no override_path; if/then/else)"] },
+    "bad-renamed-harness.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "manifest", "inject": "schema", "asserts": ["M3 harness enum closure (non-enum 'claude' dies at the P0 schema; reclassified from p1 per converged §5.5 — M3 git-diff rename detection is fixtureless, deferred P5+)"] },
+    "bad-alert-both-vocab-fields-set.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "structured-alert", "inject": "schema", "asserts": ["F62 structured-alert if/then/else"] },
+    "bad-alert-no-vocab-field.json": { "expect": "fail", "detected_by": "p0-schema", "target_schema": "structured-alert", "inject": "schema", "asserts": ["F62 structured-alert if/then/else"] },
+
+    "bad-stale-taxonomy-version.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M6", "asserts": ["M6 taxonomy_version equality"] },
+    "bad-dangling-label.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M5", "attributed_reason": "dangling", "asserts": ["M5/F6 emits_labels subset of taxonomy"] },
+    "bad-missing-runbook.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M7", "attributed_reason": "missing", "asserts": ["M7 runbook presence"] },
+    "bad-short-runbook.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M7", "attributed_reason": "byte_floor", "asserts": ["M7 MIN_RUNBOOK_BYTES"] },
+    "bad-override-suppresses-marker-write.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M5a", "asserts": ["M5a non-overridable preservation"] },
+    "bad-capability-dishonest.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M4a", "attributed_reason": "ceiling_below_tier", "asserts": ["M4a bypass ceiling (codex pre_tool_use MEDIUM)"] },
+    "bad-missing-bypass-record.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M4a", "attributed_reason": "no_record", "asserts": ["M4a/F28 vacuity prevention (opencode no record)"] },
+    "bad-runbook-path-traversal.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M7b", "attributed_reason": "path_outside_authority", "asserts": ["M7b/F29 path containment"] },
+    "bad-override-path-traversal.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "attributed_check": "M7b", "attributed_reason": "path_outside_authority", "asserts": ["M7b/F29 path containment (override_path)"] },
+    "bad-runbook-symlink-escape.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "symlink-temp", "attributed_check": "M7b", "attributed_reason": "symlink_escape", "asserts": ["M7b symlink canonicalization (temp-dir plant; skipped where symlinkSync is unprivileged)"] },
+    "bad-override-emits-tsv.json": { "expect": "fail", "detected_by": "p3-runtime", "target_schema": "manifest", "inject": "deferred", "asserts": ["F27 override must emit NDJSON (P3 runtime — recorded deferred, NOT run)"] },
+
+    "claude-code-as-override.json": { "expect": "pass", "detected_by": "p1-registry-validator", "target_schema": "manifest", "inject": "manifest", "asserts": ["M5/M5a override branch live (non-overridable preserved; proves the override path is non-dead)"] },
+    "bad-bypass-known-missing-claude-code-record.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "bypass_known", "inject": "bypass-known", "attributed_check": "M4a", "attributed_reason": "no_record", "asserts": ["M4a/F28 claude-code records load-bearing (drop stop record)"] },
+    "bad-bypass-known-claude-code-ceiling-below-tier.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "bypass_known", "inject": "bypass-known", "attributed_check": "M4a", "attributed_reason": "ceiling_below_tier", "asserts": ["M4a claude-code STRONG above injected MEDIUM ceiling"] },
+    "bad-index-manifest-capability-mismatch.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "_index", "inject": "index", "attributed_check": "M-cross", "attributed_reason": "capabilities", "asserts": ["M-cross registry/manifest single-source-of-truth (R8 L114)"] },
+    "bad-index-newer-minor.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "_index", "inject": "index", "attributed_check": "typed_versioned", "attributed_reason": "forward", "asserts": ["R8-118 fail-closed-forward (minor > max)"] },
+    "bad-index-newer-major.json": { "expect": "fail", "detected_by": "p1-registry-validator", "target_schema": "_index", "inject": "index", "attributed_check": "typed_versioned", "attributed_reason": "forward", "asserts": ["R8-118 fail-closed-forward (major > max)"] }
   },
   "harness_events": {
-    "_note": "Raw pre-translation harness events replayed through good-manifest.json event_translations (F39 Layer 1, P1 gauntlet step 8).",
+    "_note": "Raw pre-translation harness events replayed through good-manifest.json event_translations (F39 Layer 1, P1 gauntlet step 8 — P1c).",
     "claude-code": ["pre-tool-use.json", "stop.json", "session-start.json", "session-end.json"]
   }
 }

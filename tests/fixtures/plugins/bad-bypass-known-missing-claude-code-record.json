@@ -1,0 +1,9 @@
+{
+  "_note": "M4a/F28 bypass-side self-negative. A bypass registry MISSING the claude-code/stop record. Fed via --bypass-known against the LIVE claude-code manifest (which declares stop) -> M4a 'no_record'. Proves the 4 live claude-code records are load-bearing (non-vacuity).",
+  "records": [
+    { "harness": "codex", "event": "pre_tool_use", "ceiling": "MEDIUM", "citation": "multi-edit bypass per RFC-008 §Per-harness capability declarations" },
+    { "harness": "claude-code", "event": "pre_tool_use", "no_known_bypass_evidence": true, "last_audited_iso8601": "2026-06-06T00:00:00Z", "auditor": "rfc008-p1b-capability-audit" },
+    { "harness": "claude-code", "event": "session_start", "no_known_bypass_evidence": true, "last_audited_iso8601": "2026-06-06T00:00:00Z", "auditor": "rfc008-p1b-capability-audit" },
+    { "harness": "claude-code", "event": "session_end", "no_known_bypass_evidence": true, "last_audited_iso8601": "2026-06-06T00:00:00Z", "auditor": "rfc008-p1b-capability-audit" }
+  ]
+}
