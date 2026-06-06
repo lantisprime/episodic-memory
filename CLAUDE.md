@@ -26,20 +26,15 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - No mental tracing — use the actual files/data, and read them for code review
 
 ## Second-opinion review harness
-Pluggable cross-tool review at `scripts/second-opinion.mjs`. Replaces the
-manual 5-step `em-store + codex exec + episode-reply` recipe with a callable
-harness handling preamble composition, provider dispatch, and consensus loop.
+Pluggable cross-tool review at `scripts/second-opinion.mjs` — replaces the manual 5-step `em-store + codex exec + episode-reply` recipe with one callable harness (preamble composition, provider dispatch, consensus loop).
 
 ```bash
-# Single-shot: write request → dispatch → write reply.
 node scripts/second-opinion.mjs request \
   --provider codex --project . --storage files \
   --body "review this diff..." --summary "diff review" --dispatch
 ```
 
-Consensus-loop variant: pass `--consensus --max-rounds N --rebuttal-cb <script>`. See `scripts/second-opinion.mjs --help`.
-
-Providers: `codex`, `claude-subagent`, `gemini`, `stub`. Storage: `files` (`.review-store/`) or `episodic`. Preambles default to `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
+Consensus variant: `--consensus --max-rounds N --rebuttal-cb <script>`. Providers: `codex`, `claude-subagent`, `gemini`, `stub`. Storage: `files` (`.review-store/`) or `episodic`. Preambles default to `scripts/second-opinion/preambles/`, override via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`. See `--help`.
 
 Run `node install.mjs --tool claude-code --install-second-opinion` to write the registry snapshot at `~/.claude/hooks/second-opinion-providers.json`. The PreToolUse hook (`plugins/claude-code/hooks/second-opinion-gate.mjs`) blocks direct Bash + Agent provider invocations so all reviews route through the harness; fail-closed on missing/malformed snapshot.
 
