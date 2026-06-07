@@ -78,23 +78,97 @@ Every marker mutation is an escape hatch that must classify to `marker_write`.
 
 ## §7 — Resolution matrix
 
-*Derived content (Table A/B) authored in P1c (F5 split, M7c).* The resolution
-matrix maps `{capability tier} × {taxonomy label gate}` to the effective action
-via the R3 ternary; P1b validates only that this section header is present.
+Auto-derived from `manifest.capabilities` × `patterns/taxonomy.json` × the R3
+`effective_tier` ternary. M7c regenerates the two tables below and byte-diffs the
+embedded markdown; drift = fail (same enforcement boundary as the §1 COMMON rows).
+
+<!-- RESOLUTION:BEGIN -->
+**Table A — Per-event capability declaration.**
+
+| `pre_tool_use` | `tool_result` | `stop` | `session_start` | `session_end` |
+|---|---|---|---|---|
+| STRONG | — | STRONG | STRONG | STRONG |
+
+**Table B — Resolved gate × label action grid** (cell = taxonomy policy degraded by `effective_tier`).
+
+| Label | plan_approval | pre_checkpoint | post_checkpoint | stop |
+|---|---|---|---|---|
+| `read_only` | allow | allow | allow | refuse_stop |
+| `nonsrc_write` | block | allow | allow | refuse_stop |
+| `shared_write` | block | block | allow | refuse_stop |
+| `push_or_pr_create` | block | allow | block | refuse_stop |
+| `marker_write` † | allow | allow | allow | refuse_stop |
+| `unsafe_complex` † | block | block | block | refuse_stop |
+| `unknown` | block | block | block | refuse_stop |
+
+`†` non-overridable label — cells immutable regardless of plugin (`taxonomy.non_overridable`).
+`stop` is label-independent: `effective_tier(stop) = min(harness_cap.stop, …)` reads marker state, not the command label (F10).
+<!-- RESOLUTION:END -->
 
 ## §8 — Invocation modality
 
-`invocation_modality` is `agent`: the classifier is dispatched as an in-repo
-agent/subprocess. *Byte-equality of this line to the manifest field is M7d (P1c).*
+**Invocation modality:** agent
+
+The classifier is dispatched via the in-process Claude Code hook API
+(PreToolUse / Stop / SessionStart / SessionEnd). M7d asserts this line
+byte-equals `manifest.invocation_modality`.
 
 ## §9 — Agent manifest
 
-*Agent-manifest sentinel + fenced JSON (validated vs
-`schemas/runbook-agent-manifest.schema.json`) authored in P1c (M7e).* P1b
-validates only that this section header is present, not its content.
+A harness agent reads the machine-parseable block below — sentinel
+`## 🤖 Agent invocation manifest` (column 1) followed by one fenced JSON block —
+and learns how to invoke the plugin without a `--help` round-trip. M7e parses it,
+schema-validates against `schemas/runbook-agent-manifest.schema.json`, and
+cross-checks `invocation_modality` against §8 and the manifest.
+
+## 🤖 Agent invocation manifest
+
+```json
+{
+  "invocation_modality": "agent",
+  "command_shapes": [
+    ["bash", "{plugin_dir}/hooks/checkpoint-gate.sh"]
+  ],
+  "required_args": [],
+  "optional_args": [],
+  "expected_outputs": { "shape": "exit-code-only" },
+  "env_requirements": [
+    { "name": "CLAUDE_CODE_SESSION_ID", "required": true }
+  ],
+  "return_codes": {
+    "0": "allow — the tool call / stop proceeds",
+    "2": "block — pre_tool_use refused or stop refused (STRONG)"
+  },
+  "dispatch_examples": [
+    {
+      "description": "pre_tool_use read_only command resolves to allow (exit 0)",
+      "argv": ["bash", "{plugin_dir}/hooks/checkpoint-gate.sh"]
+    }
+  ]
+}
+```
 
 ## §10 — Config / taxonomy cross-binding
 
-*Config/taxonomy cross-binding values (taxonomy_ref, taxonomy_version,
-emits_labels, consumes_events) byte-equal their derived source-of-truth — M7f,
-authored in P1c.* P1b validates only that this section header is present.
+Auto-derived from `manifest.json` (the per-project `enforce-config.json` schema
+lands in P4 — until then M7f 10a is present-and-parses only). M7f byte-diffs the
+block below against the derived source-of-truth.
+
+<!-- CONFIG:BEGIN -->
+**10a — Configuration.**
+
+- `enforce_config_keys`: none yet — the per-project `enforce-config.json` schema lands in P4; M7f 10a is present-and-parses until then.
+- `install_time_config`: hooks deployed under `~/.claude/hooks/` by `install.mjs --install-hooks`.
+
+**10b — Taxonomies.**
+
+- `taxonomy_ref`: `patterns/taxonomy.json`
+- `taxonomy_version`: `sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4`
+- `emits_labels`: `read_only`, `nonsrc_write`, `shared_write`, `push_or_pr_create`, `marker_write`, `unsafe_complex`, `unknown`
+- `consumes_events`: `pre_tool_use`, `stop`, `session_start`, `session_end`
+- `event_translations_summary`:
+  - `pre_tool_use`: `claude-code-pre-tool-use-stdin-json`
+  - `stop`: `claude-code-stop-stdin-json`
+  - `session_start`: `claude-code-session-start-stdin-json`
+  - `session_end`: `claude-code-session-end-stdin-json`
+<!-- CONFIG:END -->

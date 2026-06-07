@@ -46,6 +46,7 @@ const SCHEMAS = {
 const CONTEXT_FILES = [
   "plugins/_index.schema.json", "plugins/manifest.schema.json", "plugins/bypass_known.schema.json",
   "plugins/installed-state.schema.json", "schemas/runtime/structured-alert.schema.json",
+  "schemas/runbook-agent-manifest.schema.json", // M7e context schema (P1c)
   "patterns/taxonomy.json", "patterns/events.json", "plugins/bypass_known.json",
 ];
 
@@ -287,6 +288,58 @@ const CONTEXT_FILES = [
 }
 
 // ===========================================================================
+// 8. M7c–M7f content-derivation NEGATIVES (P1c). A live-mode temp project with a
+//    planted STALE runbook; assert each check fires at its attributed reason.
+//    (Positive coverage is section 1's live registry PASS. These are in-test
+//    scenarios rather than committed .json fixtures because M7c–M7f are gated to
+//    live registry mode — a single-manifest fixture can't trigger them, and the
+//    drift lives in the RUNBOOK, not the manifest.)
+// ===========================================================================
+{
+  const RB = "plugins/claude-code/runbooks/enforcement.md";
+  const RES_BEGIN = "<!-- RESOLUTION:BEGIN -->";
+  const RES_END = "<!-- RESOLUTION:END -->";
+
+  // baseline: a clean live temp project passes (proves the harness; isolates the mutation).
+  {
+    const tmp = buildLiveProject();
+    try {
+      const r = validateRegistry({ projectRoot: tmp });
+      assert(r.status === "ok", "M7x baseline: clean live temp project passes", JSON.stringify(r.violations.slice(0, 4)));
+    } finally { rmrf(tmp); }
+  }
+
+  const staleRunbook = (label, mutate, check, keyword) => {
+    const tmp = buildLiveProject();
+    try {
+      const rbPath = path.join(tmp, RB);
+      const before = fs.readFileSync(rbPath, "utf8");
+      const after = mutate(before);
+      assert(after !== before, `${label}: mutation actually changed the runbook`, "no-op mutation (string not found)");
+      fs.writeFileSync(rbPath, after);
+      const r = validateRegistry({ projectRoot: tmp });
+      assert(r.violations.some((v) => v.check === check && (!keyword || v.keyword === keyword)),
+        `${label}: ${check}${keyword ? "/" + keyword : ""}`, JSON.stringify(r.violations.slice(0, 4)));
+    } finally { rmrf(tmp); }
+  };
+
+  // M7c — one mutated Table B cell => resolution_drift.
+  staleRunbook("M7c stale resolution cell", (t) => t.replace("| `read_only` | allow | allow | allow | refuse_stop |", "| `read_only` | block | allow | allow | refuse_stop |"), "M7c", "resolution_drift");
+  // M7c — drop the RESOLUTION markers => resolution_block.
+  staleRunbook("M7c missing RESOLUTION block", (t) => t.replace(RES_BEGIN, "").replace(RES_END, ""), "M7c", "resolution_block");
+  // M7d — wrong modality line => modality_drift.
+  staleRunbook("M7d modality drift", (t) => t.replace("**Invocation modality:** agent", "**Invocation modality:** cli"), "M7d", "modality_drift");
+  // M7e — removed §9 sentinel => sentinel. Target the exact header LINE (the §9
+  // prose also mentions the sentinel inline in backticks; a plain replace would
+  // hit that first and leave the real header intact).
+  staleRunbook("M7e missing sentinel", (t) => t.split("\n").map((l) => l === "## 🤖 Agent invocation manifest" ? "## Not the sentinel" : l).join("\n"), "M7e", "sentinel");
+  // M7e — §9 JSON modality disagrees with manifest+§8 => modality_xfield.
+  staleRunbook("M7e modality cross-field", (t) => t.replace('"invocation_modality": "agent",', '"invocation_modality": "cli",'), "M7e", "modality_xfield");
+  // M7f — stale taxonomy_version in §10 => config_drift.
+  staleRunbook("M7f config drift (stale taxonomy_version)", (t) => t.replace("`taxonomy_version`: `sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4`", "`taxonomy_version`: `sha256:" + "0".repeat(64) + "`"), "M7f", "config_drift");
+}
+
+// ===========================================================================
 // Helpers.
 // ===========================================================================
 function runCLI(args, cwd, extraEnv) {
@@ -314,6 +367,27 @@ function buildMinimalContext(tmp) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(REPO, rel), dest);
   }
+}
+
+// A FULL live plugin project in a temp dir (registry + manifest + runbook +
+// reserved on-disk dir), so M7c–M7f (gated to live registry mode) actually run.
+function buildLiveProject() {
+  const tmp = mkdtemp();
+  const LIVE_FILES = [
+    ...CONTEXT_FILES,
+    "plugins/_index.json",
+    "plugins/claude-code/manifest.json",
+    "plugins/claude-code/runbooks/enforcement.md",
+    "plugins/claude-code/runbooks/enforcement.quickref.md",
+    "scripts/scaffold-plugin/templates/common-rows.md",
+  ];
+  for (const rel of LIVE_FILES) {
+    const dest = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(path.join(REPO, rel), dest);
+  }
+  fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true }); // on-disk reserved (M8)
+  return tmp;
 }
 
 // Build a temp project with a planted symlink at the runbook.full path, then
