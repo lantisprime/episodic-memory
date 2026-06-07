@@ -171,7 +171,7 @@ const CONTEXT_FILES = [
 // ===========================================================================
 {
   assert(RESERVED_DIRS["episodic-memory"] && RESERVED_DIRS["episodic-memory"].presence === "on-disk", "M8: episodic-memory reserved as on-disk");
-  assert(RESERVED_DIRS["second-opinion"] && RESERVED_DIRS["second-opinion"].presence === "reserved-for-Follow", "M8: second-opinion reserved-for-Follow (annotation-only; dir not yet on disk — N2)");
+  assert(RESERVED_DIRS["second-opinion"] && RESERVED_DIRS["second-opinion"].presence === "on-disk", "M8: second-opinion reserved as on-disk (runbook-carrier authored by the Follow move — N2/R10)");
 
   const tmp = mkdtemp();
   try {
@@ -192,11 +192,26 @@ const CONTEXT_FILES = [
 
     // reserved on-disk absent -> reserved_absent (stale exemption risk).
     const tmp2 = mkdtemp();
-    fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory dir
+    fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory / second-opinion dirs
     c = collect();
     checkBidirectionalDirs(tmp2, [{ directory: "plugins/claude-code" }], c.add, []);
     assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "episodic-memory"), "M8: an on-disk reserved dir that is absent fails (typo can't silently exempt a real orphan)");
+    // RFC-008 Follow (R10): second-opinion is now on-disk reserved, so its
+    // absence is likewise reserved_absent — the carrier can't be silently exempt.
+    assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "second-opinion"), "M8: second-opinion on-disk reserved dir absent -> reserved_absent (Follow/R10)");
     rmrf(tmp2);
+
+    // positive: BOTH on-disk reserved dirs present -> no reserved_absent (the
+    // exemption is honest, not stale). Mirrors the live tree post-Follow.
+    const tmp3 = mkdtemp();
+    fs.mkdirSync(path.join(tmp3, "plugins/claude-code"), { recursive: true });
+    fs.mkdirSync(path.join(tmp3, "plugins/episodic-memory"), { recursive: true });
+    fs.mkdirSync(path.join(tmp3, "plugins/second-opinion/runbooks"), { recursive: true });
+    c = collect();
+    checkBidirectionalDirs(tmp3, [{ directory: "plugins/claude-code" }], c.add, []);
+    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: both on-disk reserved dirs present -> no reserved_absent (Follow/R10)");
+    assert(!c.vs.some((v) => v.dir === "second-opinion"), "M8: present second-opinion carrier raises no orphan/absent violation");
+    rmrf(tmp3);
   } finally { rmrf(tmp); }
 }
 
@@ -405,6 +420,7 @@ function buildLiveProject() {
     fs.copyFileSync(path.join(REPO, rel), dest);
   }
   fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true }); // on-disk reserved (M8)
+  fs.mkdirSync(path.join(tmp, "plugins/second-opinion/runbooks"), { recursive: true }); // on-disk reserved (M8, Follow/R10)
   return tmp;
 }
 

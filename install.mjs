@@ -1404,10 +1404,12 @@ if (installSecondOpinion) {
   const repoValidatorSrc    = path.join(REPO_SECOND_OPINION, 'lib', 'registry-validator.mjs')
   const repoLocalDirSrc     = path.join(REPO_DIR, 'scripts', 'lib', 'local-dir.mjs')
   const repoTimeoutFloorSrc = path.join(REPO_HOOKS, 'lib', 'so-timeout-floor.mjs')
-  // RFC-008 P1a: hooks/ moved to plugins/claude-code/hooks/, but hooks/runbooks/
-  // stays at the repo root until the second-opinion Follow PR. Point at REPO_DIR
-  // explicitly (NOT REPO_HOOKS, which now resolves under plugins/claude-code/).
-  const repoRunbookSrc      = path.join(REPO_DIR, 'hooks', 'runbooks', 'second-opinion-harness.md')
+  // RFC-008 Follow (R10): the second-opinion runbooks now live at
+  // plugins/second-opinion/runbooks/ (in-repo name harness.md per RFC L1135).
+  // The deploy dest below stays second-opinion-harness.md, so the gate runtime
+  // path (second-opinion-gate.mjs) is unchanged. REPO_DIR-relative (NOT
+  // REPO_HOOKS, which resolves under plugins/claude-code/).
+  const repoRunbookSrc      = path.join(REPO_DIR, 'plugins', 'second-opinion', 'runbooks', 'harness.md')
 
   const userGateDst         = path.join(userHooksDir, 'second-opinion-gate.mjs')
   const userValidatorDst    = path.join(userHooksLibDir, 'registry-validator.mjs')

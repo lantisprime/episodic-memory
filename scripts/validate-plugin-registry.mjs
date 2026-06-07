@@ -68,7 +68,7 @@ const RESOLUTION_GATES = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 // dirs do not exist yet and are annotation-only (claude-subagent N2).
 export const RESERVED_DIRS = {
   "episodic-memory": { presence: "on-disk", why: "Claude-Code plugin packaging (.claude-plugin/, scripts/, skills/); exists on main." },
-  "second-opinion": { presence: "reserved-for-Follow", why: "RFC-008 L1257 second-opinion runbooks fork; dir authored in the post-P1 Follow, not yet on disk." },
+  "second-opinion": { presence: "on-disk", why: "RFC-008 L1257/R10 second-opinion runbooks fork; runbook-carrier (NOT an enforcement plugin — manifest.schema is enforcement-only), authored on disk by the Follow move." },
 };
 
 // ---------------------------------------------------------------------------
