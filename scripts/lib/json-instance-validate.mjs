@@ -30,20 +30,28 @@
 //       (memoized by identity). So you cannot instance-validate against a schema
 //       whose keyword/value-shape set the interpreter has not vetted.
 //
-// Modeled subset (the union the 5 interpreted schemas actually use — _index,
-// manifest, bypass_known, installed-state, structured-alert):
+// Modeled subset (the union the interpreted schemas use — the 5 P1b schemas
+// _index, manifest, bypass_known, installed-state, structured-alert, PLUS the
+// P1c consumers schemas/events/event-*.schema.json + runbook-agent-manifest):
 //   applicators : properties additionalProperties(bool|schema) items
 //                 propertyNames allOf oneOf if then else not $ref $defs
 //   validation  : type(scalar|array) enum const(any-JSON deep-equal) pattern
-//                 format(date-time) required minLength minItems minProperties
+//                 format(date-time) required minLength minItems maxItems
+//                 minProperties minimum
 //   annotations : $schema $id title description $comment  (explicit no-ops)
+//
+// `minimum` + `maxItems` added in P1c (RFC-008 R0c): the event schemas assert
+// `minimum:0` on turn_index, and runbook-agent-manifest asserts `maxItems:0` on
+// command_shapes (static-rules). `validateInstance` is the first P1c consumer of
+// both schema sets, so without these the closure guard throws SchemaModelingError
+// before validating. Both are fail-closed value-shape-checked like every keyword.
 //
 // Deliberately ABSENT (fail CLOSED if ever introduced): anyOf, contains,
 // patternProperties, dependentSchemas, dependentRequired, prefixItems,
-// unevaluatedItems, unevaluatedProperties, multipleOf, maximum/minimum (+excl),
-// maxLength, maxItems, uniqueItems, max/minContains, maxProperties, default,
-// deprecated, readOnly, writeOnly, examples, content*, $anchor, $dynamicRef,
-// $dynamicAnchor, $vocabulary.
+// unevaluatedItems, unevaluatedProperties, multipleOf, maximum, exclusiveMinimum,
+// exclusiveMaximum, maxLength, uniqueItems, max/minContains, maxProperties,
+// default, deprecated, readOnly, writeOnly, examples, content*, $anchor,
+// $dynamicRef, $dynamicAnchor, $vocabulary.
 
 const VALID_TYPES = new Set([
   "null", "boolean", "object", "array", "number", "string", "integer",
@@ -71,6 +79,7 @@ const ANNOTATION_KEYWORDS = new Set([
 //   "any"          value is any JSON (const)
 //   "string"       value is a string
 //   "nonNegInt"    value is a non-negative integer
+//   "number"       value is any finite JSON number (minimum — negative/float OK)
 const KEYWORD_SHAPE = {
   // applicators (subschema-bearing)
   properties: "schemaMap",
@@ -95,7 +104,9 @@ const KEYWORD_SHAPE = {
   required: "stringArray",
   minLength: "nonNegInt",
   minItems: "nonNegInt",
+  maxItems: "nonNegInt",
   minProperties: "nonNegInt",
+  minimum: "number",
 };
 
 // The recurse-set: which shapes bear subschemas the scanner must descend into.
@@ -218,6 +229,13 @@ function assertShape(keyword, value, path) {
     case "nonNegInt":
       if (!Number.isInteger(value) || value < 0) {
         throw new SchemaModelingError(`${path}: "${keyword}" must be a non-negative integer, got ${JSON.stringify(value)}`);
+      }
+      return;
+    case "number":
+      // `minimum` bound — any finite JSON number (negative/float admitted; JSON
+      // has no NaN/Infinity literal, but reject defensively if one is injected).
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new SchemaModelingError(`${path}: "${keyword}" must be a finite number, got ${jsonType(value)}`);
       }
       return;
     default:
@@ -403,8 +421,18 @@ function validateAgainst(instance, schema, root, path, errors) {
     if ("minItems" in schema && instance.length < schema.minItems) {
       err(errors, path, "minItems", `${instance.length} items < ${schema.minItems}`);
     }
+    if ("maxItems" in schema && instance.length > schema.maxItems) {
+      err(errors, path, "maxItems", `${instance.length} items > ${schema.maxItems}`);
+    }
     if ("items" in schema) {
       instance.forEach((el, i) => validateAgainst(el, schema.items, root, `${path}/${i}`, errors));
+    }
+  }
+
+  // number assertions (integers are jsonType "number" too)
+  if (it === "number") {
+    if ("minimum" in schema && instance < schema.minimum) {
+      err(errors, path, "minimum", `${instance} < ${schema.minimum}`);
     }
   }
 
