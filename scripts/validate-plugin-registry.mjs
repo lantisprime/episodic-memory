@@ -47,6 +47,20 @@ const RUNBOOK_SECTION_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const COMMON_BEGIN = "<!-- COMMON:BEGIN -->";
 const COMMON_END = "<!-- COMMON:END -->";
 
+// M7c–M7f content-derivation (P1c, F5 split). §7 + §10 each carry an
+// auto-generated block fenced by BEGIN/END markers that the validator
+// regenerates from manifest+taxonomy+events and byte-diffs (same enforcement
+// boundary as M7a COMMON-row drift). §8 is a single derived line; §9 is a
+// sentinel-anchored fenced JSON block, schema-validated + cross-checked.
+const RESOLUTION_BEGIN = "<!-- RESOLUTION:BEGIN -->";
+const RESOLUTION_END = "<!-- RESOLUTION:END -->";
+const CONFIG_BEGIN = "<!-- CONFIG:BEGIN -->";
+const CONFIG_END = "<!-- CONFIG:END -->";
+const AGENT_MANIFEST_SENTINEL = "## 🤖 Agent invocation manifest";
+const MODALITY_LINE_RE = /^\*\*Invocation modality:\*\*\s+(\S+)\s*$/;
+const EVENT_ORDER = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"];
+const RESOLUTION_GATES = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
+
 // RESERVED_DIRS (M8): a closed allowlist of plugins/ subdirs that are NOT
 // enforcement plugins and so are exempt from the bidirectional dir↔entry rule.
 // Each carries a presence disposition: "on-disk" reserved dirs must EXIST (so a
@@ -145,6 +159,7 @@ function loadContext(root, readJson, bypassKnownPath) {
     bypass_known: readJson(path.join(root, "plugins/bypass_known.schema.json")),
     installed_state: readJson(path.join(root, "plugins/installed-state.schema.json")),
     structured_alert: readJson(path.join(root, "schemas/runtime/structured-alert.schema.json")),
+    runbook_agent_manifest: readJson(path.join(root, "schemas/runbook-agent-manifest.schema.json")),
   };
   assertAllSchemasModeled(schemas); // throws SchemaModelingError if any schema escapes the modeled subset
   const taxonomy = readJson(path.join(root, "patterns/taxonomy.json"));
@@ -157,7 +172,7 @@ function loadContext(root, readJson, bypassKnownPath) {
 // ---------------------------------------------------------------------------
 // Per-manifest checks (M2–M7b). add(check, severity, detail, extra?) collects.
 // ---------------------------------------------------------------------------
-function validateManifest(ctx, manifest, root, readMaybe, add) {
+function validateManifest(ctx, manifest, root, readMaybe, add, opts = {}) {
   const { schemas, taxonomy, events, bypassKnown } = ctx;
 
   // M2 — schema (additionalProperties:false everywhere). A schema failure means
@@ -320,6 +335,31 @@ function validateManifest(ctx, manifest, root, readMaybe, add) {
       if (block == null) add("M7a", "error", `runbook.full missing COMMON block (${COMMON_BEGIN} … ${COMMON_END})`, { keyword: "common_block" });
       else if (block !== tmpl) add("M7a", "error", "runbook.full COMMON block does not byte-match common-rows.md template", { keyword: "common_drift" });
     }
+
+    // ---- M7c–M7f content derivation (P1c, F5 split). Gated to LIVE registry
+    // mode (opts.contentChecks): content-derivation byte-equality is meaningful
+    // only for the registry's DECLARED manifest↔runbook pairing, never a
+    // single-manifest fixture injected against an unrelated runbook.
+    if (opts.contentChecks) {
+      // M7c — §7 resolution matrix byte-equals the regenerated tables.
+      const resBlock = extractBetween(fullText, RESOLUTION_BEGIN, RESOLUTION_END);
+      if (resBlock == null) add("M7c", "error", `runbook §7 missing RESOLUTION block (${RESOLUTION_BEGIN} … ${RESOLUTION_END})`, { keyword: "resolution_block" });
+      else if (resBlock !== renderResolutionMatrix(manifest, taxonomy, events)) add("M7c", "error", "runbook §7 resolution matrix does not byte-match the derived tables (capabilities × taxonomy × R3 ternary)", { keyword: "resolution_drift" });
+
+      // M7d — §8 modality line byte-equals manifest.invocation_modality.
+      let modalityVal = null;
+      for (const ln of fullText.split("\n")) { const m = MODALITY_LINE_RE.exec(ln); if (m) { modalityVal = m[1]; break; } }
+      if (modalityVal == null) add("M7d", "error", `runbook §8 missing the "**Invocation modality:** <value>" line`, { keyword: "modality_missing" });
+      else if (modalityVal !== manifest.invocation_modality) add("M7d", "error", `runbook §8 modality ${JSON.stringify(modalityVal)} != manifest.invocation_modality ${JSON.stringify(manifest.invocation_modality)}`, { keyword: "modality_drift" });
+
+      // M7e — §9 agent-manifest sentinel + fenced JSON + schema + cross-field.
+      validateAgentManifest(fullText, manifest, schemas, add);
+
+      // M7f — §10 config/taxonomy cross-binding byte-equals derived source-of-truth.
+      const cfgBlock = extractBetween(fullText, CONFIG_BEGIN, CONFIG_END);
+      if (cfgBlock == null) add("M7f", "error", `runbook §10 missing CONFIG block (${CONFIG_BEGIN} … ${CONFIG_END})`, { keyword: "config_block" });
+      else if (cfgBlock !== renderConfigBlock(manifest)) add("M7f", "error", "runbook §10 config/taxonomy block does not byte-match the derived source-of-truth (manifest)", { keyword: "config_drift" });
+    }
   }
 }
 
@@ -332,6 +372,156 @@ function extractCommonBlock(text) {
   const e = lines.findIndex((l) => l.trim() === COMMON_END);
   if (b === -1 || e === -1 || e <= b) return null;
   return lines.slice(b + 1, e).join("\n") + "\n";
+}
+
+// Inner lines strictly between two marker lines, joined with \n (NO trailing
+// newline — the §7/§10 generators emit the same shape, so the embedded runbook
+// block byte-equals the generator output exactly).
+function extractBetween(text, begin, end) {
+  const lines = text.split("\n");
+  const b = lines.findIndex((l) => l.trim() === begin);
+  const e = lines.findIndex((l) => l.trim() === end);
+  if (b === -1 || e === -1 || e <= b) return null;
+  return lines.slice(b + 1, e).join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// §7 / §10 content GENERATORS (M7c / M7f). Single source of truth: the runbook
+// embeds EXACTLY these strings between the markers; the validator regenerates +
+// byte-diffs. One pure function per block — no author discretion (plan H1).
+// ---------------------------------------------------------------------------
+
+// effective_tier = min over PRESENT tier sources (N2). On main only harness_cap
+// exists; the min() folds contract/project_config tiers the moment P2/P4 add
+// them, so the table never silently lies after a degrading contract lands.
+function effectiveTier(tiers) {
+  let min = null, minRank = Infinity;
+  for (const t of tiers) {
+    if (t == null) continue;
+    const r = TIER_RANK[t] ?? Infinity;
+    if (r < minRank) { minRank = r; min = t; }
+  }
+  return min;
+}
+
+function eventActionId(events, eventId, tier) {
+  const ev = (events.events || []).find((e) => e.id === eventId);
+  const a = ev && ev.actions && tier != null ? ev.actions[tier] : null;
+  return a && a.id ? a.id : "—";
+}
+
+export function renderResolutionMatrix(manifest, taxonomy, events) {
+  const caps = manifest.capabilities || {};
+  const emits = (manifest.classifier && manifest.classifier.emits_labels) || [];
+  const nonOverridable = new Set(taxonomy.non_overridable || []);
+  const labelById = new Map((taxonomy.labels || []).map((l) => [l.id, l]));
+
+  // Table A — one column per canonical event; cell = declared tier or em-dash.
+  const aHead = `| ${EVENT_ORDER.map((e) => "`" + e + "`").join(" | ")} |`;
+  const aSep = `|${EVENT_ORDER.map(() => "---").join("|")}|`;
+  const aRow = `| ${EVENT_ORDER.map((e) => caps[e] || "—").join(" | ")} |`;
+
+  // Checkpoint-gate columns degrade by effective_tier(pre_tool_use); the stop
+  // column is label-INDEPENDENT (F10) — same action for every row.
+  const effPre = effectiveTier([caps.pre_tool_use]);
+  const stopCell = eventActionId(events, "stop", effectiveTier([caps.stop]));
+
+  const bRows = emits.map((label) => {
+    const gates = (labelById.get(label) || {}).gates || {};
+    const cells = RESOLUTION_GATES.map((g) =>
+      gates[g] === "allow" ? "allow" : eventActionId(events, "pre_tool_use", effPre),
+    );
+    const mark = nonOverridable.has(label) ? " †" : "";
+    return `| \`${label}\`${mark} | ${cells.join(" | ")} | ${stopCell} |`;
+  });
+
+  return [
+    "**Table A — Per-event capability declaration.**",
+    "",
+    aHead, aSep, aRow,
+    "",
+    "**Table B — Resolved gate × label action grid** (cell = taxonomy policy degraded by `effective_tier`).",
+    "",
+    "| Label | plan_approval | pre_checkpoint | post_checkpoint | stop |",
+    "|---|---|---|---|---|",
+    ...bRows,
+    "",
+    "`†` non-overridable label — cells immutable regardless of plugin (`taxonomy.non_overridable`).",
+    "`stop` is label-independent: `effective_tier(stop) = min(harness_cap.stop, …)` reads marker state, not the command label (F10).",
+  ].join("\n");
+}
+
+export function renderConfigBlock(manifest) {
+  const cls = manifest.classifier || {};
+  const emits = cls.emits_labels || [];
+  const trans = manifest.event_translations || {};
+  const consumes = Object.keys(manifest.capabilities || {});
+  const out = [
+    "**10a — Configuration.**",
+    "",
+    "- `enforce_config_keys`: none yet — the per-project `enforce-config.json` schema lands in P4; M7f 10a is present-and-parses until then.",
+    "- `install_time_config`: hooks deployed under `~/.claude/hooks/` by `install.mjs --install-hooks`.",
+    "",
+    "**10b — Taxonomies.**",
+    "",
+    `- \`taxonomy_ref\`: \`${manifest.taxonomy_ref}\``,
+    `- \`taxonomy_version\`: \`${manifest.taxonomy_version}\``,
+    `- \`emits_labels\`: ${emits.map((l) => "`" + l + "`").join(", ")}`,
+    `- \`consumes_events\`: ${consumes.map((e) => "`" + e + "`").join(", ")}`,
+    "- `event_translations_summary`:",
+  ];
+  for (const e of consumes) out.push(`  - \`${e}\`: \`${trans[e] && trans[e].source_format}\``);
+  return out.join("\n");
+}
+
+// M7e — §9 agent-manifest: sentinel + fenced JSON + schema + cross-field. Pushes
+// structured violations via `add`. Maps to F49/F50/F57/F64/F66 (R6, R10).
+function validateAgentManifest(fullText, manifest, schemas, add) {
+  const lines = fullText.split("\n");
+  const sIdx = lines.findIndex((l) => l === AGENT_MANIFEST_SENTINEL);
+  if (sIdx === -1) { add("M7e", "error", `runbook §9 missing sentinel ${JSON.stringify(AGENT_MANIFEST_SENTINEL)} at column 1`, { keyword: "sentinel" }); return; }
+  let fenceStart = -1;
+  for (let i = sIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim() === "```json") { fenceStart = i; break; }
+    if (lines[i].startsWith("## ")) break; // hit the next section before any fence
+  }
+  if (fenceStart === -1) { add("M7e", "error", "runbook §9 sentinel not followed by a ```json fenced block", { keyword: "fence_missing" }); return; }
+  let fenceEnd = -1;
+  for (let i = fenceStart + 1; i < lines.length; i++) { if (lines[i].trim() === "```") { fenceEnd = i; break; } }
+  if (fenceEnd === -1) { add("M7e", "error", "runbook §9 ```json fence is not closed", { keyword: "fence_unclosed" }); return; }
+
+  let am;
+  try { am = JSON.parse(lines.slice(fenceStart + 1, fenceEnd).join("\n")); }
+  catch (e) { add("M7e", "error", `runbook §9 agent-manifest JSON parse error: ${e.message}`, { keyword: "json_parse" }); return; }
+
+  const v = validateInstance(am, schemas.runbook_agent_manifest);
+  if (!v.valid) { for (const e of v.errors) add("M7e", "error", `§9 agent-manifest ${e.path}: ${e.keyword} — ${e.detail}`, { keyword: "schema" }); return; }
+
+  // cross-field consistency (beyond what the schema alone can assert).
+  if (am.invocation_modality !== manifest.invocation_modality) {
+    add("M7e", "error", `§9 invocation_modality ${JSON.stringify(am.invocation_modality)} != manifest ${JSON.stringify(manifest.invocation_modality)}`, { keyword: "modality_xfield" });
+  }
+  if (am.invocation_modality === "api") {
+    if (!am.credentials || typeof am.credentials.mechanism !== "string") add("M7e", "error", "§9 api modality requires credentials.mechanism", { keyword: "credentials_required" });
+    if (!Array.isArray(am.log_paths)) add("M7e", "error", "§9 api modality requires log_paths (possibly empty, F64)", { keyword: "log_paths_required" });
+  } else if (am.credentials && am.credentials.mechanism !== "none") {
+    add("M7e", "error", `§9 non-api modality must have credentials absent or mechanism:"none", got ${JSON.stringify(am.credentials.mechanism)}`, { keyword: "credentials_nonapi" });
+  }
+  for (const er of am.env_requirements || []) {
+    if (er.redaction_pattern != null) {
+      try { new RegExp(er.redaction_pattern); }
+      catch (e) { add("M7e", "error", `§9 env_requirements[${er.name}].redaction_pattern not a compilable regex: ${e.message}`, { keyword: "redaction_regex" }); }
+    }
+  }
+  // posix forward-slash invariant on every command_shapes / dispatch_examples token
+  // (the schema's posixPath only covers log_paths/config_path; argv tokens are posixSafeString).
+  const argvTokens = [
+    ...(am.command_shapes || []).flat(),
+    ...(am.dispatch_examples || []).flatMap((d) => d.argv || []),
+  ];
+  for (const tok of argvTokens) {
+    if (typeof tok === "string" && tok.includes("\\")) add("M7e", "error", `§9 argv token ${JSON.stringify(tok)} contains a backslash (forward-slash invariant, F58)`, { keyword: "backslash" });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +588,7 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
       let manifest;
       try { manifest = readJson(manAbs); }
       catch (e) { add("M2", "error", `entry ${entry.id} manifest unreadable: ${e.message}`); continue; }
-      validateManifest(ctx, manifest, root, readMaybe, add);
+      validateManifest(ctx, manifest, root, readMaybe, add, { contentChecks: true });
 
       // M-cross (R8 L114 single-source-of-truth): registry must mirror the manifest.
       if (!deepEqualJson(entry.capabilities, manifest.capabilities)) {

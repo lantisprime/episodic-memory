@@ -234,6 +234,84 @@ try {
     "items: an invalid emits_labels element fails via items->pattern", JSON.stringify(r.errors.slice(0, 2)));
 }
 
+// ===========================================================================
+// C0 (RFC-008 R0c P1c) — `minimum` + `maxItems` modeled. The event schemas and
+// runbook-agent-manifest (P1c's NEW validateInstance consumers) use keywords
+// that were on the fail-closed ABSENT list; without C0 they throw
+// SchemaModelingError before any instance check (claude-subagent F1, verified
+// on disk: event-*.schema use `minimum:0` on turn_index; runbook-agent-manifest
+// uses `maxItems:0` on command_shapes).
+// ===========================================================================
+
+// --- C0 closure: the P1c consumer schemas are now all modeled --------------
+const P1C_SCHEMAS = {
+  event_pre_tool_use: read("schemas/events/event-pre-tool-use.schema.json"),
+  event_stop: read("schemas/events/event-stop.schema.json"),
+  event_session_start: read("schemas/events/event-session-start.schema.json"),
+  event_session_end: read("schemas/events/event-session-end.schema.json"),
+  event_tool_result: read("schemas/events/event-tool-result.schema.json"),
+  runbook_agent_manifest: read("schemas/runbook-agent-manifest.schema.json"),
+};
+try {
+  assertAllSchemasModeled(P1C_SCHEMAS);
+  ok("C0 closure: event-* + runbook-agent-manifest schemas all modeled (no SchemaModelingError)");
+} catch (e) {
+  bad("C0 closure: P1c consumer schemas modeled", e.message);
+}
+
+// --- C0 `minimum`: positive + negative + boundary over a real event schema --
+{
+  const ev = P1C_SCHEMAS.event_pre_tool_use;
+  const base = {
+    tool: "Bash", tool_args: { command: "ls" }, cwd: "/r",
+    session_id: "s", turn_index: 3, timestamp_iso8601: "2026-06-06T00:00:00Z",
+  };
+  assert(validateInstance(base, ev).valid,
+    "C0 minimum: turn_index 3 satisfies `minimum:0`", JSON.stringify(validateInstance(base, ev).errors.slice(0, 2)));
+  const below = { ...base, turn_index: -1 };
+  const r = validateInstance(below, ev);
+  assert(!r.valid && r.errors.some((e) => e.keyword === "minimum"),
+    "C0 minimum: turn_index -1 fails via `minimum`", JSON.stringify(r.errors.slice(0, 2)));
+  assert(validateInstance({ ...base, turn_index: 0 }, ev).valid, "C0 minimum: turn_index 0 (== bound) passes");
+}
+
+// --- C0 `minimum`: negative/float BOUND admitted (value-shape number, not nonNegInt)
+{
+  const negSchema = { type: "number", minimum: -2.5 };
+  assert(validateInstance(-1, negSchema).valid, "C0 minimum: -1 satisfies minimum:-2.5 (negative/float bound)");
+  const r = validateInstance(-10, negSchema);
+  assert(!r.valid && r.errors.some((e) => e.keyword === "minimum"), "C0 minimum: -10 fails minimum:-2.5");
+}
+
+// --- C0 `maxItems`: positive + negative over the agent-manifest static-rules -
+{
+  const ram = P1C_SCHEMAS.runbook_agent_manifest;
+  const staticOk = {
+    invocation_modality: "static-rules", command_shapes: [], required_args: [], optional_args: [],
+    expected_outputs: { shape: "exit-code-only" }, env_requirements: [], return_codes: { "0": "ok" },
+    dispatch_examples: [{ description: "deploy rules file" }],
+  };
+  assert(validateInstance(staticOk, ram).valid,
+    "C0 maxItems: static-rules manifest with command_shapes:[] passes maxItems:0",
+    JSON.stringify(validateInstance(staticOk, ram).errors.slice(0, 3)));
+  const staticBad = { ...staticOk, command_shapes: [["python", "x"]] }; // 1 item > maxItems:0
+  const r = validateInstance(staticBad, ram);
+  assert(!r.valid && r.errors.some((e) => e.keyword === "maxItems"),
+    "C0 maxItems: static-rules with a non-empty command_shapes fails via `maxItems`", JSON.stringify(r.errors.slice(0, 3)));
+}
+
+// --- C0 value-shape: malformed BOUNDS fail closed; `maximum` stays unmodeled -
+{
+  throws(() => assertSchemaModeled({ type: "integer", minimum: "0" }),
+    "C0 value-shape: `minimum` with a string bound -> SchemaModelingError");
+  throws(() => assertSchemaModeled({ type: "array", maxItems: -1 }),
+    "C0 value-shape: `maxItems` with a negative bound -> SchemaModelingError");
+  throws(() => assertSchemaModeled({ type: "array", maxItems: 1.5 }),
+    "C0 value-shape: `maxItems` with a non-integer bound -> SchemaModelingError");
+  throws(() => assertSchemaModeled({ type: "number", maximum: 10 }),
+    "C0 value-shape: `maximum` still unmodeled -> SchemaModelingError (only minimum added, not maximum)");
+}
+
 console.log(`\ntest-json-instance-validate: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
   console.error("\nFAILURES:");
