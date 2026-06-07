@@ -28,8 +28,8 @@ requirement parent. Each phase file carries its own R-anchors and back-links to 
 - **Bug fix (any time):** `plan-gate.sh:108–115` ordering — F14 early-exit blocks the
   `marker_write` escape hatch (deadlock class 2, R4). See the RFC
   [Deadlock analysis](../RFC-008-decouple-enforcement-from-substrate.md#deadlock-analysis-maps-to-taxonomy-r3-r4-r9).
-- **Follow-up (post-P1):** migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/`
-  (R10). Tracked in [P1-plugin-registry.md](P1-plugin-registry.md#the-runbooks-fork).
+- **Follow-up (post-P1) — DONE:** migrated `hooks/runbooks/` → `plugins/second-opinion/runbooks/`
+  (R10). See [P1-plugin-registry.md](P1-plugin-registry.md#the-runbooks-fork).
 
 ## Build order
 

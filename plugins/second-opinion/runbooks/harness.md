@@ -2,7 +2,7 @@
 
 The harness exists. Use it. But the harness is invoked via the Bash tool, and the Bash tool has its own gotchas. This file is the single-page operator checklist so I stop burning sessions rediscovering the same lessons.
 
-This file is shipped via `install.mjs --install-second-opinion` to `~/.claude/hooks/runbooks/second-opinion-harness.md` and is the source the `second-opinion-gate.mjs` PreToolUse hook injects into context on the first harness invocation per session. Mirror of `feedback_second_opinion_harness_runbook.md` in episodic memory.
+This file lives at `plugins/second-opinion/runbooks/harness.md` and is shipped via `install.mjs --install-second-opinion` to `~/.claude/hooks/runbooks/second-opinion-harness.md` (deploy name unchanged) — the source the `second-opinion-gate.mjs` PreToolUse hook injects into context on the first harness invocation per session. Mirror of `feedback_second_opinion_harness_runbook.md` in episodic memory.
 
 ## ⚠️ Self-trigger checklist — the THREE moments I keep getting wrong
 

@@ -1,7 +1,7 @@
 # Second-opinion harness — adding a provider (maintainer runbook)
 
 How to add a new review provider (LLM/agent CLI or API) to the second-opinion
-harness. This is the *maintainer* counterpart to `second-opinion-harness.md`
+harness. This is the *maintainer* counterpart to `harness.md`
 (which is the *operator* runbook for invoking reviews). Worked reference case:
 the `opencode` provider (DeepSeek v4-pro), added 2026-05-27.
 
@@ -123,6 +123,6 @@ cross-platform probe (`where` on win32, `which` elsewhere) and fix the class.
 
 ## Composes with
 
-- `second-opinion-harness.md` — operator runbook (how to *invoke* reviews).
+- `harness.md` — operator runbook (how to *invoke* reviews).
 - `reference_second_opinion_harness.md` — design reference (what the harness IS).
 - `feedback_cross_platform_always.md` — the cross-platform design lens.

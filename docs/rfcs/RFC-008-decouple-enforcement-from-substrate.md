@@ -124,7 +124,7 @@ The pre-checkpoint gate materializes ONLY at the IMPLEMENTATION boundary — the
 
 ### R10 — Enforcement plugin runbooks
 Each enforcement plugin MUST include a runbook in `plugins/<harness>/runbooks/` with specified content per section. The runbook is injected on first invocation per session via content-addressed UX-marker (`.so-runbook-shown.<sha8>`). Runbook marker writes are exempt from checkpoint/plan gating. Session-start lifecycle clears all runbook markers. Content-addressed (sha8 = SHA256(full_runbook_content).hex.slice(0, 8)) — edits invalidate the marker, forcing re-injection.
-**Governed by:** PRINCIPLES.md P4 (Cognitive load > lightweight — the runbook prevents the model from rediscovering the same lessons each session). **Precedent:** second-opinion harness runbook at `hooks/runbooks/second-opinion-harness.md` (118 lines, production since 2026-05-13).
+**Governed by:** PRINCIPLES.md P4 (Cognitive load > lightweight — the runbook prevents the model from rediscovering the same lessons each session). **Precedent:** second-opinion harness runbook at `plugins/second-opinion/runbooks/harness.md` (production since 2026-05-13; relocated from `hooks/runbooks/` in the P1 Follow move).
 
 ### R11 — Pluggable memory-store strategies
 How episodes are persisted is pluggable. The default store is the append-only episode log + lexical index (zero-dep). A **store-strategy** plugin MAY additionally build **derived indexes** from episodes — a knowledge-graph index or another derived structure that makes recall richer. Store strategies are **substrate capabilities** ([CAPABILITIES.md](../../CAPABILITIES.md)): they operate on episodes via `em-store`, register as the `store-strategy` plugin type (R8), and MUST contain no enforcement/gate/marker logic (R1). Derived-index *algorithms* are specified in their own RFC, not here — the knowledge-graph index folds into **RFC-007 (Graph Projection)**.
@@ -1191,7 +1191,7 @@ Summary (full file lists + architecture in the linked per-phase files):
 | **P8** | Cursor (full adapter) + Windsurf (static-rules) plugins — added per F43 | 8 | 0 | ~45K | P3 | R6, R10 |
 | **P9** | Pluggable recall strategies — *deferred to its own RFC* | 5 | 1 | ~50K | — | R7 |
 | Bug | `plan-gate.sh:108–115` ordering fix (deadlock class 2) | 0 | 1 | small | — | R4 |
-| Follow | migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/` | 0 | 1 | small | P1 | R10 |
+| Follow ✓ | migrated `hooks/runbooks/` → `plugins/second-opinion/runbooks/` (DONE) | 0 | 1 | small | P1 | R10 |
 
 Each phase's **architecture diagram, exact file manifest, build steps, hazards, and Done-when boundary** live in its own file under [`docs/rfcs/RFC-008/`](RFC-008/README.md). The stubs below are the navigational index; the table above is the at-a-glance map.
 
@@ -1201,7 +1201,7 @@ Serves R3, R4 (+ closes F11–F51) · depends on: — · **DONE — PR #367 (`d0
 
 #### P1 — Plugin directory + registry + test gauntlet → [RFC-008/P1-plugin-registry.md](RFC-008/P1-plugin-registry.md)
 
-Serves R1, R6, R8 · depends on: P0, R0b′ · **NEXT.** `git mv hooks/` → `plugins/claude-code/hooks/` (byte-identical) + `_index.json` registry + `manifest.json` + `validate-plugin-registry.mjs` + `test-plugin.mjs` 9-step gauntlet + net-new `field_bindings` interpreter. **~84–104K across 4 PRs** (P1a/P1b/P1c + Follow); P1a ships standalone first.
+Serves R1, R6, R8 · depends on: P0, R0b′ · **DONE (P1a #373, P1b #374, P1c #376, Follow this PR — closes P1).** `git mv hooks/` → `plugins/claude-code/hooks/` (byte-identical) + `_index.json` registry + `manifest.json` + `validate-plugin-registry.mjs` + `test-plugin.mjs` 9-step gauntlet + net-new `field_bindings` interpreter + the Follow move `hooks/runbooks/` → `plugins/second-opinion/runbooks/`. **~84–104K across 4 PRs** (P1a/P1b/P1c + Follow); P1a shipped standalone first.
 
 #### P2 — BP contract instances + contract validators → [RFC-008/P2-bp-contracts.md](RFC-008/P2-bp-contracts.md)
 
@@ -1230,7 +1230,7 @@ Serves R7 · **DEFERRED to its own RFC.** The only feature phase; semantic's emb
 #### Non-phase items
 
 - **Bug fix (any time):** `plan-gate.sh:108–115` ordering — F14 early-exit blocks the `marker_write` escape hatch (deadlock class 2, R4).
-- **Follow-up (post-P1):** migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/` (R10). See [P1-plugin-registry.md](RFC-008/P1-plugin-registry.md#the-runbooks-fork).
+- **Follow-up (post-P1) — DONE (this PR):** migrated `hooks/runbooks/` → `plugins/second-opinion/runbooks/` (R10). See [P1-plugin-registry.md](RFC-008/P1-plugin-registry.md#the-runbooks-fork).
 
 ### Build order and Phase-to-P crosswalk
 
@@ -1247,7 +1247,7 @@ The per-phase manifest above is the single source of truth for what each phase s
 | **P8** | *(none — added v11.1)* | R6, R10 | P3 | Cursor (full adapter, F43) + Windsurf (static-rules); added after the OQ-3 closure. |
 | **P9** | Phase 9 | R7 | — | Recall strategies — **deferred to its own RFC**. |
 | Bug | — | R4 | — | `plan-gate.sh:108–115` ordering fix. |
-| Follow | — | R10 | P1 | Migrate `hooks/runbooks/` → `plugins/second-opinion/runbooks/`. |
+| Follow ✓ | — | R10 | P1 | Migrated `hooks/runbooks/` → `plugins/second-opinion/runbooks/` (DONE, this PR). |
 
 ---
 
@@ -1525,7 +1525,7 @@ Consolidated second-opinion review of the v11 + v11.1 + v11.2 spec edits (13 fin
 ## Ground truth hierarchy
 
 1. **PRINCIPLES.md** — governing principles; all design must conform.
-2. **Code on disk** — what works today (`hooks/`, `scripts/`, `plugins/`, `patterns/`, `hooks/runbooks/`).
+2. **Code on disk** — what works today (`scripts/`, `plugins/`, `patterns/`; enforcement hooks at `plugins/claude-code/hooks/`, runbooks at `plugins/*/runbooks/`).
 3. **Accepted RFCs** — RFC-003 (accepted), RFC-004 (accepted).
 4. **This RFC (spec v8)** — requirements R1–R12 anchor all decisions.
 5. **Deadlock analysis** — episode `20260527-073522-deadlock-analysis-7-classes-traced-again-2648`.

@@ -37,7 +37,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const HOOK = path.join(REPO_ROOT, 'plugins', 'claude-code', 'hooks', 'second-opinion-gate.mjs')
-const RUNBOOK_SRC = path.join(REPO_ROOT, 'hooks', 'runbooks', 'second-opinion-harness.md')
+const RUNBOOK_SRC = path.join(REPO_ROOT, 'plugins', 'second-opinion', 'runbooks', 'harness.md')
 // Orphan-install fixtures below copy HOOK alone; the gate's harness branch
 // now also dynamic-imports lib/so-timeout-floor.mjs, so fixtures must
 // colocate it or they fail-closed with so-timeout-floor-load-failed before
@@ -139,6 +139,18 @@ function validQuickrefContent() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+console.log('# Repo runbook source (RFC-008 Follow / R10)')
+
+test('repo runbook source exists at the new plugin path with the sentinel', () => {
+  // Regression for the Follow move: hooks/runbooks/second-opinion-harness.md ->
+  // plugins/second-opinion/runbooks/harness.md. install.mjs deploys from
+  // RUNBOOK_SRC and deriveQuickref() extracts the "Self-trigger checklist"
+  // section, so the file MUST exist at the new path AND carry the sentinel.
+  assert.ok(fs.existsSync(RUNBOOK_SRC), `runbook source missing at ${RUNBOOK_SRC}`)
+  const body = fs.readFileSync(RUNBOOK_SRC, 'utf8')
+  assert.ok(/^## [^\n]*Self-trigger checklist/m.test(body), 'runbook missing "Self-trigger checklist" sentinel (deriveQuickref would fail-closed)')
+})
 
 console.log('# Gate detection — positive cases')
 

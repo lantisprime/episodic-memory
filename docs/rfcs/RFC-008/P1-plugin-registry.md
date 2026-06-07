@@ -27,7 +27,7 @@ with its own review → E2E → bug-disposition cycle.
 | **P1a** | The move only: `git mv hooks/ → plugins/claude-code/hooks/` (link-text-identical) + repoint 2 symlinks + `install.mjs` (`REPO_HOOKS` :43, `repoRunbookSrc` :1407) + `scripts/lib/install-manifest.mjs` (:123/:133/:136) + **>100** repo-side test path-refs. **No new contracts.** | ~24–30K | every suite green from the new path; `test-migration-cutover.mjs` green; `install --install-hooks-force` byte-identical (shasum); live gate fires. |
 | **P1b** | `plugins/_index.json` + `claude-code/manifest.json` (= the P0 `good-manifest.json`) + `validate-plugin-registry.mjs` (**M1–M6b + M-cross + M7/M7a/M7b + M8 `RESERVED_DIRS` + M9/M10** + typed/versioned `MAX_SUPPORTED` gate + the **6-axis validator project-root binding matrix**) + net-new `scripts/lib/json-instance-validate.mjs` (fail-closed closed-subset instance validator) + COMMON-rows template + enforcement runbook (**existence/byte-floor/sentinel/§-headers only**) + fixtures (version/symlink/F1 corpus remediation) + `bypass_known.json` claude-code records. **M7c–M7f + §7/§10 runbook content-derivation moved to P1c (F5 split).** | ~28–34K | validator PASS for claude-code; all fixtures behave per `detected_by` (fail at the *attributed* check); `claude-code-as-override.json` proves the override branch is live; `test-p0-schemas.mjs` green. |
 | **P1c** | **M7c–M7f runbook content-derivation** (§7 Table A/B re-derived from capabilities+taxonomy+R3 ternary, §8 modality line, §9 agent-manifest sentinel+schema+cross-field, §10 config/taxonomy cross-binding — byte-coupled to runbook authoring) + `test-plugin.mjs` 9-step gauntlet (5/6 report *deferred-P3*, not pass) + **net-new `field_bindings` interpreter** + `test-plugin-harness-binding.mjs` (**F31/F36/F61**) + a P1-local structured-alert probe with a pinned output contract (`input_project_root` vs `store_root`). | ~34–44K | M7c–M7f byte-equality green; gauntlet steps 1–4,7,8,9 green; 4 binding tests pass. |
-| **Follow** | `hooks/runbooks/ → plugins/second-opinion/runbooks/` (the second-opinion runbooks, kept out of P1a so the move stays single-destination; `second-opinion` is already in `RESERVED_DIRS`). | ~6–8K | runbooks deploy from the new path; M8 does not flag `second-opinion`. |
+| **Follow ✓ (DONE)** | `hooks/runbooks/ → plugins/second-opinion/runbooks/`, renamed to plugin-relative `harness.md`/`add-provider.md` (RFC L1135); deploy dest unchanged so zero hook bytes; `second-opinion` flipped to `presence:on-disk` in `RESERVED_DIRS`. | ~6–8K | runbooks deploy from the new path; M8 does not flag `second-opinion`. |
 
 ## Architecture
 
@@ -301,7 +301,7 @@ runbooks. RFC line 1257 routes them to `plugins/second-opinion/runbooks/`, **not
 `plugins/claude-code/`. So the move splits:
 
 - `hooks/*.sh` + `hooks/lib/` + `hooks/*.mjs` → `plugins/claude-code/hooks/`
-- `hooks/runbooks/` → `plugins/second-opinion/runbooks/` *(the post-P1 follow-up; small)*
+- `hooks/runbooks/` → `plugins/second-opinion/runbooks/` *(DONE in the Follow PR; renamed to `harness.md`/`add-provider.md`; `second-opinion` now `presence:on-disk`)*
 
 ### Ordinary repointing
 
