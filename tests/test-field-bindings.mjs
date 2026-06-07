@@ -84,6 +84,15 @@ throwsFB(() => interpretBindings({ x: "$$now" }, RAW), "$$now without injected n
 throwsFB(() => interpretBindings(null, RAW), "non-object bindings throws");
 throwsFB(() => interpretBindings([], RAW), "array bindings throws");
 
+// --- negative: the closed grammar holds on the KEY axis too (F2) -------------
+// `{ ["__proto__"]: … }` (computed key) is an OWN enumerable property, so
+// Object.entries sees it — it must THROW, not no-op or mutate the prototype.
+throwsFB(() => interpretBindings({ ["__proto__"]: "$.tool_name" }, RAW), "__proto__ key throws (closed key grammar, F2)");
+throwsFB(() => interpretBindings({ _leading: "$.tool_name" }, RAW), "leading-underscore key throws");
+throwsFB(() => interpretBindings({ Tool: "$.tool_name" }, RAW), "uppercase-leading key throws");
+throwsFB(() => interpretBindings({ "bad-key": "$.tool_name" }, RAW), "hyphen in key throws");
+assert(Object.getPrototypeOf(interpretBindings({ tool: "$.tool_name" }, RAW)) === null, "payload is prototype-less (no __proto__ pollution surface, F2)");
+
 console.log(`\ntest-field-bindings: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
   console.error("\nFAILURES:");

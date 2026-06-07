@@ -38,6 +38,11 @@ export class FieldBindingError extends Error {
 
 const SEGMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CONST_PREFIX = "$$const:";
+// Canonical-field KEY grammar — the same pattern `manifest.schema.json` pins on
+// `field_bindings` keys (and `labelId`). The closed grammar must hold on the KEY
+// axis too (claude-subagent F2): a key like `__proto__` is outside it and MUST
+// throw, never silently no-op or mutate the payload prototype.
+const FIELD_KEY_RE = /^[a-z][a-z0-9_]*$/;
 
 /**
  * Interpret a whole `field_bindings` object into a canonical payload.
@@ -52,8 +57,16 @@ export function interpretBindings(bindings, rawEvent, opts = {}) {
     throw new FieldBindingError(`field_bindings must be an object of {field: directive}, got ${describe(bindings)}`);
   }
   const now = opts && typeof opts === "object" ? opts.now : undefined;
-  const payload = {};
+  // Prototype-less payload: even if a caller bypasses the schema's propertyNames
+  // pin, `payload["__proto__"] = …` cannot reach an inherited accessor (F2 belt).
+  const payload = Object.create(null);
   for (const [key, directive] of Object.entries(bindings)) {
+    if (!FIELD_KEY_RE.test(key)) {
+      throw new FieldBindingError(
+        `field_bindings key ${JSON.stringify(key)} is outside the closed key grammar ` +
+        `/^[a-z][a-z0-9_]*$/ (keys are canonical field names; e.g. "__proto__" is rejected, not silently mishandled)`,
+      );
+    }
     payload[key] = interpretDirective(directive, rawEvent, now, key);
   }
   return payload;

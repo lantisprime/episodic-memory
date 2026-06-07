@@ -35,7 +35,12 @@ assert(r.summary.deferred === r.steps.filter((s) => s.status === "deferred-P3").
 
 // the net-new orchestration steps pass.
 assert(r.steps.find((s) => s.n === 8).status === "pass", "step 8 (event replay F39) passes");
-assert(r.steps.find((s) => s.n === 9).status === "pass", "step 9 (invocation parity F47 + N1 isolation) passes");
+const s9 = r.steps.find((s) => s.n === 9);
+assert(s9.status === "pass", "step 9 (invocation parity F47 + N1 isolation) passes");
+// F1 non-vacuity lock (claude-subagent review): step 9 must ACTUALLY arm a
+// marker in the sandbox — a regression to a read_only no-op dispatch (which
+// produced no marker, making the absence-assertion vacuous) would drop this.
+assert(/self-armed in sandbox/.test(s9.detail), "step 9 N1 is non-vacuous: gate self-armed a real marker in the sandbox", s9.detail);
 
 // read_trace stays under the project root.
 assert(r.read_trace.every((p) => p === REPO || p.startsWith(REPO + "/")), "every read_trace entry under the project root");

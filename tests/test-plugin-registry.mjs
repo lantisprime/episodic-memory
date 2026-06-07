@@ -340,6 +340,24 @@ const CONTEXT_FILES = [
 }
 
 // ===========================================================================
+// 9. field_bindings KEY-axis closure (claude-subagent F2). The manifest schema's
+//    propertyNames pin rejects a `__proto__` binding key at M2 (the interpreter
+//    layer is covered by tests/test-field-bindings.mjs). JSON.parse yields an OWN
+//    enumerable "__proto__" property (no prototype mutation), so the validator's
+//    Object.keys sees it and propertyNames fires.
+// ===========================================================================
+{
+  const fbSchema = SCHEMAS.manifest.$defs.eventTranslation.properties.field_bindings;
+  const badProto = JSON.parse('{"__proto__":"$.tool_name"}');
+  const r1 = validateInstance(badProto, fbSchema);
+  assert(!r1.valid && r1.errors.some((e) => e.keyword === "propertyNames"), "F2: field_bindings {__proto__} fails M2 propertyNames", JSON.stringify(r1.errors));
+  const r2 = validateInstance({ tool: "$.tool_name", session_id: "$.session_id" }, fbSchema);
+  assert(r2.valid, "F2: canonical-field-name keys still pass", JSON.stringify(r2.errors));
+  const r3 = validateInstance({ "Tool-Name": "$.x" }, fbSchema);
+  assert(!r3.valid && r3.errors.some((e) => e.keyword === "propertyNames"), "F2: hyphen/uppercase key fails propertyNames", JSON.stringify(r3.errors));
+}
+
+// ===========================================================================
 // Helpers.
 // ===========================================================================
 function runCLI(args, cwd, extraEnv) {

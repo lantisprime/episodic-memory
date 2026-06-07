@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { validateRegistry } from "./validate-plugin-registry.mjs";
 import { validateInstance } from "./lib/json-instance-validate.mjs";
 import { interpretBindings } from "./lib/field-bindings.mjs";
@@ -222,18 +223,38 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
   read_trace.push(...iso.read_trace);
   if (iso.error) problems.push(`N1 sandbox: ${iso.error}`);
   else {
-    if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after dispatch (${iso.leaked})`);
+    // The dispatch must ACTUALLY produce a marker (else the absence-assertions
+    // below are vacuous — claude-subagent F1). A push_or_pr_create command
+    // self-arms `.post-checkpoint-required` under the gate's resolved REPO_ROOT.
+    if (!iso.markerArmedInSandbox) problems.push(`N1: dispatch armed no marker in the sandbox — the isolation assertion would be vacuous (expected push self-arm)`);
+    // N1 proper: the marker landed in the sandbox (stdin .cwd), NOT the live repo.
+    if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after dispatch (${iso.liveLeak})`);
+    // Root-source proof: process cwd is DIVERGENT from stdin .cwd; a gate that
+    // resolved its root from process cwd would have leaked here instead.
+    if (!iso.cwdHeld) problems.push(`N1 root-source breach: a marker appeared under the divergent process cwd (${iso.procLeak}) — gate used process cwd, not stdin .cwd`);
     if (iso.exit != null && !(String(iso.exit) in am.return_codes)) problems.push(`dispatched gate exit ${iso.exit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
   }
 
   return problems.length === 0
-    ? { n, title, status: "pass", detail: `§9 surface-truth ok; sandbox dispatch exit ${iso.exit} ∈ return_codes; live markers untouched (N1)` }
+    ? { n, title, status: "pass", detail: `§9 surface-truth ok; gate self-armed in sandbox (${iso.sandboxMarkers}); live + divergent-process-cwd untouched (N1: root from stdin .cwd)` }
     : { n, title, status: "fail", detail: problems.slice(0, 3).join("; ") };
 }
 
-// Dispatch the first command_shape (gate hook) in a throwaway git-init sandbox
-// with hook stdin `.cwd` = sandbox root. Returns the captured exit + whether the
-// live --project's .checkpoints set was left unchanged (N1 absence-assertion).
+// Dispatch the gate hook (first command_shape) in a throwaway git-init sandbox
+// and PROVE N1 isolation non-vacuously (claude-subagent F1). Two deliberate
+// design points:
+//   1. The dispatched command is a marker-PRODUCING one — `git push` classifies
+//      push_or_pr_create, which self-arms `.post-checkpoint-required` under the
+//      gate's resolved REPO_ROOT regardless of prior state (checkpoint-gate.sh
+//      :1558-1610). The earlier `git status` (read_only) exited the gate at
+//      :1151 before any marker write, so the absence-assertion was vacuous.
+//   2. The process cwd is a SEPARATE throwaway dir, DIVERGENT from stdin `.cwd`.
+//      The gate resolves REPO_ROOT from an absolute stdin `.cwd` (:80-110) and
+//      only falls back to process cwd when `.cwd` is empty/relative. With the
+//      two divergent, a marker in the sandbox proves stdin `.cwd` won; a marker
+//      under the process cwd would prove it lost.
+// Asserts: marker present in the sandbox; ABSENT under the live --project (N1);
+// ABSENT under the divergent process cwd (root-source proof).
 function sandboxDispatch(root, manifest, am) {
   const read_trace = [];
   const shape = (am.command_shapes || [])[0];
@@ -241,36 +262,53 @@ function sandboxDispatch(root, manifest, am) {
   const pluginDir = path.join(root, "plugins", manifest.harness);
   const argv = shape.map((tok) => (typeof tok === "string" ? tok.replace("{plugin_dir}", pluginDir) : tok));
 
-  const liveCheckpoints = path.join(root, ".checkpoints");
-  const snapshot = () => { try { return new Set(fs.readdirSync(liveCheckpoints)); } catch { return new Set(); } };
-  const before = snapshot();
+  const SID = "00000000-0000-4000-8000-000000000000";
+  const snapshot = (base) => { try { return new Set(fs.readdirSync(path.join(base, ".checkpoints"))); } catch { return new Set(); } };
+  const newMarkers = (base, before) => [...snapshot(base)].filter((f) => !before.has(f));
 
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tp-gauntlet-"));
-  let exit = null, err = null;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tp-gauntlet-sbx-"));
+  const procCwd = fs.mkdtempSync(path.join(os.tmpdir(), "tp-gauntlet-cwd-")); // divergent process cwd
+  const liveBefore = snapshot(root);
+  const procBefore = snapshot(procCwd);
+
+  let exit = null, err = null, sandboxMarkers = [];
   try {
     execFileSync("git", ["init", "-q"], { cwd: sandbox });
+    const sandboxBefore = snapshot(sandbox); // fresh git-init → no .checkpoints yet
     const stdin = JSON.stringify({
-      session_id: "00000000-0000-4000-8000-000000000000",
-      cwd: fs.realpathSync(sandbox), // ABSOLUTE sandbox root (N1: gate reads root from stdin .cwd)
+      session_id: SID,
+      cwd: fs.realpathSync(sandbox), // ABSOLUTE sandbox root — gate's authoritative root (:80-110)
       tool_name: "Bash",
-      tool_input: { command: "git status" }, // read_only — a no-op for the gate
+      tool_input: { command: "git push" }, // push_or_pr_create — self-arms a REAL marker
       transcript: [],
     });
     try {
       execFileSync(argv[0], argv.slice(1), {
-        cwd: sandbox, // belt-and-suspenders for the empty/relative .cwd fallback
+        cwd: procCwd, // DIVERGENT from stdin .cwd: a gate reading process cwd would leak HERE, not the sandbox
         input: stdin,
-        env: { ...process.env, CLAUDE_CODE_SESSION_ID: "00000000-0000-4000-8000-000000000000" },
+        env: { ...process.env, CLAUDE_CODE_SESSION_ID: SID },
         stdio: ["pipe", "ignore", "ignore"],
       });
       exit = 0;
     } catch (e) { exit = typeof e.status === "number" ? e.status : null; if (exit == null) err = e.message; }
+    sandboxMarkers = newMarkers(sandbox, sandboxBefore); // snapshot BEFORE the finally rm
   } catch (e) { err = `sandbox setup failed: ${e.message}`; }
-  finally { try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {} }
+  finally {
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
+  }
 
-  const after = snapshot();
-  const leaked = [...after].filter((f) => !before.has(f));
-  return { exit, error: err, isolationHeld: leaked.length === 0, leaked: leaked.join(","), read_trace };
+  const liveLeak = newMarkers(root, liveBefore);
+  const procLeak = newMarkers(procCwd, procBefore);
+  return {
+    exit, error: err, read_trace,
+    markerArmedInSandbox: sandboxMarkers.length > 0,
+    sandboxMarkers: sandboxMarkers.join(","),
+    isolationHeld: liveLeak.length === 0, // N1: no marker under the live --project
+    liveLeak: liveLeak.join(","),
+    cwdHeld: procLeak.length === 0, //       gate used stdin .cwd, not the divergent process cwd
+    procLeak: procLeak.join(","),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -320,4 +358,4 @@ function main() {
   process.exit(exit);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();

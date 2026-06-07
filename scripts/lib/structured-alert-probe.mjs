@@ -87,7 +87,12 @@ export function emitProbeAlert({ input, now, command = "", scope = "local" } = {
     throw new ProbeError("emitProbeAlert: { now } (ISO-8601 string) must be injected — never Date.now() here");
   }
   const projectRoot = canonical(input);
-  const storeRoot = resolveRepoRoot(projectRoot);
+  // realpath the resolved store root too (claude-subagent N-a): `input` is
+  // canonicalized, but resolveRepoRoot returns git's path as-is, which on some
+  // hosts is non-canonical for a worktree. Without this, project_root could be
+  // canonical while store_root is not, spuriously breaking the F4 "input==store
+  // for a non-worktree" invariant. storeRoot always exists, so realpath is safe.
+  const storeRoot = fs.realpathSync(resolveRepoRoot(projectRoot));
   const alertsDir = path.join(storeRoot, ".episodic-memory", "alerts");
   const episodeFile = path.join(alertsDir, `structured-alert-${stampSlug(now)}.json`);
 

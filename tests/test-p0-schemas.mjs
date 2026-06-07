@@ -246,6 +246,17 @@ if (idxSchema && manSchema) {
     "manifest requires `type` const enforcement (R8-116, enforcement descriptor)",
   );
 
+  // --- field_bindings KEY closure (claude-subagent F2): keys are pinned to the
+  // canonical-field pattern (same as labelId), closing the __proto__ key axis so
+  // a `{"__proto__": "$.x"}` binding can never pass M2. Drift guard for the pin.
+  const fb = manSchema.$defs && manSchema.$defs.eventTranslation &&
+    manSchema.$defs.eventTranslation.properties.field_bindings;
+  assert(
+    fb && fb.propertyNames && fb.propertyNames.pattern === "^[a-z][a-z0-9_]*$",
+    "manifest field_bindings pins propertyNames to ^[a-z][a-z0-9_]*$ (F2 key-closure)",
+    JSON.stringify(fb && fb.propertyNames),
+  );
+
   // --- versioned-contract (R8 line 118): required schema_version, semver PATTERN not const
   assert(idxSchema.required.includes("schema_version"), "_index requires schema_version (R8-118)");
   assert(manSchema.required.includes("schema_version"), "manifest requires schema_version (R8-118)");
