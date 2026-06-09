@@ -320,11 +320,11 @@ if (symlinksOk) {
 // main() never run -> exit 0 + empty output = vacuous green for the CI gate.
 {
   const spacedScripts = path.join(TMP, "spaced dir", "scripts");
-  fs.mkdirSync(path.join(spacedScripts, "lib"), { recursive: true });
+  fs.mkdirSync(spacedScripts, { recursive: true });
   fs.copyFileSync(VALIDATOR, path.join(spacedScripts, "validate-schemas.mjs"));
-  for (const lib of ["mini-jsonschema.mjs", "path-contain.mjs"]) {
-    fs.copyFileSync(path.join(REPO_ROOT, "scripts", "lib", lib), path.join(spacedScripts, "lib", lib));
-  }
+  // Whole lib/ (not a hand-list): a future import-graph addition must not turn
+  // into copy-list churn (round-2 FU-2; staleness was already fail-loud).
+  copyTree(path.join(REPO_ROOT, "scripts", "lib"), path.join(spacedScripts, "lib"));
   const r = spawnSync(
     process.execPath,
     [path.join(spacedScripts, "validate-schemas.mjs"), "--project", path.join(TMP, "does-not-exist")],
