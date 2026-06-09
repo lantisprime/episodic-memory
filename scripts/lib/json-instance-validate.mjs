@@ -2,7 +2,7 @@
 // INSTANCE validator with a fail-CLOSED closure guard (RFC-008 R0c P1b, §2.1).
 //
 // This is NOT a general 2020-12 validator and NOT the schema-DOC linter
-// (tests/lib/mini-jsonschema.mjs asserts "a schema is a valid schema"; this
+// (scripts/lib/mini-jsonschema.mjs asserts "a schema is a valid schema"; this
 // asserts "an instance satisfies a schema"). It models exactly the keyword
 // subset the P0 plugin/runtime schemas use, and is the FIRST consumer to
 // instance-validate plugins/_index.json + plugins/claude-code/manifest.json
