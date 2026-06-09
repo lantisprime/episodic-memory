@@ -1,0 +1,72 @@
+name: Plugin + schema validation
+
+# RFC-008 P2a (Rule 13: enforce in CI, not just docs). Wires the suites P2a
+# ships or touches. Issue #377 tracks the REMAINING plugin-family suites —
+# still pending here: test-json-instance-validate.mjs, test-plugin-json.mjs,
+# test-field-bindings.mjs, test-plugin-gauntlet.mjs,
+# test-plugin-harness-binding.mjs. Add them as steps per #377; this comment is
+# the marker that their absence is a tracked gap, not full coverage.
+
+on:
+  pull_request:
+    paths:
+      - 'patterns/**'
+      - 'plugins/**'
+      - 'schemas/**'
+      - 'scripts/validate-schemas.mjs'
+      - 'scripts/validate-plugin-registry.mjs'
+      - 'scripts/lib/mini-jsonschema.mjs'
+      - 'scripts/lib/json-instance-validate.mjs'
+      - 'scripts/lib/path-contain.mjs'
+      - 'scripts/lib/version-hash.mjs'
+      - 'tests/lib/**'
+      - 'tests/fixtures/**'
+      - 'tests/test-p0-schemas.mjs'
+      - 'tests/test-validate-schemas.mjs'
+      - 'tests/test-path-contain.mjs'
+      - 'tests/test-plugin-registry.mjs'
+      - '.github/workflows/plugin-validate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'patterns/**'
+      - 'plugins/**'
+      - 'schemas/**'
+      - 'scripts/validate-schemas.mjs'
+      - 'scripts/validate-plugin-registry.mjs'
+      - 'scripts/lib/mini-jsonschema.mjs'
+      - 'scripts/lib/json-instance-validate.mjs'
+      - 'scripts/lib/path-contain.mjs'
+      - 'scripts/lib/version-hash.mjs'
+      - 'tests/lib/**'
+      - 'tests/fixtures/**'
+      - 'tests/test-p0-schemas.mjs'
+      - 'tests/test-validate-schemas.mjs'
+      - 'tests/test-path-contain.mjs'
+      - 'tests/test-plugin-registry.mjs'
+      - '.github/workflows/plugin-validate.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate schema docs + shared negative corpus (M1/M2, #368)
+        run: node scripts/validate-schemas.mjs --project "$GITHUB_WORKSPACE"
+
+      - name: Run validate-schemas self-tests
+        run: node tests/test-validate-schemas.mjs
+
+      - name: Run P0 schema gate (corpus co-consumer — #368 divergence lock)
+        run: node tests/test-p0-schemas.mjs
+
+      - name: Run path-contain axis tests
+        run: node tests/test-path-contain.mjs
+
+      - name: Run plugin-registry conformance tests (path-contain regression lock)
+        run: node tests/test-plugin-registry.mjs
