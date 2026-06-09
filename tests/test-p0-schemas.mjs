@@ -155,6 +155,9 @@ assert(
   "corpus entry names are unique (a duplicate shrinks class coverage silently)",
 );
 for (const entry of corpusEntries) {
+  // Shape-violating entries already failed the contract asserts above; skipping
+  // them here keeps a malformed entry from crashing the run before the summary.
+  if (entry === null || typeof entry !== "object" || typeof entry.name !== "string" || !("schema" in entry)) continue;
   const { valid } = lintSchema(entry.schema);
   assert(!valid, `rejects: ${entry.name}`, "linter accepted an invalid schema (fail-open)");
 }

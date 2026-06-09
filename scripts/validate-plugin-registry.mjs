@@ -30,6 +30,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { validateInstance, assertAllSchemasModeled } from "./lib/json-instance-validate.mjs";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
@@ -676,4 +677,8 @@ function main() {
 }
 
 // Run as CLI only when invoked directly (not when imported by tests).
-if (import.meta.url === `file://${process.argv[1]}`) main();
+// pathToFileURL, not `file://${argv[1]}`: a path needing URL-encoding (space,
+// non-ASCII) makes the raw template compare false -> main() never runs ->
+// exit 0 with empty output, a vacuous green for the CI gate (P2a step-6 F4;
+// same fix as validate-schemas.mjs, pattern from test-plugin.mjs:361).
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();

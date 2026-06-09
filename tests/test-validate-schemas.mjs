@@ -254,6 +254,29 @@ function writeCorpus(root, corpus) {
   assert(hasViolation(r.payload, "doc-lint", `sub${path.sep}schema.json`), "bare-named doc in scan root: discovered AND linted (F-B)");
 }
 
+// doc-named regular DIRECTORY in a scan root -> violation, never silently
+// ignored (step-6 review F1: the symlink branch flagged doc-named entries but
+// the directory branch stayed lenient — class fix judges doc-named entries by
+// kind before any skip rule)
+{
+  const root = makeCase("doc-named-dir");
+  fs.mkdirSync(path.join(root, "schemas", "dir.schema.json"));
+  const r = run(["--project", root, "--json"]);
+  assert(r.exit === 1, "doc-named directory: exit 1", `exit=${r.exit}`);
+  assert(hasViolation(r.payload, "doc-regular-file", "dir.schema.json"), "doc-named directory: doc-regular-file violation (not a silent skip)");
+}
+
+// dot-prefixed doc-named FILE -> discovered and linted (step-6 review F2: the
+// dot-skip applies to directories only; a hidden .bad.schema.json must not
+// lurk unlinted)
+{
+  const root = makeCase("dotfile-doc");
+  fs.writeFileSync(path.join(root, "schemas", ".hidden.schema.json"), JSON.stringify({ requiredd: [] }));
+  const r = run(["--project", root, "--json"]);
+  assert(r.exit === 1, "hidden doc-named file: exit 1", `exit=${r.exit}`);
+  assert(hasViolation(r.payload, "doc-lint", ".hidden.schema.json"), "hidden doc-named file: discovered AND linted");
+}
+
 // discovery vacuity: empty scan roots -> min-docs violation
 {
   const root = makeCase("min-docs");
@@ -290,6 +313,25 @@ if (symlinksOk) {
   const r = run(["--bogus"]);
   assert(r.exit === 2, "unknown argument: exit 2", `exit=${r.exit}`);
   assert(r.stderr.includes("--bogus"), "unknown argument: named in stderr");
+}
+
+// direct-run guard survives URL-encoding-requiring paths (step-6 review F4):
+// with the raw `file://${argv[1]}` compare, a SPACE in the script path made
+// main() never run -> exit 0 + empty output = vacuous green for the CI gate.
+{
+  const spacedScripts = path.join(TMP, "spaced dir", "scripts");
+  fs.mkdirSync(path.join(spacedScripts, "lib"), { recursive: true });
+  fs.copyFileSync(VALIDATOR, path.join(spacedScripts, "validate-schemas.mjs"));
+  for (const lib of ["mini-jsonschema.mjs", "path-contain.mjs"]) {
+    fs.copyFileSync(path.join(REPO_ROOT, "scripts", "lib", lib), path.join(spacedScripts, "lib", lib));
+  }
+  const r = spawnSync(
+    process.execPath,
+    [path.join(spacedScripts, "validate-schemas.mjs"), "--project", path.join(TMP, "does-not-exist")],
+    { encoding: "utf8" },
+  );
+  assert(r.status === 2, "spaced script path: direct-run guard fires (exit 2, not a silent 0)", `exit=${r.status} stdout=${JSON.stringify(r.stdout.slice(0, 80))}`);
+  assert(r.stderr.includes("does not resolve"), "spaced script path: real usage error surfaced", r.stderr.slice(0, 200));
 }
 
 // ---------------------------------------------------------------------------

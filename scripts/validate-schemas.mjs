@@ -41,6 +41,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { lintSchema, assertSelfConsistent } from "./lib/mini-jsonschema.mjs";
 import { UsageError } from "./lib/path-contain.mjs";
@@ -58,13 +59,18 @@ function isSchemaDocName(name) {
 
 /**
  * No-follow walk (lstat semantics via Dirent): never traverses symlinked
- * directories, never resolves symlinked files; skips dot-prefixed entries
+ * directories, never resolves symlinked files; skips dot-prefixed DIRECTORIES
  * (harness-staged local state — .review-store/, .episodic-memory/ — is absent
  * from CI checkouts; sweeping it would diverge local vs CI) and node_modules.
- * Symlinks whose NAME matches a schema doc are surfaced to the caller — a
- * schema doc must be a regular file, so those become violations, not skips.
+ *
+ * Doc-NAMED entries are judged by KIND before any skip rule (step-6 review
+ * F1/F2 class fix — one guard, both branch leniencies):
+ *   - regular file  -> discovery hit, even dot-prefixed (a hidden
+ *     .bad.schema.json must not lurk unlinted);
+ *   - anything else (symlink, directory, fifo) -> violation, never a silent
+ *     skip and never recursed into.
  */
-function walkNoFollow(dir, hits, symlinkHits) {
+function walkNoFollow(dir, hits, nonRegularHits) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -73,17 +79,14 @@ function walkNoFollow(dir, hits, symlinkHits) {
     throw e;
   }
   for (const ent of entries) {
-    if (ent.name.startsWith(".") || ent.name === "node_modules") continue;
     const p = path.join(dir, ent.name);
-    if (ent.isSymbolicLink()) {
-      if (isSchemaDocName(ent.name)) symlinkHits.push(p);
+    if (isSchemaDocName(ent.name)) {
+      if (ent.isFile()) hits.push(p);
+      else nonRegularHits.push(p);
       continue;
     }
-    if (ent.isDirectory()) {
-      walkNoFollow(p, hits, symlinkHits);
-    } else if (ent.isFile() && isSchemaDocName(ent.name)) {
-      hits.push(p);
-    }
+    if (ent.name.startsWith(".") || ent.name === "node_modules") continue;
+    if (ent.isDirectory()) walkNoFollow(p, hits, nonRegularHits);
   }
 }
 
@@ -117,11 +120,11 @@ export function validateSchemas({ projectRoot }) {
 
   // --- discovery over the scan roots (no-follow, dedupe) ---
   const hits = [];
-  const symlinkHits = [];
-  for (const rel of SCAN_ROOTS) walkNoFollow(path.join(root, rel), hits, symlinkHits);
-  for (const p of symlinkHits) {
+  const nonRegularHits = [];
+  for (const rel of SCAN_ROOTS) walkNoFollow(path.join(root, rel), hits, nonRegularHits);
+  for (const p of nonRegularHits) {
     checks++;
-    violation("doc-regular-file", `${path.relative(root, p)} is a symlink — schema docs must be regular files (no-follow discovery would otherwise skip it silently)`);
+    violation("doc-regular-file", `${path.relative(root, p)} is doc-named but not a regular file (symlink/directory/other) — schema docs must be regular files (no-follow discovery would otherwise skip it silently)`);
   }
   const seenReal = new Set();
   const docs = [];
@@ -157,14 +160,14 @@ export function validateSchemas({ projectRoot }) {
   // --- out-of-root sweep: same no-follow walker over the whole repo ---
   checks++;
   const sweepHits = [];
-  const sweepSymlinks = [];
-  walkNoFollow(root, sweepHits, sweepSymlinks);
+  const sweepNonRegular = [];
+  walkNoFollow(root, sweepHits, sweepNonRegular);
   const scanRootAbs = SCAN_ROOTS.map((r) => path.join(root, r));
   const fixturesAbs = path.join(root, "tests", "fixtures");
   const insideAllowed = (p) =>
     scanRootAbs.some((r) => p === r || p.startsWith(r + path.sep)) ||
     p.startsWith(fixturesAbs + path.sep);
-  for (const p of [...sweepHits, ...sweepSymlinks]) {
+  for (const p of [...sweepHits, ...sweepNonRegular]) {
     if (!insideAllowed(p)) {
       violation("out-of-root-doc", `${path.relative(root, p)} is schema-doc-named but OUTSIDE the scan roots (${SCAN_ROOTS.join(", ")}) — it would never be linted; move it into a scan root`);
     }
@@ -204,7 +207,9 @@ export function validateSchemas({ projectRoot }) {
     violation("corpus-shape", `${CORPUS_REL}: entry names must be unique — a duplicate keeps the >= ${MIN_CORPUS_ENTRIES} floor green while class coverage silently shrinks`);
   }
   for (const entry of entries) {
-    if (entry === null || typeof entry !== "object" || !("schema" in entry)) continue; // shape violation already recorded
+    // Shape violation already recorded above; string-name guard keeps the
+    // divergence detail from printing `undefined` for a malformed entry.
+    if (entry === null || typeof entry !== "object" || typeof entry.name !== "string" || !("schema" in entry)) continue;
     checks++;
     const { valid } = lintSchema(entry.schema);
     if (valid) {
@@ -281,4 +286,7 @@ function main() {
 }
 
 // Run as CLI only when invoked directly (not when imported by tests).
-if (import.meta.url === `file://${process.argv[1]}`) main();
+// pathToFileURL, not `file://${argv[1]}`: a path needing URL-encoding (space,
+// non-ASCII) makes the raw template compare false -> main() never runs ->
+// exit 0 with empty output, a vacuous green for the CI gate (step-6 F4).
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();
