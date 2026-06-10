@@ -294,6 +294,19 @@ classifierCase("P-live: redefinition appended to an EXISTING allowlisted call-si
 classifierCase("unproven branch: direct call without $() is fail-closed", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + '\n_priority "read_only"\n');
 }, UNPROVEN);
+// F-1R4: a backslash-newline continuation splits the token across physical
+// lines — bash joins during lexing, so the scan must normalize first.
+classifierCase("F-1R4: token split by backslash-newline continuation", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n_prio\\\nrity() { printf '9' ; }\n");
+}, DUP_DEFS);
+// F-1R4 FP control: a legitimate continuation that does NOT touch the token
+// stays green (the join must not manufacture spurious occurrences).
+{
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + '\nprobe_continuation() {\n  printf \'%s\' \\\n    "harmless"\n}\n');
+  const r = run(["--project", SANDBOX, "--json"]);
+  assert(r.exit === 0, "7b FP control: harmless backslash-newline continuation stays green (F-1R4)", `exit=${r.exit} violations=${JSON.stringify((r.payload && r.payload.violations || []).filter((v) => v.check === "7").map((v) => v.detail.slice(0, 80)))}`);
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER);
+}
 // FP controls (F-1R2): allowlisted contexts stay green — an extra $(-call
 // site and a full-line comment mention are NOT violations.
 {

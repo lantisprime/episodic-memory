@@ -194,7 +194,10 @@ function stableIdCheck({ root, relPath, currentDoc, idsOf, label, violation }) {
  * explains why arms are unusable.
  */
 export function extractPriorityArms(text, relPath, violation) {
-  const lines = text.split(/\r?\n/);
+  // Join backslash-newline continuations BEFORE splitting (step-6 F-1R4):
+  // bash strips `\`-newline during lexing, so `_prio\` + newline + `rity() {`
+  // is a live redefinition the per-line token scan would never see. CRLF-safe.
+  const lines = text.replace(/\\\r?\n/g, "").split(/\r?\n/);
   const defIdx = [];
   const unproven = [];
   for (let i = 0; i < lines.length; i++) {
