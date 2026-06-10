@@ -307,6 +307,20 @@ classifierCase("F-1R4: token split by backslash-newline continuation", () => {
   assert(r.exit === 0, "7b FP control: harmless backslash-newline continuation stays green (F-1R4)", `exit=${r.exit} violations=${JSON.stringify((r.payload && r.payload.violations || []).filter((v) => v.check === "7").map((v) => v.detail.slice(0, 80)))}`);
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER);
 }
+// F-1R5: bash does NOT join a backslash-newline inside a comment — a trailing
+// `\` on a comment line must not absorb a next-line definition into the
+// comment skip (the R4 unconditional join regressed exactly this).
+classifierCase("F-1R5: definition after a trailing-backslash COMMENT line", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n# note \\\n_priority() { printf '9' ; }\n");
+}, DUP_DEFS);
+// F-1R5 FP control: comment-with-trailing-backslash followed by a harmless
+// line stays green (the comment-aware join must not flag inert text).
+{
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + '\n# trailing backslash here \\\nprobe_harmless() { printf \'ok\' ; }\n');
+  const r = run(["--project", SANDBOX, "--json"]);
+  assert(r.exit === 0, "7b FP control: comment trailing-backslash + harmless next line stays green (F-1R5)", `exit=${r.exit} violations=${JSON.stringify((r.payload && r.payload.violations || []).filter((v) => v.check === "7").map((v) => v.detail.slice(0, 80)))}`);
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER);
+}
 // FP controls (F-1R2): allowlisted contexts stay green — an extra $(-call
 // site and a full-line comment mention are NOT violations.
 {

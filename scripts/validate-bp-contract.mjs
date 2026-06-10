@@ -194,10 +194,27 @@ function stableIdCheck({ root, relPath, currentDoc, idsOf, label, violation }) {
  * explains why arms are unusable.
  */
 export function extractPriorityArms(text, relPath, violation) {
-  // Join backslash-newline continuations BEFORE splitting (step-6 F-1R4):
-  // bash strips `\`-newline during lexing, so `_prio\` + newline + `rity() {`
-  // is a live redefinition the per-line token scan would never see. CRLF-safe.
-  const lines = text.replace(/\\\r?\n/g, "").split(/\r?\n/);
+  // Comment-aware logical-line assembly (step-6 F-1R4/F-1R5): bash strips
+  // `\`-newline during lexing — so `_prio\` + newline + `rity() {` is a live
+  // redefinition the per-line token scan would never see — but ONLY outside
+  // comments: a trailing `\` on a comment line is just a comment character,
+  // and an unconditional join would absorb the next-line definition INTO the
+  // comment skip (the R4→R5 regression). Honor the continuation only when the
+  // logical line does not start with `#`. Known divergences both err
+  // fail-closed: a continuation inside a single-quoted string joins here but
+  // stays literal in bash (DUP/unproven FP, never a miss); same for mid-line
+  // comments. The one accepted fail-OPEN tail remains eval/quoted-string-
+  // concat definitions whose source never spells the token (needs a bash
+  // lexer).
+  const phys = text.split(/\r?\n/);
+  const lines = [];
+  for (let i = 0; i < phys.length; i++) {
+    let cur = phys[i];
+    if (!/^\s*#/.test(cur)) {
+      while (cur.endsWith("\\") && i + 1 < phys.length) { cur = cur.slice(0, -1) + phys[++i]; }
+    }
+    lines.push(cur);
+  }
   const defIdx = [];
   const unproven = [];
   for (let i = 0; i < lines.length; i++) {
