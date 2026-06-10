@@ -117,14 +117,20 @@ console.log('\nbp-001 signal is an advisory; em-recall never arms a marker (plan
 test('em-recall emits __BP1_ADVISORY__ and arms NO .checkpoint-required at either root', () => {
   const root = setupRepo()
   // Force activation by seeding a recent bp-001 violation in local store.
+  // The date MUST be computed: shouldArmBp001Checkpoint (em-recall.mjs) only
+  // matches violations inside a 30-day window (`e.date >= cutoffStr`). A
+  // hardcoded 2026-05-09 rotted out of the window on 2026-06-08 and failed CI
+  // on a zero-diff PR (#381) — seed yesterday's date so the fixture never ages
+  // out again.
+  const recentDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   const localEpisodes = path.join(root, '.episodic-memory', 'episodes')
   fs.mkdirSync(localEpisodes, { recursive: true })
-  const violationId = '20260509-000000-test-bp001-violation-aaaa'
+  const violationId = `${recentDate.replace(/-/g, '')}-000000-test-bp001-violation-aaaa`
   fs.writeFileSync(
     path.join(localEpisodes, `${violationId}.md`),
     `---
 id: ${violationId}
-date: 2026-05-09
+date: ${recentDate}
 project: test
 category: violation
 status: active
@@ -137,7 +143,7 @@ test
   // Build a minimal index.jsonl so loadIndex picks it up.
   const indexLine = JSON.stringify({
     id: violationId,
-    date: '2026-05-09',
+    date: recentDate,
     project: 'test',
     category: 'violation',
     status: 'active',

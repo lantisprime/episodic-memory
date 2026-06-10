@@ -1,0 +1,16 @@
+[
+  { "name": "items-is-array (R2)", "schema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "items": [] } },
+  { "name": "required-is-string", "schema": { "required": "x" } },
+  { "name": "type-banana", "schema": { "type": "banana" } },
+  { "name": "properties-is-array", "schema": { "properties": [] } },
+  { "name": "unknown-keyword (requiredd)", "schema": { "requiredd": [] } },
+  { "name": "properties-value-not-schema", "schema": { "properties": { "a": [] } } },
+  { "name": "nested-bad-type-under-items", "schema": { "items": { "type": "strng" } } },
+  { "name": "deep: propertyNames.items=[]", "schema": { "propertyNames": { "items": [] } } },
+  { "name": "deep: unevaluatedProperties.type=banana", "schema": { "unevaluatedProperties": { "type": "banana" } } },
+  { "name": "deep: dependentSchemas.a.items=[]", "schema": { "dependentSchemas": { "a": { "items": [] } } } },
+  { "name": "deep: allOf element bad", "schema": { "allOf": [{ "type": "banana" }] } },
+  { "name": "deep: contentSchema.items=[]", "schema": { "contentSchema": { "items": [] } } },
+  { "name": "enum-not-array", "schema": { "enum": "x" } },
+  { "name": "minLength-negative", "schema": { "minLength": -1 } }
+]

@@ -124,29 +124,42 @@ for (const rel of SCHEMA_DOCS) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. NEGATIVE corpus — each MUST be rejected. Includes the deep fail-open
-//    cases the R0b review (R3) demanded: subschema nested under propertyNames /
+// 4. NEGATIVE corpus — each MUST be rejected. SHARED fixture (#368): the same
+//    file drives the shipped scripts/validate-schemas.mjs, so the P0 gate and
+//    the CI validator cannot drift. Includes the deep fail-open cases the R0b
+//    review (R3) demanded: subschema nested under propertyNames /
 //    unevaluatedProperties / dependentSchemas.
 // ---------------------------------------------------------------------------
-const NEGATIVE = [
-  ["items-is-array (R2)", { $schema: "https://json-schema.org/draft/2020-12/schema", items: [] }],
-  ["required-is-string", { required: "x" }],
-  ["type-banana", { type: "banana" }],
-  ["properties-is-array", { properties: [] }],
-  ["unknown-keyword (requiredd)", { requiredd: [] }],
-  ["properties-value-not-schema", { properties: { a: [] } }],
-  ["nested-bad-type-under-items", { items: { type: "strng" } }],
-  ["deep: propertyNames.items=[]", { propertyNames: { items: [] } }],
-  ["deep: unevaluatedProperties.type=banana", { unevaluatedProperties: { type: "banana" } }],
-  ["deep: dependentSchemas.a.items=[]", { dependentSchemas: { a: { items: [] } } }],
-  ["deep: allOf element bad", { allOf: [{ type: "banana" }] }],
-  ["deep: contentSchema.items=[]", { contentSchema: { items: [] } }],
-  ["enum-not-array", { enum: "x" }],
-  ["minLength-negative", { minLength: -1 }],
-];
-for (const [name, schema] of NEGATIVE) {
-  const { valid } = lintSchema(schema);
-  assert(!valid, `rejects: ${name}`, "linter accepted an invalid schema (fail-open)");
+let corpusRaw = null;
+try {
+  corpusRaw = JSON.parse(readFileSync(join(REPO_ROOT, "tests/fixtures/schema-negative-corpus.json"), "utf8"));
+  ok("negative corpus parses");
+} catch (e) {
+  bad("negative corpus parses", e.message);
+}
+// Shape contract + non-vacuity guard run UNCONDITIONALLY (outside the read
+// try/catch): a missing/unparseable fixture must fail these too, never skip.
+const corpusEntries = Array.isArray(corpusRaw) ? corpusRaw : [];
+assert(Array.isArray(corpusRaw), "negative corpus is an array", `got ${corpusRaw === null ? "null/unreadable" : typeof corpusRaw}`);
+assert(
+  corpusEntries.length >= 14,
+  "negative corpus has >= 14 entries (non-vacuity, #368)",
+  `got ${corpusEntries.length}`,
+);
+assert(
+  corpusEntries.every((e) => e !== null && typeof e === "object" && typeof e.name === "string" && "schema" in e),
+  "every corpus entry has string `name` + `schema` key",
+);
+assert(
+  new Set(corpusEntries.map((e) => e && e.name)).size === corpusEntries.length,
+  "corpus entry names are unique (a duplicate shrinks class coverage silently)",
+);
+for (const entry of corpusEntries) {
+  // Shape-violating entries already failed the contract asserts above; skipping
+  // them here keeps a malformed entry from crashing the run before the summary.
+  if (entry === null || typeof entry !== "object" || typeof entry.name !== "string" || !("schema" in entry)) continue;
+  const { valid } = lintSchema(entry.schema);
+  assert(!valid, `rejects: ${entry.name}`, "linter accepted an invalid schema (fail-open)");
 }
 
 // ---------------------------------------------------------------------------

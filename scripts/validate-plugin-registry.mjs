@@ -30,9 +30,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { validateInstance, assertAllSchemasModeled } from "./lib/json-instance-validate.mjs";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
+import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs";
 
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
 export const MAX_SUPPORTED = "1.0.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality)
@@ -95,39 +97,10 @@ export function gateSchemaVersion(raw, maxSupported = MAX_SUPPORTED) {
 }
 
 // ---------------------------------------------------------------------------
-// Path helpers.
+// Path helpers. contained/resolveContained/UsageError were extracted verbatim
+// to ./lib/path-contain.mjs in P2a (shared with P2b's validate-bp-contract);
+// the UsageError -> exit-2 boundary stays here in main() (N-7).
 // ---------------------------------------------------------------------------
-function contained(abs, baseReal) {
-  return abs === baseReal || abs.startsWith(baseReal + path.sep);
-}
-
-/**
- * Resolve an INJECTED file path (--manifest / --index / --bypass-known) and
- * realpath-contain it under the project root (F7/F29). An injected path is
- * caller-controlled, so it must not let the validator read outside the project:
- * lexical escape (../, absolute) OR symlink escape -> UsageError (exit 2). A
- * not-yet-existing path keeps its lexically-contained abs (the reader surfaces
- * ENOENT). `root` is already canonical (realpathSync in resolveProjectRoot).
- */
-function resolveContained(root, p, label) {
-  const absLex = path.resolve(root, p);
-  // realpath FIRST for an existing path (canonicalizes e.g. macOS /var ->
-  // /private/var so an absolute in-project path is not falsely rejected by a
-  // lexical compare against the already-canonical root); lexical fallback only
-  // for a not-yet-existing path (the reader then surfaces ENOENT).
-  let real;
-  try { real = fs.realpathSync(absLex); }
-  catch {
-    if (!contained(absLex, root)) throw new UsageError(`--${label} ${JSON.stringify(p)} escapes --project authority`);
-    return absLex;
-  }
-  if (!contained(real, root)) throw new UsageError(`--${label} ${JSON.stringify(p)} resolves outside --project authority`);
-  return real;
-}
-
-class UsageError extends Error {
-  constructor(message) { super(message); this.name = "UsageError"; }
-}
 
 /** Resolve the project root. --project explicit -> realpath (git never consulted). */
 function resolveProjectRoot(argProject, cwd) {
@@ -704,4 +677,8 @@ function main() {
 }
 
 // Run as CLI only when invoked directly (not when imported by tests).
-if (import.meta.url === `file://${process.argv[1]}`) main();
+// pathToFileURL, not `file://${argv[1]}`: a path needing URL-encoding (space,
+// non-ASCII) makes the raw template compare false -> main() never runs ->
+// exit 0 with empty output, a vacuous green for the CI gate (P2a step-6 F4;
+// same fix as validate-schemas.mjs, pattern from test-plugin.mjs:361).
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();

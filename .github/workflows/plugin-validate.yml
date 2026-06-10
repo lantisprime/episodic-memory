@@ -1,0 +1,44 @@
+name: Plugin + schema validation
+
+# RFC-008 P2a (Rule 13: enforce in CI, not just docs). Wires the suites P2a
+# ships or touches. NO path filters (approved-plan decision, step-6 review F3):
+# the suites run in seconds, and a path-filtered required check leaves
+# non-matching PRs hanging on "Expected" status once the check is required —
+# while a hand-curated per-file filter silently stops running when a new
+# scripts/lib helper joins the import graph.
+#
+# Issue #377 tracks the REMAINING plugin-family suites — still pending here:
+# test-json-instance-validate.mjs, test-plugin-json.mjs,
+# test-field-bindings.mjs, test-plugin-gauntlet.mjs,
+# test-plugin-harness-binding.mjs. Add them as steps per #377; this comment is
+# the marker that their absence is a tracked gap, not full coverage.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate schema docs + shared negative corpus (M1/M2, #368)
+        run: node scripts/validate-schemas.mjs --project "$GITHUB_WORKSPACE"
+
+      - name: Run validate-schemas self-tests
+        run: node tests/test-validate-schemas.mjs
+
+      - name: Run P0 schema gate (corpus co-consumer — #368 divergence lock)
+        run: node tests/test-p0-schemas.mjs
+
+      - name: Run path-contain axis tests
+        run: node tests/test-path-contain.mjs
+
+      - name: Run plugin-registry conformance tests (path-contain regression lock)
+        run: node tests/test-plugin-registry.mjs
