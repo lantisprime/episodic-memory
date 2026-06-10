@@ -263,21 +263,36 @@ classifierCase("duplicate via `_priority () {` spelling (F-1)", () => {
 classifierCase("duplicate via INDENTED `_priority() {` spelling (F-1)", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n  _priority() {" + PLANTED_BODY);
 }, "_priority() definitions");
-// Step-6 F-1R2 boundary inversion: bash accepts `name()` + ANY compound
-// command anywhere a command may appear, so unrecognized token occurrences
-// are violations by construction — one regression per captured N-member.
+// Step-6 F-1R2/F-1R3: per-OCCURRENCE token-context allowlist — every
+// definition opener anywhere on any line counts toward the exactly-one
+// tally; occurrences outside the allowlist are unproven violations.
 const UNPROVEN = "cannot prove exactly-one _priority definition";
+const DUP_DEFS = "_priority() definitions";
 classifierCase("N11: brace-on-next-line definition (F-1R2)", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n_priority()\n{" + PLANTED_BODY);
-}, UNPROVEN);
+}, DUP_DEFS);
 classifierCase("N12: `function _priority` brace-on-next-line (F-1R2)", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\nfunction _priority\n{" + PLANTED_BODY);
-}, UNPROVEN);
+}, DUP_DEFS);
 classifierCase("N13: non-brace compound body definition (F-1R2)", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n_priority() case \"$1\" in read_only) printf '1' ;; esac\n");
-}, UNPROVEN);
+}, DUP_DEFS);
 classifierCase("N14: definition after a same-line command (F-1R2)", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n: ; _priority() {" + PLANTED_BODY);
+}, DUP_DEFS);
+// F-1R3 P-members: a call site and a redefinition share one line — the call
+// context must mask only its own OCCURRENCE, never the rest of the line.
+classifierCase("P1: call site + same-line redefinition (F-1R3)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\nout=$(_priority read_only); _priority() { printf '9' ; }\n");
+}, DUP_DEFS);
+classifierCase("P8: call inside a string + same-line redefinition (F-1R3)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\nmsg=\"see $(_priority x)\"; _priority() { printf '9' ; }\n");
+}, DUP_DEFS);
+classifierCase("P-live: redefinition appended to an EXISTING allowlisted call-site line (F-1R3)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER.replace('local lp=$(_priority "$lbl")', 'local lp=$(_priority "$lbl"); _priority() { printf \'9\' ; }'));
+}, DUP_DEFS);
+classifierCase("unproven branch: direct call without $() is fail-closed", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + '\n_priority "read_only"\n');
 }, UNPROVEN);
 // FP controls (F-1R2): allowlisted contexts stay green — an extra $(-call
 // site and a full-line comment mention are NOT violations.

@@ -87,18 +87,22 @@ const GATE_KEYS = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 const GATE_ACTIONS = ["allow", "block"];
 const ACTION_ENUM = ["block", "warn", "inject", "modify", "observe", "refuse_stop", "inject_context", "inject_static", "write_artifact", "unsupported"];
 const TIER_ARMS = ["STRONG", "MEDIUM", "WEAK"];
-// Step-6 F-1/F-1R2 — the enforcement boundary is an ALLOWLIST of _priority
-// token CONTEXTS, not a blocklist of definition spellings. Bash accepts
-// `name()` followed by ANY compound command anywhere a command may appear
-// (brace-next-line, `case` body, after `;`), so a spelling regex can never
-// close the duplicate-definition class; instead every word-bounded _priority
-// occurrence must be one of: (1) the ONE canonical definition (recognizer
-// below), (2) a `$(`-call site, (3) a full-line comment. Anything else =
-// "cannot prove exactly-one definition" violation — fail-closed by
-// construction for every current and future spelling.
+// Step-6 F-1/F-1R2/F-1R3 — the enforcement boundary is a per-OCCURRENCE
+// allowlist of _priority token contexts, not a blocklist of definition
+// spellings and not a per-line short-circuit. Bash accepts `name()` followed
+// by ANY compound command anywhere a command may appear (brace-next-line,
+// `case` body, after `;`/`&&` — including on a line that ALSO holds a
+// legitimate call site, the F-1R3 P1/P8 false-pass), so: every word-bounded
+// _priority occurrence is classified individually — a paren-form opener
+// `_priority()` or keyword-form `function _priority` ANYWHERE counts toward
+// the exactly-one definition tally; a `$(`-preceded occurrence is a call
+// site; a full-line comment is inert; anything else is a "cannot prove
+// exactly-one definition" violation. Fail-closed by construction; the one
+// accepted fail-open tail is an eval-built definition whose source never
+// spells the token (`eval "_priori""ty() …"`) — closing that needs a bash
+// parser, documented residual.
 const PRIORITY_DEF_RE = /^\s*(?:function\s+_priority\s*(?:\(\s*\))?|_priority\s*\(\s*\))\s*\{/;
 const PRIORITY_TOKEN_RE = /\b_priority\b/;
-const PRIORITY_CALL_RE = /\$\(\s*_priority\b/;
 const ARM_PLAIN_RE = /^\s*([a-z_][a-z0-9_]*)\)/;
 const ARM_STAR_RE = /^\s*\*\)/;
 const ARM_INTRODUCING_RE = /^\s*\S+\)/;
@@ -196,17 +200,30 @@ export function extractPriorityArms(text, relPath, violation) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!PRIORITY_TOKEN_RE.test(line)) continue;
-    if (PRIORITY_DEF_RE.test(line)) { defIdx.push(i); continue; }
-    if (PRIORITY_CALL_RE.test(line)) continue;
-    if (line.trim().startsWith("#")) continue;
-    unproven.push(i + 1);
+    if (line.trim().startsWith("#")) continue; // full-line comment: inert
+    const tokenRe = /\b_priority\b/g;
+    let m;
+    while ((m = tokenRe.exec(line)) !== null) {
+      const before = line.slice(0, m.index);
+      const after = line.slice(m.index + "_priority".length);
+      // Definition opener, ANY position on the line (F-1R3): paren form
+      // `_priority()` (bash cannot "call" with literal empty parens) or
+      // keyword form `function _priority`.
+      if (/^\s*\(\s*\)/.test(after) || /\bfunction\s+$/.test(before)) { defIdx.push(i); continue; }
+      if (/\$\(\s*$/.test(before)) continue; // $( call site (this OCCURRENCE only — the rest of the line is still scanned)
+      unproven.push(i + 1);
+    }
   }
   if (unproven.length > 0) {
-    violation(`${relPath}: cannot prove exactly-one _priority definition — unrecognized _priority token occurrence(s) at line(s) ${unproven.join(", ")}; allowlisted contexts are the canonical definition, $(-call sites, and full-line comments — any other spelling could be a bash redefinition (fail-closed, F-1R2)`);
+    violation(`${relPath}: cannot prove exactly-one _priority definition — unrecognized _priority token occurrence(s) at line(s) ${unproven.join(", ")}; allowlisted contexts are the definition opener, $(-call sites, and full-line comments — any other spelling could be a bash redefinition (fail-closed, F-1R2)`);
     return null;
   }
   if (defIdx.length === 0) { violation(`${relPath}: no _priority() definition found — cannot verify priority-arm closure`); return null; }
   if (defIdx.length > 1) { violation(`${relPath}: ${defIdx.length} _priority() definitions found (expected exactly one) — bash last-wins would diverge from a first-match parse (A3)`); return null; }
+  if (!PRIORITY_DEF_RE.test(lines[defIdx[0]])) {
+    violation(`${relPath}: the single _priority definition is not in canonical \`_priority() {\` form (line ${defIdx[0] + 1}) — cannot parse arms (fail-closed)`);
+    return null;
+  }
 
   let caseIdx = -1;
   for (let i = defIdx[0] + 1; i < lines.length; i++) {
