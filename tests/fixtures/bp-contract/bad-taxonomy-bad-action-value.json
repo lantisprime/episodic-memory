@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "labels": [
+    { "id": "read_only", "meaning": "fixture: gate value outside {allow, block}", "overridable": true, "gates": { "plan_approval": "maybe", "pre_checkpoint": "allow", "post_checkpoint": "allow" } },
+    { "id": "nonsrc_write", "meaning": "fixture", "overridable": true, "gates": { "plan_approval": "block", "pre_checkpoint": "allow", "post_checkpoint": "allow" } },
+    { "id": "shared_write", "meaning": "fixture", "overridable": true, "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "allow" } },
+    { "id": "push_or_pr_create", "meaning": "fixture", "overridable": true, "gates": { "plan_approval": "block", "pre_checkpoint": "allow", "post_checkpoint": "block" } },
+    { "id": "marker_write", "meaning": "fixture", "overridable": false, "gates": { "plan_approval": "allow", "pre_checkpoint": "allow", "post_checkpoint": "allow" } },
+    { "id": "unsafe_complex", "meaning": "fixture", "overridable": false, "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "block" } },
+    { "id": "unknown", "meaning": "fixture", "overridable": true, "gates": { "plan_approval": "block", "pre_checkpoint": "block", "post_checkpoint": "block" } }
+  ],
+  "non_overridable": ["marker_write", "unsafe_complex"]
+}
