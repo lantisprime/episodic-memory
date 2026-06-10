@@ -39,7 +39,7 @@ import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs"
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
 export const MAX_SUPPORTED = "1.0.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality)
 const HARNESS_IDS = ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"];
-const EVENT_IDS = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"];
+export const EVENT_IDS = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"]; // exported for the Rule-14 binding check in tests/test-validate-bp-contract.mjs (EVENT_IDS ≡ live events[].id)
 const TIERS = ["STRONG", "MEDIUM", "WEAK", "TBD"];
 const TIER_RANK = { TBD: 0, WEAK: 1, MEDIUM: 2, STRONG: 3 };
 const MIN_RUNBOOK_FULL_BYTES = 1024;
