@@ -87,14 +87,18 @@ const GATE_KEYS = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 const GATE_ACTIONS = ["allow", "block"];
 const ACTION_ENUM = ["block", "warn", "inject", "modify", "observe", "refuse_stop", "inject_context", "inject_static", "write_artifact", "unsupported"];
 const TIER_ARMS = ["STRONG", "MEDIUM", "WEAK"];
-// Definition recognizer covers the full bash spelling CLASS (step-6 F-1 — a
-// recognizer narrower than bash's own grammar lets `function _priority {` /
-// `_priority () {` / indented duplicates slip past the A3 exactly-one guard
-// while bash last-wins executes the planted one): optional indent, optional
-// `function` keyword, optional space before the parens, parens themselves
-// optional only with the keyword form, same-line `{`. A spelling outside the
-// class (e.g. brace on the next line) yields count 0 -> fail-closed violation.
+// Step-6 F-1/F-1R2 — the enforcement boundary is an ALLOWLIST of _priority
+// token CONTEXTS, not a blocklist of definition spellings. Bash accepts
+// `name()` followed by ANY compound command anywhere a command may appear
+// (brace-next-line, `case` body, after `;`), so a spelling regex can never
+// close the duplicate-definition class; instead every word-bounded _priority
+// occurrence must be one of: (1) the ONE canonical definition (recognizer
+// below), (2) a `$(`-call site, (3) a full-line comment. Anything else =
+// "cannot prove exactly-one definition" violation — fail-closed by
+// construction for every current and future spelling.
 const PRIORITY_DEF_RE = /^\s*(?:function\s+_priority\s*(?:\(\s*\))?|_priority\s*\(\s*\))\s*\{/;
+const PRIORITY_TOKEN_RE = /\b_priority\b/;
+const PRIORITY_CALL_RE = /\$\(\s*_priority\b/;
 const ARM_PLAIN_RE = /^\s*([a-z_][a-z0-9_]*)\)/;
 const ARM_STAR_RE = /^\s*\*\)/;
 const ARM_INTRODUCING_RE = /^\s*\S+\)/;
@@ -188,7 +192,19 @@ function stableIdCheck({ root, relPath, currentDoc, idsOf, label, violation }) {
 export function extractPriorityArms(text, relPath, violation) {
   const lines = text.split(/\r?\n/);
   const defIdx = [];
-  for (let i = 0; i < lines.length; i++) if (PRIORITY_DEF_RE.test(lines[i])) defIdx.push(i);
+  const unproven = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!PRIORITY_TOKEN_RE.test(line)) continue;
+    if (PRIORITY_DEF_RE.test(line)) { defIdx.push(i); continue; }
+    if (PRIORITY_CALL_RE.test(line)) continue;
+    if (line.trim().startsWith("#")) continue;
+    unproven.push(i + 1);
+  }
+  if (unproven.length > 0) {
+    violation(`${relPath}: cannot prove exactly-one _priority definition — unrecognized _priority token occurrence(s) at line(s) ${unproven.join(", ")}; allowlisted contexts are the canonical definition, $(-call sites, and full-line comments — any other spelling could be a bash redefinition (fail-closed, F-1R2)`);
+    return null;
+  }
   if (defIdx.length === 0) { violation(`${relPath}: no _priority() definition found — cannot verify priority-arm closure`); return null; }
   if (defIdx.length > 1) { violation(`${relPath}: ${defIdx.length} _priority() definitions found (expected exactly one) — bash last-wins would diverge from a first-match parse (A3)`); return null; }
 

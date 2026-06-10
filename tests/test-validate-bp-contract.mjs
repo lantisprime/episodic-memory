@@ -263,6 +263,30 @@ classifierCase("duplicate via `_priority () {` spelling (F-1)", () => {
 classifierCase("duplicate via INDENTED `_priority() {` spelling (F-1)", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n  _priority() {" + PLANTED_BODY);
 }, "_priority() definitions");
+// Step-6 F-1R2 boundary inversion: bash accepts `name()` + ANY compound
+// command anywhere a command may appear, so unrecognized token occurrences
+// are violations by construction — one regression per captured N-member.
+const UNPROVEN = "cannot prove exactly-one _priority definition";
+classifierCase("N11: brace-on-next-line definition (F-1R2)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n_priority()\n{" + PLANTED_BODY);
+}, UNPROVEN);
+classifierCase("N12: `function _priority` brace-on-next-line (F-1R2)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\nfunction _priority\n{" + PLANTED_BODY);
+}, UNPROVEN);
+classifierCase("N13: non-brace compound body definition (F-1R2)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n_priority() case \"$1\" in read_only) printf '1' ;; esac\n");
+}, UNPROVEN);
+classifierCase("N14: definition after a same-line command (F-1R2)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n: ; _priority() {" + PLANTED_BODY);
+}, UNPROVEN);
+// FP controls (F-1R2): allowlisted contexts stay green — an extra $(-call
+// site and a full-line comment mention are NOT violations.
+{
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + '\n# _priority is documented here\nextra_probe() {\n  local x=$(_priority "read_only")\n  printf \'%s\' "$x"\n}\n');
+  const r = run(["--project", SANDBOX, "--json"]);
+  assert(r.exit === 0, "7b FP control: call-site + comment _priority mentions stay green (F-1R2)", `exit=${r.exit} violations=${JSON.stringify((r.payload && r.payload.violations || []).filter((v) => v.check === "7").map((v) => v.detail.slice(0, 80)))}`);
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER);
+}
 
 // ---------------------------------------------------------------------------
 // 6. Stable-ID E2E (assertions 8/14) — all branches incl. A2 + N-5.
