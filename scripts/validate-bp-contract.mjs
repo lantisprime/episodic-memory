@@ -78,12 +78,23 @@ import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs"
 import { deriveBpIds } from "./scaffold-bp.mjs";
 
 const BP_STRICT_RE = /^bp-[0-9]{3}\.json$/;
-const BP_LOOSE_RE = /^bp-.*\.json$/;
+// Case-INSENSITIVE on purpose (step-6 F-3): on case-insensitive filesystems
+// (macOS APFS, Windows) a `BP-099.JSON` is the same dead-data escape the F5
+// guard names; the STRICT regex stays case-sensitive so any case variant is a
+// named violation, never silently ignored.
+const BP_LOOSE_RE = /^bp-.*\.json$/i;
 const GATE_KEYS = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 const GATE_ACTIONS = ["allow", "block"];
 const ACTION_ENUM = ["block", "warn", "inject", "modify", "observe", "refuse_stop", "inject_context", "inject_static", "write_artifact", "unsupported"];
 const TIER_ARMS = ["STRONG", "MEDIUM", "WEAK"];
-const PRIORITY_DEF_RE = /^_priority\(\)\s*\{/;
+// Definition recognizer covers the full bash spelling CLASS (step-6 F-1 — a
+// recognizer narrower than bash's own grammar lets `function _priority {` /
+// `_priority () {` / indented duplicates slip past the A3 exactly-one guard
+// while bash last-wins executes the planted one): optional indent, optional
+// `function` keyword, optional space before the parens, parens themselves
+// optional only with the keyword form, same-line `{`. A spelling outside the
+// class (e.g. brace on the next line) yields count 0 -> fail-closed violation.
+const PRIORITY_DEF_RE = /^\s*(?:function\s+_priority\s*(?:\(\s*\))?|_priority\s*\(\s*\))\s*\{/;
 const ARM_PLAIN_RE = /^\s*([a-z_][a-z0-9_]*)\)/;
 const ARM_STAR_RE = /^\s*\*\)/;
 const ARM_INTRODUCING_RE = /^\s*\S+\)/;
@@ -184,7 +195,7 @@ export function extractPriorityArms(text, relPath, violation) {
   let caseIdx = -1;
   for (let i = defIdx[0] + 1; i < lines.length; i++) {
     if (/^\s*case\s+"\$1"\s+in\b/.test(lines[i])) { caseIdx = i; break; }
-    if (/^\}/.test(lines[i])) break; // function closed before any case block
+    if (/^\s*\}\s*$/.test(lines[i])) break; // function closed before any case block (indent-tolerant, F-1 class)
   }
   if (caseIdx === -1) { violation(`${relPath}: _priority() carries no \`case "$1" in\` block — cannot verify priority-arm closure`); return null; }
 
@@ -244,10 +255,14 @@ export function validateBpContract({ projectRoot, taxonomyPath = null, eventsPat
   const enforcementEntries = (Array.isArray(pluginsIndex.plugins) ? pluginsIndex.plugins : []).filter((p) => p && p.type === "enforcement");
   const manifests = [];
   for (const entry of enforcementEntries) {
-    if (typeof entry.manifest !== "string") { violation("7", `_index entry ${JSON.stringify(entry.id)} has no manifest path — closure arms cannot run for it`); continue; }
+    // An unloadable manifest skips arms in THREE assertion groups — attribute
+    // the skip in each so no consumer reads a green 11/15 as "checked"
+    // (step-6 NIT: attribution-only, exit was already 1).
+    const skipAll = (why) => { for (const check of ["7", "11", "15"]) violation(check, why); };
+    if (typeof entry.manifest !== "string") { skipAll(`_index entry ${JSON.stringify(entry.id)} has no manifest path — closure arms cannot run for it`); continue; }
     const abs = path.join(root, entry.manifest);
     try { manifests.push({ entry, manifest: JSON.parse(fs.readFileSync(abs, "utf8")) }); }
-    catch (e) { violation("7", `manifest ${entry.manifest} unreadable/unparseable (${e.message}) — closure arms cannot run for it`); }
+    catch (e) { skipAll(`manifest ${entry.manifest} unreadable/unparseable (${e.message}) — closure arms cannot run for it`); }
   }
 
   // ---------------------------------------------------------------------------
@@ -435,9 +450,21 @@ export function validateBpContract({ projectRoot, taxonomyPath = null, eventsPat
   }
 
   // ---------------------------------------------------------------------------
-  // Assertion 12 — action-enum closure per event x tier.
+  // Assertion 12 — action-enum closure per event x tier, plus event-id
+  // uniqueness (step-6 F-2 — the events mirror of assertion 6; without it a
+  // duplicate event id silently dedups into the eventIds Set. RFC L448-453
+  // carries no explicit dup-id assertion — asymmetry flagged for the P2c
+  // doc sweep).
   // ---------------------------------------------------------------------------
   assertionsRun.add(12);
+  checks++;
+  {
+    const ids = eventList.map((e) => e && e.id).filter((id) => typeof id === "string");
+    if (new Set(ids).size !== ids.length) {
+      const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
+      violation("12", `duplicate event id(s): ${[...new Set(dup)].join(", ")} (events mirror of F1d)`);
+    }
+  }
   for (const ev of eventList) {
     const id = ev && typeof ev.id === "string" ? ev.id : "<unnamed event>";
     const actions = ev && ev.actions !== null && typeof ev.actions === "object" && !Array.isArray(ev.actions) ? ev.actions : null;

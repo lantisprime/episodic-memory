@@ -1,7 +1,7 @@
 {
   "_note": "RFC-008 P2b golden corpus for scripts/validate-bp-contract.mjs (normative assertion 9, RFC L487). Dispatch: tests/test-validate-bp-contract.mjs stages each fixture into a git-initialized sandbox copy of the repo (review F1 — a bare fixture file can never satisfy the 0-set equality guard, so bp fixtures OVERLAY a canonical contract in the staged set; taxonomy/events fixtures are injected via --taxonomy/--events). The runner asserts each fail-fixture fails AT its attributed check (membership in violations[]), never merely exit 1.",
   "_token_note": "bp fixtures carry __LIVE_TAXONOMY_VERSION__/__LIVE_EVENTS_VERSION__ tokens replaced at staging time with hashes computed from the sandbox's effective documents (scripts/lib/version-hash.mjs) — committed digests would be a hand-typed-rot time bomb. The two stale-version fixtures keep all-zero digests on the field under test (schema-valid by pattern, never equal to a live hash).",
-  "min_fixtures": 16,
+  "min_fixtures": 17,
   "fixtures": {
     "bad-bp-fourth-gate-key.json": { "expect": "fail", "attributed_check": "0-schema", "inject": "bp-overlay", "asserts": ["attack-target-4: fourth classification gate (additionalProperties:false in gates)"] },
     "bad-bp-stop-in-gates.json": { "expect": "fail", "attributed_check": "0-schema", "inject": "bp-overlay", "asserts": ["attack-target-4: stop demoted per-label into gates (F2/F10)"] },
@@ -17,6 +17,7 @@
     "bad-taxonomy-overridability-mismatch.json": { "expect": "fail", "attributed_check": "5", "inject": "taxonomy", "asserts": ["F1c/F9 stored non_overridable equals derived set"] },
     "bad-taxonomy-duplicate-id.json": { "expect": "fail", "attributed_check": "6", "inject": "taxonomy", "asserts": ["F1d unique label ids"] },
     "bad-events-bad-action-id.json": { "expect": "fail", "attributed_check": "12", "inject": "events", "asserts": ["F37 assertion-12 closed action enum"] },
+    "bad-events-duplicate-id.json": { "expect": "fail", "attributed_check": "12", "inject": "events", "asserts": ["step-6 F-2: event-id uniqueness (events mirror of F1d)"] },
     "bad-events-dangling-payload-schema.json": { "expect": "fail", "attributed_check": "13", "inject": "events", "asserts": ["F37 assertion-13 payload_schema resolution (ENOENT = fail)"] },
     "bad-events-missing-tier-arm.json": { "expect": "fail", "attributed_check": "12", "inject": "events", "asserts": ["F37 assertion-12 all three tier arms present"] }
   }

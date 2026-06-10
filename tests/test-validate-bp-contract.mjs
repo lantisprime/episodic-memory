@@ -42,15 +42,17 @@ function ok() { pass++; }
 function bad(name, detail) { fail++; failures.push(`${name}${detail ? " — " + detail : ""}`); }
 function assert(cond, name, detail) { if (cond) ok(name); else bad(name, detail); }
 
+// Both runners forward the isolated git env (step-6 NIT): the validator's own
+// git subprocesses must not pick up developer-global config (hooks/signing).
 function run(args, opts = {}) {
-  const r = spawnSync(process.execPath, [VALIDATOR, ...args], { encoding: "utf8", ...opts });
+  const r = spawnSync(process.execPath, [VALIDATOR, ...args], { encoding: "utf8", env: GIT_ENV, ...opts });
   let payload = null;
   try { payload = JSON.parse(r.stdout); } catch { /* non-JSON (human/usage) output */ }
   return { exit: r.status, stdout: r.stdout, stderr: r.stderr, payload };
 }
 
 function runScaffold(args, opts = {}) {
-  const r = spawnSync(process.execPath, [SCAFFOLD, ...args], { encoding: "utf8", ...opts });
+  const r = spawnSync(process.execPath, [SCAFFOLD, ...args], { encoding: "utf8", env: GIT_ENV, ...opts });
   let payload = null;
   try { payload = JSON.parse(r.stdout); } catch { /* ignore */ }
   return { exit: r.status, stdout: r.stdout, stderr: r.stderr, payload };
@@ -214,6 +216,15 @@ for (const [name, meta] of Object.entries(corpusIndex.fixtures)) {
   assert(r.exit === 1 && hasViolation(r.payload, "0-set", "malformed contract filename"), "0-set: near-miss filename bp-07.json is a named violation (F5)", `exit=${r.exit}`);
   fs.rmSync(path.join(SANDBOX, "patterns", "bp-07.json"));
 }
+{
+  // Step-6 F-3: case variants are the same dead-data escape on
+  // case-insensitive filesystems — the loose filter is case-insensitive, the
+  // strict regex is not, so the variant is a NAMED violation.
+  fs.writeFileSync(path.join(SANDBOX, "patterns", "BP-099.JSON"), "{}");
+  const r = run(["--project", SANDBOX, "--json"]);
+  assert(r.exit === 1 && hasViolation(r.payload, "0-set", "BP-099.JSON"), "0-set: case-variant filename BP-099.JSON is a named violation (F-3)", `exit=${r.exit}`);
+  fs.rmSync(path.join(SANDBOX, "patterns", "BP-099.JSON"));
+}
 
 // ---------------------------------------------------------------------------
 // 5. Assertion 7b classifier negatives (synthetic-root mechanism, F3b).
@@ -238,6 +249,20 @@ classifierCase("missing arm = silent-downgrade violation (L473)", () => {
 classifierCase("extra arm not in taxonomy", () => {
   fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER.replace(/^(\s*)read_only\)(.*)$/m, "$1bogus_label) printf '9' ;;\n$1read_only)$2"));
 }, '"bogus_label" is not a taxonomy label');
+// Step-6 F-1 class: the definition recognizer must cover bash's full spelling
+// class — `function` keyword, space-before-parens, and indented duplicates are
+// last-wins at runtime and must trip the A3 exactly-one guard, not slip past a
+// single-spelling regex (captured false-pass repros N1/N2).
+const PLANTED_BODY = '\n  case "$1" in\n    read_only) printf \'1\' ;;\n  esac\n}\n';
+classifierCase("duplicate via `function _priority {` spelling (F-1)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\nfunction _priority {" + PLANTED_BODY);
+}, "_priority() definitions");
+classifierCase("duplicate via `_priority () {` spelling (F-1)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n_priority () {" + PLANTED_BODY);
+}, "_priority() definitions");
+classifierCase("duplicate via INDENTED `_priority() {` spelling (F-1)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + "\n  _priority() {" + PLANTED_BODY);
+}, "_priority() definitions");
 
 // ---------------------------------------------------------------------------
 // 6. Stable-ID E2E (assertions 8/14) — all branches incl. A2 + N-5.
