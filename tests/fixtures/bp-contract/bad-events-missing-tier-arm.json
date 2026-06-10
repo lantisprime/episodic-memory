@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "events": [
+    {
+      "id": "pre_tool_use",
+      "fires_on": "fixture: WEAK tier arm MISSING (all three arms required)",
+      "payload_schema": "schemas/events/event-pre-tool-use.schema.json",
+      "actions": {
+        "STRONG": { "id": "block", "semantics": "fixture" },
+        "MEDIUM": { "id": "warn", "semantics": "fixture" }
+      }
+    },
+    {
+      "id": "stop",
+      "fires_on": "fixture",
+      "payload_schema": "schemas/events/event-stop.schema.json",
+      "actions": {
+        "STRONG": { "id": "refuse_stop", "semantics": "fixture" },
+        "MEDIUM": { "id": "warn", "semantics": "fixture" },
+        "WEAK": { "id": "unsupported", "semantics": "fixture" }
+      }
+    }
+  ]
+}

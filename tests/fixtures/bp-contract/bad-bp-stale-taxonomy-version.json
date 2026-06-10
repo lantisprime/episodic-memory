@@ -1,0 +1,15 @@
+{
+  "id": "bp-001",
+  "title": "stale taxonomy_version binding (F8)",
+  "gates": {
+    "plan_approval": "STRONG",
+    "pre_checkpoint": "STRONG",
+    "post_checkpoint": "STRONG"
+  },
+  "stop": {
+    "tier": "STRONG"
+  },
+  "taxonomy_ref": "patterns/taxonomy.json",
+  "taxonomy_version": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "events_version": "__LIVE_EVENTS_VERSION__"
+}

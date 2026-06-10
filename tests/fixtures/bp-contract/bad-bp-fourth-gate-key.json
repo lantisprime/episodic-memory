@@ -1,0 +1,16 @@
+{
+  "id": "bp-001",
+  "title": "fourth classification gate smuggled into gates",
+  "gates": {
+    "plan_approval": "STRONG",
+    "pre_checkpoint": "STRONG",
+    "post_checkpoint": "STRONG",
+    "deploy_approval": "STRONG"
+  },
+  "stop": {
+    "tier": "STRONG"
+  },
+  "taxonomy_ref": "patterns/taxonomy.json",
+  "taxonomy_version": "__LIVE_TAXONOMY_VERSION__",
+  "events_version": "__LIVE_EVENTS_VERSION__"
+}

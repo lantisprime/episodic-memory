@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "events": [
+    {
+      "id": "pre_tool_use",
+      "fires_on": "fixture: DUPLICATE event id (events mirror of F1d, step-6 F-2)",
+      "payload_schema": "schemas/events/event-pre-tool-use.schema.json",
+      "actions": {
+        "STRONG": { "id": "block", "semantics": "fixture" },
+        "MEDIUM": { "id": "warn", "semantics": "fixture" },
+        "WEAK": { "id": "inject", "semantics": "fixture" }
+      }
+    },
+    {
+      "id": "pre_tool_use",
+      "fires_on": "fixture: second entry under the same id",
+      "payload_schema": "schemas/events/event-pre-tool-use.schema.json",
+      "actions": {
+        "STRONG": { "id": "block", "semantics": "fixture" },
+        "MEDIUM": { "id": "warn", "semantics": "fixture" },
+        "WEAK": { "id": "inject", "semantics": "fixture" }
+      }
+    }
+  ]
+}
