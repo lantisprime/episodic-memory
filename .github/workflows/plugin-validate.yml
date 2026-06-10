@@ -23,6 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # P2b: validate-bp-contract's stable-ID assertions (8/14) diff the
+          # taxonomy/events id-sets against the merge-base with origin/main and
+          # FAIL CLOSED on shallow history — full history is load-bearing.
+          # N-6 (issue): on fork PRs `origin` is the fork, so the baseline is
+          # fork-controlled; prefer github.base_ref if forks are ever enabled.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -42,3 +49,9 @@ jobs:
 
       - name: Run plugin-registry conformance tests (path-contain regression lock)
         run: node tests/test-plugin-registry.mjs
+
+      - name: Validate bp contracts (assertions 0 + 1-15, P2b)
+        run: node scripts/validate-bp-contract.mjs --project "$GITHUB_WORKSPACE"
+
+      - name: Run validate-bp-contract self-tests (golden corpus + stable-ID E2E)
+        run: node tests/test-validate-bp-contract.mjs
