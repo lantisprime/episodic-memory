@@ -633,6 +633,126 @@ test('§CF4 --command-file write then inline --read hit (write path honors --com
   assert.strictEqual(r.label, 'read_only')
 })
 
+// ----- Checkpoint-hygiene F5: --command-file consume-unlink + vacuum .cmd -----
+
+test('§CF5 in-dir --command-file consumed on written; verdict intact', () => {
+  const repo = mkrepo('cf5')
+  const sid = 's_cf5_' + crypto.randomBytes(4).toString('hex')
+  const classifyDir = path.join(repo, '.checkpoints', 'classify')
+  fs.mkdirSync(classifyDir, { recursive: true })
+  const cmdFile = path.join(classifyDir, 'pending-cf5.cmd')
+  fs.writeFileSync(cmdFile, 'node ./scripts/foo.mjs')
+
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', cmdFile, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'staged in classify dir'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  const wj = parseStdout(w)
+  assert.strictEqual(wj.status, 'written')
+  assert.strictEqual(wj.command_file_consumed, true, 'in-dir staging file must be consumed')
+  assert.ok(!fs.existsSync(cmdFile), 'staging file must be unlinked')
+  assert.ok(fs.existsSync(wj.file), 'verdict marker must survive the consume')
+})
+
+test('§CF6 noop_same_tuple ALSO consumes (second same-tuple write, fresh staging file)', () => {
+  const repo = mkrepo('cf6')
+  const sid = 's_cf6_' + crypto.randomBytes(4).toString('hex')
+  const classifyDir = path.join(repo, '.checkpoints', 'classify')
+  fs.mkdirSync(classifyDir, { recursive: true })
+  const cmd = 'node ./scripts/foo.mjs'
+
+  const f1 = path.join(classifyDir, 'pending-cf6-first.cmd')
+  fs.writeFileSync(f1, cmd)
+  const w1 = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', f1, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'first'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(parseStdout(w1).status, 'written')
+
+  const f2 = path.join(classifyDir, 'pending-cf6-second.cmd')
+  fs.writeFileSync(f2, cmd)
+  const w2 = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', f2, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'second'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w2.status, 0, `same-tuple rewrite failed: ${w2.stderr}`)
+  const j2 = parseStdout(w2)
+  assert.strictEqual(j2.status, 'noop_same_tuple')
+  assert.strictEqual(j2.command_file_consumed, true, 'noop_same_tuple must also consume')
+  assert.ok(!fs.existsSync(f2), 'second staging file must be unlinked on noop_same_tuple')
+})
+
+test('§CF7 out-of-dir --command-file preserved (verdict still written)', () => {
+  const repo = mkrepo('cf7')
+  const sid = 's_cf7_' + crypto.randomBytes(4).toString('hex')
+  const cmdFile = path.join(repo, 'my-staging.cmd')
+  fs.writeFileSync(cmdFile, 'node ./scripts/foo.mjs')
+
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', cmdFile, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'staged outside classify dir'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  const wj = parseStdout(w)
+  assert.strictEqual(wj.status, 'written')
+  assert.strictEqual(wj.command_file_consumed, false, 'out-of-dir file must NOT be consumed')
+  assert.ok(fs.existsSync(cmdFile), 'out-of-dir staging file must be preserved')
+})
+
+test('§CF8 symlinked --command-file → never unlinked (link + target preserved)', () => {
+  const repo = mkrepo('cf8')
+  const sid = 's_cf8_' + crypto.randomBytes(4).toString('hex')
+  const classifyDir = path.join(repo, '.checkpoints', 'classify')
+  fs.mkdirSync(classifyDir, { recursive: true })
+  const external = mktmp('cf8-target')
+  const target = path.join(external, 'real-cmd.txt')
+  fs.writeFileSync(target, 'node ./scripts/foo.mjs')
+  const link = path.join(classifyDir, 'pending-cf8.cmd')
+  fs.symlinkSync(target, link)
+
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', link, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'symlinked staging'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  assert.strictEqual(parseStdout(w).command_file_consumed, false,
+    'symlinked staging file must not be consumed (canonical target is out-of-dir)')
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'symlink must survive')
+  assert.ok(fs.existsSync(target), 'link target must survive')
+})
+
+test('§CF9 vacuum reaps aged *.cmd, preserves fresh *.cmd and symlinked .cmd', () => {
+  const repo = mkrepo('cf9')
+  const classifyDir = path.join(repo, '.checkpoints', 'classify')
+  fs.mkdirSync(classifyDir, { recursive: true })
+  const oldCmd = path.join(classifyDir, 'pending-old.cmd')
+  const freshCmd = path.join(classifyDir, 'pending-fresh.cmd')
+  fs.writeFileSync(oldCmd, 'x')
+  fs.writeFileSync(freshCmd, 'y')
+  const ago = (Date.now() - 60 * 24 * 60 * 60 * 1000) / 1000
+  fs.utimesSync(oldCmd, ago, ago)
+  const external = mktmp('cf9-target')
+  const linkTarget = path.join(external, 'z.cmd')
+  fs.writeFileSync(linkTarget, 'z')
+  const link = path.join(classifyDir, 'pending-linked.cmd')
+  fs.symlinkSync(linkTarget, link)
+  try { fs.lutimesSync(link, ago, ago) } catch {}
+
+  const v = runHelper(['--vacuum', '--project-root', repo, '--max-age-days', '30'],
+    { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(v.status, 0, `vacuum: ${v.stderr}`)
+  assert.ok(!fs.existsSync(oldCmd), 'aged .cmd must be reaped')
+  assert.ok(fs.existsSync(freshCmd), 'fresh .cmd must be preserved')
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'symlinked .cmd must be preserved')
+  assert.ok(fs.existsSync(linkTarget), 'symlink target must be intact')
+})
+
 // ----- PR-B2 S3: --target-path path-verdict mode (§11/§14-F4/§15-C2) -----
 
 test('§P1 path verdict write + read round-trip (existing target)', () => {

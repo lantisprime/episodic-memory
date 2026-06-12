@@ -542,7 +542,12 @@ function vacuumMarkers(projectRootCanon, maxAgeDays) {
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
   let removed = 0, scanned = 0
   for (const entry of fs.readdirSync(classifyDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    // Checkpoint-hygiene F5: vacuum also reaps aged one-shot *.cmd staging
+    // files (the deny-hint flow stages them here; consume-unlink in --write
+    // handles the happy path, vacuum is the backstop for aborted flows).
+    // Verdict *.json cache semantics unchanged.
+    const reapable = entry.name.endsWith('.json') || entry.name.endsWith('.cmd')
+    if (!entry.isFile() || !reapable) continue
     scanned++
     const p = path.join(classifyDir, entry.name)
     try {
@@ -676,13 +681,36 @@ function mainWrite(argv) {
     classified_by: 'agent_self'
   }
   const written = writeMarker(classifyDir, sha, payload)
+
+  // Checkpoint-hygiene F5: consume the one-shot --command-file staging file
+  // once a verdict is on file. Keyed on the common exit-0 epilogue so EVERY
+  // success status ('written' AND 'noop_same_tuple') consumes — a same-tuple
+  // re-write must not strand its staging file. Unlink ONLY when the
+  // canonicalized file sits inside the validated classifyDir (single
+  // canonical pass via realpath, never raw-string prefix on the input) and
+  // lstat says regular file (symlinks are never followed or removed).
+  // Staging files outside classifyDir belong to the agent and stay put.
+  const cmdFileArg = flag(argv, '--command-file')
+  let commandFileConsumed = false
+  if (cmdFileArg !== undefined) {
+    try {
+      const realCf = realpathOrSame(path.resolve(cmdFileArg))
+      const st = fs.lstatSync(realCf)
+      if (st.isFile() && isUnder(realCf, classifyDir) && realCf !== written.file) {
+        fs.unlinkSync(realCf)
+        commandFileConsumed = true
+      }
+    } catch { /* best-effort: a vanished staging file never fails the write */ }
+  }
+
   emit({
     status: written.status,
     file: written.file,
     label,
     cache_key: sha,
     session_id: sessionId,
-    project_root_used: projectRoot
+    project_root_used: projectRoot,
+    command_file_consumed: commandFileConsumed
   })
   process.exit(0)
 }
