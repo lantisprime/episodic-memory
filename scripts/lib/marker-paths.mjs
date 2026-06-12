@@ -319,6 +319,62 @@ export function preflightMarkerBasenameForSession(sid) {
   return PREFLIGHT_MARKER_BASENAME_TEMPLATE.replace('{sid}', sid)
 }
 
+/**
+ * Suffixed-ONLY preflight-marker match (checkpoint-hygiene F4, closes part
+ * of #283). Accepts `.preflight-done.<sid>`; rejects the legacy suffix-less
+ * `.preflight-done` — its lifecycle belongs to the burn-in cutover (F7),
+ * not the per-session orphan sweep. Reuses PREFLIGHT_MARKER_BASENAME_RE
+ * (suffix capture group must be non-null) so the two matchers cannot drift.
+ *
+ * @param {string} basename
+ * @returns {boolean}
+ */
+export function preflightMarkerSuffixedBasenameMatches(basename) {
+  if (typeof basename !== 'string') return false
+  const m = PREFLIGHT_MARKER_BASENAME_RE.exec(basename)
+  return !!(m && m[1])
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint-hygiene F4 — per-session .last-user-prompt sidecar contract.
+//
+// Written by preflight-prompt-helper.sh (UserPromptSubmit) as
+// `.last-user-prompt.<sid>.json`; consumed by preflight-gate.sh for true
+// prompt binding (#238 PR1 FU-C2). Suffix-MANDATORY by construction — there
+// was never a suffix-less legacy form, so the sweep matcher has no
+// burn-in carve-out.
+// ---------------------------------------------------------------------------
+
+export const LAST_USER_PROMPT_BASENAME_TEMPLATE = '.last-user-prompt.{sid}.json'
+export const LAST_USER_PROMPT_BASENAME_RE = /^\.last-user-prompt\.[A-Za-z0-9_-]{1,128}\.json$/
+
+/**
+ * Strict match for per-session last-user-prompt sidecar basenames. Accepts ONLY:
+ *   .last-user-prompt.<sid>.json     (sid matches char-class + length)
+ * Rejects:
+ *   .last-user-prompt.json           (no sid)
+ *   .last-user-prompt.<sid>          (missing .json)
+ *   .last-user-prompt.a/b.json       (slash in sid)
+ *   .last-user-prompt.<129-char>.json (oversize sid)
+ *
+ * @param {string} basename
+ * @returns {boolean}
+ */
+export function lastUserPromptBasenameMatches(basename) {
+  return typeof basename === 'string' && LAST_USER_PROMPT_BASENAME_RE.test(basename)
+}
+
+/**
+ * Compose the per-session last-user-prompt basename for a given session id.
+ * Caller MUST validateSessionId(sid) first; this helper does not re-validate.
+ *
+ * @param {string} sid — valid session-id
+ * @returns {string} '.last-user-prompt.<sid>.json'
+ */
+export function lastUserPromptBasenameForSession(sid) {
+  return LAST_USER_PROMPT_BASENAME_TEMPLATE.replace('{sid}', sid)
+}
+
 // ---------------------------------------------------------------------------
 // Rank-2 (PR for checkpoint-quartet) — generic per-session marker contract.
 //
