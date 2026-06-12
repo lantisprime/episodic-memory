@@ -59,7 +59,12 @@ warn_hook_freshness() {
   fi
   [ -n "$source_repo" ] || return 0
 
-  if [ ! -d "$source_repo/hooks" ]; then
+  # Probe only the repo root, not a fixed subdirectory layout. The old
+  # `$source_repo/hooks` probe broke when PR #373 moved hooks to
+  # plugins/claude-code/hooks/ — every SessionStart printed a false
+  # "source repo unavailable" warning. The per-file loop below already
+  # classifies missing/relocated sources (missing_source bucket).
+  if [ ! -d "$source_repo" ]; then
     echo "episodic-memory: hook freshness warning: source repo unavailable: $source_repo"
     echo "episodic-memory: installed Claude hooks may be stale; re-run install.mjs --install-hooks from the current episodic-memory repo."
     return 0

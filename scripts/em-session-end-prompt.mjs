@@ -26,6 +26,8 @@ import {
   namespacedMarkerBasenameForSession,
   CHECKPOINT_QUARTET,
   PLAN_APPROVED_LEGACY_BASENAME,
+  preflightMarkerBasenameForSession,
+  lastUserPromptBasenameForSession,
 } from './lib/marker-paths.mjs'
 import { validateSessionId } from './lib/session-id.mjs'
 
@@ -162,6 +164,21 @@ for (const marker of ALL_MIGRATED_MARKERS) {
     ]) {
       try { fs.unlinkSync(p) } catch {}
     }
+  }
+}
+
+// Checkpoint-hygiene F4 (closes the #283 SessionEnd half): own-session reap
+// of the per-session preflight families written by preflight-prompt-helper.sh
+// every session. Primary dir ONLY — these families never had legacy .claude/
+// forms. Own-session only (mirrors the quartet's cross-session contract);
+// crashed-session orphans are reaped by the em-recall SessionStart sweep
+// (7-day mtime guard). Invalid/missing sid → skip; the orphan sweep handles it.
+if (validateSessionId(sessionEndSid)) {
+  for (const basename of [
+    preflightMarkerBasenameForSession(sessionEndSid),
+    lastUserPromptBasenameForSession(sessionEndSid),
+  ]) {
+    try { fs.unlinkSync(primaryMarkerPath(repoRoot, basename)) } catch {}
   }
 }
 

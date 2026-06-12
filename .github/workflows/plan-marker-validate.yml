@@ -51,6 +51,12 @@ jobs:
       - name: Run em-recall-sessionstart hook-wrapper integration (cwd + stdin sid binding)
         run: bash tests/test-em-recall-sessionstart-hook-binding.sh
 
+      - name: Run em-recall-sessionstart hook regression (incl. F1 freshness-probe layout fix)
+        run: bash tests/test-em-recall-sessionstart.sh
+
+      - name: Run preflight-marker reapers (F4 SessionEnd reap + SessionStart 7d orphan sweep)
+        run: node tests/test-preflight-marker-reapers.mjs
+
       - name: Run no-legacy-plan-marker-writes detector (Rule 13)
         run: node tests/test-no-legacy-plan-marker-writes.mjs
 

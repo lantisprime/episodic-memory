@@ -9,7 +9,7 @@
 #   - Resolves repo_root via git common-dir, normalizing linked-worktree → MAIN.
 #   - Resolves memory_root with BOUNDED candidate set (sanitization variants of
 #     resolved repo_root ONLY — no ~/.claude/projects/* scan; codex F9).
-#   - Emits explicit absolute paths for the 8 always-tier discipline files
+#   - Emits explicit absolute paths for the always-tier discipline files
 #     (codex F11; replaces "batch-Read the feedback files under MEMORY.md's …
 #     anchors" prose which loaded 34+ files / ~47k tokens / ~10% of context).
 #   - Emits mechanical `cd <repo_root> && node <repo_root>/scripts/em-search.mjs …`
@@ -25,6 +25,11 @@
 #                          F10 source/install sync, F11 em-search mechanical)
 #   r4 …68d0→…87ac HOLD (F12 matrix vary stdin.cwd, F13 fail-safe tightening)
 #   r5 …5c73→…0355 ACCEPT-with-FU (no new architectural class; #19 trigger)
+#
+# 2026-06-12 (checkpoint-hygiene C2/F3): backported the installed runtime —
+# 6-file always-tier list (2026-05-16 demotions) + condensed Q1/Q2 directive —
+# which had drifted ahead of this source; file is now tracked in HOOK_SPECS /
+# the freshness manifest so future drift is reported at SessionStart.
 #
 # Composes with:
 #   - hooks/lib/repo-root.sh (sourced for resolve_repo_root canonical helper)
@@ -144,7 +149,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Always-tier list (8 files, codex r1 F2 added canonical-agent-dispatch).
+# Always-tier list (6 files; demotions 2026-05-16):
+#   - feedback_send_grep_artifact.md → lazy-tier (content trigger: PII /
+#     sanitization keywords via MEMORY.md Trigger-phrase index)
+#   - feedback_three_state_review_verdict.md → lazy-tier (loads when
+#     "verdict" / "ACCEPT" / "HOLD" / "REJECT" / "approving" keywords fire)
 # These rules fire on EVERY claim OR on short/no-keyword prompts; lazy-loading
 # them would defeat their self-trigger contract (catch-22 from plan v1).
 # ---------------------------------------------------------------------------
@@ -153,8 +162,6 @@ ALWAYS_TIER=(
   "feedback_verify_by_artifact.md"
   "feedback_self_trigger_artifact_mode.md"
   "feedback_per_prompt_rule_preflight.md"
-  "feedback_send_grep_artifact.md"
-  "feedback_three_state_review_verdict.md"
   "feedback_bp1_step9_filing_trigger.md"
   "feedback_canonical_agent_dispatch_trigger.md"
 )
@@ -199,42 +206,28 @@ if [ -f "${HANDOFF}" ]; then
          || stat -c '%y' "${HANDOFF}" 2>/dev/null | cut -c1-16 \
          || echo unknown)"
 
-  DIRECTIVE="BLOCKING DIRECTIVE: This session has TWO pending y/n questions you MUST ask in order before responding to the user's prompt.
+  DIRECTIVE="BLOCKING: Ask both y/n questions before responding. No preamble or tool calls between them.
 
-Phase 1 — Your FIRST message this session must be exactly:
+Q1 (verbatim):
   Load session_handoff.md from ${MTIME}? (y/n)
 
-Phase 2 — After Phase 1 is answered, your NEXT message must be exactly:
+Q2 (verbatim, after Q1 is answered):
   Load discipline + toolkit + recent lessons? (y/n)
 
-Q1 answer must be remembered across Phase 2; do NOT drop it.
-No preamble, no other content, no tool calls between Phase 1 and Phase 2.
+Remember Q1's answer across Q2; do NOT drop it.
 
-After BOTH answers are collected, process them in this order:
-  1. If Phase 1 answer = y: Read ${HANDOFF}
-  2. If Phase 2 answer = y: batch-Read these 8 always-tier discipline files (explicit absolute paths):
-${_paths}     Then run the lessons search command:
-       ${EM_SEARCH_CMD}
-     (Lazy-tier discipline files load on demand via Read or trigger-phrase classifier — see MEMORY.md tier-3 trigger-phrase index. This always-tier load replaces the prior 34+ file batch-Read.)
-  3. Then address the user's original prompt.
-
-Do not skip this even if the user's first message asks something else; ask Phase 1 first, then Phase 2, then address their request."
+After both answers, process in order:
+  1. If Q1=y: Read ${HANDOFF}
+  2. If Q2=y: batch-Read these 6 absolute paths, then run the em-search command:
+${_paths}     ${EM_SEARCH_CMD}
+  3. Then address the user's prompt."
 else
-  DIRECTIVE="BLOCKING DIRECTIVE: This session has ONE pending y/n question you MUST ask before responding to the user's prompt.
-
-Your FIRST message this session must be exactly:
+  DIRECTIVE="BLOCKING: Ask this y/n question (verbatim) before responding, no preamble or tool calls:
   Load discipline + toolkit + recent lessons? (y/n)
 
-No preamble, no other content, no tool calls.
-
-After the answer is collected, process it:
-  1. If answer = y: batch-Read these 8 always-tier discipline files (explicit absolute paths):
-${_paths}     Then run the lessons search command:
-       ${EM_SEARCH_CMD}
-     (Lazy-tier discipline files load on demand via Read or trigger-phrase classifier — see MEMORY.md tier-3 trigger-phrase index. This always-tier load replaces the prior 34+ file batch-Read.)
-  2. Then address the user's original prompt.
-
-Do not skip this even if the user's first message asks something else; ask the y/n question first, then address their request after their answer."
+If y: batch-Read these 6 absolute paths, then run the em-search command:
+${_paths}     ${EM_SEARCH_CMD}
+Then address the user's prompt."
 fi
 
 jq -n --arg ctx "${DIRECTIVE}" '{

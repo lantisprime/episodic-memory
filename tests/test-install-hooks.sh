@@ -93,15 +93,17 @@ manifest_source=$(jq -r '.source_repo' "$TEST_HOME/.episodic-memory/hook-install
 assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT" "$manifest_source"
 
 managed_count=$(jq '[.files[]? | select(.relative_path | test("^plugins/claude-code/hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
-# 6 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
-# preflight-prompt-helper, em-recall-sessionstart, stop-gate) + 6
-# hooks/lib/.sh files (command-classifier, repo-root, marker-paths,
-# session-id, agent-classifier, agent-classifier-deny-reason) = 12.
+# 7 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
+# preflight-prompt-helper, em-recall-sessionstart, session-handoff-prompt,
+# stop-gate) + 6 hooks/lib/.sh files (command-classifier, repo-root,
+# marker-paths, session-id, agent-classifier, agent-classifier-deny-reason) = 13.
 # NOTE (PR-B): was hardcoded "10" and went stale when PR #331 added the
 # classifier lib (this test runs in no CI workflow). Corrected to 11, then to 12
-# when PR-B2 (#351) added the 3-way deny-hint lib agent-classifier-deny-reason.sh.
-# The test is wired into CI (plan-marker-validate.yml) to catch future drift.
-assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "12" "$managed_count"
+# when PR-B2 (#351) added the 3-way deny-hint lib agent-classifier-deny-reason.sh,
+# then to 13 when checkpoint-hygiene F3 brought session-handoff-prompt.sh under
+# HOOK_SPECS. The test is wired into CI (plan-marker-validate.yml) to catch
+# future drift.
+assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "13" "$managed_count"
 
 pg_manifest=$(jq -r '.files[] | select(.relative_path == "plugins/claude-code/hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
 assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"
@@ -119,6 +121,24 @@ assert_eq "T1c3 plan-gate registered with no matcher (runs on every PreToolUse)"
 
 ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T1d SessionStart contains exactly one em-recall-sessionstart entry" "1" "$ss_count"
+
+# session-handoff-prompt.sh tracking (checkpoint-hygiene F3): copied,
+# registered exactly once with timeout 5, manifest row, and ordered AFTER
+# em-recall-sessionstart (matches the pre-existing manual registration).
+[ -f "$TEST_HOME/.claude/hooks/session-handoff-prompt.sh" ] && r=true || r=false
+assert_eq "T1d2 session-handoff-prompt.sh copied to ~/.claude/hooks/ (F3)" "true" "$r"
+
+shp_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T1d3 SessionStart contains exactly one session-handoff-prompt entry (F3)" "1" "$shp_count"
+
+shp_timeout=$(jq -r '.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt")) | .timeout' "$TEST_HOME/.claude/settings.json")
+assert_eq "T1d4 session-handoff-prompt entry timeout=5s (F3)" "5" "$shp_timeout"
+
+shp_manifest=$(jq -r '.files[] | select(.relative_path == "plugins/claude-code/hooks/session-handoff-prompt.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
+assert_eq "T1d5 hook freshness manifest records session-handoff-prompt install path (F3)" "$TEST_HOME/.claude/hooks/session-handoff-prompt.sh" "$shp_manifest"
+
+shp_order=$(jq '[.hooks.SessionStart[].hooks[0].command] as $c | ($c | map(test("em-recall-sessionstart")) | index(true)) < ($c | map(test("session-handoff-prompt")) | index(true))' "$TEST_HOME/.claude/settings.json")
+assert_eq "T1d6 em-recall-sessionstart registered before session-handoff-prompt (F3)" "true" "$shp_order"
 
 se_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T1e SessionEnd contains exactly one em-session-end-prompt entry (nested shape)" "1" "$se_count"
@@ -145,6 +165,9 @@ assert_eq "T2b2 still exactly one plan-gate entry after re-run (#86 PR-A)" "1" "
 
 ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T2c still exactly one em-recall-sessionstart entry after re-run" "1" "$ss_count"
+
+shp_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+assert_eq "T2c2 still exactly one session-handoff-prompt entry after re-run (F3)" "1" "$shp_count"
 
 se_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T2d still exactly one em-session-end-prompt entry after re-run" "1" "$se_count"
@@ -227,7 +250,7 @@ if echo "$output" | grep -q "stale PreToolUse entry for plan-gate.sh"; then r=tr
 assert_eq "T4b3 stale-canonical warning printed for non-canonical /some/user/plan-gate.sh" "true" "$r"
 
 ss_total=$(jq '.hooks.SessionStart | length' "$TEST_HOME/.claude/settings.json")
-assert_eq "T4c SessionStart now has 2 entries (existing + em-recall-sessionstart)" "2" "$ss_total"
+assert_eq "T4c SessionStart now has 3 entries (existing + em-recall-sessionstart + session-handoff-prompt)" "3" "$ss_total"
 
 rules_check_intact=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("rules-check"))] | length' "$TEST_HOME/.claude/settings.json")
 assert_eq "T4d existing rules-check.sh entry preserved" "1" "$rules_check_intact"

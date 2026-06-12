@@ -34,6 +34,8 @@ import {
   bothMarkerPaths,
   namespacedMarkerBasenameForSession,
   CHECKPOINT_QUARTET,
+  preflightMarkerSuffixedBasenameMatches,
+  lastUserPromptBasenameMatches,
 } from './lib/marker-paths.mjs'
 import {
   _maxMtimeAcrossRootsStrict,
@@ -744,6 +746,44 @@ if (sessionStartFlag) {
       } catch (e) {
         if (e.code !== 'ENOENT') {
           process.stderr.write(`em-recall: legacy-plan-marker-sweep skipped ${p}: ${e.code || e.message}\n`)
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Preflight-family orphan sweep (checkpoint-hygiene F4, closes the #283
+    // SessionStart half). `.preflight-done.<sid>` and
+    // `.last-user-prompt.<sid>.json` are written by preflight-prompt-helper.sh
+    // every session; SessionEnd reaps the own-session pair, this sweep reaps
+    // crashed-session orphans.
+    //
+    // Containment + safety:
+    //   - readdir of the PRIMARY marker dir only (families never had legacy
+    //     .claude/ forms); basenames carry no path separators.
+    //   - suffixED-only matchers — the legacy suffix-less `.preflight-done`
+    //     is burn-in/F7 scope and is preserved.
+    //   - 7-day mtime guard: a live concurrent session's markers are days,
+    //     not weeks, old. Worst case (week-idle still-open session) the
+    //     preflight gate re-prompts once — fail-closed in the safe direction.
+    //   - lstat per entry; symlinks never followed or unlinked (mirrors the
+    //     classifier-marker vacuum contract).
+    // ---------------------------------------------------------------------
+    const PREFLIGHT_ORPHAN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+    const sweepCutoff = Date.now() - PREFLIGHT_ORPHAN_MAX_AGE_MS
+    const primaryDir = path.join(REPO_ROOT, PRIMARY_MARKER_DIR)
+    let sweepEntries = []
+    try { sweepEntries = fs.readdirSync(primaryDir) } catch { sweepEntries = [] }
+    for (const name of sweepEntries) {
+      if (!preflightMarkerSuffixedBasenameMatches(name) && !lastUserPromptBasenameMatches(name)) continue
+      const p = path.join(primaryDir, name)
+      try {
+        const st = fs.lstatSync(p)
+        if (st.isSymbolicLink()) continue
+        if (!st.isFile()) continue
+        if (st.mtimeMs < sweepCutoff) fs.unlinkSync(p)
+      } catch (e) {
+        if (e.code !== 'ENOENT') {
+          process.stderr.write(`em-recall: preflight-orphan-sweep skipped ${p}: ${e.code || e.message}\n`)
         }
       }
     }

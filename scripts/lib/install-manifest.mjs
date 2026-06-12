@@ -82,6 +82,16 @@ export const HOOK_SPECS = [
     file: 'preflight-prompt-helper.sh',
     event: 'UserPromptSubmit',
     timeout: 5
+  },
+  // session-handoff-prompt.sh: SessionStart two-phase handoff/discipline
+  // directive (rank-10 slice). Was installed + registered manually but never
+  // tracked here, so the installed copy drifted ahead of the repo source
+  // unreported (checkpoint-hygiene F3, diagnosis 20260611-234742). Timeout 5
+  // matches the pre-existing manual registration in settings.json.
+  {
+    file: 'session-handoff-prompt.sh',
+    event: 'SessionStart',
+    timeout: 5
   }
 ]
 

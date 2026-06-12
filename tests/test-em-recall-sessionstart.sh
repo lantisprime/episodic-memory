@@ -173,15 +173,21 @@ fi
 echo ""
 echo "--- #103 hook freshness warnings ---"
 # ============================================================================
+# F1 regression (diagnosis 20260611-234742): the fixture mirrors the REAL
+# post-PR-373 repo layout — sources under plugins/claude-code/hooks/, NO
+# top-level hooks/ directory. The old line-62 probe `[ ! -d "$source_repo/hooks" ]`
+# emitted a false "source repo unavailable" every SessionStart against this
+# layout; test 10 fails if that probe regresses.
 FRESH_SRC="$TEST_DIR/fresh-source-repo"
+FRESH_SRC_HOOKS="$FRESH_SRC/plugins/claude-code/hooks"
 FRESH_INSTALLED="$TEST_HOME/.claude/hooks"
-mkdir -p "$FRESH_SRC/hooks/lib" "$FRESH_INSTALLED/lib" "$TEST_HOME/.episodic-memory"
-cp "$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh" "$FRESH_SRC/hooks/plan-gate.sh"
-cp "$REPO_ROOT/plugins/claude-code/hooks/em-recall-sessionstart.sh" "$FRESH_SRC/hooks/em-recall-sessionstart.sh"
-cp "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" "$FRESH_SRC/hooks/lib/command-classifier.sh"
-cp "$FRESH_SRC/hooks/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
-cp "$FRESH_SRC/hooks/em-recall-sessionstart.sh" "$FRESH_INSTALLED/em-recall-sessionstart.sh"
-cp "$FRESH_SRC/hooks/lib/command-classifier.sh" "$FRESH_INSTALLED/lib/command-classifier.sh"
+mkdir -p "$FRESH_SRC_HOOKS/lib" "$FRESH_INSTALLED/lib" "$TEST_HOME/.episodic-memory"
+cp "$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh" "$FRESH_SRC_HOOKS/plan-gate.sh"
+cp "$REPO_ROOT/plugins/claude-code/hooks/em-recall-sessionstart.sh" "$FRESH_SRC_HOOKS/em-recall-sessionstart.sh"
+cp "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" "$FRESH_SRC_HOOKS/lib/command-classifier.sh"
+cp "$FRESH_SRC_HOOKS/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
+cp "$FRESH_SRC_HOOKS/em-recall-sessionstart.sh" "$FRESH_INSTALLED/em-recall-sessionstart.sh"
+cp "$FRESH_SRC_HOOKS/lib/command-classifier.sh" "$FRESH_INSTALLED/lib/command-classifier.sh"
 
 cat > "$TEST_HOME/.episodic-memory/hook-install.json" <<EOF
 {
@@ -211,10 +217,16 @@ cat > "$TEST_HOME/.episodic-memory/hook-install.json" <<EOF
 }
 EOF
 
+# Reject EVERY freshness output class, not just the two historical greps —
+# the missing_source line ("manifest references missing source files")
+# previously matched neither grep, so a broken fixture passed vacuously.
 output="$(run_hook_capture)"
 if ! echo "$output" | grep -q "hook freshness warning" \
-  && ! echo "$output" | grep -q "installed Claude hooks differ"; then
-  echo "  ✓ 10. Current installed hooks are quiet"
+  && ! echo "$output" | grep -q "installed Claude hooks differ" \
+  && ! echo "$output" | grep -q "installed Claude hooks are missing" \
+  && ! echo "$output" | grep -q "missing source files" \
+  && ! echo "$output" | grep -q "source repo unavailable"; then
+  echo "  ✓ 10. Current installed hooks are quiet (no top-level hooks/ in source repo)"
   ((passed++))
 else
   echo "  ✗ 10. Current installed hooks produced a freshness warning"
@@ -234,7 +246,7 @@ else
   ((failed++))
 fi
 
-cp "$FRESH_SRC/hooks/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
+cp "$FRESH_SRC_HOOKS/plan-gate.sh" "$FRESH_INSTALLED/plan-gate.sh"
 printf '\n# local lib edit without version bump\n' >> "$FRESH_INSTALLED/lib/command-classifier.sh"
 output="$(run_hook_capture)"
 if echo "$output" | grep -q "plugins/claude-code/hooks/lib/command-classifier.sh"; then
@@ -246,13 +258,30 @@ else
   ((failed++))
 fi
 
+# Individual source file gone under an EXISTING repo → per-file loop
+# classifies it missing_source (the loop, not the root probe, owns
+# file-level classification post-F1).
+cp "$FRESH_SRC_HOOKS/lib/command-classifier.sh" "$FRESH_INSTALLED/lib/command-classifier.sh"
+rm "$FRESH_SRC_HOOKS/plan-gate.sh"
+output="$(run_hook_capture)"
+if echo "$output" | grep -q "missing source files" \
+  && echo "$output" | grep -q "plugins/claude-code/hooks/plan-gate.sh"; then
+  echo "  ✓ 13. Missing individual source file is classified by the per-file loop"
+  ((passed++))
+else
+  echo "  ✗ 13. Missing individual source file was not reported"
+  echo "    output: $output"
+  ((failed++))
+fi
+cp "$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh" "$FRESH_SRC_HOOKS/plan-gate.sh"
+
 mv "$FRESH_SRC" "$FRESH_SRC.moved"
 output="$(run_hook_capture)"
 if echo "$output" | grep -q "source repo unavailable"; then
-  echo "  ✓ 13. Missing source repo is reported"
+  echo "  ✓ 14. Missing source repo is reported"
   ((passed++))
 else
-  echo "  ✗ 13. Missing source repo was not reported"
+  echo "  ✗ 14. Missing source repo was not reported"
   echo "    output: $output"
   ((failed++))
 fi
