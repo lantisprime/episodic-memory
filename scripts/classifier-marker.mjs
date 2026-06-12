@@ -694,11 +694,20 @@ function mainWrite(argv) {
   let commandFileConsumed = false
   if (cmdFileArg !== undefined) {
     try {
-      const realCf = realpathOrSame(path.resolve(cmdFileArg))
-      const st = fs.lstatSync(realCf)
-      if (st.isFile() && isUnder(realCf, classifyDir) && realCf !== written.file) {
-        fs.unlinkSync(realCf)
-        commandFileConsumed = true
+      // lstat the ARGV path BEFORE any realpath: a symlink staging file is
+      // never consumed, even when its canonical target lands inside
+      // classifyDir. Codex code-review R1 P1 (episode 20260612-101323-…-a15e)
+      // reproduced the realpath-first ordering deleting an in-dir symlink's
+      // in-dir TARGET — a wrong-family deletion inside the correct root.
+      const argvPath = path.resolve(cmdFileArg)
+      const argvSt = fs.lstatSync(argvPath)
+      if (argvSt.isFile()) {
+        const realCf = realpathOrSame(argvPath)
+        const st = fs.lstatSync(realCf)
+        if (st.isFile() && isUnder(realCf, classifyDir) && realCf !== written.file) {
+          fs.unlinkSync(realCf)
+          commandFileConsumed = true
+        }
       }
     } catch { /* best-effort: a vanished staging file never fails the write */ }
   }

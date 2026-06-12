@@ -727,6 +727,30 @@ test('§CF8 symlinked --command-file → never unlinked (link + target preserved
   assert.ok(fs.existsSync(target), 'link target must survive')
 })
 
+test('§CF10 (codex CR R1 P1) in-dir symlink → in-dir target: NEITHER consumed', () => {
+  const repo = mkrepo('cf10')
+  const sid = 's_cf10_' + crypto.randomBytes(4).toString('hex')
+  const classifyDir = path.join(repo, '.checkpoints', 'classify')
+  fs.mkdirSync(classifyDir, { recursive: true })
+  // Another session's staging file, IN-DIR.
+  const target = path.join(classifyDir, 'other-session.cmd')
+  fs.writeFileSync(target, 'node ./scripts/foo.mjs')
+  // This session's "staging file" is an in-dir symlink to it.
+  const link = path.join(classifyDir, 'current-session.cmd')
+  fs.symlinkSync(target, link)
+
+  const w = runHelper(['--write',
+    '--project-root', repo, '--caller-cwd', repo,
+    '--command-file', link, '--session-id', sid,
+    '--label', 'read_only', '--confidence', '0.9', '--reason', 'in-dir symlink staging'
+  ], { cwd: repo, env: { CLAUDE_CODE_SESSION_ID: '' } })
+  assert.strictEqual(w.status, 0, `write failed: ${w.stderr}`)
+  assert.strictEqual(parseStdout(w).command_file_consumed, false,
+    'symlink staging file must not consume — even with an in-dir canonical target')
+  assert.ok(fs.existsSync(target), 'in-dir TARGET must survive (wrong-family deletion)')
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'symlink must survive')
+})
+
 test('§CF9 vacuum reaps aged *.cmd, preserves fresh *.cmd and symlinked .cmd', () => {
   const repo = mkrepo('cf9')
   const classifyDir = path.join(repo, '.checkpoints', 'classify')
