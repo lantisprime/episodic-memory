@@ -505,8 +505,8 @@ export function validateBpContract({ projectRoot, taxonomyPath = null, eventsPat
   // ---------------------------------------------------------------------------
   // Assertion 12 — action-enum closure per event x tier, plus event-id
   // uniqueness (step-6 F-2 — the events mirror of assertion 6; without it a
-  // duplicate event id silently dedups into the eventIds Set. RFC L448-453
-  // carries no explicit dup-id assertion — asymmetry flagged for the P2c
+  // duplicate event id silently dedups into the eventIds Set. RFC assertion 12
+  // documents this event-id uniqueness check — asymmetry resolved in the P2c
   // doc sweep).
   // ---------------------------------------------------------------------------
   assertionsRun.add(12);
