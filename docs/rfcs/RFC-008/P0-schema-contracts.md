@@ -37,8 +37,8 @@ graph TB
     end
 
     subgraph GATE["Test-only validity gate (tests/)"]
-        LINT["tests/lib/mini-jsonschema.mjs<br/>(2020-12 keyword-grammar linter;<br/>self-asserting SUBSCHEMA_KEYWORDS;<br/>ALLOWLIST=57)"]
-        VH["tests/lib/version-hash.mjs"]
+        LINT["scripts/lib/mini-jsonschema.mjs<br/>(2020-12 keyword-grammar linter;<br/>self-asserting SUBSCHEMA_KEYWORDS;<br/>ALLOWLIST=57; promoted from tests/lib in P2a)"]
+        VH["scripts/lib/version-hash.mjs<br/>(promoted from tests/lib in P1b)"]
         T["tests/test-p0-schemas.mjs = 89/0"]
         FIX["tests/fixtures/plugins/* (>=16 golden)<br/>tests/fixtures/harness-events/claude-code/*"]
     end
@@ -65,8 +65,11 @@ graph TB
   `event-session-start` · `event-session-end` *(`.schema.json`)*
 - `schemas/runbook-agent-manifest.schema.json` *(F49)*
 
-Test-only (T17-permitted): `tests/lib/mini-jsonschema.mjs`, `tests/lib/version-hash.mjs`,
-`tests/test-p0-schemas.mjs`, `tests/fixtures/plugins/*`, `tests/fixtures/harness-events/claude-code/*`.
+Test-only (T17-permitted): `tests/test-p0-schemas.mjs`, `tests/fixtures/plugins/*`,
+`tests/fixtures/harness-events/claude-code/*`. (`mini-jsonschema.mjs` and `version-hash.mjs`
+shipped test-only here at P0; both were later promoted to `scripts/lib/` — version-hash in
+P1b, mini-jsonschema in P2a when `scripts/validate-schemas.mjs` began importing it — leaving
+re-export shims at the `tests/lib/` paths.)
 
 ## Implementation notes (as shipped)
 
@@ -81,8 +84,10 @@ Test-only (T17-permitted): `tests/lib/mini-jsonschema.mjs`, `tests/lib/version-h
 - **Canonical hashes baked:** `taxonomy_version = sha256:7ea41ed8…`,
   `events_version = sha256:13f01e5a…` (computed over the sorted `labels` array only — editorial
   fields change without invalidating classification behavior).
-- Full official-meta-schema validation is owned by **P2**'s `scripts/validate-schemas.mjs`,
-  which re-validates these P0 schemas when it lands.
+- Doc-validity checking of these schemas is owned by **P2**'s `scripts/validate-schemas.mjs` —
+  the same keyword-grammar linter promoted to a shipped CI validator (a zero-dep approximation
+  of 2020-12 doc-validity, **not** instance-validation against the published meta-schema, which
+  is the wrong patch class). It re-validates these P0 schemas.
 
 ## Done when ✓
 
@@ -135,7 +140,7 @@ Plan reviewed cross-tool (codex, 3 rounds → ACCEPT): request `…044435…2fe8
 ## Follow-up
 
 **Issue [#368](https://github.com/lantisprime/episodic-memory/issues/368)** — P2 must share
-ONE negative corpus between the P0 linter (`tests/lib/mini-jsonschema.mjs`) and P2's
+ONE negative corpus between the P0 linter (`scripts/lib/mini-jsonschema.mjs`, promoted from `tests/lib/` in P2a with a re-export shim) and P2's
 `scripts/validate-schemas.mjs` (RFC line 1188; drift guard, Rule 14). Blocked by P2.
 
 ## Maps to
