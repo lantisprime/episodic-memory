@@ -77,9 +77,11 @@ mk_fake_home() {
   # marker-paths.mjs; without it the module fails to load and the hook
   # falls back to the canned em-recall-non-zero error message.
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$fake_home/.episodic-memory/scripts/lib/marker-paths.mjs"
-  # rank-1 plan v7 (2026-05-12): em-recall also imports stop-gate-helpers.mjs
-  # for the active-plan exemption (_maxMtimeAcrossRootsStrict).
-  cp "$REPO_ROOT/scripts/lib/stop-gate-helpers.mjs" "$fake_home/.episodic-memory/scripts/lib/stop-gate-helpers.mjs"
+  # RFC-008 P3a (2026-06-15): em-recall imports marker-state.mjs (relocated
+  # from stop-gate-helpers.mjs) for the active-plan exemption
+  # (_maxMtimeAcrossRootsStrict). marker-state imports the already-copied
+  # marker-paths.mjs.
+  cp "$REPO_ROOT/scripts/lib/marker-state.mjs" "$fake_home/.episodic-memory/scripts/lib/marker-state.mjs"
   # 2026-05-18 concurrent-session fix: em-recall imports session-id.mjs for
   # the --session-id flag (codex R1 P1.2; logging-only in v6 sweep).
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$fake_home/.episodic-memory/scripts/lib/session-id.mjs"

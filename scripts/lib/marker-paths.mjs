@@ -539,8 +539,10 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
   // E10: plan-gate.sh existence check + marker_write allowlist.
   { file: 'plugins/claude-code/hooks/plan-gate.sh', line: 57, role: 'PLAN_PENDING_W resolution + existence check + marker_write allowlist (session-aware after #268 fix)', kind: 'shell-equality', semantic_role: 'read-own-session' },
 
-  // E11: scripts/em-recall.mjs TASK_SIGNAL_MARKERS array literal (consumer).
-  { file: 'scripts/em-recall.mjs', line: 97, role: 'TASK_SIGNAL_MARKERS array literal (consumer)', kind: 'js-array', semantic_role: 'read-any' },
+  // E11: scripts/lib/marker-state.mjs plan-marker consumer (relocated from
+  // em-recall.mjs in RFC-008 P3a — carve-out + relaxed mtime helpers now live
+  // in the enforcement-owned marker-state module).
+  { file: 'scripts/lib/marker-state.mjs', line: 0, role: 'plan-marker carve-out consumer (PLAN_MARKER_LEGACY_BASENAME branch + relaxed/strict mtime helpers)', kind: 'js-array', semantic_role: 'read-any' },
 
   // E12: scripts/em-audit-compliance.mjs compliance regex.
   { file: 'scripts/em-audit-compliance.mjs', line: 111, role: 'compliance audit regex (\\.plan-approval-pending\\b accepts both forms)', kind: 'js-regex', semantic_role: 'read-any' },
@@ -558,9 +560,13 @@ export const PLAN_MARKER_ENFORCEMENT_SITES = [
   { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 459, role: 'pre-checkpoint gate (.checkpoint-required — DIFFERENT marker)', kind: 'shell-decoupled', semantic_role: 'decoupled' },
   { file: 'plugins/claude-code/hooks/checkpoint-gate.sh', line: 497, role: 'pre→post arming gate (.checkpoint-required — DIFFERENT marker)', kind: 'shell-decoupled', semantic_role: 'decoupled' },
 
-  // E19-E20: em-recall.mjs iteration consumers.
-  { file: 'scripts/em-recall.mjs', line: 170, role: 'TASK_SIGNAL_MARKERS carve-out loop (glob-expands suffixed forms)', kind: 'js-array-iter', semantic_role: 'read-any' },
-  { file: 'scripts/em-recall.mjs', line: 587, role: 'TASK_SIGNAL_MARKERS orphan-clear sweep (non-plan-marker class only; plan-marker handled by sibling unconditional sweep — post-2026-05-18 deadlock fix)', kind: 'js-array-iter', semantic_role: 'sweep-stale' },
+  // E19: carve-out loop — relocated to scripts/lib/marker-state.mjs in
+  // RFC-008 P3a (stopGateCarveOutApplies + _maxMtimeAcrossRootsForPlanMarker
+  // glob-expand suffixed forms).
+  { file: 'scripts/lib/marker-state.mjs', line: 0, role: 'TASK_SIGNAL_MARKERS carve-out loop (glob-expands suffixed forms)', kind: 'js-array-iter', semantic_role: 'read-any' },
+  // E20: em-recall.mjs orphan-clear sweep (stays in em-recall — SessionStart
+  // legacy plan-marker sweep, not part of the P3a carve-out move).
+  { file: 'scripts/em-recall.mjs', line: 587, role: 'legacy plan-marker orphan-clear sweep (PLAN_MARKER_LEGACY_BASENAME, suffix-less; post-2026-05-18 deadlock fix)', kind: 'js-array-iter', semantic_role: 'sweep-stale' },
 
   // E20b: NEW unconditional legacy-suffix-less plan-marker sweep above the
   // baseline guard. Suffixed forms `.plan-approval-pending.<sid>` are

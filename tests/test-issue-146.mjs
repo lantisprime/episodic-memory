@@ -546,7 +546,9 @@ function mkE2EHome() {
   // omit it and em-recall fails to load (same fix as test-stop-gate.sh's
   // mk_fake_home).
   // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs.
-  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'stop-gate-helpers.mjs', 'session-id.mjs']) {
+  // RFC-008 P3a: em-recall imports marker-state.mjs (relocated from
+  // stop-gate-helpers.mjs); marker-state imports the already-copied marker-paths.mjs.
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }

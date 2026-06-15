@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // test-em-strict-lstat.mjs — Level-2 in-process unit tests for
-// _maxMtimeAcrossRootsStrict (scripts/lib/stop-gate-helpers.mjs).
+// _maxMtimeAcrossRootsStrict (scripts/lib/marker-state.mjs — relocated from
+// stop-gate-helpers.mjs in RFC-008 P3a).
 //
 // Codex round-6 F17: prove the strict-error PATH is reached (not just
 // a tautological BLOCK from a downstream effect). Imports the helper
@@ -18,7 +19,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { execSync } from 'child_process'
-import { _maxMtimeAcrossRootsStrict } from '../scripts/lib/stop-gate-helpers.mjs'
+import { _maxMtimeAcrossRootsStrict } from '../scripts/lib/marker-state.mjs'
 
 let pass = 0
 let fail = 0
