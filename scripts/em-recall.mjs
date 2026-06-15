@@ -21,7 +21,6 @@ import os from 'os'
 import { execSync } from 'child_process'
 import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 import {
-  TASK_SIGNAL_MARKERS,
   BASELINE_NAME,
   PRIMARY_MARKER_DIR,
   LEGACY_MARKER_DIR,
@@ -33,15 +32,15 @@ import {
   ensurePrimaryDir,
   bothMarkerPaths,
   namespacedMarkerBasenameForSession,
-  CHECKPOINT_QUARTET,
   preflightMarkerSuffixedBasenameMatches,
   lastUserPromptBasenameMatches,
 } from './lib/marker-paths.mjs'
 import {
   _maxMtimeAcrossRootsStrict,
   _maxMtimeAcrossRootsForPlanMarkerStrict,
-  _maxMtimeAcrossRootsForCheckpointMarkerOwnSessionStrict,
-} from './lib/stop-gate-helpers.mjs'
+  resolveOwnSessionMarkerRead,
+  stopGateCarveOutApplies,
+} from './lib/marker-state.mjs'
 import { validateSessionId } from './lib/session-id.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -128,171 +127,16 @@ if (sessionStartFlag && gateFlag !== undefined) {
 }
 
 // ---------------------------------------------------------------------------
-// Task-signal markers — the closed set of files whose mtime distinguishes
-// "fresh task work this session" from "stale from prior". Imported from
-// scripts/lib/marker-paths.mjs (single source of truth shared with hook).
-// Extended class members MUST be added there.
-//
-// 2026-05-09 .checkpoints/ migration: marker writes go to PRIMARY (.checkpoints/)
-// only; reads check PRIMARY first then fall back to LEGACY (.claude/) until
-// burn-in completes. Carve-out, orphan-clear, and baseline checks all use
-// the shared marker-paths helpers — see scripts/lib/marker-paths.mjs.
+// Marker-state reads moved to scripts/lib/marker-state.mjs (RFC-008 P3a, R1).
+// The carve-out predicate, relaxed mtime helpers, and own-session resolver now
+// live in the enforcement-owned marker-state module; em-recall imports only the
+// four helpers its surviving `--gate stop` dispatch handler still calls
+// (_maxMtimeAcrossRootsStrict, _maxMtimeAcrossRootsForPlanMarkerStrict,
+// resolveOwnSessionMarkerRead, stopGateCarveOutApplies). TASK_SIGNAL_MARKERS
+// and CHECKPOINT_QUARTET moved with the carve-out and are no longer imported
+// here. The dispatch handler itself moves to enforce-contract.mjs in P3b and
+// is deleted here in P3d.
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Stop-gate carve-out (#146 A2). Pure function — testable in isolation.
-//
-// Returns true iff the stop-gate should treat the current turn as having no
-// real task signal (e.g. session-start handoff y/n + workplan display) and
-// allow stop despite an armed .checkpoint-required.
-//
-// Invariant: every TASK_SIGNAL_MARKERS member at EITHER root (primary or
-// legacy) must be either absent or have mtime <= .session-baseline mtime.
-// A signal mtime > baseline means it was created/touched mid-session,
-// which is the case the gate must catch.
-//
-// Dual-root semantics (.checkpoints/ migration): baselineMtime is the MAX
-// of primary and legacy baseline mtimes (whichever is most recent).
-// Per-marker mtime is the MAX across both roots.
-//
-// .session-baseline is written/touched by em-recall --session-start (called
-// from hooks/em-recall-sessionstart.sh). If missing at both roots, the
-// carve-out does not apply (conservative — pre-existing sessions before
-// this fix shipped).
-//
-// SubagentStop semantics (P1-1): the same predicate runs for SubagentStop.
-// A subagent that wrote files would have caused checkpoint-gate to arm
-// .post-checkpoint-required (mtime > baseline), denying the carve-out. A
-// subagent that did read-only work satisfies the carve-out — same semantics
-// as the parent's no-task-signal turn, which is the desired behavior.
-//
-// Symlink defense (P2-2): uses lstatSync so a symlink to an old file cannot
-// trick the carve-out into firing. ANY symlink — baseline or marker, at
-// EITHER root — causes the carve-out to FAIL CLOSED. Same-class symmetry
-// per feedback_same_class_completeness.md. Codex round-1 P2 finding
-// (episode 20260505-124511-...-845f) reproduced the asymmetry.
-// ---------------------------------------------------------------------------
-function _maxMtimeAcrossRoots(repoRoot, basename) {
-  // Returns { mtime, hadSymlink, anyExisted }. mtime is the max across both
-  // roots. If either side is a symlink, hadSymlink=true (caller fails closed).
-  let mtime = -Infinity
-  let hadSymlink = false
-  let anyExisted = false
-  for (const p of [primaryMarkerPath(repoRoot, basename), legacyMarkerPath(repoRoot, basename)]) {
-    try {
-      const st = fs.lstatSync(p)
-      if (st.isSymbolicLink()) { hadSymlink = true; continue }
-      anyExisted = true
-      if (st.mtimeMs > mtime) mtime = st.mtimeMs
-    } catch {}
-  }
-  return { mtime, hadSymlink, anyExisted }
-}
-
-// #268 fix E19: non-strict plan-marker variant for carve-out. Scans BOTH
-// legacy `.plan-approval-pending` AND any `.plan-approval-pending.<sid>`
-// at primary + legacy roots; returns max mtime across the set.
-//
-// Symmetric with _maxMtimeAcrossRoots (relaxed: lstat errors silently
-// skipped). Use this for carve-out (NON-fail-closed) sites; for stop-gate
-// fail-closed sites use _maxMtimeAcrossRootsForPlanMarkerStrict from
-// stop-gate-helpers.mjs.
-function _maxMtimeAcrossRootsForPlanMarker(repoRoot) {
-  let mtime = -Infinity
-  let hadSymlink = false
-  let anyExisted = false
-  for (const p of [
-    primaryMarkerPath(repoRoot, PLAN_MARKER_LEGACY_BASENAME),
-    legacyMarkerPath(repoRoot, PLAN_MARKER_LEGACY_BASENAME),
-  ]) {
-    try {
-      const st = fs.lstatSync(p)
-      if (st.isSymbolicLink()) { hadSymlink = true; continue }
-      anyExisted = true
-      if (st.mtimeMs > mtime) mtime = st.mtimeMs
-    } catch {}
-  }
-  const prefix = `${PLAN_MARKER_LEGACY_BASENAME}.`
-  for (const dir of [path.join(repoRoot, PRIMARY_MARKER_DIR), path.join(repoRoot, LEGACY_MARKER_DIR)]) {
-    let entries
-    try { entries = fs.readdirSync(dir) } catch { continue }
-    for (const name of entries) {
-      if (!name.startsWith(prefix)) continue
-      const p = path.join(dir, name)
-      try {
-        const st = fs.lstatSync(p)
-        if (st.isSymbolicLink()) { hadSymlink = true; continue }
-        anyExisted = true
-        if (st.mtimeMs > mtime) mtime = st.mtimeMs
-      } catch {}
-    }
-  }
-  return { mtime, hadSymlink, anyExisted }
-}
-
-// Rank-2: resolve a session-aware marker read. Resolution order:
-//   1. <root>/.checkpoints/<legacy>.<sid>     (own-session, primary)
-//   2. <root>/.claude/<legacy>.<sid>          (own-session, legacy root)
-//   3. <root>/.checkpoints/<legacy>           (legacy literal, primary)
-//   4. <root>/.claude/<legacy>                (legacy literal, legacy root)
-//
-// Returns the first existing path or null. Other sessions' suffixed
-// markers are intentionally NOT probed — own-session semantic per
-// rank-2 plan §3 trust model.
-//
-// When sid is null/empty, only steps 3-4 are tried (legacy-literal-only
-// fallback for invalid/missing sid). Symlink-aware via fs.existsSync
-// (which follows links); callers needing symlink-fail-closed must
-// re-check with lstatSync.
-function resolveOwnSessionMarkerRead(repoRoot, legacyBasename, sid) {
-  if (sid) {
-    const ownBasename = namespacedMarkerBasenameForSession(legacyBasename, sid)
-    const ownPrimary = primaryMarkerPath(repoRoot, ownBasename)
-    if (fs.existsSync(ownPrimary)) return ownPrimary
-    const ownLegacy = legacyMarkerPath(repoRoot, ownBasename)
-    if (fs.existsSync(ownLegacy)) return ownLegacy
-  }
-  const litPrimary = primaryMarkerPath(repoRoot, legacyBasename)
-  if (fs.existsSync(litPrimary)) return litPrimary
-  const litLegacy = legacyMarkerPath(repoRoot, legacyBasename)
-  if (fs.existsSync(litLegacy)) return litLegacy
-  return null
-}
-
-function stopGateCarveOutApplies(repoRoot, sid) {
-  const base = _maxMtimeAcrossRoots(repoRoot, BASELINE_NAME)
-  if (base.hadSymlink) return false
-  if (!base.anyExisted) return false
-  const baselineMtime = base.mtime
-
-  for (const name of TASK_SIGNAL_MARKERS) {
-    let m
-    if (name === PLAN_MARKER_LEGACY_BASENAME) {
-      // #268 fix E19: plan-marker member glob-expands suffixed forms
-      // (cross-session — plan-pending deferral is global-by-design).
-      m = _maxMtimeAcrossRootsForPlanMarker(repoRoot)
-    } else if (CHECKPOINT_QUARTET.includes(name)) {
-      // Rank-2 (codex R2 P1-B + R4 ACCEPT): quartet carve-out is
-      // OWN-SESSION-ONLY — read own `<name>.<sid>` + legacy literal,
-      // NEVER other sessions' suffixed forms. Cross-session safety is
-      // delegated to SessionStart's force-monotonic baseline probe.
-      // Strict catch (R2 P2): non-ENOENT errors fail closed.
-      const strict = _maxMtimeAcrossRootsForCheckpointMarkerOwnSessionStrict(
-        repoRoot, name, sid)
-      if (strict.hadOtherError) return false
-      m = strict
-    } else {
-      m = _maxMtimeAcrossRoots(repoRoot, name)
-    }
-    // Symlink at either root → fail closed.
-    if (m.hadSymlink) return false
-    // Marker absent at both roots → no signal; skip.
-    if (!m.anyExisted) continue
-    // Mid-session signal → fail closed.
-    if (m.mtime > baselineMtime) return false
-  }
-  return true
-}
 
 if (gateFlag === 'stop') {
   // REPO_ROOT was resolved at module load (line ~26) via resolveRepoRoot()

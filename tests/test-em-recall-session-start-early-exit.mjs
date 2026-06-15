@@ -443,11 +443,13 @@ function buildTempHome(homeRoot) {
     path.join(SCRIPTS, 'lib', 'marker-paths.mjs'),
     path.join(installedLib, 'marker-paths.mjs'),
   )
-  // rank-1 plan v7: em-recall now imports stop-gate-helpers.mjs for the
-  // active-plan exemption. Test fixture must mirror transitive imports.
+  // RFC-008 P3a: em-recall imports marker-state.mjs (relocated from
+  // stop-gate-helpers.mjs) for the active-plan exemption. Test fixture must
+  // mirror transitive imports (marker-state imports the already-copied
+  // marker-paths.mjs).
   fs.copyFileSync(
-    path.join(SCRIPTS, 'lib', 'stop-gate-helpers.mjs'),
-    path.join(installedLib, 'stop-gate-helpers.mjs'),
+    path.join(SCRIPTS, 'lib', 'marker-state.mjs'),
+    path.join(installedLib, 'marker-state.mjs'),
   )
   // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs
   // for the --session-id flag validation. Mirror per
