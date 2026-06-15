@@ -12,7 +12,10 @@ set -e
 # Architecture (RFC-003 Phase 3b primitive; Phase 2 will subsume into
 # adapters/claude-code/capabilities/enforcement.mjs — see RFC-003
 # §Considerations — #128 stop-gate alignment):
-#   - Decision logic lives in core: `node em-recall.mjs --gate stop`.
+#   - Decision logic lives in the enforcement layer:
+#     `node enforce-contract.mjs --gate stop` (RFC-008 P3b-1 — relocated from
+#     the substrate's `em-recall.mjs --gate stop`, byte-identical; em-recall's
+#     --gate handler is deleted in P3d).
 #   - This shell script is a thin runtime adapter:
 #     1. Reads stdin (Claude Code hook input JSON).
 #     2. Honors `stop_hook_active` early-exit (mandatory infinite-loop
@@ -53,12 +56,18 @@ fi
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-# Resolve em-recall.mjs at canonical global install path. The hook does not
-# attempt to use the in-repo script — production hooks invoke globally
+# Resolve enforce-contract.mjs at canonical global install path. The hook does
+# not attempt to use the in-repo script — production hooks invoke globally
 # installed copies, which is what install.mjs --install-hooks deploys.
-EM_RECALL="$HOME/.episodic-memory/scripts/em-recall.mjs"
-if [ ! -f "$EM_RECALL" ]; then
-  echo '{"decision": "block", "reason": "stop-gate.sh: em-recall.mjs not found at canonical global path. Re-run install.mjs."}'
+#
+# RFC-008 P3b-1: the stop decision moved OUT of the memory substrate
+# (em-recall.mjs --gate stop) INTO the enforcement layer (enforce-contract.mjs),
+# byte-identical. CLASS-C(c): this loud-fail-if-missing is PRESERVED on the
+# repoint — a missing/erroring binary MUST block loud, never degrade to
+# allow-always.
+ENFORCE="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+if [ ! -f "$ENFORCE" ]; then
+  echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract.mjs not found at canonical global path. Re-run install.mjs."}'
   exit 0
 fi
 
@@ -82,17 +91,17 @@ fi
 MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")"
 
 # Invoke core decision logic. Capture stdout; fail-loud envelope on error.
-# Repo-root resolution in em-recall.mjs (resolveRepoRoot module-load) now
+# Repo-root resolution in enforce-contract.mjs (resolveRepoRoot module-load) now
 # resolves from the cwd we just cd'd to — i.e., the project the hook input
 # named, not the hook process's inherited cwd.
 if [ -n "$MY_SID" ]; then
-  DECISION="$(node "$EM_RECALL" --gate stop --session-id "$MY_SID" 2>/dev/null)" || {
-    echo '{"decision": "block", "reason": "stop-gate.sh: em-recall --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
+  DECISION="$(node "$ENFORCE" --gate stop --session-id "$MY_SID" 2>/dev/null)" || {
+    echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
     exit 0
   }
 else
-  DECISION="$(node "$EM_RECALL" --gate stop 2>/dev/null)" || {
-    echo '{"decision": "block", "reason": "stop-gate.sh: em-recall --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
+  DECISION="$(node "$ENFORCE" --gate stop 2>/dev/null)" || {
+    echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
     exit 0
   }
 fi

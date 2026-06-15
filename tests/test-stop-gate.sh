@@ -72,6 +72,14 @@ mk_fake_home() {
   rm -rf "$fake_home"
   mkdir -p "$fake_home/.episodic-memory/scripts/lib"
   cp "$REPO_ROOT/scripts/em-recall.mjs" "$fake_home/.episodic-memory/scripts/em-recall.mjs"
+  # RFC-008 P3b-1 (2026-06-15): stop-gate.sh now invokes enforce-contract.mjs
+  # (the stop decision relocated OUT of em-recall into the enforcement layer,
+  # byte-identical). Stage it + its full import closure (marker-state,
+  # marker-paths, local-dir, session-id — all copied below) so the hook's
+  # canonical-path lookup resolves; a missing transitive dep would make the
+  # module fail to load and the hook fall back to the loud-fail envelope,
+  # passing the test for the wrong reason.
+  cp "$REPO_ROOT/scripts/enforce-contract.mjs" "$fake_home/.episodic-memory/scripts/enforce-contract.mjs"
   cp "$REPO_ROOT/scripts/lib/local-dir.mjs" "$fake_home/.episodic-memory/scripts/lib/local-dir.mjs"
   # 2026-05-09 .checkpoints/ migration: em-recall now also imports
   # marker-paths.mjs; without it the module fails to load and the hook
@@ -253,17 +261,19 @@ if [ "$rc" = "0" ]; then pass "L3.3: corrupt state → hook exits 0 (no crash)"
 else fail "L3.3: corrupt state crash" "rc=$rc out=$out"
 fi
 
-# 3.4 em-recall.mjs missing entirely → fail-loud block envelope
+# 3.4 enforce-contract.mjs missing entirely → fail-loud block envelope
+# (RFC-008 P3b-1: the hook now resolves enforce-contract.mjs at the canonical
+# path; CLASS-C(c) requires a missing binary to block LOUD, never allow-always.)
 L3_NOSCRIPT_HOME="$TMP_ROOT/L3_noscript_home"
 mkdir -p "$L3_NOSCRIPT_HOME/.episodic-memory/scripts"
-# Deliberately do NOT copy em-recall.mjs
+# Deliberately do NOT copy enforce-contract.mjs
 out="$(cd "$L3_MAIN" && echo "$input_min" | HOME="$L3_NOSCRIPT_HOME" bash "$HOOK" 2>/dev/null)"
-# JSON style varies between em-recall (no spaces) and shell echo (with spaces);
+# JSON style varies between node (no spaces) and shell echo (with spaces);
 # match either via the field name regex.
-if echo "$out" | grep -qE '"decision":[[:space:]]*"block"' && echo "$out" | grep -q "em-recall.mjs not found"; then
-  pass "L3.4: missing em-recall.mjs → fail-loud block envelope"
+if echo "$out" | grep -qE '"decision":[[:space:]]*"block"' && echo "$out" | grep -q "enforce-contract.mjs not found"; then
+  pass "L3.4: missing enforce-contract.mjs → fail-loud block envelope"
 else
-  fail "L3.4: missing em-recall fail-loud" "got: $out"
+  fail "L3.4: missing enforce-contract fail-loud" "got: $out"
 fi
 
 # 3.5 SubagentStop variant — same shell, same JSON shape, same behavior
