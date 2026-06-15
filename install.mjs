@@ -295,6 +295,13 @@ if (fs.existsSync(repoPatternsIndex)) {
   console.log(`Installed patterns/_index.json to ${globalPatternsDir}`)
 }
 
+// NOTE: patterns/taxonomy.json is a RUNTIME dependency of command-classifier.sh,
+// NOT a global-validation artifact like _index.json — so it is co-deployed WITH
+// the classifier inside the `if (installHooks)` block (§5a-tax below), never
+// unconditionally here. Deploying it in the main body would advance runtime
+// candidate-1 on a no-hooks install while leaving an already-installed classifier
+// stale + unwarned (PR-level codex BLOCKER; R4/F4 root parity + sync coupling).
+
 // ---------------------------------------------------------------------------
 // 2. Create local .episodic-memory in target project
 // ---------------------------------------------------------------------------
@@ -1200,6 +1207,52 @@ if (installHooks) {
         'not fully installed (divergent local edit on command-classifier.sh?); ' +
         're-run with --install-hooks-force'
       )
+    }
+
+    // 5a-tax. RFC-008 P3c (R4/F4): co-deploy patterns/taxonomy.json to the SAME
+    // global root the classifier reads at runtime (candidate 1 =
+    // $HOME/.episodic-memory/patterns/taxonomy.json; GLOBAL_DIR = os.homedir()/
+    // .episodic-memory, no EPISODIC_MEMORY_HOME indirection — codex R2-P2 root
+    // parity). This is INSIDE the installHooks block so taxonomy and classifier
+    // advance together: a no-hooks install touches neither (PR-level codex
+    // BLOCKER — taxonomy must not advance candidate-1 while the installed
+    // classifier stays stale + unwarned).
+    const repoTaxonomy = path.join(REPO_DIR, 'patterns', 'taxonomy.json')
+    if (fs.existsSync(repoTaxonomy)) {
+      fs.mkdirSync(globalPatternsDir, { recursive: true })
+      fs.copyFileSync(repoTaxonomy, path.join(globalPatternsDir, 'taxonomy.json'))
+      console.log(`Installed patterns/taxonomy.json to ${globalPatternsDir}`)
+    }
+
+    // RFC-008 P3c (R4/F4, codex R1-P1b): if the command classifier was KEPT as a
+    // divergent local edit while taxonomy.json was (re)deployed just above, the
+    // installed classifier and the global taxonomy may disagree. Two cases,
+    // distinguished by whether the kept file carries the runtime-sourcing helper:
+    //   pre-P3c  (no _ensure_taxonomy_synced): runs stale hardcoded labels and is
+    //            NOT taxonomy-synced — the gate is silently unprotected by
+    //            runtime-sourcing (no fail-closed at all).
+    //   post-P3c (has the helper): will FAIL CLOSED loudly on any drift until
+    //            re-forced.
+    if (libResults['command-classifier.sh'] === 'skipped-divergent') {
+      let keptClassifier = ''
+      try {
+        keptClassifier = fs.readFileSync(
+          path.join(userHooksLibDir, 'command-classifier.sh'), 'utf8')
+      } catch { /* unreadable → treat as pre-P3c (no helper) below */ }
+      if (keptClassifier.includes('_ensure_taxonomy_synced')) {
+        console.log(
+          'WARNING: command-classifier.sh kept (divergent local edit) while ' +
+          'taxonomy.json was redeployed — the kept classifier will FAIL CLOSED ' +
+          'on any taxonomy drift. Re-run with --install-hooks-force to sync.'
+        )
+      } else {
+        console.log(
+          'WARNING: command-classifier.sh kept (divergent local edit) is pre-P3c ' +
+          '— it does NOT runtime-source taxonomy.json and is NOT taxonomy-synced ' +
+          '(runs stale hardcoded labels). Re-run with --install-hooks-force to ' +
+          'install runtime label-sourcing.'
+        )
+      }
     }
 
     // 5a. Hook specs imported from scripts/lib/install-manifest.mjs (single

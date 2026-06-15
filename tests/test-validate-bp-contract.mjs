@@ -331,6 +331,37 @@ classifierCase("F-1R5: definition after a trailing-backslash COMMENT line", () =
 }
 
 // ---------------------------------------------------------------------------
+// Assertion 7c (RFC-008 P3c — R4/F4/F6): default classifier runtime-sources
+// taxonomy.json. Robust parser (codex R1-P2), two-emitter coverage (R1-P1),
+// emit-site vocabulary closure (GAP-2), and the `declare -f _priority` allowlist
+// regression that the runtime-sourcing derivation depends on.
+// ---------------------------------------------------------------------------
+// String forms exactly mirror the in-file guard blocks (\t/\n are literal
+// backslash-escapes in the bash printf format).
+const CP_GUARD = '  if ! _ensure_taxonomy_synced; then\n    printf \'%s\\t\\t%s\\n\' "unsafe_complex" "$_TAXONOMY_SYNC_REASON"\n    return 0\n  fi\n';
+const CC_GUARD_INNER = '    if ! _ensure_taxonomy_synced; then\n      final_label="unsafe_complex"\n      final_target=""\n      final_reason="$_TAXONOMY_SYNC_REASON"\n    fi\n';
+classifierCase("7c: missing _ensure_taxonomy_synced definition (helper deleted)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER.replace("_ensure_taxonomy_synced() {", "_ensure_taxonomy_renamed_away() {"));
+}, "no _ensure_taxonomy_synced() definition");
+classifierCase("7c: classify_path does not call the guard (codex R1-P1)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER.replace(CP_GUARD, ""));
+}, "classify_path() does not call _ensure_taxonomy_synced");
+classifierCase("7c: classify_command does not call the guard (codex R1-P1)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER.replace(CC_GUARD_INNER, ""));
+}, "classify_command() does not call _ensure_taxonomy_synced");
+classifierCase("7c: typo'd emit-site label literal (GAP-2)", () => {
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER.replace('"shared_write" "rm_non_marker"', '"shared_writ" "rm_non_marker"'));
+}, 'emit-site label literal "shared_writ"');
+// FP control: `declare -f _priority` (the runtime-sourcing derivation) reads the
+// function body — it is inert and must stay green (extractPriorityArms allowlist).
+{
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER + '\nprobe_declare() {\n  local x="$(declare -f _priority)"\n  printf \'%s\' "$x"\n}\n');
+  const r = run(["--project", SANDBOX, "--json"]);
+  assert(r.exit === 0, "7c FP control: `declare -f _priority` read stays green (P3c)", `exit=${r.exit} violations=${JSON.stringify((r.payload && r.payload.violations || []).filter((v) => v.check === "7").map((v) => v.detail.slice(0, 80)))}`);
+  fs.writeFileSync(CLS_ABS, ORIG_CLASSIFIER);
+}
+
+// ---------------------------------------------------------------------------
 // 6. Stable-ID E2E (assertions 8/14) — all branches incl. A2 + N-5.
 // ---------------------------------------------------------------------------
 // (a) rename without major bump -> assertion 8 violation
