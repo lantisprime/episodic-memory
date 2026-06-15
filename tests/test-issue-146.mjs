@@ -30,6 +30,7 @@ import path from 'path'
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname)
 const EM_RECALL = path.join(REPO_ROOT, 'scripts', 'em-recall.mjs')
+const ENFORCE = path.join(REPO_ROOT, 'scripts', 'enforce-contract.mjs')
 
 let pass = 0
 let fail = 0
@@ -541,6 +542,12 @@ function mkE2EHome() {
   const scripts = path.join(home, '.episodic-memory', 'scripts')
   fs.mkdirSync(path.join(scripts, 'lib'), { recursive: true })
   fs.copyFileSync(EM_RECALL, path.join(scripts, 'em-recall.mjs'))
+  // RFC-008 P3b-1: stop-gate.sh now invokes enforce-contract.mjs (the stop
+  // decision relocated out of em-recall, byte-identical). The L4 runtime-E2E
+  // runs the real STOP_HOOK, so the fake canonical install MUST include it or
+  // the hook hits its loud-fail "not found" envelope. Its import closure
+  // (local-dir, marker-paths, marker-state, session-id) is copied below.
+  fs.copyFileSync(ENFORCE, path.join(scripts, 'enforce-contract.mjs'))
   // em-recall imports scripts/lib/{local-dir,marker-paths}.mjs at module load.
   // .checkpoints/ migration: marker-paths.mjs ships alongside local-dir.mjs;
   // omit it and em-recall fails to load (same fix as test-stop-gate.sh's
