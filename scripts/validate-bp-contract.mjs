@@ -231,6 +231,12 @@ export function extractPriorityArms(text, relPath, violation) {
       // keyword form `function _priority`.
       if (/^\s*\(\s*\)/.test(after) || /\bfunction\s+$/.test(before)) { defIdx.push(i); continue; }
       if (/\$\(\s*$/.test(before)) continue; // $( call site (this OCCURRENCE only — the rest of the line is still scanned)
+      // `declare -f _priority` (P3c runtime-sourcing) READS the function body;
+      // it cannot redefine it, so this OCCURRENCE is inert like a $(-call site.
+      // A trailing same-line redefinition (`declare -f _priority; _priority() {`)
+      // is still caught — its `() {` is a SEPARATE occurrence flagged as a def
+      // opener (→ defIdx > 1 fails). Allowlist only the `declare -<…f…> ` prefix.
+      if (/\bdeclare\s+-[A-Za-z]*f[A-Za-z]*\s+$/.test(before)) continue;
       unproven.push(i + 1);
     }
   }
@@ -270,6 +276,106 @@ export function extractPriorityArms(text, relPath, violation) {
   }
   if (!sawEsac) { violation(`${relPath}: _priority() case block has no esac — unparseable (fail-closed)`); return null; }
   return arms;
+}
+
+/**
+ * Assertion 7c (RFC-008 P3c — maps to R4 / F4 / F6). Verifies the default
+ * classifier RUNTIME-SOURCES its label set from taxonomy.json. Robust parser,
+ * not a plain grep (codex R1-P2: grep passes on comments / dead code):
+ *   (a) `_ensure_taxonomy_synced` is defined exactly once (non-comment).
+ *   (b) it is called (live, non-definition) from BOTH `classify_command` and
+ *       `classify_path` bodies — the two public label emitters (codex R1-P1).
+ *   (c) every emit-site label LITERAL (`printf '<fmt>' "<label>" …`) is a
+ *       taxonomy label — F6 vocabulary closure over emit sites, INDEPENDENT of
+ *       the `_priority` arms (7b); catches a typo'd `shared_writ` 7b can't see.
+ * Returns true when all pass; emits violations + returns false otherwise.
+ * Body ranges are delimited by the next COLUMN-0 function opener so `${…}`
+ * expansions and the nested `_consider()` helper don't perturb the scan.
+ */
+export function checkTaxonomySourcing(text, relPath, labelIds, violation) {
+  // Comment-aware logical-line assembly (mirror of extractPriorityArms).
+  const phys = text.split(/\r?\n/);
+  const lines = [];
+  for (let i = 0; i < phys.length; i++) {
+    let cur = phys[i];
+    if (!/^\s*#/.test(cur)) {
+      while (cur.endsWith("\\") && i + 1 < phys.length) { cur = cur.slice(0, -1) + phys[++i]; }
+    }
+    lines.push(cur);
+  }
+  const isComment = (l) => l.trim().startsWith("#");
+  const GUARD = "_ensure_taxonomy_synced";
+  const GUARD_DEF_RE = /^\s*(?:function\s+)?_ensure_taxonomy_synced\s*\(\s*\)\s*\{/;
+  const GUARD_TOKEN_RE = /\b_ensure_taxonomy_synced\b/;
+  const TOPFN_RE = /^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{/;
+  let ok = true;
+
+  // (a) exactly one non-comment definition.
+  const defLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!isComment(lines[i]) && GUARD_DEF_RE.test(lines[i])) defLines.push(i);
+  }
+  if (defLines.length === 0) {
+    violation("7", `${relPath}: no ${GUARD}() definition — R4/F4 require the default classifier to runtime-source taxonomy.json (fail-closed)`);
+    ok = false;
+  } else if (defLines.length > 1) {
+    violation("7", `${relPath}: ${defLines.length} ${GUARD}() definitions (expected exactly one) — bash last-wins ambiguity (fail-closed)`);
+    ok = false;
+  }
+
+  // (b) live call from BOTH public entry-point bodies.
+  const bodyRange = (fnRe) => {
+    let start = -1;
+    for (let i = 0; i < lines.length; i++) { if (fnRe.test(lines[i])) { start = i; break; } }
+    if (start === -1) return null;
+    let end = lines.length - 1;
+    for (let i = start + 1; i < lines.length; i++) { if (TOPFN_RE.test(lines[i])) { end = i - 1; break; } }
+    return [start, end];
+  };
+  const callsGuardIn = (range) => {
+    for (let i = range[0]; i <= range[1]; i++) {
+      if (isComment(lines[i])) continue;
+      if (GUARD_DEF_RE.test(lines[i])) continue;        // the definition, not a call
+      if (GUARD_TOKEN_RE.test(lines[i])) return true;   // a live call/use
+    }
+    return false;
+  };
+  for (const [fn, fnRe] of [
+    ["classify_command", /^classify_command\s*\(\s*\)\s*\{/],
+    ["classify_path", /^classify_path\s*\(\s*\)\s*\{/],
+  ]) {
+    const range = bodyRange(fnRe);
+    if (!range) { violation("7", `${relPath}: ${fn}() body not found — cannot verify ${GUARD} is wired into it (fail-closed)`); ok = false; continue; }
+    if (!callsGuardIn(range)) { violation("7", `${relPath}: ${fn}() does not call ${GUARD} — both public emitters must front the runtime-sourcing guard (codex R1-P1; fail-closed)`); ok = false; }
+  }
+
+  // (c) emit-site label literals ⊆ taxonomy (F6 over emit sites). Scoped to the
+  // taxonomy-label emitters: the `*preflight*` functions emit Layer-D
+  // claim-classes (`codex-review-handoff`, `none`, …) via the SAME printf shape,
+  // so they are excluded by tracking the current column-0 function. The final
+  // reducer emit uses `"$final_label"` (a variable) which the literal-only regex
+  // skips by construction.
+  const FN_OPEN_RE = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{/;
+  // Label-emit shape only: format begins with `%s\t` (label<TAB>…), matching the
+  // classifier's `'%s\t%s\t%s\n'` / `'%s\t\t%s\n'` emits. A bare `printf '%s'
+  // "word"` (no tab) is NOT a label emit and is excluded by construction.
+  const EMIT_RE = /\bprintf\s+'%s\\t[^']*'\s+"([a-z_][a-z_]*)"/g;
+  let curFn = "";
+  for (let i = 0; i < lines.length; i++) {
+    if (isComment(lines[i])) continue;
+    const fm = FN_OPEN_RE.exec(lines[i]);
+    if (fm) curFn = fm[1];
+    if (/preflight/.test(curFn)) continue; // claim-class vocabulary, not taxonomy labels
+    EMIT_RE.lastIndex = 0;
+    let m;
+    while ((m = EMIT_RE.exec(lines[i])) !== null) {
+      if (!labelIds.has(m[1])) {
+        violation("7", `${relPath}: emit-site label literal ${JSON.stringify(m[1])} (line ${i + 1}) is not a taxonomy label (F6 emit-site vocabulary closure)`);
+        ok = false;
+      }
+    }
+  }
+  return ok;
 }
 
 export function validateBpContract({ projectRoot, taxonomyPath = null, eventsPath = null, bpDirPath = null } = {}) {
@@ -441,13 +547,16 @@ export function validateBpContract({ projectRoot, taxonomyPath = null, eventsPat
     try { clsReal = fs.realpathSync(clsLex); }
     catch { violation("7", `${rel}: default classifier script missing — R4 requires the default classifier; arm closure cannot be verified (fail-closed)`); continue; }
     if (!contained(clsReal, root)) { violation("7", `${rel}: classifier resolves outside the project root — refusing to read`); continue; }
-    const arms = extractPriorityArms(fs.readFileSync(clsReal, "utf8"), rel, (d) => violation("7", d));
+    const clsSrc = fs.readFileSync(clsReal, "utf8");
+    const arms = extractPriorityArms(clsSrc, rel, (d) => violation("7", d));
     if (arms === null) continue;
     classifiersParsed++;
     const armSet = new Set(arms);
     if (new Set(arms).size !== arms.length) violation("7", `${rel}: duplicate _priority case arm(s)`);
     for (const a of armSet) if (!labelIds.has(a)) violation("7", `${rel}: _priority arm ${JSON.stringify(a)} is not a taxonomy label (extra arm)`);
     for (const id of labelIds) if (!armSet.has(id)) violation("7", `${rel}: taxonomy label ${JSON.stringify(id)} has NO _priority arm — it would rank priority 0, below read_only, a silent downgrade in most-restrictive-wins reduction (L473)`);
+    // Assertion 7c — default classifier runtime-sources taxonomy.json (P3c, F4/F6).
+    checkTaxonomySourcing(clsSrc, rel, labelIds, violation);
   }
   checks++;
   if (manifests.some((m) => m.manifest.classifier && m.manifest.classifier.mode === "default") && classifiersParsed === 0) {

@@ -2400,6 +2400,129 @@ _resolve_marker_path() {
 #       cwd or a worktree. Codex R1 P1 reproduced marker miss for that
 #       divergence.
 #
+# ---------------------------------------------------------------------------
+# Runtime taxonomy sourcing (RFC-008 P3c, maps to R4 / F4 / F6)
+# ---------------------------------------------------------------------------
+# The label vocabulary is single-sourced from patterns/taxonomy.json at runtime
+# and fail-closed if it drifts from this classifier's own label authority. Per
+# F4 (OQ-2 closed) this eliminates a hand-maintained bash label list "by
+# construction"; the bash label authority is the _priority() case-arms (already
+# CI-validated == taxonomy.labels by validate-bp-contract.mjs assertion 7b), so
+# the runtime check compares taxonomy.labels against _priority arms — NO second
+# parallel list (adversarial GAP-1).
+#
+# Resolution (codex R2-P1 / R2-P2):
+#   candidate 1: $HOME/.episodic-memory/patterns/taxonomy.json — the SAME root
+#                install.mjs writes (GLOBAL_DIR, install.mjs:24) and the idiom
+#                the hooks already use (checkpoint-gate.sh:741). No
+#                EPISODIC_MEMORY_HOME indirection (os.homedir() wouldn't honor
+#                it); tests isolate via HOME.
+#   candidate 2: in-repo copy via the $BASH_SOURCE climb, used ONLY when the
+#                climbed root PROVES it is the repo copy (repo sentinels present
+#                AND the classifier path round-trips). The installed layout
+#                (~/.claude/hooks/lib) fails the predicate, so it can never read
+#                an ambient parent patterns/taxonomy.json (authority-root
+#                containment).
+#   No EM_TAXONOMY_PATH env override (codex R1-P1: command-local env taxonomy
+#   authority is a bypass vector, PR-271).
+#
+# Fail-closed surfaces via a blocking label (unsafe_complex) with a distinct
+# reason so logs disambiguate misconfig from a dangerous command. marker_write
+# is NEVER fail-closed (deadlock-class-1 escape hatch, taxonomy.json
+# non_overridable_rationale): classify_command exempts marker_write and
+# classify_path's marker cases return before the guard.
+
+_TAXONOMY_SYNC_DONE=""     # plain, NON-exported per-process guard (adversarial
+_TAXONOMY_SYNC_STATUS=""   # axis-7: a child re-sources + re-validates rather
+_TAXONOMY_SYNC_REASON=""   # than inheriting a stale "passed" flag)
+
+# Physical (symlink-resolved) path of a file by resolving its DIRECTORY via
+# `cd -P` (cross-platform; no GNU `readlink -f`). Resolves the /var→/private/var
+# class that fail-opened P3b-1's isMain check.
+_taxonomy_file_realpath() {
+  local f="$1" d b
+  d="$(dirname "$f")" || return 1
+  b="$(basename "$f")"
+  d="$(cd -P "$d" 2>/dev/null && pwd)" || return 1
+  printf '%s/%s' "$d" "$b"
+}
+
+# The single bash label authority: the _priority() case-arm names, sorted and
+# space-joined. declare -f is bash-native and formatting-stable for our regex
+# (matches `<label>)` whether inline or on its own line; never matches `*)` or
+# `case "$1" in`).
+_priority_arm_labels() {
+  declare -f _priority \
+    | sed -n 's/^[[:space:]]*\([a-z][a-z_]*\)).*/\1/p' \
+    | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+# Echo the resolved taxonomy.json path, or empty + return 1 if none qualifies.
+_taxonomy_resolve_path() {
+  # Candidate 1 — global install root (== install.mjs GLOBAL_DIR).
+  local c1="$HOME/.episodic-memory/patterns/taxonomy.json"
+  if [ -f "$c1" ]; then
+    _taxonomy_file_realpath "$c1" 2>/dev/null || printf '%s' "$c1"
+    return 0
+  fi
+  # Candidate 2 — in-repo copy, CONDITIONAL on a repo-layout proof predicate.
+  local self_dir climbed
+  self_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+  climbed="$(cd -P "$self_dir/../../../.." 2>/dev/null && pwd)" || return 1
+  # (a) repo sentinels present at the climbed root.
+  [ -f "$climbed/patterns/taxonomy.schema.json" ] || return 1
+  [ -f "$climbed/scripts/em-store.mjs" ] || return 1
+  # (b) the climbed classifier path round-trips back to THIS sourced file.
+  local rp_self rp_climbed
+  rp_self="$(_taxonomy_file_realpath "${BASH_SOURCE[0]}" 2>/dev/null)" || return 1
+  rp_climbed="$(_taxonomy_file_realpath "$climbed/plugins/claude-code/hooks/lib/command-classifier.sh" 2>/dev/null)" || return 1
+  [ "$rp_self" = "$rp_climbed" ] || return 1
+  local c2="$climbed/patterns/taxonomy.json"
+  [ -f "$c2" ] || return 1
+  _taxonomy_file_realpath "$c2" 2>/dev/null || printf '%s' "$c2"
+  return 0
+}
+
+# Validate (once per process) that taxonomy.labels == _priority arms. Returns 0
+# when synced; non-zero on drift/unresolved with the reason cached in
+# _TAXONOMY_SYNC_REASON.
+_ensure_taxonomy_synced() {
+  if [ -n "$_TAXONOMY_SYNC_DONE" ]; then
+    [ "$_TAXONOMY_SYNC_STATUS" = "ok" ]
+    return
+  fi
+  _TAXONOMY_SYNC_DONE=1
+
+  local tax_path
+  tax_path="$(_taxonomy_resolve_path)"
+  if [ -z "$tax_path" ] || [ ! -f "$tax_path" ]; then
+    _TAXONOMY_SYNC_STATUS="unresolved"
+    _TAXONOMY_SYNC_REASON="taxonomy_unresolved"
+    return 1
+  fi
+
+  # Zero-dep node read; exit!=0 on missing node / parse error / non-array labels
+  # (bash MUST branch on the exit code, not merely empty stdout — adversarial
+  # GAP-3). readFileSync+JSON.parse, NOT require() (require-cache footgun, Q2).
+  local actual
+  if ! actual="$(node -e 'const fs=require("fs");const t=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Array.isArray(t.labels))process.exit(3);process.stdout.write(t.labels.map(l=>l.id).sort().join(" "))' "$tax_path" 2>/dev/null)"; then
+    _TAXONOMY_SYNC_STATUS="unresolved"
+    _TAXONOMY_SYNC_REASON="taxonomy_unresolved"
+    return 1
+  fi
+
+  local expected
+  expected="$(_priority_arm_labels)"
+  if [ "$actual" = "$expected" ]; then
+    _TAXONOMY_SYNC_STATUS="ok"
+    _TAXONOMY_SYNC_REASON=""
+    return 0
+  fi
+  _TAXONOMY_SYNC_STATUS="drift"
+  _TAXONOMY_SYNC_REASON="taxonomy_drift"
+  return 1
+}
+
 # Output: LABEL\tTARGET\tREASON
 classify_command() {
   local cmd="$1"
@@ -2485,6 +2608,19 @@ classify_command() {
     final_reason="empty_command"
   fi
 
+  # RFC-008 P3c (R4/F4): fail-closed on taxonomy drift/unresolved. The guard
+  # NEVER overrides the two NON-OVERRIDABLE labels — marker_write (deadlock
+  # escape hatch) and unsafe_complex (already maximally blocking) — symmetric
+  # with taxonomy.json non_overridable. Everything else degrades to
+  # unsafe_complex so a possibly-mislabeled write cannot slip through as a read.
+  if [ "$final_label" != "marker_write" ] && [ "$final_label" != "unsafe_complex" ]; then
+    if ! _ensure_taxonomy_synced; then
+      final_label="unsafe_complex"
+      final_target=""
+      final_reason="$_TAXONOMY_SYNC_REASON"
+    fi
+  fi
+
   printf '%s\t%s\t%s\n' "$final_label" "$final_target" "$final_reason"
 }
 
@@ -2544,6 +2680,15 @@ classify_path() {
       return 0
       ;;
   esac
+  # RFC-008 P3c (R4/F4): fail-closed on taxonomy drift/unresolved for the
+  # non-marker write path. The marker cases above already returned (deadlock
+  # escape preserved). codex R1-P1: classify_path is the SECOND public label
+  # emitter (Write/Edit/MultiEdit/NotebookEdit via checkpoint-gate.sh:1359) and
+  # MUST front the same shared guard as classify_command.
+  if ! _ensure_taxonomy_synced; then
+    printf '%s\t\t%s\n' "unsafe_complex" "$_TAXONOMY_SYNC_REASON"
+    return 0
+  fi
   printf '%s\t\t%s\n' "shared_write" "path_default"
   return 0
 }

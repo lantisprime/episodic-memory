@@ -55,3 +55,9 @@ jobs:
 
       - name: Run validate-bp-contract self-tests (golden corpus + stable-ID E2E)
         run: node tests/test-validate-bp-contract.mjs
+
+      - name: Run command-classifier regression suite (label-emit / _priority lock)
+        run: bash tests/test-command-classifier.sh
+
+      - name: Run classifier taxonomy runtime-sourcing tests (RFC-008 P3c, R4/F4)
+        run: bash tests/test-classifier-taxonomy-sync.sh

@@ -731,6 +731,49 @@ if echo "$output" | grep -q "Skipped orphan sweep"; then r=true; else r=false; f
 assert_eq "T19f sweep-withheld message printed on divergent command-classifier" "true" "$r"
 
 # ---------------------------------------------------------------------------
+# T20: RFC-008 P3c — taxonomy.json runtime-sourcing co-deploy + divergent WARN
+# ---------------------------------------------------------------------------
+# T20a: an --install-hooks install co-deploys patterns/taxonomy.json to the SAME
+# global root the classifier reads at runtime ($HOME/.episodic-memory/patterns),
+# byte-equal to the repo (codex R2-P2 install/runtime root parity). Coupled to
+# the classifier deploy so taxonomy never advances on its own.
+reset_state
+run_installer --install-hooks >/dev/null 2>&1
+GLOBAL_TAX="$TEST_HOME/.episodic-memory/patterns/taxonomy.json"
+[ -f "$GLOBAL_TAX" ] && r=true || r=false
+assert_eq "T20a taxonomy.json co-deployed to global patterns dir (--install-hooks)" "true" "$r"
+if cmp -s "$REPO_ROOT/patterns/taxonomy.json" "$GLOBAL_TAX"; then r=true; else r=false; fi
+assert_eq "T20b deployed taxonomy.json is byte-equal to repo" "true" "$r"
+
+# T20a2 (PR-level codex BLOCKER regression): a NO-hooks install must NOT deploy
+# the global taxonomy — otherwise it would advance runtime candidate-1 while an
+# already-installed classifier stays stale + unwarned (silent taxonomy_drift).
+reset_state
+run_installer >/dev/null 2>&1
+[ -f "$TEST_HOME/.episodic-memory/patterns/taxonomy.json" ] && r=true || r=false
+assert_eq "T20a2 no-hooks install does NOT deploy global taxonomy (coupling)" "false" "$r"
+
+# T20c: pre-P3c divergent classifier (no _ensure_taxonomy_synced helper) kept +
+# taxonomy redeployed → WARN that the gate is NOT taxonomy-synced (codex R1-P1b).
+reset_state
+mkdir -p "$TEST_HOME/.claude/hooks/lib"
+printf '#!/bin/bash\n# user-customized divergent classifier (pre-P3c, no helper)\n' \
+  > "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
+output=$(run_installer_capture --install-hooks)
+if echo "$output" | grep -q "pre-P3c"; then r=true; else r=false; fi
+assert_eq "T20c pre-P3c divergent classifier emits 'not taxonomy-synced' WARN" "true" "$r"
+
+# T20d: post-P3c divergent classifier (HAS the helper) kept + taxonomy redeployed
+# → WARN that it will FAIL CLOSED on drift (the other split branch).
+reset_state
+mkdir -p "$TEST_HOME/.claude/hooks/lib"
+printf '#!/bin/bash\n_ensure_taxonomy_synced() { :; }\n# divergent local edit, post-P3c\n' \
+  > "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
+output=$(run_installer_capture --install-hooks)
+if echo "$output" | grep -q "FAIL CLOSED"; then r=true; else r=false; fi
+assert_eq "T20d post-P3c divergent classifier emits 'FAIL CLOSED' WARN" "true" "$r"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
