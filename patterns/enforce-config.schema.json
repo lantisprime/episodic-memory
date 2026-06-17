@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/patterns/enforce-config.schema.json",
+  "title": "Per-project enforcement config (RFC-008 P4, R5)",
+  "description": "Optional, HUMAN-AUTHORED per-project tuning at <repo>/.episodic-memory/enforce-config.json. Supplies the THIRD min() leg of effective_tier = min(harness_cap, contract_tier, project_config) (P3-thin-waist L54-60). Clamps DOWN only — naming a tier higher than harness∩contract has no raising effect (min ignores it). Top-level `active:false` turns enforcement OFF for this project (R5 silence). Per-bp keys carry per-gate tier overrides; the stop refuse clamps on `<bp>.stop` (NOT post_checkpoint — F-NEW-1). Absent/malformed ⇒ no clamp ⇒ base-STRONG (fail-closed; a broken or hostile file can never WEAKEN a gate). NOT agent-writable: install.mjs ships this SCHEMA, never a config instance.",
+  "type": "object",
+  "properties": {
+    "active": {
+      "type": "boolean",
+      "description": "Project-level enforcement switch. false ⇒ R5 silence for the gates P3b-2 wires (stop proceeds, no refuse). Distinct from the registry plugin status (M3). Default true (absent ⇒ enforcement on)."
+    }
+  },
+  "additionalProperties": { "$ref": "#/$defs/perBp" },
+  "propertyNames": {
+    "oneOf": [
+      { "const": "active" },
+      { "type": "string", "pattern": "^bp-[0-9]{3}$" }
+    ]
+  },
+  "$defs": {
+    "tier": {
+      "type": "string",
+      "enum": ["STRONG", "MEDIUM", "WEAK"]
+    },
+    "perBp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-gate tier clamp for one bp contract. Keys mirror GATE_CONTRACT_KEY (effective-tier.mjs): the three classification gates + the root-level stop marker-state gate. Only `stop` is LIVE-wired in P3b-2; the three classification gates parse + validate but are inert until the pre_tool_use bridge lands.",
+      "properties": {
+        "plan_approval": { "$ref": "#/$defs/tier" },
+        "pre_checkpoint": { "$ref": "#/$defs/tier" },
+        "post_checkpoint": { "$ref": "#/$defs/tier" },
+        "stop": { "$ref": "#/$defs/tier" }
+      }
+    }
+  }
+}

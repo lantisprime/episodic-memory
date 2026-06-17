@@ -84,8 +84,14 @@ jobs:
       - name: Run stop-gate regression
         run: bash tests/test-stop-gate.sh
 
-      - name: Run enforce-contract --gate stop relocation + parity (RFC-008 P3b-1)
+      - name: Run enforce-contract --gate stop relocation + parity + tier layer (RFC-008 P3b-1/P3b-2)
         run: node tests/test-enforce-contract.mjs
+
+      - name: Run enforce-config loader + clamp integration (RFC-008 P3b-2, R5/P4)
+        run: node tests/test-enforce-config.mjs
+
+      - name: Run install-runtime contract-set deploy coupling (RFC-008 P3b-2, §10)
+        run: node tests/test-install-contract-deploy.mjs
 
       - name: Run preflight-gate regression tests
         run: bash tests/test-preflight-gate.sh

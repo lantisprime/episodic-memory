@@ -93,6 +93,14 @@ mk_fake_home() {
   # 2026-05-18 concurrent-session fix: em-recall imports session-id.mjs for
   # the --session-id flag (codex R1 P1.2; logging-only in v6 sweep).
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$fake_home/.episodic-memory/scripts/lib/session-id.mjs"
+  # RFC-008 P3b-2 (2026-06-17): enforce-contract.mjs gained the effective-tier
+  # layer, importing effective-tier.mjs (the min() algebra) + json-instance-
+  # validate.mjs (enforce-config.json schema validation in loadEnforceConfig).
+  # Both are zero-further-dep; the real install copies ALL scripts/lib/*.mjs, but
+  # this hand-staged fake HOME must list each transitive dep or the module fails
+  # to load and the hook falls back to the loud-fail envelope (false pass).
+  cp "$REPO_ROOT/scripts/lib/effective-tier.mjs" "$fake_home/.episodic-memory/scripts/lib/effective-tier.mjs"
+  cp "$REPO_ROOT/scripts/lib/json-instance-validate.mjs" "$fake_home/.episodic-memory/scripts/lib/json-instance-validate.mjs"
 }
 
 TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"

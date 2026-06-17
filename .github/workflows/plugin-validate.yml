@@ -50,6 +50,12 @@ jobs:
       - name: Run plugin-registry conformance tests (path-contain regression lock)
         run: node tests/test-plugin-registry.mjs
 
+      - name: Run effective-tier algebra tests (RFC-008 P3b-2, R3 — shared min() fold)
+        run: node tests/test-effective-tier.mjs
+
+      - name: Run structured-alert F3 writer tests (RFC-008 P3b-2, CLASS-C(b)/M1/N2)
+        run: node tests/test-structured-alert.mjs
+
       - name: Validate bp contracts (assertions 0 + 1-15, P2b)
         run: node scripts/validate-bp-contract.mjs --project "$GITHUB_WORKSPACE"
 

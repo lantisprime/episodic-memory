@@ -47,6 +47,12 @@
  *   15  version bindings: every bp contract AND every enforcement manifest
  *       carries taxonomy_version/events_version equal to the live computed
  *       hashes (F8/F37; single helper scripts/lib/version-hash.mjs).
+ *   16  gate-map mirror (P3b-2, B5/F-NEW-1, LIVE mode only): the effective-tier
+ *       algebra's GATE_EVENT_MAP / GATE_CONTRACT_KEY (scripts/lib/effective-tier.mjs)
+ *       are pinned against events.json ids and patterns/schema.json keys, so the
+ *       runtime stop decision and the runbook matrix cannot drift from the contract
+ *       shape. The stop gate maps to the `stop` event + `stop.tier` key (NOT
+ *       gates.post_checkpoint) — the headline F-NEW-1 correction.
  *
  * Evaluation discipline (review F4): assertions NEVER short-circuit — all of
  * them run on every invocation (assertions_run reports which), and semantic
@@ -76,6 +82,7 @@ import { lintSchema, assertSelfConsistent } from "./lib/mini-jsonschema.mjs";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
 import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs";
 import { deriveBpIds } from "./scaffold-bp.mjs";
+import { GATE_EVENT_MAP, GATE_CONTRACT_KEY } from "./lib/effective-tier.mjs";
 
 const BP_STRICT_RE = /^bp-[0-9]{3}\.json$/;
 // Case-INSENSITIVE on purpose (step-6 F-3): on case-insensitive filesystems
@@ -141,6 +148,24 @@ function git(root, argv) {
 function majorOf(version) {
   const m = typeof version === "string" ? /^(\d+)\./.exec(version) : null;
   return m ? Number(m[1]) : null;
+}
+
+/**
+ * Assertion 16 helper — does a GATE_CONTRACT_KEY path (e.g. "gates.post_checkpoint"
+ * or "stop.tier") resolve to a declared property in patterns/schema.json? Walks
+ * `properties` at each dotted segment (descending into nested `.properties`),
+ * mirroring how a bp contract addresses its gate tiers. Used by the Rule-14
+ * gate-map mirror (F-NEW-1): a contract key the schema doesn't declare means the
+ * effective-tier algebra would clamp a gate the contract can't even express.
+ */
+function contractKeyResolves(bpSchema, keyPath) {
+  const parts = keyPath.split(".");
+  let node = bpSchema && bpSchema.properties;
+  for (let i = 0; i < parts.length; i++) {
+    if (!node || typeof node !== "object" || !node[parts[i]]) return false;
+    node = i < parts.length - 1 ? node[parts[i]].properties : node[parts[i]];
+  }
+  return !!node;
 }
 
 /**
@@ -679,6 +704,30 @@ export function validateBpContract({ projectRoot, taxonomyPath = null, eventsPat
       const actual = doc && doc[field];
       if (actual !== expected) violation("15", `${name}: stale ${field} (have ${JSON.stringify(actual)}, live ${expected}) — regenerate via scripts/scaffold-bp.mjs (F8/F37)`);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Assertion 16 — Rule-14 gate-map mirror (B5 / F-NEW-1). effective-tier.mjs maps
+  // each gate to a lifecycle EVENT and to a CONTRACT KEY; the runtime stop decision
+  // (enforce-contract.mjs) and the runbook matrix (validate-plugin-registry.mjs)
+  // share that ONE algebra, so the maps must not drift from events.json /
+  // patterns/schema.json. The headline F-NEW-1 invariant lives here: the stop gate
+  // maps to the `stop` event + the `stop.tier` contract key — NOT
+  // gates.post_checkpoint. LIVE mode only (golden-corpus dispatches inject partial
+  // events/taxonomy and would spuriously trip the event-id membership check).
+  // ---------------------------------------------------------------------------
+  if (taxonomyPath == null && eventsPath == null && bpDirPath == null) {
+    assertionsRun.add(16);
+    checks++;
+    for (const [gate, event] of Object.entries(GATE_EVENT_MAP)) {
+      if (!eventIds.has(event)) violation("16", `gate→event map: gate ${JSON.stringify(gate)} maps to event ${JSON.stringify(event)}, not an events.json id (Rule-14 mirror drift)`);
+    }
+    for (const [gate, key] of Object.entries(GATE_CONTRACT_KEY)) {
+      if (!contractKeyResolves(schemas.bp, key)) violation("16", `gate→contract-key map: gate ${JSON.stringify(gate)} maps to ${JSON.stringify(key)}, which does not resolve in patterns/schema.json (gates.* or stop.tier) — F-NEW-1 mirror drift`);
+    }
+    const eKeys = Object.keys(GATE_EVENT_MAP).sort().join(",");
+    const cKeys = Object.keys(GATE_CONTRACT_KEY).sort().join(",");
+    if (eKeys !== cKeys) violation("16", `gate→event and gate→contract-key maps cover different gate sets (${eKeys} vs ${cKeys})`);
   }
 
   return {

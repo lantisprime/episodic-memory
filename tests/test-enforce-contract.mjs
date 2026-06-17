@@ -282,6 +282,138 @@ console.log('=== C: CLI arg handling ===')
 }
 
 console.log('')
+console.log('=== D: P3b-2 tier layer — three-axis inertness + M8 + CLASS-C(a) ===')
+// These spawn enforce-contract with a CONTROLLED contract root via HOME isolation:
+// resolveContractRoot candidate-1 == os.homedir()/.episodic-memory, and the spawned
+// process sees HOME=<tmpHome>. We plant a global contract there and assert the
+// effective stop decision. armed-no-postdone is the discriminator: STRONG → block,
+// degraded/disabled → allow. The B1 invariant: a contract-resolution MISS never
+// degrades to allow (it stays at base-STRONG).
+
+// Plant a global contract under <home>/.episodic-memory/{patterns,plugins}.
+function plantGlobalContract(home, { registry, bp001, events, configSchema } = {}) {
+  const pat = path.join(home, '.episodic-memory', 'patterns')
+  const plug = path.join(home, '.episodic-memory', 'plugins')
+  fs.mkdirSync(pat, { recursive: true })
+  fs.mkdirSync(plug, { recursive: true })
+  // candidate-1 gate keys on bp-001.json presence.
+  if (bp001 !== null) fs.writeFileSync(path.join(pat, 'bp-001.json'), JSON.stringify(bp001 || REPO_BP001))
+  if (events !== null) fs.writeFileSync(path.join(pat, 'events.json'), JSON.stringify(events || REPO_EVENTS))
+  if (configSchema !== null) fs.writeFileSync(path.join(pat, 'enforce-config.schema.json'), JSON.stringify(configSchema || REPO_CONFIG_SCHEMA))
+  // taxonomy.schema.json is a candidate-2 sentinel; harmless to include but
+  // candidate-1 (bp-001 present) short-circuits before candidate-2 anyway.
+  if (registry !== null) fs.writeFileSync(path.join(plug, '_index.json'), JSON.stringify(registry || REPO_REGISTRY))
+}
+const REPO_BP001 = JSON.parse(fs.readFileSync(path.join(REPO, 'patterns', 'bp-001.json'), 'utf8'))
+const REPO_EVENTS = JSON.parse(fs.readFileSync(path.join(REPO, 'patterns', 'events.json'), 'utf8'))
+const REPO_CONFIG_SCHEMA = JSON.parse(fs.readFileSync(path.join(REPO, 'patterns', 'enforce-config.schema.json'), 'utf8'))
+const REPO_REGISTRY = JSON.parse(fs.readFileSync(path.join(REPO, 'plugins', '_index.json'), 'utf8'))
+
+function mkHome(label) { return fs.mkdtempSync(path.join(os.tmpdir(), `enforce-home-${label}-`)) }
+function runStopWithHome(repo, home) {
+  const r = spawnSync('node', [ENFORCE, '--gate', 'stop'], { cwd: repo, encoding: 'utf8', env: { ...process.env, HOME: home } })
+  return { stdout: r.stdout, stderr: r.stderr, status: r.status }
+}
+function armedRepo() {
+  const repo = mkGitRepo()
+  writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 200) // armed, no post-done
+  return repo
+}
+
+// D1 — axis (1): no config, full STRONG global contract → block (STRONG inert).
+{
+  const home = mkHome('d1'); plantGlobalContract(home, {})
+  const r = runStopWithHome(armedRepo(), home)
+  truthy('D1: STRONG contract + no config → block (inert)', /"decision":\s*"block"/.test(r.stdout), `stdout=[${r.stdout}] stderr=[${r.stderr}]`)
+}
+// D2 — axis (2): no plugins/_index.json at the contract root → harnessCap null →
+// base-STRONG (NOT allow). B1: a missing registry inside an already-firing hook is
+// a corrupted install, never "no plugin → silent".
+{
+  const home = mkHome('d2'); plantGlobalContract(home, { registry: null })
+  const r = runStopWithHome(armedRepo(), home)
+  truthy('D2: missing _index.json → harnessCap null → STRONG → block (NOT allow)', /"decision":\s*"block"/.test(r.stdout), `stdout=[${r.stdout}] stderr=[${r.stderr}]`)
+}
+// D3 — axis (3): empty global (no bp-001 at candidate-1) → candidate-1 misses →
+// falls through (candidate-2 repo, or null) → STRONG → block. Never crash-to-allow.
+{
+  const home = mkHome('d3')
+  fs.mkdirSync(path.join(home, '.episodic-memory', 'patterns'), { recursive: true }) // empty patterns/
+  const r = runStopWithHome(armedRepo(), home)
+  truthy('D3: empty global contract → STRONG fallthrough → block', /"decision":\s*"block"/.test(r.stdout), `stdout=[${r.stdout}] stderr=[${r.stderr}]`)
+}
+// D4 — M8: two ACTIVE enforcement entries binding claude-code → fail-closed REAL
+// block (never pick-first). Fires before decideStop, so an UNarmed repo still blocks.
+{
+  const home = mkHome('d4')
+  const dupEntry = REPO_REGISTRY.plugins[0]
+  plantGlobalContract(home, { registry: { schema_version: '1.0.0', plugins: [dupEntry, { ...dupEntry }] } })
+  const r = runStopWithHome(mkGitRepo(), home) // NOT armed — M8 precedes marker logic
+  truthy('D4: duplicate harness binding → M8 fail-closed block', /"decision":\s*"block"/.test(r.stdout) && /M8|one-harness-one-plugin/.test(r.stdout), `stdout=[${r.stdout}]`)
+}
+// D5 — CLASS-C(a): harness declares stop capability WEAK while the contract
+// requires the gate → harness∩contract maps to `unsupported` → REAL block (N1),
+// NOT a swallowed warn. Fires before decideStop (unarmed repo still blocks).
+{
+  const home = mkHome('d5')
+  const weakEntry = { ...REPO_REGISTRY.plugins[0], capabilities: { ...REPO_REGISTRY.plugins[0].capabilities, stop: 'WEAK' } }
+  plantGlobalContract(home, { registry: { schema_version: '1.0.0', plugins: [weakEntry] } })
+  const r = runStopWithHome(mkGitRepo(), home)
+  truthy('D5: harness WEAK stop + contract requires gate → CLASS-C(a) REAL block', /"decision":\s*"block"/.test(r.stdout) && /CLASS-C\(a\)|unsupported/.test(r.stdout), `stdout=[${r.stdout}]`)
+}
+// D6 — control: same WEAK-harness scenario degrades to allow via a CONFIG clamp is
+// NOT what happens — CLASS-C(a) is harness/contract-driven and fires regardless of
+// config. Confirm a STRONG global + a config stop→WEAK clamp DOES allow (operator
+// downgrade path is distinct from CLASS-C(a)).
+{
+  const home = mkHome('d6'); plantGlobalContract(home, {})
+  const repo = armedRepo()
+  fs.mkdirSync(path.join(repo, '.episodic-memory'), { recursive: true })
+  fs.writeFileSync(path.join(repo, '.episodic-memory', 'enforce-config.json'), JSON.stringify({ 'bp-001': { stop: 'WEAK' } }))
+  const r = runStopWithHome(repo, home)
+  eq('D6: STRONG harness + config stop→WEAK clamp → allow (operator downgrade, distinct from CLASS-C(a))', r.stdout.trim(), '')
+}
+// D7 — B3 ambient-parent regression (plan §11). resolveContractRoot candidate-2
+// is a DEPTH-1 climb gated on a realpath round-trip; it must NOT climb to an
+// ambient GRANDPARENT that happens to carry the repo sentinels + a (weaker)
+// contract. Stage a copy of the module at <ambient>/sub/scripts/, put the
+// sentinels + a WEAK bp-001 at <ambient> (grandparent, depth-2), and leave
+// <ambient>/sub (depth-1) without sentinels. Correct behavior: candidate-2 stops
+// at depth-1 (no sentinels) → null → STRONG → block. A 2-level climb bug would
+// read the ambient WEAK contract → degrade to allow.
+function stageModule(scriptsDir) {
+  fs.mkdirSync(path.join(scriptsDir, 'lib'), { recursive: true })
+  fs.copyFileSync(path.join(REPO, 'scripts', 'enforce-contract.mjs'), path.join(scriptsDir, 'enforce-contract.mjs'))
+  for (const lib of ['local-dir', 'marker-paths', 'marker-state', 'session-id', 'json-instance-validate', 'effective-tier']) {
+    fs.copyFileSync(path.join(REPO, 'scripts', 'lib', `${lib}.mjs`), path.join(scriptsDir, 'lib', `${lib}.mjs`))
+  }
+}
+{
+  const home = mkHome('d7') // empty global → candidate-1 miss
+  const ambient = fs.mkdtempSync(path.join(os.tmpdir(), 'enforce-ambient-'))
+  fs.mkdirSync(path.join(ambient, 'patterns'), { recursive: true })
+  fs.mkdirSync(path.join(ambient, 'scripts'), { recursive: true })
+  fs.writeFileSync(path.join(ambient, 'patterns', 'taxonomy.schema.json'), '{}') // grandparent sentinel
+  fs.writeFileSync(path.join(ambient, 'scripts', 'em-store.mjs'), '') //                grandparent sentinel
+  fs.writeFileSync(path.join(ambient, 'patterns', 'bp-001.json'), JSON.stringify({ ...REPO_BP001, stop: { tier: 'WEAK' } })) // trap: if wrongly read, degrades
+  const subScripts = path.join(ambient, 'sub', 'scripts') // depth-1 parent (ambient/sub) has NO sentinels
+  stageModule(subScripts)
+  const repo = armedRepo()
+  const r = spawnSync('node', [path.join(subScripts, 'enforce-contract.mjs'), '--gate', 'stop'], { cwd: repo, encoding: 'utf8', env: { ...process.env, HOME: home } })
+  truthy('D7: candidate-2 stops at depth-1 (does NOT read ambient grandparent contract) → STRONG → block', /"decision":\s*"block"/.test(r.stdout), `stdout=[${r.stdout}] stderr=[${r.stderr}]`)
+}
+// D8 — garbage-content axis (belt-and-suspenders for B1): a PRESENT-but-corrupt
+// bp-001 at candidate-1 (parse-throw) → null source → no clamp → STRONG → block.
+// Distinct from D2/D3 (absent source); this proves corrupt content also stays STRONG.
+{
+  const home = mkHome('d8')
+  fs.mkdirSync(path.join(home, '.episodic-memory', 'patterns'), { recursive: true })
+  fs.writeFileSync(path.join(home, '.episodic-memory', 'patterns', 'bp-001.json'), '{not json') // candidate-1 gate hits, parse fails
+  const r = runStopWithHome(armedRepo(), home)
+  truthy('D8: garbage bp-001 at candidate-1 → parse-fail → null source → STRONG → block', /"decision":\s*"block"/.test(r.stdout), `stdout=[${r.stdout}]`)
+}
+
+console.log('')
 if (fail === 0) {
   console.log(`PASS — ${pass} checks`)
   process.exit(0)

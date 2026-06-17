@@ -35,13 +35,18 @@ import { execFileSync } from "node:child_process";
 import { validateInstance, assertAllSchemasModeled } from "./lib/json-instance-validate.mjs";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
 import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs";
+// The tier algebra (TIER_RANK / effectiveTier / eventActionId) lives in
+// scripts/lib/effective-tier.mjs (extracted P3b-2, R3) so this validator's Table B
+// rendering and enforce-contract's runtime stop decision share ONE algebra
+// (Rule 14). No behavior change here — the self-tests prove it byte-for-byte.
+import { TIER_RANK, effectiveTier, eventActionId } from "./lib/effective-tier.mjs";
 
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
 export const MAX_SUPPORTED = "1.0.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality)
 const HARNESS_IDS = ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"];
 export const EVENT_IDS = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"]; // exported for the Rule-14 binding check in tests/test-validate-bp-contract.mjs (EVENT_IDS ≡ live events[].id)
 const TIERS = ["STRONG", "MEDIUM", "WEAK", "TBD"];
-const TIER_RANK = { TBD: 0, WEAK: 1, MEDIUM: 2, STRONG: 3 };
+// TIER_RANK is imported from ./lib/effective-tier.mjs (extracted P3b-2).
 const MIN_RUNBOOK_FULL_BYTES = 1024;
 const MIN_RUNBOOK_QUICKREF_BYTES = 256;
 const RUNBOOK_SENTINEL = "## ⚠️ Self-trigger checklist";
@@ -364,25 +369,11 @@ function extractBetween(text, begin, end) {
 // byte-diffs. One pure function per block — no author discretion (plan H1).
 // ---------------------------------------------------------------------------
 
-// effective_tier = min over PRESENT tier sources (N2). On main only harness_cap
-// exists; the min() folds contract/project_config tiers the moment P2/P4 add
-// them, so the table never silently lies after a degrading contract lands.
-function effectiveTier(tiers) {
-  let min = null, minRank = Infinity;
-  for (const t of tiers) {
-    if (t == null) continue;
-    const r = TIER_RANK[t] ?? Infinity;
-    if (r < minRank) { minRank = r; min = t; }
-  }
-  return min;
-}
-
-function eventActionId(events, eventId, tier) {
-  const ev = (events.events || []).find((e) => e.id === eventId);
-  const a = ev && ev.actions && tier != null ? ev.actions[tier] : null;
-  return a && a.id ? a.id : "—";
-}
-
+// effective_tier (min over PRESENT tier sources, null on all-absent) and
+// eventActionId are imported from ./lib/effective-tier.mjs (extracted P3b-2, R3).
+// On main only harness_cap exists; the min() folds contract/project_config tiers
+// the moment a degrading contract/config lands, so the rendered table never
+// silently lies. enforce-contract.mjs imports the SAME algebra (Rule 14).
 export function renderResolutionMatrix(manifest, taxonomy, events) {
   const caps = manifest.capabilities || {};
   const emits = (manifest.classifier && manifest.classifier.emits_labels) || [];
