@@ -128,6 +128,10 @@ function runStop(repo) {
   const r = runStop(repo)
   eq('I2: stop→WEAK clamp → allow (empty stdout)', r.stdout.trim(), '')
   truthy('I2: stop→WEAK clamp → M4 downgrade notice on stderr', /degraded STRONG→WEAK/.test(r.stderr), `stderr=[${r.stderr}]`)
+  // PR-2 (R3/R5): the stderr notice is swallowed by stop-gate.sh's 2>/dev/null, so
+  // the downgrade MUST also be persisted to a hook-independent on-disk audit.
+  const auditLog = path.join(repo, '.episodic-memory', 'enforce-audit.log')
+  truthy('I2: stop→WEAK clamp → durable on-disk audit written', fs.existsSync(auditLog) && /degraded STRONG->WEAK/.test(fs.readFileSync(auditLog, 'utf8')), `audit=[${fs.existsSync(auditLog) ? fs.readFileSync(auditLog, 'utf8') : '<absent>'}]`)
 }
 // post_checkpoint→WEAK clamp (DEFERRED gate) → stop UNAFFECTED → still block.
 {
@@ -142,6 +146,8 @@ function runStop(repo) {
   const r = runStop(repo)
   eq('I4: active:false → allow (empty stdout)', r.stdout.trim(), '')
   truthy('I4: active:false → R5 silence notice on stderr', /enforcement disabled/.test(r.stderr), `stderr=[${r.stderr}]`)
+  const auditLog4 = path.join(repo, '.episodic-memory', 'enforce-audit.log')
+  truthy('I4: active:false → durable on-disk audit written (PR-2)', fs.existsSync(auditLog4) && /enforcement disabled/.test(fs.readFileSync(auditLog4, 'utf8')), `audit=[${fs.existsSync(auditLog4) ? fs.readFileSync(auditLog4, 'utf8') : '<absent>'}]`)
 }
 // Malformed config (fail-closed) → STRONG → block (a broken file never weakens).
 {

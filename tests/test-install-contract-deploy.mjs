@@ -62,6 +62,12 @@ console.log('=== T1/T2: --install-hooks deploys the coupled contract set ===')
     truthy('T2: deployed bp-001.events_version == sha(deployed events.json)', depBp.events_version === eventsVersion(depEvents),
       `bp=${depBp.events_version} live=${eventsVersion(depEvents)}`)
   } catch (e) { bad('T2: coupling readable', e.message) }
+  // PR-1 (R3/R6/R8): the harness-cap registry the runtime reads from
+  // <contractRoot>/plugins/_index.json MUST be deployed to the global plugins/
+  // tree — else resolveHarnessCap is dead in prod and M8/CLASS-C(a) never fire.
+  const depRegistry = path.join(home, '.episodic-memory', 'plugins', '_index.json')
+  truthy('PR-1: plugins/_index.json deployed to global plugins/ (--install-hooks)', fs.existsSync(depRegistry), `missing ${depRegistry}`)
+  if (fs.existsSync(depRegistry)) truthy('PR-1: deployed registry byte-equal repo', byteEqual(depRegistry, path.join(REPO, 'plugins', '_index.json')), 'deployed registry differs from repo')
 }
 
 console.log('')
@@ -74,8 +80,10 @@ console.log('=== T3: no-hooks install leaves the contract set ABSENT (T20a2 anal
   for (const f of CONTRACT_SET) {
     truthy(`T3: ${f} ABSENT without --install-hooks`, !fs.existsSync(path.join(gp, f)), `unexpectedly present: ${path.join(gp, f)}`)
   }
-  // The unconditional _index.json IS deployed even without hooks (existing behavior).
+  // The unconditional patterns/_index.json IS deployed even without hooks (existing behavior).
   truthy('T3: patterns/_index.json deployed unconditionally', fs.existsSync(path.join(gp, '_index.json')), 'expected _index.json present')
+  // PR-1: the global plugins/_index.json is coupled to --install-hooks → absent without it.
+  truthy('T3: plugins/_index.json ABSENT without --install-hooks', !fs.existsSync(path.join(home, '.episodic-memory', 'plugins', '_index.json')), 'unexpectedly present')
 }
 
 console.log('')

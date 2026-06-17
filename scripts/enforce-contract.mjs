@@ -270,6 +270,25 @@ export function loadEnforceConfig(markerRoot, schema, { readFileSync = fs.readFi
   return { active, bps }
 }
 
+/**
+ * PR-level review PR-2 (R3/R5 observability): the M4/R5 downgrade NOTICES go to
+ * stderr, which the production stop hook (stop-gate.sh) discards via `2>/dev/null`
+ * — so a deliberate operator downgrade would otherwise leave NO durable trace.
+ * Persist a one-line audit record to disk under the MARKER root (where
+ * enforce-config.json lives), a channel the hook cannot suppress, so "a downgrade
+ * of the project's strongest gate is always auditable" (M4) holds in prod. The
+ * stderr notice is kept too (useful in dev/interactive). BEST-EFFORT: an audit
+ * write failure must NEVER break the gate decision (B1 — observability is not on
+ * the safety path).
+ */
+function appendEnforceAudit(markerRoot, line) {
+  try {
+    const dir = path.join(markerRoot, '.episodic-memory')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.appendFileSync(path.join(dir, 'enforce-audit.log'), `${new Date().toISOString()} ${line}\n`)
+  } catch { /* best-effort; never block the gate on an audit write */ }
+}
+
 // ---------------------------------------------------------------------------
 // CLI — the ONLY I/O + process.exit boundary. Invoked by hooks/stop-gate.sh as
 // `node enforce-contract.mjs --gate stop [--session-id <sid>]`. Empty stdout =
@@ -378,6 +397,7 @@ if (isMain) {
   // plugin capability → unsupported) still REAL-blocks even under active:false —
   // a corrupt install is not silenceable by an opt-out, by design (fail-closed).
   if (!cfg.active) {
+    appendEnforceAudit(markerRoot, `${BP_ID} enforcement disabled (active:false) — stop gate not applied (R5 silence)`)
     process.stderr.write(
       'enforce-contract: notice — enforcement disabled for this project via ' +
       '.episodic-memory/enforce-config.json {"active":false}; stop gate not applied (R5 silence).\n',
@@ -390,9 +410,10 @@ if (isMain) {
   // project's strongest gate is always auditable in the hook log).
   const effTier = clampTier(hcTier, configTier)
   if ((TIER_RANK[effTier] ?? 0) < (TIER_RANK[hcTier] ?? 0)) {
+    appendEnforceAudit(markerRoot, `stop refuse degraded ${hcTier}->${effTier} for ${BP_ID} (deliberate operator clamp via enforce-config.json)`)
     process.stderr.write(
       `enforce-contract: notice — stop refuse degraded ${hcTier}→${effTier} for ${BP_ID} via ` +
-      '.episodic-memory/enforce-config.json (deliberate operator clamp, M4 audit).\n',
+      '.episodic-memory/enforce-config.json (deliberate operator clamp, M4 audit → .episodic-memory/enforce-audit.log).\n',
     )
   }
 

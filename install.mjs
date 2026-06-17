@@ -1251,6 +1251,22 @@ if (installHooks) {
       deployedContractSet = true
       console.log(`Installed enforce-contract set (bp-001.json, events.json, enforce-config.schema.json) to ${globalPatternsDir}`)
     }
+
+    // PR-level review PR-1 (R3/R6/R8): enforce-contract reads the harness-capability
+    // registry at runtime from <contractRoot>/plugins/_index.json (resolveHarnessCap),
+    // and the installed contractRoot is candidate-1 = $HOME/.episodic-memory. WITHOUT
+    // this deploy the runtime registry is always null in prod → the harness-cap min()
+    // leg is dead AND the M8 duplicate-binding + CLASS-C(a) fail-closed checks are
+    // unreachable (they only fired in dev/CI where candidate-2 = the repo root). Deploy
+    // plugins/_index.json to the global plugins/ tree, coupled to the same --install-hooks
+    // block. (resolveHarnessCap reads only entry.capabilities — no manifest needed here.)
+    const repoPluginsIndex = path.join(REPO_DIR, 'plugins', '_index.json')
+    if (fs.existsSync(repoPluginsIndex)) {
+      const globalPluginsDir = path.join(GLOBAL_DIR, 'plugins')
+      fs.mkdirSync(globalPluginsDir, { recursive: true })
+      fs.copyFileSync(repoPluginsIndex, path.join(globalPluginsDir, '_index.json'))
+      console.log(`Installed plugins/_index.json to ${globalPluginsDir}`)
+    }
     // F-NEW-4 coupling assertion: the DEPLOYED bp-001.events_version must equal the
     // sha over the DEPLOYED events.json. A mismatch means a partial/torn deploy —
     // WARN (enforce-contract fails CLOSED to STRONG on a contract it can't trust,
