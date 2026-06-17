@@ -31,7 +31,9 @@ const SCAFFOLD = path.join(REPO_ROOT, "scripts", "scaffold-bp.mjs");
 const FIXTURE_DIR = path.join(REPO_ROOT, "tests", "fixtures", "bp-contract");
 const COPY_ROOTS = ["patterns", "plugins", "schemas"];
 const CLASSIFIER_REL = path.join("plugins", "claude-code", "hooks", "lib", "command-classifier.sh");
-const EXPECTED_ASSERTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15];
+// 16 (P3b-2) is the gate-map mirror — LIVE mode only (the live repo run here is
+// uninjected, so it runs; golden-corpus dispatches inject and skip it).
+const EXPECTED_ASSERTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16];
 
 let pass = 0;
 let fail = 0;
@@ -140,7 +142,7 @@ function stageBpFixture(root, fixtureName) {
     .map((p) => /^(bp-[0-9]{3})-/.exec(p.pattern_id)[1]).sort();
   assert(JSON.stringify(r.payload && r.payload.derived_ids) === JSON.stringify(indexIds), "real repo: derived_ids equals _index.json derivation (bp-007 absent)", `got ${JSON.stringify(r.payload && r.payload.derived_ids)}`);
   assert(!indexIds.includes("bp-007"), "real repo: bp-007 stays absent (N-1)");
-  assert(JSON.stringify(r.payload && r.payload.assertions_run) === JSON.stringify(EXPECTED_ASSERTIONS), "real repo: all 15 assertion groups ran (zero-run vacuity guard)", `got ${JSON.stringify(r.payload && r.payload.assertions_run)}`);
+  assert(JSON.stringify(r.payload && r.payload.assertions_run) === JSON.stringify(EXPECTED_ASSERTIONS), "real repo: all 16 assertion groups ran (zero-run vacuity guard)", `got ${JSON.stringify(r.payload && r.payload.assertions_run)}`);
   assert(r.payload && r.payload.checks > 0, "real repo: non-zero check count");
   assert(r.payload && r.payload.classifiers_parsed >= 1, "real repo: >= 1 default classifier parsed (7b non-vacuous)");
   // EVENT_IDS <-> events.json binding (review FU, Rule 14): the registry's

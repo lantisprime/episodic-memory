@@ -555,7 +555,11 @@ function mkE2EHome() {
   // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs.
   // RFC-008 P3a: em-recall imports marker-state.mjs (relocated from
   // stop-gate-helpers.mjs); marker-state imports the already-copied marker-paths.mjs.
-  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs']) {
+  // RFC-008 P3b-2: enforce-contract gained the effective-tier layer — it imports
+  // effective-tier.mjs (min() algebra) + json-instance-validate.mjs (enforce-config
+  // schema validation). Both zero-further-dep; omit either and enforce-contract
+  // fails to load → the hook falls back to the loud-fail envelope (false fail).
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs', 'effective-tier.mjs', 'json-instance-validate.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }

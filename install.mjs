@@ -20,6 +20,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
+import { eventsVersion } from './scripts/lib/version-hash.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
@@ -1222,6 +1223,69 @@ if (installHooks) {
       fs.mkdirSync(globalPatternsDir, { recursive: true })
       fs.copyFileSync(repoTaxonomy, path.join(globalPatternsDir, 'taxonomy.json'))
       console.log(`Installed patterns/taxonomy.json to ${globalPatternsDir}`)
+    }
+
+    // 5a-contract. RFC-008 P3b-2 (R5/R6/R8): co-deploy the enforce-contract RUNTIME
+    // contract set to the SAME global root enforce-contract.mjs reads at runtime
+    // (candidate 1 = $HOME/.episodic-memory/patterns/). COUPLED to the hook install
+    // exactly like the P3c taxonomy deploy above — stop-gate.sh invokes
+    // enforce-contract.mjs (a hook), so a no-hooks install must NOT advance the
+    // global contract while the installed gate stays stale (the P3c PR-level
+    // BLOCKER class). enforce-config.json itself is per-PROJECT + human-authored:
+    // ship the SCHEMA only, never a config instance.
+    //
+    // F-NEW-4 atomic multi-file deploy: bp-001.json embeds events_version (a sha
+    // over events.json). Land events.json + the schema FIRST and the sha-referencer
+    // bp-001.json LAST, so the candidate-1 gate (which keys on bp-001.json presence)
+    // flips to "present" only once the whole coupled set is on disk; a reader during
+    // the window falls through to candidate-2 and never sees new-bp-001 + stale-events.
+    const repoBp001 = path.join(REPO_DIR, 'patterns', 'bp-001.json')
+    let deployedContractSet = false
+    if (fs.existsSync(repoBp001)) {
+      fs.mkdirSync(globalPatternsDir, { recursive: true })
+      for (const f of ['events.json', 'enforce-config.schema.json']) {
+        const src = path.join(REPO_DIR, 'patterns', f)
+        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(globalPatternsDir, f))
+      }
+      fs.copyFileSync(repoBp001, path.join(globalPatternsDir, 'bp-001.json')) // LAST — sha-referencer
+      deployedContractSet = true
+      console.log(`Installed enforce-contract set (bp-001.json, events.json, enforce-config.schema.json) to ${globalPatternsDir}`)
+    }
+
+    // PR-level review PR-1 (R3/R6/R8): enforce-contract reads the harness-capability
+    // registry at runtime from <contractRoot>/plugins/_index.json (resolveHarnessCap),
+    // and the installed contractRoot is candidate-1 = $HOME/.episodic-memory. WITHOUT
+    // this deploy the runtime registry is always null in prod → the harness-cap min()
+    // leg is dead AND the M8 duplicate-binding + CLASS-C(a) fail-closed checks are
+    // unreachable (they only fired in dev/CI where candidate-2 = the repo root). Deploy
+    // plugins/_index.json to the global plugins/ tree, coupled to the same --install-hooks
+    // block. (resolveHarnessCap reads only entry.capabilities — no manifest needed here.)
+    const repoPluginsIndex = path.join(REPO_DIR, 'plugins', '_index.json')
+    if (fs.existsSync(repoPluginsIndex)) {
+      const globalPluginsDir = path.join(GLOBAL_DIR, 'plugins')
+      fs.mkdirSync(globalPluginsDir, { recursive: true })
+      fs.copyFileSync(repoPluginsIndex, path.join(globalPluginsDir, '_index.json'))
+      console.log(`Installed plugins/_index.json to ${globalPluginsDir}`)
+    }
+    // F-NEW-4 coupling assertion: the DEPLOYED bp-001.events_version must equal the
+    // sha over the DEPLOYED events.json. A mismatch means a partial/torn deploy —
+    // WARN (enforce-contract fails CLOSED to STRONG on a contract it can't trust,
+    // so this is hardening, not a fail-open fix).
+    if (deployedContractSet) {
+      try {
+        const depBp = JSON.parse(fs.readFileSync(path.join(globalPatternsDir, 'bp-001.json'), 'utf8'))
+        const depEvents = JSON.parse(fs.readFileSync(path.join(globalPatternsDir, 'events.json'), 'utf8'))
+        const liveEv = eventsVersion(depEvents)
+        if (depBp.events_version !== liveEv) {
+          console.log(
+            `WARNING: deployed bp-001.events_version (${depBp.events_version}) != sha of deployed ` +
+            `events.json (${liveEv}) — contract set is divergent/torn; enforce-contract will fail ` +
+            'CLOSED (stay STRONG). Re-run with --install-hooks-force to resync.'
+          )
+        }
+      } catch (e) {
+        console.log(`WARNING: could not verify enforce-contract set coupling: ${e.message}`)
+      }
     }
 
     // RFC-008 P3c (R4/F4, codex R1-P1b): if the command classifier was KEPT as a
