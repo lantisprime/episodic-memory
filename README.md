@@ -8,7 +8,7 @@ The design principles guiding the system are documented in [PRINCIPLES.md](PRINC
 
 > ### 🏗️ Major re-architecture in progress (RFC-008)
 >
-> The enforcement layer (behavior-pattern gates/hooks) is being **decoupled from the memory substrate**, and the system is moving to a **typed plugin model** — `enforcement`, `recall-strategy`, `store-strategy`, and `learning` plugins, each a registered, schema-validated, **versioned** contract. The capability families and the rule for extending them are the guiding post in **[CAPABILITIES.md](CAPABILITIES.md)**; the full design is **[RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md)** (accepted; building in phases — P0 schema contracts merged, P1 plugin registry next).
+> The enforcement layer (behavior-pattern gates/hooks) is being **decoupled from the memory substrate**, and the system is moving to a **typed plugin model** — `enforcement`, `recall-strategy`, `store-strategy`, and `learning` plugins, each a registered, schema-validated, **versioned** contract. The capability families and the rule for extending them are the guiding post in **[CAPABILITIES.md](CAPABILITIES.md)**; the full design is **[RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md)** (accepted; building in phases — see the [RFC-008 phase index](docs/rfcs/RFC-008/README.md) for current status).
 >
 > **This does not break current usage.** The file-based store, the CLI, and the cross-tool behavior described below are unaffected today — the substrate (`em-store` / `em-recall` / `em-search`) stays a stable, zero-dependency store-and-recall API throughout the migration. Enforcement plugins beyond Claude Code arrive incrementally as later phases land.
 
@@ -92,6 +92,13 @@ The installer:
 3. Creates `.episodic-memory/` in the target project for local episodes
 4. Copies the appropriate instruction file for your tool
 5. With `--install-hooks`: copies `plugins/claude-code/hooks/*.sh` into `~/.claude/hooks/` and `plugins/claude-code/hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
+
+**Per-project enforcement config (optional, RFC-008 P4).** With `--install-hooks` active, tune enforcement **per project** by dropping `<project>/.episodic-memory/enforce-config.json` — no need to touch global hooks:
+
+- `{"active": false}` — layer-wide **kill switch**: silences *all* episodic-memory gates (checkpoint, plan, stop, preflight, second-opinion) for that project only; your other repos keep their hooks (R5).
+- `{"bp-001": {"plan_approval": "MEDIUM"}}` — relax an individual gate (clamps tier DOWN only; never raises).
+
+Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON.
 
 ## Supported Tools
 

@@ -67,6 +67,15 @@ That's the only manual step. After this, your AI assistant reads the instruction
 4. Updates `.gitignore` to exclude memory data
 5. With `--install-hooks` (Claude Code only): registers PreToolUse (checkpoint-gate, plan-gate, stop-gate), SessionStart (recall + BP-1 fallback sweep), and SessionEnd hooks. Re-running the installer warns when any installed hook has drifted from the source-of-truth copy.
 
+### Turn enforcement on or off per project (optional)
+
+The checkpoint / plan / stop / preflight / second-opinion gates are opt-in via `--install-hooks`. Once installed, you can tune them **per project** with `<project>/.episodic-memory/enforce-config.json` (RFC-008 P4) — without disabling them everywhere:
+
+- **Turn it all off for this project** — `{"active": false}`. Silences *every* episodic-memory gate for this repo only; your other projects keep their hooks (R5). Cleaner than removing the global hook entry, which would disable enforcement across all repos.
+- **Relax a single gate** — `{"bp-001": {"plan_approval": "MEDIUM"}}`. Lowers one gate's tier (clamps DOWN only; never raises).
+
+Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON. (`enforce-config.json` is human-authored — the installer ships the *schema*, never a config instance.)
+
 ### Instruction-only skill adapters
 
 OpenCode and Pi Agent support is instruction-only in this installer slice. The installer writes skill files that tell the agent how to call the existing `~/.episodic-memory/scripts/*.mjs` commands; it does not install hooks, MCP servers, live dispatch, proactive session-start automation, or global tool config for these tools.
