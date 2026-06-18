@@ -8,7 +8,7 @@ The design principles guiding the system are documented in [PRINCIPLES.md](PRINC
 
 > ### 🏗️ Major re-architecture in progress (RFC-008)
 >
-> The enforcement layer (behavior-pattern gates/hooks) is being **decoupled from the memory substrate**, and the system is moving to a **typed plugin model** — `enforcement`, `recall-strategy`, `store-strategy`, and `learning` plugins, each a registered, schema-validated, **versioned** contract. The capability families and the rule for extending them are the guiding post in **[CAPABILITIES.md](CAPABILITIES.md)**; the full design is **[RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md)** (accepted; building in phases — P0 schema contracts merged, P1 plugin registry next).
+> The enforcement layer (behavior-pattern gates/hooks) is being **decoupled from the memory substrate**, and the system is moving to a **typed plugin model** — `enforcement`, `recall-strategy`, `store-strategy`, and `learning` plugins, each a registered, schema-validated, **versioned** contract. The capability families and the rule for extending them are the guiding post in **[CAPABILITIES.md](CAPABILITIES.md)**; the full design is **[RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md)** (accepted; building in phases — see the [RFC-008 phase index](docs/rfcs/RFC-008/README.md) for current status).
 >
 > **This does not break current usage.** The file-based store, the CLI, and the cross-tool behavior described below are unaffected today — the substrate (`em-store` / `em-recall` / `em-search`) stays a stable, zero-dependency store-and-recall API throughout the migration. Enforcement plugins beyond Claude Code arrive incrementally as later phases land.
 
