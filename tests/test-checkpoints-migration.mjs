@@ -24,7 +24,10 @@ import os from 'os'
 import { execSync, spawnSync } from 'child_process'
 
 const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts')
-const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
+// RFC-008 P3d (F38/F60): the stop gate (--gate stop) and SessionStart
+// side-effects (--session-start) relocated em-recall.mjs → enforce-contract.mjs.
+// Every subprocess call in this file is one of those two enforcement modes.
+const ENFORCE = path.join(SCRIPTS, 'enforce-contract.mjs')
 const SESSION_END = path.join(SCRIPTS, 'em-session-end-prompt.mjs')
 
 let passed = 0
@@ -75,11 +78,10 @@ function setupRepo() {
 }
 
 function runRecall(cwd, args = [], extraEnv = {}) {
-  // HOME isolation: em-recall reads GLOBAL_DIR = $HOME/.episodic-memory which
-  // in the host environment has real bp-001 violations and would re-arm
-  // .checkpoint-required mid-test. Point HOME at the test's repo to give
-  // em-recall an empty global store.
-  return execSync(`node ${RECALL} ${args.join(' ')}`, {
+  // HOME isolation: enforce-contract's bp-001 advisory reads GLOBAL_DIR =
+  // $HOME/.episodic-memory which in the host environment has real bp-001
+  // violations. Point HOME at the test's repo to give it an empty global store.
+  return execSync(`node ${ENFORCE} ${args.join(' ')}`, {
     cwd,
     stdio: ['ignore', 'pipe', 'ignore'],
     env: { ...process.env, HOME: cwd, ...extraEnv }
@@ -92,14 +94,14 @@ function gateStop(cwd) {
 
 function sessionStart(cwd) {
   // --session-start writes the .session-baseline. Planning-passive (2026-05-25):
-  // em-recall no longer arms .checkpoint-required; a bp-001 violation now emits
-  // the __BP1_ADVISORY__ stderr signal instead.
+  // session-start no longer arms .checkpoint-required; a bp-001 violation now
+  // emits the __BP1_ADVISORY__ stderr signal instead.
   return runRecall(cwd, ['--session-start'])
 }
 
 // stderr-capturing variant — the bp-001 signal is now an advisory on stderr.
 function sessionStartStderr(cwd, extraEnv = {}) {
-  const r = spawnSync('node', [RECALL, '--session-start'], {
+  const r = spawnSync('node', [ENFORCE, '--session-start'], {
     cwd, encoding: 'utf8', env: { ...process.env, HOME: cwd, ...extraEnv }
   })
   return r.stderr || ''
@@ -113,11 +115,11 @@ test('baseline lands at .checkpoints/.session-baseline, NOT .claude/', () => {
   assertMissing(path.join(root, '.claude', '.session-baseline'), 'legacy baseline must not be created')
 })
 
-console.log('\nbp-001 signal is an advisory; em-recall never arms a marker (planning-passive):')
-test('em-recall emits __BP1_ADVISORY__ and arms NO .checkpoint-required at either root', () => {
+console.log('\nbp-001 signal is an advisory; session-start never arms a marker (planning-passive):')
+test('session-start emits __BP1_ADVISORY__ and arms NO .checkpoint-required at either root', () => {
   const root = setupRepo()
   // Force activation by seeding a recent bp-001 violation in local store.
-  // The date MUST be computed: shouldArmBp001Checkpoint (em-recall.mjs) only
+  // The date MUST be computed: shouldArmBp001Checkpoint (bp001-advisory.mjs) only
   // matches violations inside a 30-day window (`e.date >= cutoffStr`). A
   // hardcoded 2026-05-09 rotted out of the window on 2026-06-08 and failed CI
   // on a zero-diff PR (#381) — seed yesterday's date so the fixture never ages
@@ -152,14 +154,14 @@ test
   })
   fs.writeFileSync(path.join(root, '.episodic-memory', 'index.jsonl'), indexLine + '\n')
 
-  // Planning-passive: em-recall surfaces the advisory (proving the violation was
-  // seen) but arms NO marker. The migration write-path contract (.checkpoints/,
+  // Planning-passive: session-start surfaces the advisory (proving the violation
+  // was seen) but arms NO marker. The migration write-path contract (.checkpoints/,
   // never .claude/) for .checkpoint-required is now exercised by the gate's
   // lazy-arm — see test-checkpoint-gate.sh PP-6 / PP-15.
   const stderr = sessionStartStderr(root)
   assertTrue(/__BP1_ADVISORY__/.test(stderr), `expected advisory on stderr; got: ${stderr}`)
-  assertMissing(path.join(root, '.checkpoints', '.checkpoint-required'), 'em-recall must not arm primary marker')
-  assertMissing(path.join(root, '.claude', '.checkpoint-required'), 'em-recall must not arm legacy marker')
+  assertMissing(path.join(root, '.checkpoints', '.checkpoint-required'), 'session-start must not arm primary marker')
+  assertMissing(path.join(root, '.claude', '.checkpoint-required'), 'session-start must not arm legacy marker')
 })
 
 console.log('\nstop-gate carve-out reads BOTH roots:')

@@ -2205,7 +2205,7 @@ echo "--- Deadlock-combo regression (planapproval, 2026-05-27) ---"
 # ============================================================================
 # Root cause being fixed: a PLANNING session that wrote .pre-checkpoint-done /
 # .post-checkpoint-done as gate bookkeeping armed .checkpoint-required via the
-# old file-write heuristic. The stop-gate (em-recall.mjs --gate stop) then
+# old file-write heuristic. The stop-gate (enforce-contract.mjs --gate stop) then
 # blocked turn-end because .checkpoint-required was armed with no
 # .post-checkpoint-done — and the post-done write was itself refused because
 # .post-checkpoint-required was never armed → DEADLOCK during planning.

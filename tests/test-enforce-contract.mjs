@@ -6,18 +6,17 @@
 // pin two things:
 //   (A) decideStop() — the relocated marker logic as a PURE function
 //       (block / allow / carve-out / plan-pending / symlink-fail-closed / null-sid).
-//   (B) PARITY — `enforce-contract --gate stop` is byte-identical to
-//       `em-recall --gate stop` on stdout AND exit-code AND stderr (modulo the
-//       script-name prefix) AND no-marker-side-effect. This is the R1 relocation
-//       invariant; em-recall's --gate handler is deleted in P3d, so this suite is
-//       the regression fixture that guards the migration until then.
+//   (B) RETIRED in P3d — the em-recall `--gate stop` parity suite was deleted
+//       once em-recall's --gate handler was removed (F38/F60 STRICT DELETION).
+//       Parity against a deleted handler is dead; suite A is now the marker-logic
+//       fixture and suite D guards the tier resolution path.
 //
 // Negative-scenario-planner findings folded:
 //   G-B: decideStop is pure (the 3 em-recall exits → returns); CLI is sole I/O.
-//   G-A: stderr is in the parity tuple (the invalid-sid warning the hook's
-//        2>/dev/null would otherwise hide).
+//   G-A: the invalid-sid stderr warning (which the hook's 2>/dev/null would hide)
+//        is asserted directly in suite C3 after the B parity tuple was retired.
 //   G-C: this suite stages its OWN module imports (no piggyback on em-recall).
-//   G-D: no-side-effect = before/after dir-entry set-equality.
+//   G-D: no-side-effect coverage lives in suite A's decideStop purity cases.
 
 import fs from 'fs'
 import os from 'os'
@@ -40,7 +39,6 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(__dirname, '..')
 const ENFORCE = path.join(REPO, 'scripts', 'enforce-contract.mjs')
-const EM_RECALL = path.join(REPO, 'scripts', 'em-recall.mjs')
 
 let pass = 0
 let fail = 0
@@ -161,84 +159,25 @@ console.log('=== A: decideStop() pure-function unit cases ===')
     d.reason.includes(writeMarkerPath(repo, namespacedMarkerBasenameForSession('.post-checkpoint-done', sid))), true)
 }
 
-console.log('')
-console.log('=== B: parity vs em-recall --gate stop (stdout + exit + stderr + no-side-effect) ===')
-
-// Run a script's `--gate stop` in a given cwd; returns {stdout, stderr, status}.
-function runGate(script, cwd, extraArgs = []) {
-  const r = spawnSync('node', [script, '--gate', 'stop', ...extraArgs], { cwd, encoding: 'utf8' })
-  return { stdout: r.stdout, stderr: r.stderr, status: r.status }
+// A9 — armed + post-checkpoint-done present but ZERO BYTES → block (size matters,
+// not presence). Migrated from the retired test-stop-gate.sh Layer-1 case L1.4
+// when its `em-recall --gate stop` unit layer was retired in P3d.
+{
+  const repo = mkRepo()
+  writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 200)
+  writeMarker(primaryMarkerPath(repo, '.post-checkpoint-done'), 200, '') // present but empty
+  const d = decideStop({ repoRoot: repo, sid: null })
+  truthy('A9: armed + zero-byte post-done → block (size, not presence)',
+    d && d.decision === 'block', `got ${JSON.stringify(d)}`)
 }
-// Normalize the only allowed stderr delta: the script-name prefix.
-function normPrefix(s) {
-  return s.replace(/^(em-recall|enforce-contract): /gm, '<script>: ')
-}
 
-// Each scenario seeds a git repo, runs BOTH scripts in the SAME repo cwd, asserts
-// full parity. Scenarios cover allow / block / carve-out / plan-pending.
-const PARITY_SCENARIOS = [
-  { name: 'no-marker (allow)', seed: () => {}, args: [] },
-  {
-    name: 'armed-no-postdone (block)',
-    seed: (repo) => writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 200),
-    args: [],
-  },
-  {
-    name: 'armed-nonempty-postdone (allow)',
-    seed: (repo) => {
-      writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 200)
-      writeMarker(primaryMarkerPath(repo, '.post-checkpoint-done'), 200, 'done\n')
-    },
-    args: [],
-  },
-  {
-    name: 'carve-out (allow)',
-    seed: (repo) => {
-      writeMarker(primaryMarkerPath(repo, BASELINE_NAME), 300)
-      writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 100)
-    },
-    args: [],
-  },
-  {
-    name: 'active-plan-pending (deferral allow)',
-    seed: (repo) => {
-      writeMarker(primaryMarkerPath(repo, BASELINE_NAME), 100)
-      writeMarker(primaryMarkerPath(repo, PLAN_MARKER_LEGACY_BASENAME), 300)
-      writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 300)
-    },
-    args: [],
-  },
-  {
-    name: 'sid-suffixed armed (block)',
-    seed: (repo) => writeMarker(primaryMarkerPath(repo, namespacedMarkerBasenameForSession('.checkpoint-required', 'p-sid')), 200),
-    args: ['--session-id', 'p-sid'],
-  },
-  {
-    name: 'invalid sid → stderr warning (allow)',
-    seed: () => {},
-    args: ['--session-id', 'bad sid!!'],
-  },
-]
-
-for (const sc of PARITY_SCENARIOS) {
-  const repoA = mkGitRepo(); sc.seed(repoA)
-  const repoB = mkGitRepo(); sc.seed(repoB)
-  const before = snapshotMarkers(repoA)
-  const a = runGate(EM_RECALL, repoA, sc.args)
-  const b = runGate(ENFORCE, repoB, sc.args)
-  const after = snapshotMarkers(repoA)
-
-  // stdout parity. Block-reason paths differ only by the repo dir (repoA vs
-  // repoB); normalize each repo's realpath out so the decision shape compares.
-  const realA = fs.realpathSync(repoA)
-  const realB = fs.realpathSync(repoB)
-  const outA = a.stdout.split(realA).join('<REPO>')
-  const outB = b.stdout.split(realB).join('<REPO>')
-  eq(`B[${sc.name}]: stdout parity`, outB, outA)
-  eq(`B[${sc.name}]: exit-code parity`, b.status, a.status)
-  eq(`B[${sc.name}]: stderr parity (modulo prefix)`, normPrefix(b.stderr), normPrefix(a.stderr))
-  eq(`B[${sc.name}]: no marker side-effect`, after, before)
-}
+// === B (RETIRED — RFC-008 P3d) ===
+// The em-recall `--gate stop` parity suite was DELETED here. em-recall's `--gate`
+// handler is gone (F38/F60 STRICT DELETION), so parity against it is dead — a
+// retained suite would invoke a flag this slice removed and run normal recall
+// instead. decideStop() purity (suite A above) is now the marker-logic
+// regression fixture, and the tier layer (suite D below) guards the resolution
+// path; enforce-contract is the sole owner of the stop decision.
 
 console.log('')
 console.log('=== C: CLI arg handling ===')
@@ -384,7 +323,7 @@ function armedRepo() {
 function stageModule(scriptsDir) {
   fs.mkdirSync(path.join(scriptsDir, 'lib'), { recursive: true })
   fs.copyFileSync(path.join(REPO, 'scripts', 'enforce-contract.mjs'), path.join(scriptsDir, 'enforce-contract.mjs'))
-  for (const lib of ['local-dir', 'marker-paths', 'marker-state', 'session-id', 'json-instance-validate', 'effective-tier']) {
+  for (const lib of ['local-dir', 'marker-paths', 'marker-state', 'session-id', 'json-instance-validate', 'effective-tier', 'bp001-advisory']) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', `${lib}.mjs`), path.join(scriptsDir, 'lib', `${lib}.mjs`))
   }
 }

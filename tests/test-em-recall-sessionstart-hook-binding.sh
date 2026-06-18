@@ -3,7 +3,13 @@
 # hooks/em-recall-sessionstart.sh end-to-end with constructed stdin JSON.
 #
 # Validates codex R3 P1 (hook wrapper coverage), R4 P1.1 (fake HOME),
-# R5 P1.1 (silent soft-noop when em-recall.mjs missing).
+# R5 P1.1 (silent soft-noop when the runtime is missing).
+#
+# RFC-008 P3d (F38/F60): the hook's SessionStart side-effects relocated
+# em-recall.mjs → enforce-contract.mjs --session-start. The hook resolves +
+# invokes enforce-contract at the canonical install path; the fixtures stage
+# enforce-contract.mjs (+ its lib closure) and presence/absence drives the
+# soft-noop path.
 #
 # Scenarios:
 #   H1  caller cwd != target; valid sid; legacy + suffixed pre-existing
@@ -11,9 +17,11 @@
 #   H3  linked worktree cwd
 #   H4  stdin .session_id omitted (empty)
 #   H5  stdin .session_id malformed
-#   H6  fake HOME containing installed-runtime em-recall.mjs
-#   H6b fake HOME WITHOUT em-recall.mjs → silent soft-noop (exit 0, no
+#   H6  fake HOME containing installed-runtime enforce-contract.mjs
+#   H6b fake HOME WITHOUT enforce-contract.mjs → silent soft-noop (exit 0, no
 #       stdout, no mutation) — codex R5 P1.1 corrected from R4 v4 expectation
+#   H7  recent bp-001 violation → hook surfaces the advisory on STDOUT (the
+#       SessionStart additionalContext path; PR #395 PR-level review MINOR-1)
 
 set -u
 
@@ -26,14 +34,14 @@ cleanup_dirs=()
 trap 'for d in "${cleanup_dirs[@]}"; do rm -rf "$d" 2>/dev/null || true; done' EXIT
 
 # All scenarios run with HOME pointed at a fake home containing this
-# worktree's em-recall.mjs + lib/. Without this, tests would run against the
-# user's installed em-recall (which may be the pre-fix version) and pass for
+# worktree's enforce-contract.mjs + lib/. Without this, tests would run against
+# the user's installed runtime (which may be the pre-fix version) and pass for
 # the wrong reasons or fail confusingly. H6 keeps the fake-HOME assertion
 # explicit, but every scenario benefits from a stable runtime fixture.
 SHARED_FAKE_HOME="$(mktemp -d -t em-hook-sharedhome-XXXXXX)"
 SHARED_FAKE_HOME="$(cd "$SHARED_FAKE_HOME" && pwd -P)"
 mkdir -p "$SHARED_FAKE_HOME/.episodic-memory/scripts/lib"
-cp "$REPO/scripts/em-recall.mjs" "$SHARED_FAKE_HOME/.episodic-memory/scripts/"
+cp "$REPO/scripts/enforce-contract.mjs" "$SHARED_FAKE_HOME/.episodic-memory/scripts/"
 cp "$REPO/scripts/lib/"*.mjs "$SHARED_FAKE_HOME/.episodic-memory/scripts/lib/"
 cleanup_dirs+=("$SHARED_FAKE_HOME")
 export HOME="$SHARED_FAKE_HOME"
@@ -72,8 +80,8 @@ mk_fake_home() {
   d="$(mktemp -d -t em-hook-fakehome-XXXXXX)"
   d="$(cd "$d" && pwd -P)"
   mkdir -p "$d/.episodic-memory/scripts/lib"
-  # Copy em-recall.mjs + its lib/ deps for a working installed-runtime fixture.
-  cp "$REPO/scripts/em-recall.mjs" "$d/.episodic-memory/scripts/"
+  # Copy enforce-contract.mjs + its lib/ deps for a working installed-runtime fixture.
+  cp "$REPO/scripts/enforce-contract.mjs" "$d/.episodic-memory/scripts/"
   cp "$REPO/scripts/lib/"*.mjs "$d/.episodic-memory/scripts/lib/"
   cleanup_dirs+=("$d")
   printf '%s' "$d"
@@ -83,7 +91,7 @@ mk_empty_fake_home() {
   local d
   d="$(mktemp -d -t em-hook-emptyhome-XXXXXX)"
   d="$(cd "$d" && pwd -P)"
-  # NO em-recall.mjs installed at $d/.episodic-memory/scripts/
+  # NO enforce-contract.mjs installed at $d/.episodic-memory/scripts/
   cleanup_dirs+=("$d")
   printf '%s' "$d"
 }
@@ -185,14 +193,14 @@ echo "H5: stdin .session_id malformed"
   rc=$?
   [ "$rc" = "0" ] && check 1 "H5 exit 0 (warn-on-invalid)" || check 0 "H5 exit 0 (got $rc)"
   [ ! -e "$TARGET/.checkpoints/.plan-approval-pending" ] && check 1 "H5 legacy still swept (independent of malformed sid)" || check 0 "H5 swept"
-  # Note: hook swallows stderr via `2>&1 || true`, so warning won't propagate
-  # to our captured stderr. The warning is verified by the
-  # session-id-binding.mjs test (direct invocation, no swallow).
+  # Note: enforce-contract --session-start accepts-and-ignores --session-id (the
+  # baseline write is not session-scoped), so no validateSessionId warning is
+  # emitted at all under purification — the sweep is independent of the sid.
   rm -f "$STDERR_LOG"
 }
 
 # ============================ H6 — fake HOME with installed runtime ============================
-echo "H6: fake HOME containing installed-runtime em-recall.mjs"
+echo "H6: fake HOME containing installed-runtime enforce-contract.mjs"
 {
   TARGET="$(mk_git_target)"
   CALLER="$(mk_caller_dir)"
@@ -211,8 +219,8 @@ echo "H6: fake HOME containing installed-runtime em-recall.mjs"
   [ ! -e "$FAKE_HOME/.checkpoints" ] && check 1 "H6 fake HOME untouched" || check 0 "H6 fake HOME untouched"
 }
 
-# ============================ H6b — fake HOME WITHOUT em-recall.mjs ============================
-echo "H6b: fake HOME WITHOUT em-recall.mjs → silent soft-noop"
+# ============================ H6b — fake HOME WITHOUT enforce-contract.mjs ============================
+echo "H6b: fake HOME WITHOUT enforce-contract.mjs → silent soft-noop"
 {
   TARGET="$(mk_git_target)"
   CALLER="$(mk_caller_dir)"
@@ -227,11 +235,39 @@ echo "H6b: fake HOME WITHOUT em-recall.mjs → silent soft-noop"
   )
   rc=$?
   [ "$rc" = "0" ] && check 1 "H6b exit 0 (silent soft-noop)" || check 0 "H6b exit 0 (got $rc)"
-  # Marker UNCHANGED — em-recall never ran
+  # Marker UNCHANGED — enforce-contract never ran (absent → soft-noop)
   [ -e "$TARGET/.checkpoints/.plan-approval-pending" ] && check 1 "H6b legacy marker UNCHANGED (no mutation)" || check 0 "H6b marker mutated unexpectedly"
   # No stdout
   [ ! -s "$STDOUT_LOG" ] && check 1 "H6b stdout empty (no block-JSON; silent path)" || check 0 "H6b stdout non-empty: $(cat "$STDOUT_LOG")"
   rm -f "$STDOUT_LOG"
+}
+
+# ============================ H7 — advisory surfaced on hook STDOUT ============================
+echo "H7: recent bp-001 violation → hook surfaces advisory on STDOUT"
+{
+  TARGET="$(mk_git_target)"
+  # Pin the arming project via package.json name so the seeded violation matches
+  # resolveArmingProject(target) (bp001-advisory.mjs: pkg.name → else basename).
+  echo '{"name":"h7proj"}' > "$TARGET/package.json"
+  ADV_HOME="$(mk_fake_home)"   # enforce-contract + full lib closure staged
+  mkdir -p "$ADV_HOME/.episodic-memory/episodes"
+  # Compute the date at runtime (avoid the dated-fixture CI time bomb): the
+  # advisory predicate requires the violation within a 30-day window.
+  TODAY="$(date -u +%Y-%m-%d)"
+  VID="${TODAY//-/}-000000-h7-bp001-aaaa"
+  printf '{"id":"%s","date":"%s","project":"h7proj","category":"violation","status":"active","tags":["violated:bp-001-implementation-workflow"],"summary":"h7"}\n' \
+    "$VID" "$TODAY" > "$ADV_HOME/.episodic-memory/index.jsonl"
+  printf -- '---\nid: %s\ndate: %s\nproject: h7proj\ncategory: violation\nstatus: active\ntags: [violated:bp-001-implementation-workflow]\nsummary: h7\n---\nh7\n' \
+    "$VID" "$TODAY" > "$ADV_HOME/.episodic-memory/episodes/$VID.md"
+  STDIN_JSON="$(stdin_json "$TARGET" "35522aab-5f44-4b84-b1cc-035cca7b9305")"
+  OUT="$(HOME="$ADV_HOME" bash "$HOOK" <<< "$STDIN_JSON" 2>/dev/null)"
+  if echo "$OUT" | grep -q "bp-001-implementation-workflow"; then
+    check 1 "H7 hook surfaces bp-001 advisory on stdout"
+  else
+    check 0 "H7 advisory on stdout (got stdout: $OUT)"
+  fi
+  # Defensive: the substrate must still NOT arm a marker (planning-passive).
+  [ ! -e "$TARGET/.checkpoints/.checkpoint-required" ] && check 1 "H7 advisory does not arm a marker" || check 0 "H7 marker armed unexpectedly"
 }
 
 echo

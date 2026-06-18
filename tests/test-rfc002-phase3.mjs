@@ -26,6 +26,10 @@ import assert from 'assert'
 
 const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts')
 const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
+// RFC-008 P3d (F38/F60): the bp-001 advisory + stop gate relocated to
+// enforce-contract.mjs. em-recall (RECALL) stays pure recall for the recall()
+// JSON helper; advisory/gate assertions use ENFORCE.
+const ENFORCE = path.join(SCRIPTS, 'enforce-contract.mjs')
 const VIOLATION = path.join(SCRIPTS, 'em-violation.mjs')
 const REBUILD = path.join(SCRIPTS, 'em-rebuild-index.mjs')
 const SESSION_END = path.join(SCRIPTS, 'em-session-end-prompt.mjs')
@@ -72,10 +76,14 @@ function recall(args = '', cwd = tmpProject) {
   return JSON.parse(result.trim())
 }
 
-// Planning-passive redesign (2026-05-25): the bp-001 signal is now an advisory
-// on stderr (__BP1_ADVISORY__), not a marker write. Capture stderr to assert it.
+// Planning-passive redesign (2026-05-25): the bp-001 signal is an advisory on
+// stderr (__BP1_ADVISORY__), not a marker write. RFC-008 P3d: that advisory
+// relocated from em-recall to enforce-contract --session-start (em-recall is now
+// pure recall and emits no advisory). The advisory is task-type-decoupled — it
+// fires on recent bp-001 violations regardless of recall args — so the legacy
+// `args` are accepted-and-ignored here for call-site compatibility.
 function recallStderr(args = '', cwd = tmpProject) {
-  const r = spawnSync('node', [RECALL, ...args.split(/\s+/).filter(Boolean)], { cwd, env, encoding: 'utf8' })
+  const r = spawnSync('node', [ENFORCE, '--session-start'], { cwd, env, encoding: 'utf8' })
   return r.stderr || ''
 }
 
@@ -314,7 +322,7 @@ test('T7a. Recall emits __BP1_ADVISORY__ + does NOT arm marker when bp-001 surfa
   rebuild()
   const stderr = recallStderr('--task-type implementation --no-track')
   assert.ok(/__BP1_ADVISORY__/.test(stderr), `advisory should be emitted after bp-001 surfaces; got: ${stderr}`)
-  assert.ok(!fs.existsSync(markerPath), 'em-recall must NOT arm .checkpoint-required (lazy-arm moved to checkpoint-gate.sh)')
+  assert.ok(!fs.existsSync(markerPath), 'session-start must NOT arm .checkpoint-required (lazy-arm moved to checkpoint-gate.sh)')
 })
 
 test('T7b. No marker when only non-bp-001 violations surface', () => {
@@ -327,9 +335,14 @@ test('T7b. No marker when only non-bp-001 violations surface', () => {
   assert.ok(!fs.existsSync(markerPath), '.checkpoint-required must not exist when bp-001 is not surfaced')
 })
 
-test('T7c. Advisory fires (no marker) when bp-001 violations exist even if task type is unclear', () => {
-  // The advisory is decoupled from task_type — bp-001 violations alone are
-  // sufficient. Planning-passive: it surfaces as a warning, never a marker.
+test('T7c. Advisory fires (no marker) on bp-001 violations — structurally task-type-independent', () => {
+  // RFC-008 P3d: the advisory relocated to enforce-contract --session-start, which
+  // takes NO task_type at all (recallStderr ignores recall args), so it is
+  // task-type-independent by construction — bp-001 violations alone are
+  // sufficient. (Pre-P3d this proved em-recall's task_type inference didn't gate
+  // the advisory; now the gating input simply doesn't exist.) Planning-passive:
+  // it surfaces as a warning, never a marker. The branch is still set to a
+  // no-keyword value to document that prior recall context is irrelevant.
   clearStore()
   clearMarker()
   for (let d = 1; d <= 3; d++) seedViolation('bp-001-implementation-workflow', d)
@@ -337,7 +350,7 @@ test('T7c. Advisory fires (no marker) when bp-001 violations exist even if task 
   setBranch('main') // no keyword match → inferTaskType returns null
   const stderr = recallStderr('--no-track')
   assert.ok(/__BP1_ADVISORY__/.test(stderr), 'advisory must fire when bp-001 recent, regardless of task_type')
-  assert.ok(!fs.existsSync(markerPath), 'em-recall must NOT arm (planning-passive)')
+  assert.ok(!fs.existsSync(markerPath), 'session-start must NOT arm (planning-passive)')
 })
 
 test('T7c2. No marker when there are no recent bp-001 violations (regardless of task type)', () => {
@@ -370,7 +383,7 @@ test('T7d. Advisory emission is idempotent (re-recall does not error, never arms
   assert.ok(/__BP1_ADVISORY__/.test(recallStderr('--task-type implementation --no-track')), 'advisory on first recall')
   // Second recall should not throw and should still advise
   assert.ok(/__BP1_ADVISORY__/.test(recallStderr('--task-type implementation --no-track')), 'advisory on second recall (no error)')
-  assert.ok(!fs.existsSync(markerPath), 'em-recall never arms the marker')
+  assert.ok(!fs.existsSync(markerPath), 'session-start never arms the marker')
 })
 
 test('T7e. em-session-end-prompt.mjs sweeps the marker at session end', () => {
@@ -569,7 +582,7 @@ test('T7k. Round-trip: advisory → (gate) arm → Stop blocks → SessionEnd sw
   //   1. Setup: temp project + seeded bp-001 violation in episode store
   //   2. SessionStart hook SURFACES advisory (does not arm); simulate the gate
   //      lazy-arming .checkpoint-required at the first repo write
-  //   3. Simulate Stop firing (em-recall --gate stop) → returns block JSON
+  //   3. Simulate Stop firing (enforce-contract --gate stop) → returns block JSON
   //   4. em-session-end-prompt.mjs sweeps all 4 markers
   //   5. SessionStart hook runs again → still advises (NOT re-armed)
   //   6. Verify the violation episode still exists (source of truth survived)
@@ -635,7 +648,7 @@ test('T7k. Round-trip: advisory → (gate) arm → Stop blocks → SessionEnd sw
   fs.writeFileSync(preReq, '')
   assert.ok(fs.existsSync(preReq), 'step 1: gate-simulated lazy-arm present')
 
-  // ----- Step 2: Stop fires; em-recall --gate stop returns block -----
+  // ----- Step 2: Stop fires; enforce-contract --gate stop returns block -----
   // Post-#146 (A2 carve-out): SessionStart now writes .session-baseline.
   // For Stop to block, a real mid-session task signal must exist. Without
   // one, the carve-out correctly treats the turn as no-task-signal and
@@ -649,7 +662,7 @@ test('T7k. Round-trip: advisory → (gate) arm → Stop blocks → SessionEnd sw
     const future = (Date.now() + 5_000) / 1000
     fs.utimesSync(postReq, future, future)
   }
-  const stopOut = execSync(`node "${path.join(sessionScripts, 'em-recall.mjs')}" --gate stop`, {
+  const stopOut = execSync(`node "${path.join(sessionScripts, 'enforce-contract.mjs')}" --gate stop`, {
     cwd: sessionProject, env: sessionEnv, encoding: 'utf8'
   })
   const stopJson = JSON.parse(stopOut)

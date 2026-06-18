@@ -26,7 +26,8 @@ import os from 'os'
 import path from 'path'
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname)
-const EM_RECALL = path.join(REPO_ROOT, 'scripts', 'em-recall.mjs')
+// RFC-008 P3d: bp-001 advisory relocated em-recall.mjs → enforce-contract.mjs --session-start (F7/F38).
+const ENFORCE = path.join(REPO_ROOT, 'scripts', 'enforce-contract.mjs')
 
 let pass = 0, fail = 0
 const failures = []
@@ -82,7 +83,7 @@ function seedViolation(home, { project, date, status = 'active', daysAgo = null,
 }
 
 function runSessionStart(cwd, home, extraArgs = []) {
-  const r = spawnSync('node', [EM_RECALL, '--session-start', '--limit', '1', ...extraArgs], {
+  const r = spawnSync('node', [ENFORCE, '--session-start', ...extraArgs], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, HOME: home }
   })

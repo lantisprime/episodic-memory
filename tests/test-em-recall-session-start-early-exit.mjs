@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
- * test-em-recall-session-start-early-exit.mjs — Tests for em-recall.mjs
- * SessionStart fast path (relocated inferContext + process.exit(0) after
- * baseline write).
+ * test-em-recall-session-start-early-exit.mjs — Tests for the SessionStart
+ * side-effect path. RFC-008 P3d relocated these side-effects (baseline write +
+ * sweeps + bp-001 advisory) from em-recall.mjs to enforce-contract.mjs
+ * --session-start; the --session-start cases + hook E2E now target
+ * enforce-contract, while T5/T6 remain pure em-recall recall regressions.
  *
  * Plan: round-2 ACCEPT episode 20260509-082149-...-6ef8.
  *
@@ -49,6 +51,11 @@ const HERE = path.dirname(new URL(import.meta.url).pathname)
 const REPO = path.resolve(HERE, '..')
 const SCRIPTS = path.join(REPO, 'scripts')
 const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
+// RFC-008 P3d (F38/F60): SessionStart side-effects (baseline write + sweeps +
+// bp-001 advisory) relocated em-recall.mjs → enforce-contract.mjs --session-start.
+// The --session-start calls below + the hook E2E (T8/T11) target ENFORCE; the
+// pure-recall regressions (T5/T6) stay on RECALL.
+const ENFORCE = path.join(SCRIPTS, 'enforce-contract.mjs')
 const STORE = path.join(SCRIPTS, 'em-store.mjs')
 const HOOK = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'em-recall-sessionstart.sh')
 
@@ -170,14 +177,14 @@ test('T1: --session-start with recent active bp-001 violation emits advisory + d
   // Pre-condition: fixture dirs exist (defensive for negative assertions).
   assert.ok(fs.existsSync(mainRepoReal), 'pre: mainRepo exists')
 
-  const r = spawnSync('node', [RECALL, '--session-start', '--scope', 'local', '--project', 'test', '--no-track'], {
+  const r = spawnSync('node', [ENFORCE, '--session-start'], {
     cwd: mainRepo, encoding: 'utf8',
   })
 
   assert.ok(/__BP1_ADVISORY__/.test(r.stderr || ''),
     `expected __BP1_ADVISORY__ on stderr with recent violation; got: ${r.stderr}`)
   assert.ok(!fs.existsSync(mainCheckpointMarker),
-    `em-recall must NOT arm ${mainCheckpointMarker} (planning-passive — lazy-arm moved to checkpoint-gate.sh)`)
+    `session-start must NOT arm ${mainCheckpointMarker} (planning-passive — lazy-arm moved to checkpoint-gate.sh)`)
   assert.ok(fs.existsSync(mainBaseline),
     `expected ${mainBaseline} after --session-start (always written)`)
 })
@@ -192,7 +199,7 @@ test('T2: --session-start with no recent bp-001 violation does NOT arm .checkpoi
   // Defensive: assert mainRepo dir exists so the !exists check below isn't vacuous.
   assert.ok(fs.existsSync(mainRepoReal), 'pre: mainRepo exists')
 
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
@@ -210,7 +217,7 @@ test('T3: --session-start advances .session-baseline mtime on subsequent invocat
   clearLocalStore()
 
   // First invocation seeds the baseline.
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
   assert.ok(fs.existsSync(mainBaseline), 'pre: first baseline exists')
@@ -220,7 +227,7 @@ test('T3: --session-start advances .session-baseline mtime on subsequent invocat
   execSync('sleep 0.1')
 
   // Second invocation must advance mtime (utimesSync forces Date.now()).
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
   const t2 = fs.statSync(mainBaseline).mtimeMs
@@ -243,7 +250,7 @@ test('T4: --session-start PRESERVES checkpoint markers; baseline.mtime dominates
   clearLocalStore()
 
   // First invocation: seed a baseline.
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
   assert.ok(fs.existsSync(mainBaseline), 'pre: baseline exists')
@@ -258,7 +265,7 @@ test('T4: --session-start PRESERVES checkpoint markers; baseline.mtime dominates
   execSync('sleep 0.1')
 
   // Second invocation: marker must be PRESERVED (NOT swept).
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
@@ -348,7 +355,7 @@ test('T7: --session-start does NOT invoke `git remote get-url origin` or `git br
     PATH: `${stubDir}:${process.env.PATH}`,
   }
 
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, env, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
@@ -379,14 +386,14 @@ test('T9: direct --session-start from linked worktree writes baseline + marker a
   assert.ok(fs.existsSync(mainRepoReal), 'pre: main repo exists')
   assert.ok(fs.existsSync(worktreeRootReal), 'pre: worktree exists')
 
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
   assert.ok(fs.existsSync(mainBaseline),
     `baseline must land at canonical main: ${mainBaseline}`)
   assert.ok(!fs.existsSync(mainCheckpointMarker),
-    `em-recall must NOT arm ${mainCheckpointMarker} (planning-passive — root-resolution proven by baseline)`)
+    `session-start must NOT arm ${mainCheckpointMarker} (planning-passive — root-resolution proven by baseline)`)
   // Negative + post-fixture-existence guard: worktree dir is still here, so
   // !exists isn't vacuous.
   assert.ok(fs.existsSync(worktreeRootReal),
@@ -407,13 +414,13 @@ test('T10: direct --session-start from nested cwd writes artifacts at repo root,
   seedBp001Violation()
   assert.ok(fs.existsSync(nestedDir), 'pre: nested dir exists')
 
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: nestedDir, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
   assert.ok(fs.existsSync(mainBaseline), 'baseline at repo root')
   assert.ok(!fs.existsSync(mainCheckpointMarker),
-    'em-recall must NOT arm marker (planning-passive — root-resolution proven by baseline)')
+    'session-start must NOT arm marker (planning-passive — root-resolution proven by baseline)')
 
   const nestedCheckpointsDir = path.join(nestedDir, '.checkpoints')
   assert.ok(fs.existsSync(nestedDir),
@@ -426,38 +433,33 @@ test('T10: direct --session-start from nested cwd writes artifacts at repo root,
 // T8 / T11 — Hook E2E with callerDir != targetRepo via stdin .cwd, in a
 // temp HOME with a fully-staged installed runtime.
 //
-// Per feedback_fixture_transitive_imports.md: stage em-recall.mjs PLUS its
-// transitive lib imports (lib/local-dir.mjs, lib/marker-paths.mjs).
+// RFC-008 P3d (F38/F60): em-recall-sessionstart.sh now invokes
+// enforce-contract.mjs --session-start (the SessionStart side-effects relocated
+// out of em-recall). Per feedback_fixture_transitive_imports.md, stage
+// enforce-contract.mjs PLUS its full transitive lib closure:
+//   local-dir, marker-paths, marker-state, session-id, bp001-advisory,
+//   json-instance-validate, effective-tier.
+// (--session-start needs no patterns/ files — contract/tier loading is the
+// --gate stop path; the advisory reads the episode index, the sweeps/baseline
+// read only the marker libs.)
 // ---------------------------------------------------------------------------
 function buildTempHome(homeRoot) {
   const installedScripts = path.join(homeRoot, '.episodic-memory', 'scripts')
   const installedLib = path.join(installedScripts, 'lib')
   fs.mkdirSync(installedLib, { recursive: true })
 
-  fs.copyFileSync(RECALL, path.join(installedScripts, 'em-recall.mjs'))
-  fs.copyFileSync(
-    path.join(SCRIPTS, 'lib', 'local-dir.mjs'),
-    path.join(installedLib, 'local-dir.mjs'),
-  )
-  fs.copyFileSync(
-    path.join(SCRIPTS, 'lib', 'marker-paths.mjs'),
-    path.join(installedLib, 'marker-paths.mjs'),
-  )
-  // RFC-008 P3a: em-recall imports marker-state.mjs (relocated from
-  // stop-gate-helpers.mjs) for the active-plan exemption. Test fixture must
-  // mirror transitive imports (marker-state imports the already-copied
-  // marker-paths.mjs).
-  fs.copyFileSync(
-    path.join(SCRIPTS, 'lib', 'marker-state.mjs'),
-    path.join(installedLib, 'marker-state.mjs'),
-  )
-  // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs
-  // for the --session-id flag validation. Mirror per
-  // feedback_fixture_transitive_imports.md.
-  fs.copyFileSync(
-    path.join(SCRIPTS, 'lib', 'session-id.mjs'),
-    path.join(installedLib, 'session-id.mjs'),
-  )
+  fs.copyFileSync(ENFORCE, path.join(installedScripts, 'enforce-contract.mjs'))
+  for (const lib of [
+    'local-dir.mjs',
+    'marker-paths.mjs',
+    'marker-state.mjs',
+    'session-id.mjs',
+    'bp001-advisory.mjs',
+    'json-instance-validate.mjs',
+    'effective-tier.mjs',
+  ]) {
+    fs.copyFileSync(path.join(SCRIPTS, 'lib', lib), path.join(installedLib, lib))
+  }
   // No hook-install.json; warn_hook_freshness soft-fails on missing manifest.
   return installedScripts
 }
@@ -489,7 +491,7 @@ test('T8: Hook E2E with callerDir != targetRepo writes artifacts under targetRep
   // Positive: artifacts at targetRepo.
   assert.ok(fs.existsSync(mainBaseline), 'baseline at targetRepo')
   assert.ok(!fs.existsSync(mainCheckpointMarker),
-    'em-recall must NOT arm marker at targetRepo (planning-passive)')
+    'session-start must NOT arm marker at targetRepo (planning-passive)')
 
   // Negative + post-fixture-existence guard.
   assert.ok(fs.existsSync(callerDirReal),
@@ -504,7 +506,7 @@ test('T11: Hook E2E with HOME containing spaces still writes artifacts correctly
   seedBp001Violation()
 
   // Build a HOME path that contains a space — exercises shell-quoting in
-  // the hook's `node "$EM_RECALL"` call. This is the PR #207 install
+  // the hook's `node "$ENFORCE"` call. This is the PR #207 install
   // class of failure (path quoting).
   const spacedHomeParent = fs.mkdtempSync(path.join(tmpRoot, 'home11-parent-'))
   const tempHome = path.join(spacedHomeParent, 'home with spaces')
@@ -517,7 +519,7 @@ test('T11: Hook E2E with HOME containing spaces still writes artifacts correctly
 
   assert.ok(fs.existsSync(mainBaseline), 'baseline at targetRepo (HOME-with-spaces)')
   assert.ok(!fs.existsSync(mainCheckpointMarker),
-    'em-recall must NOT arm marker at targetRepo when HOME has spaces (planning-passive)')
+    'session-start must NOT arm marker at targetRepo when HOME has spaces (planning-passive)')
   assert.ok(!fs.existsSync(callerPrimaryDir),
     `caller dir must NOT have .checkpoints/ created when HOME has spaces`)
 })

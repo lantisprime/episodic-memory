@@ -45,8 +45,11 @@ jobs:
       - name: Run em-recall force-monotonic baseline regression (2026-05-18 orphan-deadlock fix)
         run: node tests/test-em-recall-baseline-monotonic.mjs
 
-      - name: Run em-recall --session-id binding regression
-        run: node tests/test-em-recall-session-id-binding.mjs
+      - name: Run session-start repo-root/worktree resolution regression (#106)
+        run: node tests/test-em-repo-root-worktree.mjs
+
+      - name: Run bp-001 per-project arming regression (advisory, RFC-008 P3d)
+        run: node tests/test-bp001-per-project-arming.mjs
 
       - name: Run em-recall-sessionstart hook-wrapper integration (cwd + stdin sid binding)
         run: bash tests/test-em-recall-sessionstart-hook-binding.sh
@@ -62,6 +65,9 @@ jobs:
 
       - name: Run em-strict-lstat regression
         run: node tests/test-em-strict-lstat.mjs
+
+      - name: Run marker-state carve-out unit tests (incl. #268 cross-session foreign-sid exclusion)
+        run: node tests/test-marker-state.mjs
 
       - name: Run issue-146 plan-pending deferral regression
         run: node tests/test-issue-146.mjs
@@ -86,6 +92,18 @@ jobs:
 
       - name: Run enforce-contract --gate stop relocation + parity + tier layer (RFC-008 P3b-1/P3b-2)
         run: node tests/test-enforce-contract.mjs
+
+      - name: Run enforce-contract --session-start side-effects relocation (RFC-008 P3d)
+        run: node tests/test-enforce-contract-session-start.mjs
+
+      - name: Run bp-001 advisory lib regression (RFC-008 P3d, F7)
+        run: node tests/test-bp001-advisory.mjs
+
+      - name: Run em-recall enforcement-token purity guard (RFC-008 P3d, F60)
+        run: node tests/test-em-recall-purity.mjs
+
+      - name: Run install-time em-recall purity sentinel (RFC-008 P3d, F45)
+        run: node tests/test-install-em-recall-purified.mjs
 
       - name: Run enforce-config loader + clamp integration (RFC-008 P3b-2, R5/P4)
         run: node tests/test-enforce-config.mjs

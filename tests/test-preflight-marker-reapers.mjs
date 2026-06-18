@@ -35,7 +35,8 @@ import { spawnSync } from 'child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const SESSION_END = path.join(REPO, 'scripts', 'em-session-end-prompt.mjs')
-const EM_RECALL = path.join(REPO, 'scripts', 'em-recall.mjs')
+// RFC-008 P3d: SessionStart side-effects relocated em-recall.mjs → enforce-contract.mjs --session-start (F38/F60).
+const ENFORCE = path.join(REPO, 'scripts', 'enforce-contract.mjs')
 
 const SID_A = 'session-a'
 const SID_B = 'session-b'
@@ -93,7 +94,7 @@ function runSessionEnd(stdinCwd, sid, { home, processCwd } = {}) {
 }
 
 function runSessionStart(cwd, { home } = {}) {
-  return spawnSync('node', [EM_RECALL, '--limit', '5', '--session-start', '--session-id', SID_A], {
+  return spawnSync('node', [ENFORCE, '--session-start', '--session-id', SID_A], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, HOME: home || mkFakeHome() },

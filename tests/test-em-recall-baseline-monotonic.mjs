@@ -49,7 +49,9 @@ import os from 'os'
 import { spawnSync } from 'child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const EM_RECALL = path.join(REPO, 'scripts', 'em-recall.mjs')
+// RFC-008 P3d: SessionStart side-effects (baseline write + sweeps) relocated
+// from em-recall.mjs to enforce-contract.mjs --session-start (F38/F60).
+const ENFORCE = path.join(REPO, 'scripts', 'enforce-contract.mjs')
 
 let passed = 0
 let failed = 0
@@ -87,7 +89,7 @@ function touchWithMtimeMs(p, mtimeMs) {
 }
 
 function runSessionStart(cwd, env = {}, extraArgs = []) {
-  const args = [EM_RECALL, '--limit', '5', '--session-start', ...extraArgs]
+  const args = [ENFORCE, '--session-start', ...extraArgs]
   return spawnSync('node', args, {
     cwd,
     encoding: 'utf8',
@@ -317,7 +319,7 @@ function mtimeMsOf(p) {
   const target = mkTmpGitRepo('em-monotonic-cwd1-target-')
   const caller = mkTmpGitRepo('em-monotonic-cwd1-caller-')
   touchWithMtimeMs(path.join(target, '.checkpoints', '.checkpoint-required'), Date.now() - 1000)
-  // Hook semantics: cd "$CWD"; node em-recall. We invoke from target as cwd directly.
+  // Hook semantics: cd "$CWD"; node enforce-contract --session-start. We invoke from target as cwd directly.
   const r = runSessionStart(target)
   check(r.status === 0, `CWD1 exit 0`)
   check(fs.existsSync(path.join(target, '.checkpoints', '.session-baseline')), `CWD1 target baseline written`)
@@ -373,10 +375,10 @@ function mtimeMsOf(p) {
 // ============================ CWD5 ============================
 {
   // Documented semantics (local-dir.mjs:30): GIT_DIR= / GIT_WORK_TREE= cause
-  // `git rev-parse --show-toplevel` to return the linked work tree. em-recall.mjs
+  // `git rev-parse --show-toplevel` to return the linked work tree. enforce-contract.mjs
   // honors this — env pollution moves REPO_ROOT to the polluted path. This is
   // existing behavior (NOT v4 regression). The SessionStart hook is responsible
-  // for env hygiene; em-recall.mjs trusts process env.
+  // for env hygiene; enforce-contract.mjs trusts process env.
   // We assert: NO leak to caller cwd (the documented isolation invariant) AND
   // baseline lands at the env-bound work tree, not at process.cwd(). The point
   // is that env-bound semantics are predictable, not that env is ignored.
