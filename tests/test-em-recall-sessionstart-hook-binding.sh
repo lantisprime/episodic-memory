@@ -20,6 +20,8 @@
 #   H6  fake HOME containing installed-runtime enforce-contract.mjs
 #   H6b fake HOME WITHOUT enforce-contract.mjs → silent soft-noop (exit 0, no
 #       stdout, no mutation) — codex R5 P1.1 corrected from R4 v4 expectation
+#   H7  recent bp-001 violation → hook surfaces the advisory on STDOUT (the
+#       SessionStart additionalContext path; PR #395 PR-level review MINOR-1)
 
 set -u
 
@@ -238,6 +240,34 @@ echo "H6b: fake HOME WITHOUT enforce-contract.mjs → silent soft-noop"
   # No stdout
   [ ! -s "$STDOUT_LOG" ] && check 1 "H6b stdout empty (no block-JSON; silent path)" || check 0 "H6b stdout non-empty: $(cat "$STDOUT_LOG")"
   rm -f "$STDOUT_LOG"
+}
+
+# ============================ H7 — advisory surfaced on hook STDOUT ============================
+echo "H7: recent bp-001 violation → hook surfaces advisory on STDOUT"
+{
+  TARGET="$(mk_git_target)"
+  # Pin the arming project via package.json name so the seeded violation matches
+  # resolveArmingProject(target) (bp001-advisory.mjs: pkg.name → else basename).
+  echo '{"name":"h7proj"}' > "$TARGET/package.json"
+  ADV_HOME="$(mk_fake_home)"   # enforce-contract + full lib closure staged
+  mkdir -p "$ADV_HOME/.episodic-memory/episodes"
+  # Compute the date at runtime (avoid the dated-fixture CI time bomb): the
+  # advisory predicate requires the violation within a 30-day window.
+  TODAY="$(date -u +%Y-%m-%d)"
+  VID="${TODAY//-/}-000000-h7-bp001-aaaa"
+  printf '{"id":"%s","date":"%s","project":"h7proj","category":"violation","status":"active","tags":["violated:bp-001-implementation-workflow"],"summary":"h7"}\n' \
+    "$VID" "$TODAY" > "$ADV_HOME/.episodic-memory/index.jsonl"
+  printf -- '---\nid: %s\ndate: %s\nproject: h7proj\ncategory: violation\nstatus: active\ntags: [violated:bp-001-implementation-workflow]\nsummary: h7\n---\nh7\n' \
+    "$VID" "$TODAY" > "$ADV_HOME/.episodic-memory/episodes/$VID.md"
+  STDIN_JSON="$(stdin_json "$TARGET" "35522aab-5f44-4b84-b1cc-035cca7b9305")"
+  OUT="$(HOME="$ADV_HOME" bash "$HOOK" <<< "$STDIN_JSON" 2>/dev/null)"
+  if echo "$OUT" | grep -q "bp-001-implementation-workflow"; then
+    check 1 "H7 hook surfaces bp-001 advisory on stdout"
+  else
+    check 0 "H7 advisory on stdout (got stdout: $OUT)"
+  fi
+  # Defensive: the substrate must still NOT arm a marker (planning-passive).
+  [ ! -e "$TARGET/.checkpoints/.checkpoint-required" ] && check 1 "H7 advisory does not arm a marker" || check 0 "H7 marker armed unexpectedly"
 }
 
 echo

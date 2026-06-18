@@ -19,7 +19,7 @@ Phase 3b (RFC-002) introduces user-level hooks that need to be installed into `~
 |------|-------|---------|
 | `checkpoint-gate.sh` | PreToolUse | RFC-002 Phase 3b two-gate write/push enforcement |
 | `plan-gate.sh` | PreToolUse | Blocks write tools while `.plan-approval-pending` exists at the repo root; allows read-only tools (canonical list lives in the `case` at `hooks/plan-gate.sh` — do not duplicate here). Issue #86 PR-A canonicalized this from a previously user-maintained file. |
-| `em-recall-sessionstart.sh` | SessionStart | Mechanically invokes em-recall so its activator can arm checkpoint-gate before any user interaction |
+| `em-recall-sessionstart.sh` | SessionStart | Invokes `enforce-contract --session-start` (RFC-008 P3d): writes the `.session-baseline`, sweeps stale plan/preflight markers, and surfaces the bp-001 advisory. Arms nothing (planning-passive — the pre-checkpoint is lazily armed by checkpoint-gate.sh at first repo write). |
 | `stop-gate.sh` | Stop / SubagentStop | Blocks turn-end when post-checkpoint required but absent (#128). |
 | `lib/marker-paths.sh` | sourced | Shared marker-path constants and dual-root helpers (2026-05-09 .checkpoints/ migration) |
 | `lib/repo-root.sh` | sourced | `resolve_repo_root` git-common-dir walker (PR #105 / #85) |
