@@ -15,10 +15,10 @@ requirement parent. Each phase file carries its own R-anchors and back-links to 
 | Phase | File | Serves | Depends on | Status |
 |-------|------|--------|-----------|--------|
 | **P0** | [P0-schema-contracts.md](P0-schema-contracts.md) | R3, R4 | — | **DONE** — PR #367 (`d078fdc`) |
-| **P1** | [P1-plugin-registry.md](P1-plugin-registry.md) | R1, R6, R8 | P0, R0b′ | **NEXT** (4 slices: P1a/P1b/P1c + Follow) |
-| **P2** | [P2-bp-contracts.md](P2-bp-contracts.md) | R2, R3, R4 | P0 | queued |
-| **P3** | [P3-thin-waist.md](P3-thin-waist.md) | R1, R2, R3, R4, R5, R9 | P0, P2 | queued |
-| **P4** | [P4-enforce-config.md](P4-enforce-config.md) | R3, R5 | P3 | queued |
+| **P1** | [P1-plugin-registry.md](P1-plugin-registry.md) | R1, R6, R8 | P0, R0b′ | **DONE** — P1a #373 + P1b #374 + P1c #376 + Follow #378 |
+| **P2** | [P2-bp-contracts.md](P2-bp-contracts.md) | R2, R3, R4 | P0 | **DONE** — P2a #381 + P2b #384 + P2c #388 |
+| **P3** | [P3-thin-waist.md](P3-thin-waist.md) | R1, R2, R3, R4, R5, R9 | P0, P2 | **DONE** — P3a #389 + P3b-1 #391 + P3c #392 + P3b-2 #393 (P4 schema folded in) + P3d #395 |
+| **P4** | [P4-enforce-config.md](P4-enforce-config.md) | R3, R5 | P3 | **NEXT** — config schema landed in P3b-2 #393; per-project loader/E2E remain |
 | **P5–P7** | [P5-P7-tool-plugins.md](P5-P7-tool-plugins.md) | R6, R10 | P3 | queued |
 | **P8** | [P8-cursor-windsurf.md](P8-cursor-windsurf.md) | R6, R10 | P3 | queued |
 | **P9** | [P9-recall-strategies.md](P9-recall-strategies.md) | R7 | — | **DEFERRED** — own RFC |
