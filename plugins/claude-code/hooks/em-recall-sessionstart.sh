@@ -1,42 +1,40 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-05-08.1
+# episodic-memory-hook-version: 2026-06-18.1
 # em-recall-sessionstart.sh — RFC-002 Phase 3b SessionStart hook
 #
-# Mechanically invokes em-recall at session start. The effective side effect
-# is the marker activation: em-recall.mjs's shouldArmBp001Checkpoint
-# predicate runs unconditionally on session start (decoupled from
-# --task-type), and arms $CWD/.claude/.checkpoint-required whenever a recent
-# bp-001-implementation-workflow violation exists, which in turn arms
-# checkpoint-gate.sh.
+# RFC-008 P3d (F38/F60): the SessionStart enforcement side-effects (the
+# .session-baseline write, the legacy-plan-marker + preflight-orphan sweeps, and
+# the bp-001 advisory) RELOCATED out of the memory substrate (em-recall.mjs) into
+# the enforcement layer (enforce-contract.mjs --session-start). This hook now
+# invokes enforce-contract directly — exactly parallel to P3b-1's stop-gate.sh
+# repoint. em-recall is pure recall and is no longer called here: its recall body
+# was already discarded to /dev/null (#61, not yet surfaced as SessionStart
+# additionalContext), so the only observable output of the former call was the
+# advisory, which enforce-contract now emits.
 #
-# Known limitation (#61): em-recall stdout is redirected to /dev/null, so
-# violation warnings do NOT surface to the AI yet. Spec line 220 calls for
-# surfacing via SessionStart additionalContext JSON; the protocol work is
-# tracked under #61.
+# Per Codex review: parse cwd from stdin, cd to it, then run enforce-contract
+# with no project arg so cwd/git inference owns project resolution. This keeps
+# the enforcement layer's marker root and checkpoint-gate.sh's marker root
+# aligned (resolveRepoRoot() from the same cwd, byte-faithful with the former
+# em-recall resolution).
 #
-# Per Codex review: parse cwd from stdin, cd to it, then run em-recall with
-# no project arg so cwd/git inference owns project resolution. This keeps
-# em-recall's marker root and checkpoint-gate.sh's marker root aligned.
+# Idempotent: enforce-contract --session-start is best-effort and re-runnable
+# (multiple SessionStart firings, --resume, etc.) — the force-monotonic baseline
+# write tolerates re-invocation.
 #
-# Idempotent: em-recall.mjs:364 only writes the marker if it doesn't already
-# exist, so re-runs (multiple SessionStart firings, --resume, etc.) won't
-# clobber state.
-#
-# --session-start (#146 A2): em-recall writes/touches .session-baseline on
-# every invocation with this flag. The mtime of .session-baseline is the
-# stop-gate's reference point: any task-signal marker (.checkpoint-required,
-# .post-checkpoint-required, .plan-approval-pending) with mtime > baseline
-# was created mid-session and prevents the no-task-signal carve-out. Stale
-# .plan-approval-pending whose mtime predates the prior baseline is also
-# cleared here (orphan from a crashed prior session).
+# .session-baseline is the stop-gate's reference point: any task-signal marker
+# (.checkpoint-required, .post-checkpoint-required, .plan-approval-pending) with
+# mtime > baseline was created mid-session and prevents the no-task-signal
+# carve-out. Stale .plan-approval-pending predating the prior baseline is cleared
+# here (orphan from a crashed prior session).
 
 INPUT="$(cat)"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-EM_RECALL="$HOME/.episodic-memory/scripts/em-recall.mjs"
+ENFORCE="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
 
 _em_join_list() {
   local out=""
@@ -139,40 +137,29 @@ if [ -d "$CANONICAL_ROOT/.checkpoints" ]; then
   rm -f "$CANONICAL_ROOT"/.checkpoints/.so-runbook-shown.* 2>/dev/null || true
 fi
 
-# Soft-fail if em-recall isn't installed — sessions without episodic-memory
-# should still start cleanly.
-if [ ! -f "$EM_RECALL" ]; then
+# Soft-fail if enforce-contract isn't installed — sessions without
+# episodic-memory should still start cleanly.
+if [ ! -f "$ENFORCE" ]; then
   exit 0
 fi
 
 # If $CWD is invalid (nonexistent / unreadable), fail soft instead of running
-# em-recall in whatever directory the hook process inherited from. Per #70:
-# without this guard, em-recall.mjs:347-369 could touch .checkpoint-required
-# in an unrelated project, causing checkpoint-gate.sh to fire spuriously
-# in the next session of that wrong project.
+# enforce-contract in whatever directory the hook process inherited from. Per
+# #70: without this guard, the --session-start baseline write could land in an
+# unrelated project, causing checkpoint-gate.sh to fire spuriously in the next
+# session of that wrong project.
 if ! cd "$CWD" 2>/dev/null; then
   exit 0
 fi
 
-# Parse stdin .session_id for em-recall's --session-id flag (codex R1 P1.2:
-# bind from authoritative SessionStart stdin, not env var). Empty value →
-# omit the flag, preserving prior wrapper contract. Validation lives inside
-# em-recall.mjs (warn-on-invalid; no exit-non-zero per codex R2 Q3).
-MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")"
-
-# Planning-passive redesign (2026-05-25): em-recall no longer ARMS the
-# pre-checkpoint marker at session start. When a recent bp-001 violation
-# exists it now emits an ADVISORY on a dedicated `__BP1_ADVISORY__` stderr
-# sentinel (warning, not a block). Capture stderr (stdout still → /dev/null,
-# the recall body stays suppressed per the original #61 rationale) and surface
-# just the advisory line as SessionStart context — matching the plain-stdout
-# pattern warn_hook_freshness already uses.
-EM_ERR=""
-if [ -n "$MY_SID" ]; then
-  EM_ERR="$(node "$EM_RECALL" --limit 5 --session-start --session-id "$MY_SID" 2>&1 >/dev/null || true)"
-else
-  EM_ERR="$(node "$EM_RECALL" --limit 5 --session-start 2>&1 >/dev/null || true)"
-fi
+# Planning-passive redesign (2026-05-25): the pre-checkpoint marker is NOT armed
+# at session start. When a recent bp-001 violation exists, enforce-contract
+# --session-start emits an ADVISORY on a dedicated `__BP1_ADVISORY__` stderr
+# sentinel (warning, not a block). Capture stderr (stdout → /dev/null: the
+# side-effect mode emits no recall JSON) and surface just the advisory line as
+# SessionStart context — matching the plain-stdout pattern warn_hook_freshness
+# already uses.
+EM_ERR="$(node "$ENFORCE" --session-start 2>&1 >/dev/null || true)"
 
 BP1_ADVISORY="$(printf '%s\n' "$EM_ERR" | grep '^__BP1_ADVISORY__ ' | head -n1 | sed 's/^__BP1_ADVISORY__ //')"
 if [ -n "$BP1_ADVISORY" ]; then

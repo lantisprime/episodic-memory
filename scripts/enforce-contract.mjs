@@ -50,8 +50,15 @@ import { fileURLToPath } from 'node:url'
 import { resolveRepoRoot } from './lib/local-dir.mjs'
 import {
   BASELINE_NAME,
+  PRIMARY_MARKER_DIR,
+  LEGACY_MARKER_DIR,
+  PLAN_MARKER_LEGACY_BASENAME,
   writeMarkerPath,
+  ensurePrimaryDir,
+  bothMarkerPaths,
   namespacedMarkerBasenameForSession,
+  preflightMarkerSuffixedBasenameMatches,
+  lastUserPromptBasenameMatches,
 } from './lib/marker-paths.mjs'
 import {
   _maxMtimeAcrossRootsStrict,
@@ -59,6 +66,7 @@ import {
   resolveOwnSessionMarkerRead,
   stopGateCarveOutApplies,
 } from './lib/marker-state.mjs'
+import { computeBp001Advisory } from './lib/bp001-advisory.mjs'
 import { validateSessionId } from './lib/session-id.mjs'
 import { validateInstance } from './lib/json-instance-validate.mjs'
 import {
@@ -305,6 +313,120 @@ function appendEnforceAudit(markerRoot, line) {
 // install path still resolves as main. (Caught by test-stop-gate.sh's
 // /var/folders fixture during P3b-1 E2E; pinned by test-enforce-contract.mjs
 // "CLI via symlinked path".)
+// ---------------------------------------------------------------------------
+// SessionStart side-effects — RELOCATED from em-recall.mjs (RFC-008 P3d, F38/
+// F60). em-recall is now pure recall; the enforcement layer owns the baseline
+// write + marker sweeps + bp-001 advisory. Invoked via `enforce-contract
+// --session-start` from em-recall-sessionstart.sh (parallel to P3b-1's stop-gate
+// repoint). Semantics move VERBATIM from em-recall.mjs:562-774 — force-monotonic
+// baseline, dual-root MAX probe, lstat/symlink-skip defenses, 7-day orphan
+// guard. markerRoot is the single resolveRepoRoot() (writer+reader collapse onto
+// one root resolution — a drift REDUCTION vs the old split). Best-effort: each
+// block is independently guarded so one failure never aborts the rest, and the
+// caller exit(0)s regardless (carve-out simply stays inactive for the session).
+// ---------------------------------------------------------------------------
+function runSessionStartSideEffects(markerRoot) {
+  // (1) Legacy-plan-marker sweep (PR #314) + (2) preflight-orphan sweep (#283
+  // checkpoint-hygiene F4). Symlinks ignored (lstat-based; honest-agent model).
+  try {
+    ensurePrimaryDir(markerRoot)
+    for (const dir of [path.join(markerRoot, PRIMARY_MARKER_DIR), path.join(markerRoot, LEGACY_MARKER_DIR)]) {
+      const p = path.join(dir, PLAN_MARKER_LEGACY_BASENAME)
+      try {
+        const st = fs.lstatSync(p)
+        if (!st.isSymbolicLink()) fs.rmSync(p, { force: true })
+      } catch (e) {
+        if (e.code !== 'ENOENT') process.stderr.write(`enforce-contract: legacy-plan-marker-sweep skipped ${p}: ${e.code || e.message}\n`)
+      }
+    }
+    const PREFLIGHT_ORPHAN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+    const sweepCutoff = Date.now() - PREFLIGHT_ORPHAN_MAX_AGE_MS
+    const primaryDir = path.join(markerRoot, PRIMARY_MARKER_DIR)
+    let sweepEntries = []
+    try { sweepEntries = fs.readdirSync(primaryDir) } catch { sweepEntries = [] }
+    for (const name of sweepEntries) {
+      if (!preflightMarkerSuffixedBasenameMatches(name) && !lastUserPromptBasenameMatches(name)) continue
+      const p = path.join(primaryDir, name)
+      try {
+        const st = fs.lstatSync(p)
+        if (st.isSymbolicLink()) continue
+        if (!st.isFile()) continue
+        if (st.mtimeMs < sweepCutoff) fs.unlinkSync(p)
+      } catch (e) {
+        if (e.code !== 'ENOENT') process.stderr.write(`enforce-contract: preflight-orphan-sweep skipped ${p}: ${e.code || e.message}\n`)
+      }
+    }
+  } catch {
+    // Best-effort: a sweep failure leaves orphans for the next SessionStart.
+  }
+
+  // (3) bp-001 advisory — stderr sentinel surfaced as SessionStart
+  // additionalContext by the hook wrapper. Never a marker/block (planning-passive
+  // redesign): the pre-checkpoint requirement is lazily armed by checkpoint-gate.sh
+  // at the first repo-source write, not here. Episode load lives in
+  // lib/bp001-advisory.mjs (enforcement consuming the substrate — R1-valid).
+  try {
+    const advisory = computeBp001Advisory(markerRoot)
+    if (advisory) process.stderr.write(advisory + '\n')
+  } catch {
+    // Best-effort: advisory is a non-blocking signal.
+  }
+
+  // (4) SessionStart baseline write — M5 retime-and-rearm (#146 A2 + 2026-05-18
+  // orphan-deadlock fix). Force-monotonic: baseline.mtime = max(Date.now(),
+  // ceil(max(CR.mtime, PostR.mtime)) + 1) so the carve-out invariant
+  // marker.mtime <= baseline.mtime holds for every checkpoint marker observed,
+  // regardless of arming session. No rm of CR/PostR (concurrent-session-safe:
+  // a live session's marker is preserved; Stop unblocks because this baseline
+  // dominates). Probe both roots; +1 ms guarantees ordering on APFS/ext4/NTFS.
+  try {
+    ensurePrimaryDir(markerRoot)
+    let maxCheckpointMarkerMs = 0
+    const taskSignalQuartet = ['.checkpoint-required', '.post-checkpoint-required']
+    for (const name of taskSignalQuartet) {
+      // Legacy literal at both roots.
+      for (const p of bothMarkerPaths(markerRoot, name)) {
+        try {
+          const st = fs.lstatSync(p)
+          if (st.isSymbolicLink()) continue
+          if (st.mtimeMs > maxCheckpointMarkerMs) maxCheckpointMarkerMs = st.mtimeMs
+        } catch (e) {
+          if (e.code !== 'ENOENT') process.stderr.write(`enforce-contract: baseline-monotonic-probe skipped ${p}: ${e.code || e.message}\n`)
+        }
+      }
+      // Cross-session glob-expand `<name>.<*>` at both roots (the baseline must
+      // dominate all sessions' suffixed markers for every carve-out to hold).
+      const prefix = `${name}.`
+      for (const dir of [path.join(markerRoot, PRIMARY_MARKER_DIR), path.join(markerRoot, LEGACY_MARKER_DIR)]) {
+        let entries
+        try { entries = fs.readdirSync(dir) } catch (e) {
+          if (e.code !== 'ENOENT') process.stderr.write(`enforce-contract: baseline-monotonic-probe readdir skipped ${dir}: ${e.code || e.message}\n`)
+          continue
+        }
+        for (const ent of entries) {
+          if (!ent.startsWith(prefix)) continue
+          const p = path.join(dir, ent)
+          try {
+            const st = fs.lstatSync(p)
+            if (st.isSymbolicLink()) continue
+            if (st.mtimeMs > maxCheckpointMarkerMs) maxCheckpointMarkerMs = st.mtimeMs
+          } catch (e) {
+            if (e.code !== 'ENOENT') process.stderr.write(`enforce-contract: baseline-monotonic-probe skipped ${p}: ${e.code || e.message}\n`)
+          }
+        }
+      }
+    }
+    const baseline = writeMarkerPath(markerRoot, BASELINE_NAME)
+    fs.writeFileSync(baseline, '')
+    const baselineTargetMs = Math.max(Date.now(), Math.ceil(maxCheckpointMarkerMs) + 1)
+    const baselineTargetSec = baselineTargetMs / 1000
+    fs.utimesSync(baseline, baselineTargetSec, baselineTargetSec)
+  } catch {
+    // Best-effort: baseline write failure leaves the carve-out inactive for this
+    // session (the gate falls back to unconditional refuse — fail-CLOSED).
+  }
+}
+
 const isMain = (() => {
   if (!process.argv[1]) return false
   try {
@@ -319,6 +441,24 @@ if (isMain) {
     const i = argv.indexOf(name)
     if (i === -1 || i + 1 >= argv.length) return undefined
     return argv[i + 1]
+  }
+
+  // RFC-008 P3d (F6): --session-start is a side-effect mode (no block/allow
+  // decision) RELOCATED from em-recall.mjs. It MUST dispatch before the --gate
+  // required-check below (which exit(1)s on any non-`stop` value, so a bare
+  // --session-start would otherwise error). Always exit 0 — the hook wrapper
+  // treats this as best-effort (matches the former em-recall.mjs:773 fast-path
+  // exit). --session-id is accepted-and-ignored (the hook passes it; the baseline
+  // write is not session-scoped). Mutually exclusive with --gate (mirrors the
+  // former em-recall.mjs:124-127): combining them would silently skip the
+  // baseline write behind --gate's early exit.
+  if (argv.includes('--session-start')) {
+    if (flag('--gate') !== undefined) {
+      console.log(JSON.stringify({ status: 'error', message: '--session-start cannot be combined with --gate' }))
+      process.exit(1)
+    }
+    runSessionStartSideEffects(resolveRepoRoot())
+    process.exit(0)
   }
 
   const VALID_GATES = ['stop']

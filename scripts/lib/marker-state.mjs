@@ -201,10 +201,10 @@ export function _maxMtimeAcrossRootsForCheckpointMarkerOwnSessionStrict(
 // of primary and legacy baseline mtimes (whichever is most recent).
 // Per-marker mtime is the MAX across both roots.
 //
-// .session-baseline is written/touched by em-recall --session-start (called
-// from hooks/em-recall-sessionstart.sh). If missing at both roots, the
-// carve-out does not apply (conservative — pre-existing sessions before
-// this fix shipped).
+// .session-baseline is written/touched by enforce-contract --session-start
+// (called from hooks/em-recall-sessionstart.sh; relocated from em-recall in
+// RFC-008 P3d). If missing at both roots, the carve-out does not apply
+// (conservative — pre-existing sessions before this fix shipped).
 //
 // SubagentStop semantics (P1-1): the same predicate runs for SubagentStop.
 // A subagent that wrote files would have caused checkpoint-gate to arm

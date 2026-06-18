@@ -101,6 +101,10 @@ mk_fake_home() {
   # to load and the hook falls back to the loud-fail envelope (false pass).
   cp "$REPO_ROOT/scripts/lib/effective-tier.mjs" "$fake_home/.episodic-memory/scripts/lib/effective-tier.mjs"
   cp "$REPO_ROOT/scripts/lib/json-instance-validate.mjs" "$fake_home/.episodic-memory/scripts/lib/json-instance-validate.mjs"
+  # RFC-008 P3d (2026-06-18): enforce-contract.mjs imports bp001-advisory.mjs
+  # (the relocated --session-start bp-001 advisory). Load-time dep regardless of
+  # whether the stop gate calls it; omit it and the module fails to load.
+  cp "$REPO_ROOT/scripts/lib/bp001-advisory.mjs" "$fake_home/.episodic-memory/scripts/lib/bp001-advisory.mjs"
 }
 
 TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"

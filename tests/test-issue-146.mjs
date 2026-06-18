@@ -559,7 +559,9 @@ function mkE2EHome() {
   // effective-tier.mjs (min() algebra) + json-instance-validate.mjs (enforce-config
   // schema validation). Both zero-further-dep; omit either and enforce-contract
   // fails to load → the hook falls back to the loud-fail envelope (false fail).
-  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs', 'effective-tier.mjs', 'json-instance-validate.mjs']) {
+  // RFC-008 P3d: enforce-contract gained the --session-start relocation — it
+  // imports bp001-advisory.mjs (the relocated bp-001 advisory). Same load-time dep.
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs', 'effective-tier.mjs', 'json-instance-validate.mjs', 'bp001-advisory.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }
