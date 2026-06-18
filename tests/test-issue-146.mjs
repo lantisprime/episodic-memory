@@ -2,14 +2,14 @@
 // test-issue-146.mjs — Tests for #146 session-start deadlock fix.
 //
 // Coverage:
-//   L1 — em-recall --gate stop carve-out behavior (subprocess + temp repo)
+//   L1 — enforce-contract --gate stop carve-out behavior (subprocess + temp repo)
 //        - 1.1 baseline absent → block (back-compat)
 //        - 1.2 baseline + all-stale → allow (carve-out fires)
 //        - 1.3 baseline + plan-pending newer → block (active plan in flight)
 //        - 1.4 baseline + .checkpoint-required newer → block (re-armed mid-session)
 //        - 1.5 baseline + .post-checkpoint-required newer → block
 //        - 1.6 baseline + plan-pending older (orphan) → allow
-//   L2 — em-recall --session-start side effects
+//   L2 — enforce-contract --session-start side effects
 //        - 2.1 first run creates .session-baseline
 //        - 2.2 second run touches baseline mtime forward
 //        - 2.3 stale .plan-approval-pending cleared on second run
@@ -29,7 +29,8 @@ import os from 'os'
 import path from 'path'
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname)
-const EM_RECALL = path.join(REPO_ROOT, 'scripts', 'em-recall.mjs')
+// RFC-008 P3d (F38/F60): the stop gate (--gate stop) and SessionStart
+// side-effects (--session-start) both relocated em-recall.mjs → enforce-contract.mjs.
 const ENFORCE = path.join(REPO_ROOT, 'scripts', 'enforce-contract.mjs')
 
 let pass = 0
@@ -60,15 +61,16 @@ function mkRepo(label) {
   return d
 }
 
-// Isolated HOME directory for the whole test run. Pinning HOME ensures
-// em-recall reads only the test's local episode store (none seeded), so
-// shouldArmBp001Checkpoint() returns false and the arming block doesn't
-// re-create .checkpoint-required after our cleanup.
+// Isolated HOME directory for the whole test run. Pinning HOME ensures the
+// bp-001 advisory (enforce-contract --session-start) reads only the test's
+// global episode store (none seeded), so no advisory fires after our cleanup.
+// RFC-008 P3d: the stop gate (--gate stop) and SessionStart side-effects
+// (--session-start) both relocated em-recall.mjs → enforce-contract.mjs.
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'em-146-home-'))
 fs.mkdirSync(path.join(TEST_HOME, '.episodic-memory', 'episodes'), { recursive: true })
 
 function runGateStop(cwd) {
-  const r = spawnSync('node', [EM_RECALL, '--gate', 'stop'], {
+  const r = spawnSync('node', [ENFORCE, '--gate', 'stop'], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, HOME: TEST_HOME }
   })
@@ -78,7 +80,7 @@ function runGateStop(cwd) {
 }
 
 function runSessionStart(cwd, extraArgs = []) {
-  const r = spawnSync('node', [EM_RECALL, '--session-start', '--limit', '1', ...extraArgs], {
+  const r = spawnSync('node', [ENFORCE, '--session-start', ...extraArgs], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, HOME: TEST_HOME }
   })
@@ -214,7 +216,7 @@ console.log('\n=== L1 — stop-gate carve-out behavior ===')
 }
 
 // ============================================================================
-console.log('\n=== L2 — em-recall --session-start side effects ===')
+console.log('\n=== L2 — enforce-contract --session-start side effects ===')
 // ============================================================================
 
 // 2.1 first run creates .session-baseline
@@ -496,7 +498,7 @@ console.log('\n=== L3 — same-class extension, symlink defense, flag combo ==='
 // the SessionStart-only baseline write.
 {
   const d = mkRepo('3-4'); cleanupDirs.push(d)
-  const r = spawnSync('node', [EM_RECALL, '--session-start', '--gate', 'stop'], {
+  const r = spawnSync('node', [ENFORCE, '--session-start', '--gate', 'stop'], {
     cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
   })
   if (r.status === 1 && r.stdout.includes('cannot be combined')) {
@@ -526,7 +528,7 @@ console.log('\n=== L4 — Runtime-integration E2E (hook chain via real shell) ==
 // Exercises the actual hook scripts (em-recall-sessionstart.sh, stop-gate.sh,
 // checkpoint-gate.sh) the way Claude Code invokes them — piping JSON
 // through bash. This is the "real flow" that subprocess unit tests don't
-// cover. Sandbox: fake HOME with em-recall + lib copied in, fake project
+// cover. Sandbox: fake HOME with enforce-contract + lib copied in, fake project
 // with empty .episodic-memory/. Closes the BP-1 step 8 gap flagged in
 // violation episode 20260505-123354-...-0088.
 
@@ -541,31 +543,24 @@ function mkE2EHome() {
   // Fake canonical install path expected by stop-gate.sh:58
   const scripts = path.join(home, '.episodic-memory', 'scripts')
   fs.mkdirSync(path.join(scripts, 'lib'), { recursive: true })
-  fs.copyFileSync(EM_RECALL, path.join(scripts, 'em-recall.mjs'))
-  // RFC-008 P3b-1: stop-gate.sh now invokes enforce-contract.mjs (the stop
-  // decision relocated out of em-recall, byte-identical). The L4 runtime-E2E
-  // runs the real STOP_HOOK, so the fake canonical install MUST include it or
-  // the hook hits its loud-fail "not found" envelope. Its import closure
-  // (local-dir, marker-paths, marker-state, session-id) is copied below.
+  // RFC-008 P3b-1/P3d: both hooks exercised here (em-recall-sessionstart.sh via
+  // --session-start, stop-gate.sh via --gate stop) now invoke enforce-contract.mjs
+  // — em-recall.mjs is no longer load-bearing for the enforcement E2E (F38/F60),
+  // so it is NOT staged. The L4 runtime-E2E runs the real hooks, so the fake
+  // canonical install MUST include enforce-contract.mjs + its full import closure
+  // or the hook hits its loud-fail "not found" envelope. Closure:
+  //   local-dir, marker-paths (.checkpoints/ migration) — module-load imports
+  //   marker-state (P3a, relocated from stop-gate-helpers; imports marker-paths)
+  //   session-id (2026-05-18 concurrent-session fix)
+  //   effective-tier + json-instance-validate (P3b-2 tier/clamp layer)
+  //   bp001-advisory (P3d, relocated bp-001 advisory)
+  // Omit any and enforce-contract fails to load → hook falls back to loud-fail.
   fs.copyFileSync(ENFORCE, path.join(scripts, 'enforce-contract.mjs'))
-  // em-recall imports scripts/lib/{local-dir,marker-paths}.mjs at module load.
-  // .checkpoints/ migration: marker-paths.mjs ships alongside local-dir.mjs;
-  // omit it and em-recall fails to load (same fix as test-stop-gate.sh's
-  // mk_fake_home).
-  // 2026-05-18 concurrent-session fix: em-recall now imports session-id.mjs.
-  // RFC-008 P3a: em-recall imports marker-state.mjs (relocated from
-  // stop-gate-helpers.mjs); marker-state imports the already-copied marker-paths.mjs.
-  // RFC-008 P3b-2: enforce-contract gained the effective-tier layer — it imports
-  // effective-tier.mjs (min() algebra) + json-instance-validate.mjs (enforce-config
-  // schema validation). Both zero-further-dep; omit either and enforce-contract
-  // fails to load → the hook falls back to the loud-fail envelope (false fail).
-  // RFC-008 P3d: enforce-contract gained the --session-start relocation — it
-  // imports bp001-advisory.mjs (the relocated bp-001 advisory). Same load-time dep.
   for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs', 'effective-tier.mjs', 'json-instance-validate.mjs', 'bp001-advisory.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }
-  // Empty episodes dir so shouldArmBp001Checkpoint returns false
+  // Empty episodes dir so the bp-001 advisory finds no recent violation.
   fs.mkdirSync(path.join(home, '.episodic-memory', 'episodes'), { recursive: true })
   return home
 }

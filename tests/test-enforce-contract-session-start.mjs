@@ -156,5 +156,29 @@ console.log('=== enforce-contract --session-start side-effects ===')
   eq('S8: armed marker → no decision on stdout', r.stdout, '')
 }
 
+// S9 — --session-id is accepted-and-ignored (the baseline write is not
+// session-scoped). Folds in the coverage from the retired
+// test-em-recall-session-id-binding.mjs: under purification em-recall's
+// validateSessionId path is GONE, so a malformed/valid sid must NOT crash, NOT
+// emit a validateSessionId warning, and must NOT suppress the sweeps. (The old
+// em-recall --session-start emitted "failed validateSessionId" on a bad sid;
+// enforce-contract --session-start silently ignores the flag.)
+{
+  const repo = mkGitRepo()
+  writeMarker(primaryMarkerPath(repo, PLAN_MARKER_LEGACY_BASENAME), 200)
+  const rBad = runSessionStart(repo, ['--session-id', '../../etc/passwd'])
+  eq('S9: malformed --session-id → exit 0 (accepted-and-ignored)', rBad.status, 0)
+  truthy('S9: malformed --session-id → no validateSessionId warning on stderr',
+    !/validateSessionId/.test(rBad.stderr), `stderr=${rBad.stderr}`)
+  eq('S9: legacy plan-marker still swept with --session-id present',
+    fs.existsSync(primaryMarkerPath(repo, PLAN_MARKER_LEGACY_BASENAME)), false)
+
+  const repo2 = mkGitRepo()
+  const rOk = runSessionStart(repo2, ['--session-id', '35522aab-5f44-4b84-b1cc-035cca7b9305'])
+  eq('S9: valid --session-id → exit 0', rOk.status, 0)
+  truthy('S9: valid --session-id → baseline written',
+    fs.existsSync(primaryMarkerPath(repo2, BASELINE_NAME)))
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 if (fail > 0) { console.log('\nFailures:'); for (const f of failures) console.log(`  - ${f}`); process.exit(1) }

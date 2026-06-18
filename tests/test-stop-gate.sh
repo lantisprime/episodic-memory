@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# test-stop-gate.sh — Tests for #128 hooks/stop-gate.sh + em-recall --gate stop
+# test-stop-gate.sh — Tests for #128 hooks/stop-gate.sh + enforce-contract --gate stop
 #
-# Three layers per feedback_bp1_step9_filing_trigger.md sister lesson
+# RFC-008 P3d (F38/F60): the stop decision relocated em-recall.mjs →
+# enforce-contract.mjs (--gate stop). The former Layer-1 `em-recall --gate stop`
+# subprocess unit cases were RETIRED here — that decision logic is now owned by
+# enforce-contract and unit-tested directly in test-enforce-contract.mjs (suite A,
+# incl. A9 migrated from the old L1.4 zero-byte edge). This file keeps the hook
+# integration + failure-scenario layers, which exercise the real stop-gate.sh →
+# enforce-contract path.
+#
+# Layers per feedback_bp1_step9_filing_trigger.md sister lesson
 # `20260504-113349-...-3ef1` (Layer-3 explicit failure-scenario tests):
-#   Layer 1 — em-recall --gate stop unit cases (subprocess; controlled fixtures)
 #   Layer 2 — stop-gate.sh integration (simulated hook input piped through shell)
 #   Layer 3 — explicit failure scenarios (corrupt marker, missing .claude,
 #             worktree-cwd resolution, SubagentStop conversion, hook-script
 #             missing, stop_hook_active short-circuit, malformed JSON input)
+#   Layer 4 — M5 retime-and-rearm contract (enforce-contract --session-start)
 #
 # Defensive ordering per feedback_test_resource_existence_check.md: every
 # state assertion is paired with an existence check on the artifact at
@@ -18,7 +26,7 @@ set -e
 
 REPO_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$REPO_ROOT/plugins/claude-code/hooks/stop-gate.sh"
-EM_RECALL="$REPO_ROOT/scripts/em-recall.mjs"
+ENFORCE="$REPO_ROOT/scripts/enforce-contract.mjs"
 
 PASS=0
 FAIL=0
@@ -49,30 +57,24 @@ mk_repo() {
     git commit -q -m init )
 }
 
-# Run em-recall --gate stop with REPO_ROOT-pinned cwd; returns stdout.
-gate_stop() {
-  local cwd="$1"
-  ( cd "$cwd" && node "$EM_RECALL" --gate stop 2>/dev/null )
-}
-
 # Pipe a synthetic hook input JSON through the hook script. Mocks
-# HOME so the hook resolves the canonical em-recall to our repo's copy.
+# HOME so the hook resolves the canonical enforce-contract to our repo's copy.
 run_hook() {
   local input_json="$1"
   local fake_home="$2"
   echo "$input_json" | HOME="$fake_home" bash "$HOOK" 2>/dev/null
 }
 
-# Build a fake HOME with em-recall.mjs at the canonical install path so
-# the hook's lookup at "$HOME/.episodic-memory/scripts/em-recall.mjs"
-# resolves correctly. The fake HOME also gets a copy of the resolver lib
-# so em-recall.mjs's import works.
+# Build a fake HOME with enforce-contract.mjs at the canonical install path so
+# the hook's lookup at "$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+# resolves correctly. The fake HOME also gets a copy of the import closure so
+# enforce-contract.mjs loads. RFC-008 P3d: em-recall.mjs is no longer staged —
+# stop-gate.sh + em-recall-sessionstart.sh both invoke enforce-contract now.
 mk_fake_home() {
   local fake_home="$1"
   rm -rf "$fake_home"
   mkdir -p "$fake_home/.episodic-memory/scripts/lib"
-  cp "$REPO_ROOT/scripts/em-recall.mjs" "$fake_home/.episodic-memory/scripts/em-recall.mjs"
-  # RFC-008 P3b-1 (2026-06-15): stop-gate.sh now invokes enforce-contract.mjs
+  # RFC-008 P3b-1 (2026-06-15): stop-gate.sh invokes enforce-contract.mjs
   # (the stop decision relocated OUT of em-recall into the enforcement layer,
   # byte-identical). Stage it + its full import closure (marker-state,
   # marker-paths, local-dir, session-id — all copied below) so the hook's
@@ -81,16 +83,16 @@ mk_fake_home() {
   # passing the test for the wrong reason.
   cp "$REPO_ROOT/scripts/enforce-contract.mjs" "$fake_home/.episodic-memory/scripts/enforce-contract.mjs"
   cp "$REPO_ROOT/scripts/lib/local-dir.mjs" "$fake_home/.episodic-memory/scripts/lib/local-dir.mjs"
-  # 2026-05-09 .checkpoints/ migration: em-recall now also imports
+  # 2026-05-09 .checkpoints/ migration: enforce-contract imports
   # marker-paths.mjs; without it the module fails to load and the hook
-  # falls back to the canned em-recall-non-zero error message.
+  # falls back to the loud-fail block envelope.
   cp "$REPO_ROOT/scripts/lib/marker-paths.mjs" "$fake_home/.episodic-memory/scripts/lib/marker-paths.mjs"
-  # RFC-008 P3a (2026-06-15): em-recall imports marker-state.mjs (relocated
+  # RFC-008 P3a (2026-06-15): enforce-contract imports marker-state.mjs (relocated
   # from stop-gate-helpers.mjs) for the active-plan exemption
   # (_maxMtimeAcrossRootsStrict). marker-state imports the already-copied
   # marker-paths.mjs.
   cp "$REPO_ROOT/scripts/lib/marker-state.mjs" "$fake_home/.episodic-memory/scripts/lib/marker-state.mjs"
-  # 2026-05-18 concurrent-session fix: em-recall imports session-id.mjs for
+  # 2026-05-18 concurrent-session fix: enforce-contract imports session-id.mjs for
   # the --session-id flag (codex R1 P1.2; logging-only in v6 sweep).
   cp "$REPO_ROOT/scripts/lib/session-id.mjs" "$fake_home/.episodic-memory/scripts/lib/session-id.mjs"
   # RFC-008 P3b-2 (2026-06-17): enforce-contract.mjs gained the effective-tier
@@ -111,56 +113,12 @@ TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # ============================================================================
-# Layer 1 — em-recall --gate stop unit cases
+# Layer 1 — RETIRED (RFC-008 P3d). The `em-recall --gate stop` subprocess unit
+# cases (no-marker→allow, armed→block, post-done size semantics, invalid-gate
+# error) moved to test-enforce-contract.mjs suite A (A1/A2/A3 + A9 for the
+# zero-byte post-done edge; C1/C2 for the invalid-gate error). enforce-contract
+# is the sole owner of the stop decision; Layer 2 below exercises the hook path.
 # ============================================================================
-echo ""
-echo "=== Layer 1: em-recall --gate stop unit cases ==="
-
-L1_REPO="$TMP_ROOT/L1"
-mk_repo "$L1_REPO"
-mkdir -p "$L1_REPO/.claude"
-
-# 1.1 No marker → empty stdout → allow
-out="$(gate_stop "$L1_REPO")"
-if [ -z "$out" ]; then pass "L1.1: no marker → empty stdout (allow)"
-else fail "L1.1: no marker → empty stdout" "got: $out"
-fi
-
-# 1.2 Marker armed, post-done empty → block JSON
-touch "$L1_REPO/.claude/.checkpoint-required"
-out="$(gate_stop "$L1_REPO")"
-if echo "$out" | grep -q '"decision":"block"'; then pass "L1.2: armed + post-empty → block"
-else fail "L1.2: armed + post-empty → block" "got: $out"
-fi
-
-# Defensive existence check: the marker we set still exists at this point.
-if [ -f "$L1_REPO/.claude/.checkpoint-required" ]; then pass "L1.2 (defensive): marker still present at check time"
-else fail "L1.2 defensive existence" "marker disappeared between setup and assertion"
-fi
-
-# 1.3 Marker armed, post-done non-empty → empty stdout (allow)
-echo "post-checkpoint content" > "$L1_REPO/.claude/.post-checkpoint-done"
-out="$(gate_stop "$L1_REPO")"
-if [ -z "$out" ]; then pass "L1.3: armed + post-non-empty → empty stdout (allow)"
-else fail "L1.3: armed + post-non-empty" "got: $out"
-fi
-
-# 1.4 Marker armed, post-done exists but EMPTY (size 0) → block (size matters, not presence)
-rm "$L1_REPO/.claude/.post-checkpoint-done"
-touch "$L1_REPO/.claude/.post-checkpoint-done"
-out="$(gate_stop "$L1_REPO")"
-if echo "$out" | grep -q '"decision":"block"'; then pass "L1.4: armed + post-zero-bytes → block"
-else fail "L1.4: armed + post-zero-bytes → block" "got: $out"
-fi
-
-# 1.5 Invalid --gate value → error JSON, exit 1
-set +e
-out="$(node "$EM_RECALL" --gate prewrite 2>&1)"
-rc=$?
-set -e
-if [ "$rc" = "1" ] && echo "$out" | grep -q "Invalid --gate"; then pass "L1.5: invalid --gate → error + exit 1"
-else fail "L1.5: invalid --gate" "rc=$rc out=$out"
-fi
 
 # ============================================================================
 # Layer 2 — stop-gate.sh integration via piped JSON
@@ -201,15 +159,15 @@ fi
 rm "$L2_REPO/.claude/.post-checkpoint-done"
 
 # 2.4 stop_hook_active=true → hook short-circuits BEFORE invoking node
-# (verify by removing em-recall from the fake home; if the hook still
+# (verify by removing enforce-contract from the fake home; if the hook still
 # exits 0 with no output, we know it never tried to call it)
-rm "$L2_HOME/.episodic-memory/scripts/em-recall.mjs"
+rm "$L2_HOME/.episodic-memory/scripts/enforce-contract.mjs"
 input_active='{"session_id":"test","stop_hook_active":true}'
 out="$(cd "$L2_REPO" && run_hook "$input_active" "$L2_HOME")"
 if [ -z "$out" ]; then pass "L2.4: stop_hook_active=true → short-circuit (no node call)"
-else fail "L2.4: stop_hook_active short-circuit" "got: $out (expected empty; em-recall was deliberately removed)"
+else fail "L2.4: stop_hook_active short-circuit" "got: $out (expected empty; enforce-contract was deliberately removed)"
 fi
-# Restore em-recall for subsequent tests
+# Restore enforce-contract for subsequent tests
 mk_fake_home "$L2_HOME"
 
 # ============================================================================
@@ -326,9 +284,9 @@ fi
 # 3.8 BYPASS REGRESSION (Codex round-1 finding 1, P1):
 # Hook PROCESS cwd is /private/tmp (outside any project) but hook INPUT JSON
 # has cwd pointing at the armed repo. Pre-fix: stop-gate.sh ignored input
-# cwd → em-recall resolveRepoRoot resolved from /private/tmp → silently
+# cwd → enforce-contract resolveRepoRoot resolved from /private/tmp → silently
 # allowed Stop on the armed project. Post-fix: hook parses input cwd,
-# cd's to it, em-recall reads main repo's .claude/ correctly → blocks.
+# cd's to it, enforce-contract reads main repo's .claude/ correctly → blocks.
 mkdir -p "$L3_MAIN/.claude"
 touch "$L3_MAIN/.claude/.checkpoint-required"
 rm -f "$L3_MAIN/.claude/.post-checkpoint-done"
@@ -350,18 +308,18 @@ else fail "L3.8 defensive existence" "marker disappeared between setup and asser
 fi
 
 # 3.9 INVALID .cwd graceful-fail: input cwd points at non-existent dir.
-# Per #70 wrong-project class, we must NOT run em-recall in whatever cwd
+# Per #70 wrong-project class, we must NOT run enforce-contract in whatever cwd
 # the hook process inherited. Hook should fail-soft (empty stdout = allow).
 input_bad_cwd='{"cwd":"/nonexistent-path-for-test","stop_hook_active":false}'
 out="$(cd "$L3_MAIN" && echo "$input_bad_cwd" | HOME="$L3_HOME" bash "$HOOK" 2>/dev/null)"
 # Note: even though we cd'd to L3_MAIN (which has armed marker), the bad
 # input .cwd takes precedence. The hook tries to cd to the bad path, fails,
-# and exits 0 with no decision (graceful — don't run em-recall in
+# and exits 0 with no decision (graceful — don't run enforce-contract in
 # inherited cwd to avoid #70 wrong-project bug).
 if [ -z "$out" ]; then
   pass "L3.9: invalid input .cwd → fail-soft, no decision (#70 wrong-project guard)"
 else
-  fail "L3.9: invalid cwd graceful-fail" "got: $out (expected empty; should not run em-recall in inherited cwd)"
+  fail "L3.9: invalid cwd graceful-fail" "got: $out (expected empty; should not run enforce-contract in inherited cwd)"
 fi
 
 # 3.10 Empty .cwd in input falls back to pwd (canonical pattern).
@@ -406,7 +364,7 @@ touch -t "$(date -r $PAST_TS '+%Y%m%d%H%M.%S')" "$L4_REPO/.checkpoints/.checkpoi
   touch -d "@$PAST_TS" "$L4_REPO/.checkpoints/.checkpoint-required"
 
 # Fire SessionStart on the repo (force-monotonic baseline writes).
-( cd "$L4_REPO" && HOME="$L4_HOME" node "$EM_RECALL" --session-start --limit 1 >/dev/null 2>&1 ) || true
+( cd "$L4_REPO" && HOME="$L4_HOME" node "$ENFORCE" --session-start >/dev/null 2>&1 ) || true
 
 # Marker MUST be preserved (M5 contract: no rm of CR/PostR).
 if [ -e "$L4_REPO/.checkpoints/.checkpoint-required" ]; then

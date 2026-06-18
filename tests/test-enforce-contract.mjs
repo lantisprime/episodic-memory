@@ -159,6 +159,18 @@ console.log('=== A: decideStop() pure-function unit cases ===')
     d.reason.includes(writeMarkerPath(repo, namespacedMarkerBasenameForSession('.post-checkpoint-done', sid))), true)
 }
 
+// A9 — armed + post-checkpoint-done present but ZERO BYTES → block (size matters,
+// not presence). Migrated from the retired test-stop-gate.sh Layer-1 case L1.4
+// when its `em-recall --gate stop` unit layer was retired in P3d.
+{
+  const repo = mkRepo()
+  writeMarker(primaryMarkerPath(repo, '.checkpoint-required'), 200)
+  writeMarker(primaryMarkerPath(repo, '.post-checkpoint-done'), 200, '') // present but empty
+  const d = decideStop({ repoRoot: repo, sid: null })
+  truthy('A9: armed + zero-byte post-done → block (size, not presence)',
+    d && d.decision === 'block', `got ${JSON.stringify(d)}`)
+}
+
 // === B (RETIRED — RFC-008 P3d) ===
 // The em-recall `--gate stop` parity suite was DELETED here. em-recall's `--gate`
 // handler is gone (F38/F60 STRICT DELETION), so parity against it is dead — a

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * test-em-recall-plan-marker-sweep.mjs — Direct em-recall --session-start
- * invocations exercising the post-2026-05-18 sweep policy:
+ * test-em-recall-plan-marker-sweep.mjs — Direct enforce-contract --session-start
+ * invocations exercising the post-2026-05-18 sweep policy (the sweep relocated
+ * from em-recall.mjs to enforce-contract.mjs in RFC-008 P3d; this suite keeps
+ * the concurrent-session SID-A/SID-B cases not covered by the S-suite):
  *
  *   - Legacy suffix-less `.plan-approval-pending` swept UNCONDITIONALLY at
  *     primary + legacy roots, regardless of baseline state
@@ -28,7 +30,8 @@ import os from 'os'
 import { spawnSync } from 'child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const EM_RECALL = path.join(REPO, 'scripts', 'em-recall.mjs')
+// RFC-008 P3d: SessionStart side-effects relocated em-recall.mjs → enforce-contract.mjs --session-start (F38/F60).
+const ENFORCE = path.join(REPO, 'scripts', 'enforce-contract.mjs')
 
 let passed = 0
 let failed = 0
@@ -67,7 +70,7 @@ function touchWithMtime(p, secondsAgo) {
 }
 
 function runSessionStart(cwd, extraArgs = []) {
-  const args = [EM_RECALL, '--limit', '5', '--session-start', ...extraArgs]
+  const args = [ENFORCE, '--session-start', ...extraArgs]
   return spawnSync('node', args, { cwd, encoding: 'utf8' })
 }
 

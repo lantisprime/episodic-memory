@@ -21,6 +21,7 @@ import crypto from 'crypto'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { eventsVersion } from './scripts/lib/version-hash.mjs'
+import { findEnforcementTokens } from './scripts/lib/em-recall-purity.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
@@ -263,6 +264,33 @@ function copyDirRecursive(src, dst) {
 }
 
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
+
+// ---------------------------------------------------------------------------
+// F45 (RFC-008 P3d): em-recall purity sentinel. em-recall.mjs is the memory
+// SUBSTRATE and must carry ZERO enforcement code (RFC-008:83,85) — the stop gate
+// (--gate stop), the SessionStart side-effects (--session-start: baseline write +
+// marker sweeps), and the bp-001 advisory all relocated to enforce-contract.mjs.
+// Assert the JUST-DEPLOYED em-recall is pure. A dirty installed copy means the
+// install SOURCE is a stale pre-v11 (pre-purification) checkout; deploying it
+// would re-couple enforcement into the substrate (double-running the stop gate,
+// re-arming markers from recall). Fail loudly rather than ship that.
+// Single source of the token class: scripts/lib/em-recall-purity.mjs (Rule 14;
+// CI grep-guard tests/test-em-recall-purity.mjs scans the repo source, this
+// scans the deployed copy).
+// ---------------------------------------------------------------------------
+const installedEmRecall = path.join(SCRIPTS_DIR, 'em-recall.mjs')
+if (fs.existsSync(installedEmRecall)) {
+  const leaked = findEnforcementTokens(fs.readFileSync(installedEmRecall, 'utf8'))
+  if (leaked.length > 0) {
+    console.error(
+      `FATAL: installed em-recall.mjs contains enforcement tokens [${leaked.join(', ')}] ` +
+      `(RFC-008 P3d F45). The install source is a stale pre-v11 (pre-purification) em-recall — ` +
+      `the stop gate / SessionStart side-effects now live in enforce-contract.mjs. ` +
+      `Re-install from an episodic-memory checkout at v11+.`
+    )
+    process.exit(1)
+  }
+}
 
 // 1a. Seed default LLM-classifier config if absent. Idempotent — existing
 // project/global configs win via the loader's env > project > global > defaults

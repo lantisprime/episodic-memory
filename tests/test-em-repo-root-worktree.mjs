@@ -32,6 +32,11 @@ import { resolveRepoRoot } from '../scripts/lib/local-dir.mjs'
 
 const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts')
 const RECALL = path.join(SCRIPTS, 'em-recall.mjs')
+// RFC-008 P3d (F38/F60): SessionStart side-effects (baseline write + sweeps)
+// relocated em-recall.mjs → enforce-contract.mjs --session-start. The
+// --session-start root-resolution tests target ENFORCE; the two NEG tests below
+// invoke plain em-recall recall (RECALL) and assert it is marker-side-effect-free.
+const ENFORCE = path.join(SCRIPTS, 'enforce-contract.mjs')
 const STORE = path.join(SCRIPTS, 'em-store.mjs')
 const SESSION_END = path.join(SCRIPTS, 'em-session-end-prompt.mjs')
 
@@ -196,35 +201,35 @@ function clearMarkers() {
   }
 }
 
-test('em-recall from main writes .session-baseline at <main>/.checkpoints/ (no marker armed)', () => {
+test('session-start from main writes .session-baseline at <main>/.checkpoints/ (no marker armed)', () => {
   clearMarkers()
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: mainRepo, stdio: ['ignore', 'ignore', 'ignore'],
   })
-  // Root-resolution observed via baseline; em-recall no longer arms the marker.
-  assert.ok(fs.existsSync(mainBaseline), `expected ${mainBaseline} after em-recall from main`)
-  assert.ok(!fs.existsSync(worktreeBaseline), `unexpected ${worktreeBaseline} after em-recall from main`)
-  assert.ok(!fs.existsSync(mainMarker), `em-recall must NOT arm ${mainMarker} (planning-passive)`)
+  // Root-resolution observed via baseline; session-start never arms the marker.
+  assert.ok(fs.existsSync(mainBaseline), `expected ${mainBaseline} after session-start from main`)
+  assert.ok(!fs.existsSync(worktreeBaseline), `unexpected ${worktreeBaseline} after session-start from main`)
+  assert.ok(!fs.existsSync(mainMarker), `session-start must NOT arm ${mainMarker} (planning-passive)`)
 })
 
-test('em-recall from linked worktree writes .session-baseline at <main>/.checkpoints/, NOT worktree', () => {
+test('session-start from linked worktree writes .session-baseline at <main>/.checkpoints/, NOT worktree', () => {
   clearMarkers()
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
   // Positive: baseline landed at main repo root.
   assert.ok(
     fs.existsSync(mainBaseline),
-    `expected ${mainBaseline} after em-recall from worktree (regressed #106)`,
+    `expected ${mainBaseline} after session-start from worktree (regressed #106)`,
   )
   // Negative: baseline did NOT land at worktree (the #106 bug-shape assertion).
   assert.ok(
     !fs.existsSync(worktreeBaseline),
     `baseline leaked into worktree: ${worktreeBaseline} (this is the #106 bug)`,
   )
-  // em-recall must not arm the marker anywhere (planning-passive).
+  // session-start must not arm the marker anywhere (planning-passive).
   assert.ok(!fs.existsSync(mainMarker) && !fs.existsSync(worktreeMarker),
-    `em-recall must NOT arm .checkpoint-required (planning-passive)`)
+    `session-start must NOT arm .checkpoint-required (planning-passive)`)
   // Defensive existence check: verify the worktree dir itself wasn't deleted
   // out from under us before the assertion, which would make the negative
   // check vacuously pass.
@@ -234,14 +239,14 @@ test('em-recall from linked worktree writes .session-baseline at <main>/.checkpo
   )
 })
 
-test('em-recall from nested cwd inside worktree still writes .session-baseline at <main>/.checkpoints/', () => {
+test('session-start from nested cwd inside worktree still writes .session-baseline at <main>/.checkpoints/', () => {
   clearMarkers()
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: nestedDir, stdio: ['ignore', 'ignore', 'ignore'],
   })
   assert.ok(fs.existsSync(mainBaseline))
   assert.ok(!fs.existsSync(worktreeBaseline), `baseline leaked into worktree from nested cwd`)
-  assert.ok(!fs.existsSync(mainMarker), `em-recall must NOT arm marker (planning-passive)`)
+  assert.ok(!fs.existsSync(mainMarker), `session-start must NOT arm marker (planning-passive)`)
 })
 
 test('em-session-end-prompt from worktree cleans markers at <main>, not worktree', () => {
@@ -308,14 +313,14 @@ test('NEG: stale worktree-local marker (pre-fix legacy state) is preserved, not 
   fs.writeFileSync(worktreeMarkerLegacy, 'legacy-from-pre-106')
   assert.ok(fs.existsSync(worktreeMarkerLegacy), 'pre-condition: legacy worktree marker seeded')
 
-  execSync(`node ${RECALL} --session-start --scope local --project test --no-track`, {
+  execSync(`node ${ENFORCE} --session-start`, {
     cwd: worktreeRoot, stdio: ['ignore', 'ignore', 'ignore'],
   })
 
-  // New behavior: em-recall writes the .session-baseline at main/.checkpoints/
-  // (and never arms a marker). Root-resolution still lands at main.
+  // New behavior: enforce-contract --session-start writes the .session-baseline
+  // at main/.checkpoints/ (and never arms a marker). Root-resolution lands at main.
   assert.ok(fs.existsSync(mainBaseline), 'baseline should land at main/.checkpoints/')
-  assert.ok(!fs.existsSync(mainMarker), 'em-recall must NOT arm a marker (planning-passive)')
+  assert.ok(!fs.existsSync(mainMarker), 'session-start must NOT arm a marker (planning-passive)')
   // Legacy worktree marker preserved verbatim — we don't read or modify
   // worktree-local state.
   assert.ok(fs.existsSync(worktreeMarkerLegacy), 'legacy worktree marker should be untouched')
@@ -331,8 +336,8 @@ test('NEG: em-recall from non-git cwd degrades gracefully (no crash, no cross-st
   // From a non-git cwd:
   //   - resolveRepoRoot returns cwd (no main repo to converge on)
   //   - LOCAL_DIR = <cwd>/.episodic-memory (does not exist; loadIndex returns [])
-  //   - global store has no bp-001 violation either (test seed lives in mainRepo)
-  //   - shouldArmBp001Checkpoint returns false → armCheckpointMarker never runs
+  //   - em-recall is now pure recall (RFC-008 P3d): it has NO marker-arming path
+  //     at all, so it cannot write a marker regardless of bp-001 state
   //   - em-recall exits 0 with empty episodes
   // Assertion shape: no crash, no marker anywhere, no .claude/ dir spuriously created.
   let exitOk = true
@@ -348,17 +353,18 @@ test('NEG: em-recall from non-git cwd degrades gracefully (no crash, no cross-st
   // No marker created at cwd, main, or worktree.
   assert.ok(
     !fs.existsSync(path.join(nonGitDirReal, '.claude')),
-    `.claude/ created at non-git cwd — activator armed spuriously`,
+    `.claude/ created at non-git cwd — em-recall recall wrote a marker (must be side-effect-free)`,
   )
   assert.ok(!fs.existsSync(mainMarker), 'non-git cwd should not write to main repo')
   assert.ok(!fs.existsSync(worktreeMarker), 'non-git cwd should not write to worktree')
 })
 
-test('NEG: em-recall with no recent bp-001 violation does NOT arm marker (activator no-op)', () => {
+test('NEG: em-recall recall is marker-side-effect-free (no arming path post-purification)', () => {
   clearMarkers()
-  // Use a fresh ephemeral repo with NO seeded violation. shouldArmBp001Checkpoint
-  // returns false → armCheckpointMarker is never called → no marker written.
-  // Verifies the activator does not spuriously create marker files.
+  // Use a fresh ephemeral repo with NO seeded violation. em-recall is pure
+  // recall (RFC-008 P3d): it has no marker-arming code path at all, so a recall
+  // invocation can never create a marker file. (Pre-purification this guarded
+  // the now-deleted shouldArmBp001Checkpoint/armCheckpointMarker activator.)
   const cleanRepo = path.join(tmpRoot, 'clean')
   fs.mkdirSync(cleanRepo, { recursive: true })
   git(cleanRepo, 'init -q -b main')
@@ -382,19 +388,18 @@ test('NEG: em-recall with no recent bp-001 violation does NOT arm marker (activa
 
   assert.ok(
     !fs.existsSync(cleanMarkerPrimary),
-    `unexpected marker at ${cleanMarkerPrimary} — activator armed without violation evidence`,
+    `unexpected marker at ${cleanMarkerPrimary} — em-recall recall wrote a marker (must be side-effect-free)`,
   )
   assert.ok(
     !fs.existsSync(cleanMarkerLegacy),
-    `unexpected legacy marker at ${cleanMarkerLegacy} — activator wrote to legacy path`,
+    `unexpected legacy marker at ${cleanMarkerLegacy} — em-recall recall wrote to legacy path`,
   )
-  // Defensive: prove neither dir was mkdir'd by armCheckpointMarker. After
-  // .checkpoints/ migration, ensurePrimaryDir is the gate; if armCheckpoint
-  // had run we'd see .checkpoints/. Legacy .claude/ also asserted absent
-  // because armCheckpointMarker should never touch it.
+  // Defensive: prove neither dir was created by the recall invocation. em-recall
+  // recall must never create .checkpoints/ or legacy .claude/; if either appears
+  // the recall path regained a marker side-effect.
   assert.ok(
     !fs.existsSync(path.join(cleanRepoReal, '.checkpoints')),
-    `.checkpoints/ dir created without arming — armCheckpointMarker ran spuriously`,
+    `.checkpoints/ dir created by em-recall recall — recall regained a marker side-effect`,
   )
   assert.ok(
     !fs.existsSync(path.join(cleanRepoReal, '.claude')),

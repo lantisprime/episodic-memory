@@ -33,7 +33,8 @@ import { spawnSync } from 'child_process'
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const PLAN_GATE = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'plan-gate.sh')
 const HELPER = path.join(REPO, 'scripts', 'plan-marker.mjs')
-const EM_RECALL = path.join(REPO, 'scripts', 'em-recall.mjs')
+// RFC-008 P3d: SessionStart side-effects relocated em-recall.mjs → enforce-contract.mjs --session-start (F38/F60).
+const ENFORCE = path.join(REPO, 'scripts', 'enforce-contract.mjs')
 const SESSION_END = path.join(REPO, 'scripts', 'em-session-end-prompt.mjs')
 
 let passed = 0
@@ -135,10 +136,10 @@ function check(cond, label) {
   fs.writeFileSync(path.join(ck, '.plan-approval-pending'), '')
   const markerMs = Date.now() / 1000 - 1800  // 30m ago — NEWER than baseline
   fs.utimesSync(path.join(ck, '.plan-approval-pending'), markerMs, markerMs)
-  const r = spawnSync('node', [EM_RECALL, '--session-start', '--no-track', '--limit', '1'], {
+  const r = spawnSync('node', [ENFORCE, '--session-start'], {
     cwd: root, encoding: 'utf8'
   })
-  check(r.status === 0, `X4a em-recall --session-start exit 0 (got ${r.status})`)
+  check(r.status === 0, `X4a enforce-contract --session-start exit 0 (got ${r.status})`)
   check(!fs.existsSync(path.join(ck, '.plan-approval-pending')), `X4a: legacy swept (regardless of baseline mtime — codex R1 P1.4)`)
 }
 
@@ -157,10 +158,10 @@ function check(cond, label) {
     fs.utimesSync(path.join(ck, f), oldMs, oldMs)
   }
   fs.writeFileSync(path.join(ck, '.session-baseline'), '')
-  const r = spawnSync('node', [EM_RECALL, '--session-start', '--no-track', '--limit', '1', '--session-id', '35522aab-5f44-4b84-b1cc-035cca7b9305'], {
+  const r = spawnSync('node', [ENFORCE, '--session-start', '--session-id', '35522aab-5f44-4b84-b1cc-035cca7b9305'], {
     cwd: root, encoding: 'utf8'
   })
-  check(r.status === 0, `X4b em-recall --session-start exit 0 (got ${r.status})`)
+  check(r.status === 0, `X4b enforce-contract --session-start exit 0 (got ${r.status})`)
   check(fs.existsSync(path.join(ck, '.plan-approval-pending.A')), `X4b: suffixed A PRESERVED (post-fix; codex R1 P1.1 + R2 P1)`)
   check(fs.existsSync(path.join(ck, '.plan-approval-pending.B')), `X4b: suffixed B PRESERVED`)
   check(fs.existsSync(path.join(ck, '.plan-approval-pending.C')), `X4b: suffixed C PRESERVED`)

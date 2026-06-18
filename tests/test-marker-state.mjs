@@ -206,6 +206,25 @@ const SID = 'abc-123'
   fs.symlinkSync('/nonexistent', primaryMarkerPath(repo, PLAN_MARKER_LEGACY_BASENAME))
   eq('carve-out: symlinked plan-marker → false (fail-closed)', stopGateCarveOutApplies(repo, SID), false)
 }
+{
+  // Cross-session foreign-sid exclusion (#268 regression). Restored here from the
+  // retired test-em-recall-session-aware.mjs X1/X5 when its --gate stop subprocess
+  // layer was deleted in RFC-008 P3d — this two-sid case had no other surviving
+  // owner. Session A's own-session marker newer than baseline must NOT block
+  // session B's stop: the carve-out reads only the CURRENT sid's marker (+ legacy
+  // literal), excluding foreign-sid suffixed markers.
+  const repo = mkRepo()
+  writeMarker(primaryMarkerPath(repo, BASELINE_NAME), 1000)
+  const sidA = 'sess-foreign-A'
+  const sidB = 'sess-current-B'
+  const foreignMarker = primaryMarkerPath(repo, `.checkpoint-required.${sidA}`)
+  writeMarker(foreignMarker, 2000) // A's marker newer than baseline (A is mid-session)
+  eq('carve-out: foreign-session marker does NOT block current session B → true',
+    stopGateCarveOutApplies(repo, sidB), true)
+  // Carve-out is read-only — A's marker must survive (B's Stop never disarms A).
+  eq('carve-out: foreign-session marker preserved (read-only carve-out)',
+    fs.existsSync(foreignMarker), true)
+}
 
 // ---------------------------------------------------------------------------
 console.log(`\n${pass} passed, ${fail} failed`)
