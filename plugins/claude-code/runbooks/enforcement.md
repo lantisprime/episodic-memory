@@ -150,9 +150,27 @@ cross-checks `invocation_modality` against §8 and the manifest.
 
 ## §10 — Config / taxonomy cross-binding
 
-Auto-derived from `manifest.json` (the per-project `enforce-config.json` schema
-lands in P4 — until then M7f 10a is present-and-parses only). M7f byte-diffs the
+Auto-derived from `manifest.json` + the per-project `enforce-config.json` schema
+(`patterns/enforce-config.schema.json`, landed P3b-2 #393; the 4 bp-001 gates wired
+P4a / P3b-2; the layer-wide `active:false` consult added P4c). M7f byte-diffs the
 block below against the derived source-of-truth.
+
+**Layer-wide kill switch (R5, P4c).** Beyond the 4 bp-001 gates, EVERY ec enforcement
+hook honors the project-level `active:false` switch via one gate-agnostic consult:
+
+```
+node "$HOME/.episodic-memory/scripts/enforce-contract.mjs" --layer-active --marker-root <ABS_REPO_ROOT>
+```
+
+It prints exactly `inactive` to stdout when enforcement is OFF for the project, and
+NOTHING on every other outcome — active, an M8-duplicate registry (R6, non-silenceable),
+a missing/relative `--marker-root`, or any error — so the caller keeps enforcing
+(fail-closed). Consumers skip their enforcement ONLY on an exact-string `inactive`;
+any other result (incl. a non-zero exit / ENOENT from a degraded install) falls through
+to enforcement. The `marker_write` + helper-invocation substrate-trust guards (R4,
+NON-overridable) are NOT silenced by the switch. External hooks NOT shipped by ec
+(e.g. a user-global `compound-bash-gate.sh`) MAY opt in with a ~3-line read of this
+same consult.
 
 <!-- CONFIG:BEGIN -->
 **10a — Configuration.**

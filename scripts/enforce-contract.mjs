@@ -362,6 +362,34 @@ export function gateDisposition({ duplicate, harnessCap, contractTier, active, c
   return { token: 'enforce', hcTier, effTier }
 }
 
+/**
+ * layerDisposition — pure LAYER-WIDE activation resolution (no I/O, no exit).
+ * The gate-AGNOSTIC sibling of gateDisposition (RFC-008 P4c, R5): serves the
+ * operator's project-wide enforcement kill switch (enforce-config.json
+ * {"active":false}) at the LAYER level, for every ec enforcement hook that is NOT
+ * one of the 4 bp-001 gates (preflight-gate.sh, second-opinion-gate.mjs, the
+ * SessionStart token-cost path, and any external opt-in hook).
+ *
+ * Precedence is byte-identical to gateDisposition (M8 duplicate REAL-blocks BEFORE
+ * the active:false silence): a corrupt/duplicate registry (R6/M8) is NEVER
+ * silenceable by an operator opt-out.
+ *
+ *   'block'    — M8: >1 active enforcement plugin binds this harness. Corrupt
+ *                install; non-silenceable (caller keeps enforcing).
+ *   'inactive' — operator set active:false (R5). The whole layer is OFF for this
+ *                project; the caller skips its enforcement.
+ *   'active'   — enforcement ON. The fail-closed default: every miss/garbage config
+ *                resolves here via loadEnforceConfig's identity {active:true}.
+ *
+ * @param {{duplicate:boolean, active:boolean}} o
+ * @returns {{token:'block'|'inactive'|'active'}}
+ */
+export function layerDisposition({ duplicate, active }) {
+  if (duplicate) return { token: 'block' }
+  if (active === false) return { token: 'inactive' }
+  return { token: 'active' }
+}
+
 // ---------------------------------------------------------------------------
 // CLI — the ONLY I/O + process.exit boundary. Invoked by hooks/stop-gate.sh as
 // `node enforce-contract.mjs --gate stop [--session-id <sid>]`. Empty stdout =
@@ -522,7 +550,32 @@ if (isMain) {
       console.log(JSON.stringify({ status: 'error', message: '--session-start cannot be combined with --gate' }))
       process.exit(1)
     }
-    runSessionStartSideEffects(resolveRepoRoot())
+    // M5/F2: resolve the marker root ONCE and thread it to BOTH the active-check
+    // and the side-effects — no second resolveRepoRoot() to diverge mid-invocation.
+    const ssRoot = resolveRepoRoot()
+    // RFC-008 P4c F1-fold (R5/P6): honor the layer-wide kill switch on the
+    // SessionStart token-cost path too — active:false skips the baseline write +
+    // sweeps + bp-001 advisory (the dominant SessionStart cost). A schema-
+    // resolution MISS yields loadEnforceConfig's identity {active:true} ⇒ RUN the
+    // side-effects (fail-closed to DOING the work; a resolution failure never skips
+    // baseline/sweeps).
+    const ssContractRoot = resolveContractRoot()
+    const ssSchema = ssContractRoot ? readJsonSafe(path.join(ssContractRoot, 'patterns', 'enforce-config.schema.json')) : null
+    const ssCfg = loadEnforceConfig(ssRoot, ssSchema)
+    // Deliberate asymmetry vs --layer-active (review observation): this checks raw
+    // cfg.active WITHOUT the M8-duplicate precedence. Safe + fail-closed — skipping
+    // the SessionStart baseline only REMOVES an allow-arming carve-out; the stop gate
+    // blocks independently on M8 (non-silenceable), so a skipped baseline under
+    // active:false+duplicate can only make enforcement stricter, never weaker.
+    if (!ssCfg.active) {
+      appendEnforceAudit(ssRoot, `${BP_ID} session-start side-effects skipped (active:false) — no baseline/sweeps/advisory (R5 layer silence)`)
+      process.stderr.write(
+        'enforce-contract: notice — enforcement disabled for this project via ' +
+        '.episodic-memory/enforce-config.json {"active":false}; session-start side-effects skipped (R5 layer silence).\n',
+      )
+      process.exit(0)
+    }
+    runSessionStartSideEffects(ssRoot)
     process.exit(0)
   }
 
@@ -576,6 +629,44 @@ if (isMain) {
       process.stderr.write(`enforce-contract: >1 active enforcement plugin binds harness "${THIS_HARNESS}" (M8/R6); ${resolveGate} gate NOT silenceable by active:false — fix plugins/_index.json. No token emitted → gate enforces.\n`)
     }
     // token 'enforce' (or 'block'): no stdout → bash keeps blocking (fail-closed).
+    process.exit(0)
+  }
+
+  // RFC-008 P4c (R5): --layer-active --marker-root <abs> resolves the LAYER-WIDE
+  // enforcement kill switch (enforce-config.json {"active":false}) for ONE project
+  // and prints a CLOSED safe token to stdout (`inactive`) — nothing else. Every ec
+  // enforcement hook that is NOT one of the 4 bp-001 gates (preflight-gate.sh,
+  // second-opinion-gate.mjs, and external opt-in hooks) calls this EARLY and skips
+  // its enforcement ONLY on an exact-equality `inactive`. Therefore every failure
+  // path here — missing/relative --marker-root, unresolved registry, M8 duplicate
+  // (NON-silenceable, R6), base-active — prints NO token and the caller keeps
+  // enforcing (fail-closed, B1). Precedence mirrors gateDisposition: M8 duplicate ⊐
+  // active:false. --marker-root is passed EXPLICITLY by the caller (the repo root it
+  // already resolved + realpath'd); this mode NEVER calls resolveRepoRoot (F4 — no
+  // second resolution to diverge → the P3b-1 /var isMain fail-open class cannot
+  // recur). All diagnostics go to stderr; stdout is the token alone.
+  if (argv.includes('--layer-active')) {
+    const mr = flag('--marker-root')
+    if (mr === undefined || !path.isAbsolute(mr)) {
+      process.stderr.write(`enforce-contract: --layer-active requires an absolute --marker-root (got ${mr === undefined ? 'none' : `"${mr}"`}); no token emitted → layer enforces.\n`)
+      process.exit(0)
+    }
+    const cRoot = resolveContractRoot()
+    const reg = cRoot ? readJsonSafe(path.join(cRoot, 'plugins', '_index.json')) : null
+    const cSchema = cRoot ? readJsonSafe(path.join(cRoot, 'patterns', 'enforce-config.schema.json')) : null
+    // event is immaterial to the duplicate flag (resolveHarnessCap filters by
+    // harness/type/status; only `tier` is event-scoped, and we read only duplicate).
+    const hRes = reg ? resolveHarnessCap(reg, THIS_HARNESS, 'pre_tool_use') : { tier: null, duplicate: false }
+    const cfg = loadEnforceConfig(mr, cSchema)
+    const disp = layerDisposition({ duplicate: hRes.duplicate, active: cfg.active })
+    if (disp.token === 'inactive') {
+      appendEnforceAudit(mr, `layer enforcement disabled (active:false) — all ec gates silenced for this project (R5)`)
+      process.stderr.write(`enforce-contract: notice — enforcement disabled for this project via .episodic-memory/enforce-config.json {"active":false}; ALL ec gates silenced (R5 layer silence).\n`)
+      console.log('inactive')
+    } else if (disp.token === 'block') {
+      process.stderr.write(`enforce-contract: >1 active enforcement plugin binds harness "${THIS_HARNESS}" (M8/R6); layer NOT silenceable by active:false — fix plugins/_index.json. No token emitted → layer enforces.\n`)
+    }
+    // token 'active' (or 'block'): no stdout → caller keeps enforcing (fail-closed).
     process.exit(0)
   }
 
