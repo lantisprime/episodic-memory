@@ -296,6 +296,32 @@ if [ "$CLAIM_CLASS" != "codex-review-handoff" ]; then
   exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# RFC-008 P4c (R5): layer-wide enforcement kill switch.
+# Placed AFTER the claim-class early-exit (F-PERF-1) so it spawns the consult ONLY
+# for an actual codex-review-handoff — the one enforcement this gate applies and
+# the only thing the switch silences — never for the ~all non-handoff Write/Edit/
+# Bash/Agent calls. It also sits AFTER the non-overridable marker-write (:136-195)
+# + helper-invocation (:216-283) guards, which protect substrate trust (R4:
+# marker_write NON-overridable) and MUST survive active:false (planner G4).
+#
+# FAIL-CLOSED capture (reviewer F1): the script runs under `set -e` (line 2), so a
+# naive `OUT="$(node …)"` that ENOENTs (degraded install) would ABORT the gate →
+# exit 1 → PreToolUse non-blocking → tool proceeds UN-gated (the exact inverse of
+# the kill switch). Capture inside an explicit `set +e` block (mirror the
+# canonicalize pattern at :142-151) and skip enforcement ONLY on the exact string
+# `inactive`. Every other outcome — non-zero exit, ENOENT, empty, stderr-only, any
+# non-`inactive` string — falls through to enforcement (2>/dev/null discards the
+# node stderr so it can never leak into the captured token).
+# ---------------------------------------------------------------------------
+LAYER_ACTIVE_CONSULT="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+set +e
+LAYER_DISP="$(node "$LAYER_ACTIVE_CONSULT" --layer-active --marker-root "$REPO_ROOT" 2>/dev/null)"
+set -e
+if [ "$LAYER_DISP" = "inactive" ]; then
+  exit 0
+fi
+
 # #279 fix: prefer per-session marker `.preflight-done.<SESSION_ID>`, fall
 # back to legacy `.preflight-done` during burn-in. Resolution is purely a
 # local file existence check; the cross-session-stomp bug occurs only on

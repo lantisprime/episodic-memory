@@ -49,6 +49,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 
 // resolveRepoRoot is dynamically imported inside checkRunbookGate so a
 // missing local-dir.mjs (orphan/partial install) cannot preempt the gate
@@ -75,7 +76,34 @@ const MIN_QUICKREF_BYTES = 64
 // Pure helpers — no side effects at module load.
 // ---------------------------------------------------------------------------
 
+// RFC-008 P4c (R5): the layer-wide enforcement kill switch is consulted LAZILY —
+// only when a block is IMMINENT (inside emitBlock), never on the allow path. The
+// marker-root is resolved ONCE in main() (the only async step) and stored here; the
+// consult spawn itself is sync. Consulting at the single block-emission chokepoint
+// gives three properties at once: (a) NO per-call node-spawn on the ~all allow paths
+// (F-PERF-2 / P6); (b) the `inactive` audit line is written only when a REAL block is
+// silenced (F-IO-1) — exactly when the operator wants the trail; (c) ALL block paths
+// (runbook, snapshot, timeout-floor, bash, agent) honor the switch uniformly.
+let _layerConsultMarkerRoot = null
+
+function layerInactiveConsult() {
+  // FAIL-CLOSED (reviewer G1): return true (→ silence) ONLY on an exact `inactive`
+  // from the SAME global enforce-contract --layer-active the bash gates use. An
+  // unresolved marker-root, spawn ENOENT (status===null), non-zero exit, stderr-only
+  // output, timeout, or any non-`inactive` stdout → false → keep enforcing. F-OBS-1:
+  // a bounded timeout so a hung consult can't stall the gated tool call (a timed-out
+  // spawn yields status===null / no stdout → already fail-closed).
+  if (!_layerConsultMarkerRoot) return false
+  const consult = path.join(os.homedir(), '.episodic-memory', 'scripts', 'enforce-contract.mjs')
+  const res = spawnSync(process.execPath, [consult, '--layer-active', '--marker-root', _layerConsultMarkerRoot], { encoding: 'utf8', timeout: 5000 })
+  return typeof res.stdout === 'string' && res.stdout.trim() === 'inactive'
+}
+
 function emitBlock(reason, extra = {}) {
+  // RFC-008 P4c: a project with enforce-config.json {"active":false} silences the
+  // WHOLE second-opinion gate — honored at this single block chokepoint. Inactive →
+  // allow instead of block; any non-`inactive` consult result still blocks (fail-closed).
+  if (layerInactiveConsult()) emitAllow()
   console.log(JSON.stringify({ decision: 'block', reason, ...extra }))
   process.exit(0)
 }
@@ -338,6 +366,18 @@ async function main() {
   const toolName = input.tool_name || ''
   const toolInput = input.tool_input || {}
   const cwd = input.cwd || process.cwd()
+
+  // ─── RFC-008 P4c (R5): resolve the kill-switch marker-root ONCE (async). ─
+  // The actual consult is LAZY — it fires inside emitBlock, only when a block is
+  // imminent (F-PERF-2). Here we only do the one async step: resolve the repo root
+  // from cwd via the SAME resolveRepoRoot the runbook gate uses, then realpath it
+  // (G2 — parity with bash `cd -P`; NO cross-resolution path-equality, so the P3b-1
+  // isMain fail-open class cannot recur). Unresolvable → stays null → emitBlock's
+  // consult fails CLOSED (keeps enforcing).
+  try {
+    const mod = await import(new URL('./lib/local-dir.mjs', import.meta.url).href)
+    _layerConsultMarkerRoot = fs.realpathSync(mod.resolveRepoRoot(cwd))
+  } catch { /* unresolved repo root → null → fail-closed at the emitBlock consult */ }
 
   // ─── Timeout-floor + runbook gate fire BEFORE validator/snapshot work. ─
   // Codex r2 P1: validator import failure / snapshot errors MUST NOT

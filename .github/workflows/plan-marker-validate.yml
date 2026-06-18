@@ -99,6 +99,12 @@ jobs:
       - name: Run --resolve-gate bash bridge contract (RFC-008 P4a, F5 — exact-token match, ||-envelope fail-closed, plan-gate honors silence/clamp)
         run: bash tests/test-resolve-gate-bridge.sh
 
+      - name: Run --layer-active per-project kill switch (RFC-008 P4c, R5 — layerDisposition + closed-token CLI + F1 session-start fold)
+        run: node tests/test-layer-active.mjs
+
+      - name: Run --layer-active bash+node bridge (RFC-008 P4c, R5 — preflight + second-opinion honor inactive; F1 ENOENT fail-closed; G4 marker-write survives)
+        run: bash tests/test-layer-active-bridge.sh
+
       - name: Run enforce-contract --session-start side-effects relocation (RFC-008 P3d)
         run: node tests/test-enforce-contract-session-start.mjs
 
