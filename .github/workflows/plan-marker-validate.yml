@@ -93,6 +93,12 @@ jobs:
       - name: Run enforce-contract --gate stop relocation + parity + tier layer (RFC-008 P3b-1/P3b-2)
         run: node tests/test-enforce-contract.mjs
 
+      - name: Run --resolve-gate per-project pre_tool_use consult (RFC-008 P4a, R3/R5 — gateDisposition + closed-token CLI)
+        run: node tests/test-resolve-gate.mjs
+
+      - name: Run --resolve-gate bash bridge contract (RFC-008 P4a, F5 — exact-token match, ||-envelope fail-closed, plan-gate honors silence/clamp)
+        run: bash tests/test-resolve-gate-bridge.sh
+
       - name: Run enforce-contract --session-start side-effects relocation (RFC-008 P3d)
         run: node tests/test-enforce-contract-session-start.mjs
 

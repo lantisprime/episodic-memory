@@ -74,6 +74,8 @@ import {
   clampTier,
   effectiveTierStrong,
   eventActionId,
+  GATE_EVENT_MAP,
+  GATE_CONTRACT_KEY,
 } from './lib/effective-tier.mjs'
 
 // The harness this enforcement layer runs for (stop-gate.sh is the claude-code
@@ -182,6 +184,23 @@ function realpathOrNull(p) {
 
 function readJsonSafe(abs) {
   try { return JSON.parse(fs.readFileSync(abs, 'utf8')) } catch { return null }
+}
+
+/**
+ * Navigate a dotted contract path (GATE_CONTRACT_KEY value, e.g. "gates.plan_approval"
+ * or "stop.tier") and return the leaf iff it is a string; null otherwise. Used to read
+ * the per-gate contract tier out of bp-001.json: `gates.<gate>` is a bare tier string,
+ * `stop.tier` is the nested stop marker-state tier. A non-object intermediate or a
+ * non-string leaf returns null ⇒ the effective-tier fold treats it as no-clamp
+ * (base-STRONG), so a malformed contract can never weaken a gate (B1).
+ */
+function dottedGet(obj, dotted) {
+  let cur = obj
+  for (const k of String(dotted).split('.')) {
+    if (cur == null || typeof cur !== 'object') return null
+    cur = cur[k]
+  }
+  return typeof cur === 'string' ? cur : null
 }
 
 /**
@@ -295,6 +314,52 @@ function appendEnforceAudit(markerRoot, line) {
     fs.mkdirSync(dir, { recursive: true })
     fs.appendFileSync(path.join(dir, 'enforce-audit.log'), `${new Date().toISOString()} ${line}\n`)
   } catch { /* best-effort; never block the gate on an audit write */ }
+}
+
+/**
+ * gateDisposition — pure per-gate (pre_tool_use) resolution (no I/O, no exit).
+ * The pre_tool_use sibling of decideStop: the CLI boundary resolves the registry/
+ * contract/config reads and passes them in; this returns a CLOSED disposition token
+ * the bash gate consumes. The bash gate BLOCKS by default and skips its block ONLY
+ * on an explicit safe token (F5 fail-closed inversion vs the stop gate's
+ * empty=allow), so any disposition that is not 'silence'/'clamp-off' keeps the gate
+ * enforcing.
+ *
+ * Ordering is load-bearing (F7 — parity with the stop path enforce-contract.mjs:
+ * M8 duplicate REAL-blocks BEFORE the active:false silence). A corrupt registry is
+ * NOT silenceable by an operator opt-out, by design.
+ *
+ *   'block'     — M8: >1 active enforcement plugin binds this harness. Corrupt
+ *                 install; non-silenceable. (Stdout-wise identical to 'enforce' —
+ *                 both keep the gate blocking — but distinguished for the audit/
+ *                 diagnostic and to encode the precedence explicitly.)
+ *   'silence'   — operator set active:false (R5). Gate does not fire.
+ *   'clamp-off' — effective tier resolves to a pre_tool_use action other than
+ *                 `block` (MEDIUM=warn / WEAK=inject) via a deliberate operator
+ *                 clamp. Gate is degraded to allow (the MEDIUM side-band warn is
+ *                 satisfied by the CLI's appendEnforceAudit; WEAK's next-turn inject
+ *                 is not reachable from a PreToolUse hook and is approximated by the
+ *                 audit line — documented).
+ *   'enforce'   — base STRONG (action `block`), OR any unresolved/unknown action
+ *                 (events.json missing, '—', 'unsupported'): fail-closed to blocking.
+ *
+ * @param {{duplicate:boolean, harnessCap:?string, contractTier:?string,
+ *          active:boolean, configTier:?string, events:?object, event:string}} o
+ * @returns {{token:'block'|'silence'|'clamp-off'|'enforce', hcTier:?string, effTier:?string}}
+ */
+export function gateDisposition({ duplicate, harnessCap, contractTier, active, configTier, events, event }) {
+  if (duplicate) return { token: 'block', hcTier: null, effTier: null }
+  if (active === false) return { token: 'silence', hcTier: null, effTier: null }
+  const hcTier = effectiveTierStrong([harnessCap, contractTier])
+  const effTier = clampTier(hcTier, configTier)
+  // eventActionId is NOT null-safe (the stop path guards `events &&` at its call
+  // site — enforce-contract.mjs:526). A null events.json (unresolved contract root)
+  // ⇒ no action ⇒ fail-closed enforce: a resolution miss never clamps a gate off.
+  const action = events ? eventActionId(events, event, effTier) : null
+  if (action === 'block') return { token: 'enforce', hcTier, effTier }
+  if (action === 'warn' || action === 'inject') return { token: 'clamp-off', hcTier, effTier }
+  // Unknown / unsupported / '—' (unresolved events.json) ⇒ fail-closed enforce.
+  return { token: 'enforce', hcTier, effTier }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +523,59 @@ if (isMain) {
       process.exit(1)
     }
     runSessionStartSideEffects(resolveRepoRoot())
+    process.exit(0)
+  }
+
+  // RFC-008 P4a (R3/R5): --resolve-gate <plan_approval|pre_checkpoint|post_checkpoint>
+  // resolves the per-project effective disposition for ONE pre_tool_use gate and
+  // prints a CLOSED safe token to stdout (`silence` | `clamp-off`) — nothing else.
+  // The bash gate (plan-gate.sh / checkpoint-gate.sh) BLOCKS by default and skips
+  // its block ONLY on an exact-equality match of a safe token (F5). Therefore every
+  // failure path here — bad gate name, missing/relative --marker-root, unresolved
+  // contract, M8 duplicate, base-STRONG — prints NO token and the gate keeps
+  // blocking (fail-closed, B1). Dispatched BEFORE the --gate required-check (it has
+  // no --gate). --marker-root is passed EXPLICITLY by the bash gate (the REPO_ROOT
+  // it already resolved from hook-input .cwd); this mode NEVER calls resolveRepoRoot
+  // (F4 — no second resolution to diverge → the P3b-1 /var isMain fail-open class
+  // cannot recur). All diagnostics go to stderr; stdout is the token alone.
+  const resolveGate = flag('--resolve-gate')
+  if (resolveGate !== undefined) {
+    const VALID_RESOLVE_GATES = ['plan_approval', 'pre_checkpoint', 'post_checkpoint']
+    if (!VALID_RESOLVE_GATES.includes(resolveGate)) {
+      process.stderr.write(`enforce-contract: --resolve-gate "${resolveGate}" invalid (expected one of ${VALID_RESOLVE_GATES.join(', ')}); no token emitted → gate enforces.\n`)
+      process.exit(0)
+    }
+    const mr = flag('--marker-root')
+    if (mr === undefined || !path.isAbsolute(mr)) {
+      process.stderr.write(`enforce-contract: --resolve-gate requires an absolute --marker-root (got ${mr === undefined ? 'none' : `"${mr}"`}); no token emitted → gate enforces.\n`)
+      process.exit(0)
+    }
+    const event = GATE_EVENT_MAP[resolveGate] // 'pre_tool_use' (F8)
+    const cRoot = resolveContractRoot()
+    const reg = cRoot ? readJsonSafe(path.join(cRoot, 'plugins', '_index.json')) : null
+    const cDoc = cRoot ? readJsonSafe(path.join(cRoot, 'patterns', 'bp-001.json')) : null
+    const evs = cRoot ? readJsonSafe(path.join(cRoot, 'patterns', 'events.json')) : null
+    const cSchema = cRoot ? readJsonSafe(path.join(cRoot, 'patterns', 'enforce-config.schema.json')) : null
+    const hRes = reg ? resolveHarnessCap(reg, THIS_HARNESS, event) : { tier: null, duplicate: false }
+    const cfg = loadEnforceConfig(mr, cSchema)
+    const contractTier = dottedGet(cDoc, GATE_CONTRACT_KEY[resolveGate]) // gates.<gate>
+    const configTier = (cfg.bps[BP_ID] && typeof cfg.bps[BP_ID][resolveGate] === 'string') ? cfg.bps[BP_ID][resolveGate] : null
+    const disp = gateDisposition({
+      duplicate: hRes.duplicate, harnessCap: hRes.tier, contractTier,
+      active: cfg.active, configTier, events: evs, event,
+    })
+    if (disp.token === 'silence') {
+      appendEnforceAudit(mr, `${resolveGate} gate silenced (active:false) for ${BP_ID} (R5)`)
+      process.stderr.write(`enforce-contract: notice — ${resolveGate} gate silenced for this project via .episodic-memory/enforce-config.json {"active":false} (R5).\n`)
+      console.log('silence')
+    } else if (disp.token === 'clamp-off') {
+      appendEnforceAudit(mr, `${resolveGate} gate degraded ${disp.hcTier}->${disp.effTier} for ${BP_ID} (deliberate operator clamp via enforce-config.json)`)
+      process.stderr.write(`enforce-contract: notice — ${resolveGate} gate degraded ${disp.hcTier}→${disp.effTier} for ${BP_ID} via .episodic-memory/enforce-config.json (M4 audit → .episodic-memory/enforce-audit.log).\n`)
+      console.log('clamp-off')
+    } else if (disp.token === 'block') {
+      process.stderr.write(`enforce-contract: >1 active enforcement plugin binds harness "${THIS_HARNESS}" (M8/R6); ${resolveGate} gate NOT silenceable by active:false — fix plugins/_index.json. No token emitted → gate enforces.\n`)
+    }
+    // token 'enforce' (or 'block'): no stdout → bash keeps blocking (fail-closed).
     process.exit(0)
   }
 

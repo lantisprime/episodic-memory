@@ -55,13 +55,13 @@ export const GATE_CONTRACT_KEY = {
   stop: "stop.tier",
 };
 
-// Which gates P3b-2 LIVE-wires into a runtime decision. ONLY the stop gate this
-// slice (decideStop, the marker-state gate). The three pre_tool_use classification
-// gates are DEFERRED — they need the bash plan-gate.sh/checkpoint-gate.sh ↔ node
-// bridge, a later slice (§9). Exported so the Rule-14 mirror validator can assert
-// a `stop→` clamp degrades the live decision while a `post_checkpoint→` clamp does
-// not (it is inert until wired).
-export const LIVE_GATES = ["stop"];
+// Which gates are LIVE-wired into a runtime decision. P3b-2 wired the stop gate
+// (decideStop, the marker-state gate); RFC-008 P4a added the three pre_tool_use
+// classification gates via the bash plan-gate.sh/checkpoint-gate.sh ↔ node
+// `enforce-contract --resolve-gate` bridge. All four contract gates are now live.
+// Exported so the Rule-14 mirror validator can assert every contract/config gate
+// key maps to a wired runtime decision (no inert key remains).
+export const LIVE_GATES = ["stop", "plan_approval", "pre_checkpoint", "post_checkpoint"];
 
 /**
  * VALIDATOR-ONLY fold: min over the PRESENT tier sources, null on all-absent.

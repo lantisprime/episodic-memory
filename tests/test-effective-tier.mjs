@@ -70,7 +70,8 @@ eq('post_checkpoint contract key is gates.post_checkpoint', GATE_CONTRACT_KEY.po
 eq('plan_approval fires at pre_tool_use', GATE_EVENT_MAP.plan_approval, 'pre_tool_use')
 eq('pre_checkpoint fires at pre_tool_use', GATE_EVENT_MAP.pre_checkpoint, 'pre_tool_use')
 eq('the two maps cover the same four gates', Object.keys(GATE_EVENT_MAP).sort(), Object.keys(GATE_CONTRACT_KEY).sort())
-eq('only the stop gate is LIVE-wired this slice', LIVE_GATES, ['stop'])
+eq('all four contract gates are LIVE-wired (P4a)', LIVE_GATES.slice().sort(), ['plan_approval', 'post_checkpoint', 'pre_checkpoint', 'stop'])
+eq('every LIVE gate has an event + contract-key mapping', LIVE_GATES.every((g) => GATE_EVENT_MAP[g] && GATE_CONTRACT_KEY[g]), true)
 
 console.log('')
 console.log('=== eventActionId (events.json action lookup) ===')

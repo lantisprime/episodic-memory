@@ -157,7 +157,7 @@ block below against the derived source-of-truth.
 <!-- CONFIG:BEGIN -->
 **10a — Configuration.**
 
-- `enforce_config_keys`: none yet — the per-project `enforce-config.json` schema lands in P4; M7f 10a is present-and-parses until then.
+- `enforce_config_keys`: `active` (R5 project switch) + `bp-001.{plan_approval,post_checkpoint,pre_checkpoint,stop}` per-bp tier clamps (RFC-008 P4; schema `patterns/enforce-config.schema.json`; clamp-DOWN only; resolved by `enforce-contract --gate stop` / `--resolve-gate <gate>`).
 - `install_time_config`: hooks deployed under `~/.claude/hooks/` by `install.mjs --install-hooks`.
 
 **10b — Taxonomies.**
