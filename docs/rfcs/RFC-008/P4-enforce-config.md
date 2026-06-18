@@ -3,7 +3,7 @@
 > Part of [RFC-008](../RFC-008-decouple-enforcement-from-substrate.md). Index:
 > [RFC-008/README.md](README.md).
 
-**Status:** queued. *(Legacy "Phase 5".)*
+**Status:** IN PROGRESS — schema landed P3b-2 #393; **P4a #397** (per-project loader → 3 pre_tool_use contract gates) + **P4c #398** (layer-wide `active:false` kill switch across preflight + second-opinion + SessionStart, R5) merged + deployed to global. **P4b** (reduced live SessionStart→Stop E2E + cutover) remains. *(Legacy "Phase 5".)*
 **Serves:** R3, R5.
 **Depends on:** P3.
 **Estimate:** ~25K.
