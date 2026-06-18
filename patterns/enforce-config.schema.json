@@ -25,7 +25,7 @@
     "perBp": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Per-gate tier clamp for one bp contract. Keys mirror GATE_CONTRACT_KEY (effective-tier.mjs): the three classification gates + the root-level stop marker-state gate. Only `stop` is LIVE-wired in P3b-2; the three classification gates parse + validate but are inert until the pre_tool_use bridge lands.",
+      "description": "Per-gate tier clamp for one bp contract. Keys mirror GATE_CONTRACT_KEY (effective-tier.mjs): the three classification gates + the root-level stop marker-state gate. All four are LIVE-wired: `stop` since P3b-2 (decideStop), and the three pre_tool_use classification gates since P4a via the bash plan-gate.sh/checkpoint-gate.sh ↔ `enforce-contract --resolve-gate` bridge.",
       "properties": {
         "plan_approval": { "$ref": "#/$defs/tier" },
         "pre_checkpoint": { "$ref": "#/$defs/tier" },

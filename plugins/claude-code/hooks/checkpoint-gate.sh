@@ -109,6 +109,13 @@ source "$LIB_DIR/session-id.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 
+# RFC-008 P4a: the enforcement resolver the per-project enforce-config.json consult
+# spawns. Global install path (parity with stop-gate.sh:68 + the helpers below); a
+# missing binary makes `node` exit non-zero → "" → the gate keeps blocking
+# (fail-closed, B1). Never re-resolves the root — the consult passes REPO_ROOT as
+# --marker-root (F4).
+ENFORCE_CONTRACT="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+
 # Canonical WRITE paths. Used in block-message paths so the agent knows
 # where to write the checkpoint block.
 #
@@ -1424,6 +1431,42 @@ case "$TOOL_NAME" in
 esac
 
 # ---------------------------------------------------------------------------
+# RFC-008 P4a (R3/R5) — pre_checkpoint per-project enforce-config consult.
+#
+# Placement (F11): AFTER the integrity prechecks (env-prefix, relative-marker,
+# wrong-root) and the marker_write branches above — so those integrity blocks and
+# the marker_write-branch lifecycle blocks (plan-pending, premature-post) remain
+# NON-silenceable (parity with M8; a corrupt/hostile marker write can never be
+# silenced by active:false). BEFORE both pre-checkpoint gate bodies (Edit/Write
+# and Bash) so a single consult covers both (F2).
+#
+# Gate selection (F9): this site handles pre_checkpoint ONLY. The push path
+# (LABEL=push_or_pr_create) is post_checkpoint and is consulted separately inside
+# the push-gate (so its silence still runs the marker-cleanup sweep — F10). Guard
+# this consult out for push so we don't resolve the wrong gate's clamp here.
+#
+# Spawn discipline: only when a pre-checkpoint block is actually imminent — pre-done
+# unmet AND (a checkpoint is armed OR a plan is approved this session). The common
+# no-task path stays pure-bash, zero node spawn. Exact-equality safe-token match
+# (never substring); any other output (empty / non-zero via `|| PRE_DISP=""` /
+# garbage) falls through to the existing pre-checkpoint blocks (fail-closed, B1).
+#
+# R5 scope note (review MINOR-2): this consult sits ABOVE the Bash agent-classifier
+# hold (_block_needs_classification). When a plan is approved AND active:false, a
+# novel-unevaluated Bash command is silenced too — intended: active:false turns OFF
+# all bp-001 pre_checkpoint enforcement for this project, the classification hold
+# included (it only exists to route would-be pre-checkpoint writes).
+if [ "$TOOL_NAME" != "Bash" ] || [ "$LABEL" != "push_or_pr_create" ]; then
+  if ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID" \
+     && { checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" || _plan_approved_exists_for_session "$MY_SID"; }; then
+    PRE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate pre_checkpoint --marker-root "$REPO_ROOT" 2>/dev/null)" || PRE_DISP=""
+    if [ "$PRE_DISP" = "silence" ] || [ "$PRE_DISP" = "clamp-off" ]; then
+      exit 0
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Pre-checkpoint gate — planning-passive + lazy-armed (2026-05-25 redesign).
 #
 # OLD: em-recall armed .checkpoint-required at SESSION START whenever a bp-001
@@ -1556,6 +1599,21 @@ esac
 # Push-gate: only fires for Bash classified as push_or_pr_create.
 # ---------------------------------------------------------------------------
 if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
+  # RFC-008 P4a (R3/R5) — post_checkpoint per-project enforce-config consult (F9
+  # gate selection: the push path IS the post_checkpoint gate). F10: on silence/
+  # clamp-off we must NOT bare `exit 0` — that would skip the load-bearing marker-
+  # cleanup sweep below and strand .checkpoint-required, deadlocking the stop gate
+  # when post_checkpoint is clamped but stop is left STRONG (schema permits
+  # independent per-gate keys). Instead set POST_SILENCED, which suppresses the
+  # self-arm + both _block_post emitters but lets control fall through to the SAME
+  # cleanup an allowed push runs — clearing .checkpoint-required so stop can't
+  # deadlock. Exact-equality token; `|| POST_DISP=""` keeps non-zero/empty/garbage
+  # fail-closed (push still gated).
+  POST_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate post_checkpoint --marker-root "$REPO_ROOT" 2>/dev/null)" || POST_DISP=""
+  POST_SILENCED=0
+  if [ "$POST_DISP" = "silence" ] || [ "$POST_DISP" = "clamp-off" ]; then
+    POST_SILENCED=1
+  fi
   # B1 (#351, §11b/§15-C3 — D7 backstop): push self-arms .post-checkpoint-required
   # regardless of pre-checkpoint state, so push is an INDEPENDENT hard gate even
   # when the pre-checkpoint was escaped via an agent verdict (D7 made the pre-
@@ -1568,7 +1626,7 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   # satisfied done-marker; closes the read-after-arm TOCTOU, §15-C3/F2). The
   # cross-session sweep below is NOT weakened (load-bearing for orphan cleanup).
   _push_self_arm_created=0
-  if ! checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
+  if [ "$POST_SILENCED" != "1" ] && ! checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
     ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
     if validate_session_id "$MY_SID"; then
       HELPER_CKM_PUSH="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
@@ -1603,14 +1661,16 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
       fi
     fi
   fi
-  if [ "$_push_self_arm_created" = "1" ]; then
+  if [ "$POST_SILENCED" != "1" ] && [ "$_push_self_arm_created" = "1" ]; then
     # Created THIS invocation → cannot already have a satisfied
     # .post-checkpoint-done. Block unconditionally without re-reading (TOCTOU-free).
     _block_post
   fi
   # Rank-2: session-aware post-checkpoint check (already-armed path — a prior
   # invocation or post-write arming armed post-req; block until it's satisfied).
-  if checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
+  # P4a (F10): suppressed under POST_SILENCED so the cleanup below still runs.
+  if [ "$POST_SILENCED" != "1" ] \
+     && checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID" \
      && ! checkpoint_marker_nonempty_for_session .post-checkpoint-done "$MY_SID"; then
     _block_post
   fi

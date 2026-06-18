@@ -39,7 +39,7 @@ import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs"
 // scripts/lib/effective-tier.mjs (extracted P3b-2, R3) so this validator's Table B
 // rendering and enforce-contract's runtime stop decision share ONE algebra
 // (Rule 14). No behavior change here — the self-tests prove it byte-for-byte.
-import { TIER_RANK, effectiveTier, eventActionId } from "./lib/effective-tier.mjs";
+import { TIER_RANK, effectiveTier, eventActionId, GATE_CONTRACT_KEY } from "./lib/effective-tier.mjs";
 
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
 export const MAX_SUPPORTED = "1.0.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality)
@@ -420,10 +420,15 @@ export function renderConfigBlock(manifest) {
   const emits = cls.emits_labels || [];
   const trans = manifest.event_translations || {};
   const consumes = Object.keys(manifest.capabilities || {});
+  // RFC-008 P4: enforce_config_keys derived from GATE_CONTRACT_KEY (Rule-14 single
+  // source — same gate set the runtime resolver clamps; a drift here vs the runbook
+  // fails M7f loud). `active` is the R5 project switch; the per-bp tier clamps are
+  // the four contract gates this plugin reads from enforce-config.json.
+  const ecGateKeys = Object.keys(GATE_CONTRACT_KEY).sort().join(",");
   const out = [
     "**10a — Configuration.**",
     "",
-    "- `enforce_config_keys`: none yet — the per-project `enforce-config.json` schema lands in P4; M7f 10a is present-and-parses until then.",
+    `- \`enforce_config_keys\`: \`active\` (R5 project switch) + \`bp-001.{${ecGateKeys}}\` per-bp tier clamps (RFC-008 P4; schema \`patterns/enforce-config.schema.json\`; clamp-DOWN only; resolved by \`enforce-contract --gate stop\` / \`--resolve-gate <gate>\`).`,
     "- `install_time_config`: hooks deployed under `~/.claude/hooks/` by `install.mjs --install-hooks`.",
     "",
     "**10b — Taxonomies.**",

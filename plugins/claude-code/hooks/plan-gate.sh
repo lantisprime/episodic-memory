@@ -100,6 +100,26 @@ case "$TOOL_NAME" in
     ;;
 esac
 
+# RFC-008 P4a (R3/R5): per-project enforce-config consult — ONE site, placed after
+# the read-only allow and BEFORE every plan block path (the F14 fail-closed block
+# AND the main block), so active:false silences even the probe-drift defense (there
+# is no enforcement to protect when the operator turned plan_approval off).
+#
+# Spawn the resolver ONLY when a plan marker actually exists — the no-plan common
+# path stays pure-bash with zero node spawn. A safe token is matched by EXACT
+# STRING EQUALITY (never substring): a diagnostic line that merely CONTAINS
+# "silence"/"clamp-off" must NOT unblock. ANY other resolver output — empty,
+# non-zero exit (caught by `|| GATE_DISP=""`), garbage, multi-line — leaves
+# GATE_DISP unmatched and falls through to the existing block paths (fail-closed,
+# B1). A missing enforce-contract.mjs makes `node` exit non-zero → "" → block.
+ENFORCE_CONTRACT="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+if _any_plan_marker_exists_local; then
+  GATE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate plan_approval --marker-root "$REPO_ROOT" 2>/dev/null)" || GATE_DISP=""
+  if [ "$GATE_DISP" = "silence" ] || [ "$GATE_DISP" = "clamp-off" ]; then
+    exit 0
+  fi
+fi
+
 # F14 fail-closed: invalid/missing/empty session_id is a probe-drift threat
 # distinct from honest-agent forgery. If ANY plan marker exists, BLOCK with
 # a clear reason — the agent must either provide a valid session_id in
