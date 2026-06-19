@@ -78,6 +78,17 @@ function walk(root) {
   return out.sort()
 }
 const byteEqual = (a, b) => { try { return fs.readFileSync(a).equals(fs.readFileSync(b)) } catch { return false } }
+// A COSMETIC_DIFFER is cosmetic ONLY when the SOLE difference is the non-semantic
+// `install_timestamp` — a real `source_hash` (provider-registry) change must still
+// surface as DIFFER, never be swallowed (review F1). Unparseable → treat as real DIFFER.
+function snapshotDiffIsOnlyTimestamp(realPath, mockPath) {
+  try {
+    const a = JSON.parse(fs.readFileSync(realPath, 'utf8'))
+    const b = JSON.parse(fs.readFileSync(mockPath, 'utf8'))
+    delete a.install_timestamp; delete b.install_timestamp
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch { return false }
+}
 
 const REAL = os.homedir()
 const M = mkMock('deploy-audit')
@@ -100,8 +111,10 @@ for (const d of DIRS) {
   for (const f of mockFiles) {
     const key = `${d}/${f}`
     if (!realSet.has(f)) { findings.missing.push(key); continue }
-    if (!byteEqual(path.join(realDir, f), path.join(mockDir, f))) {
-      (COSMETIC_DIFFER.has(key) ? findings.cosmetic : findings.differ).push(key)
+    const rp = path.join(realDir, f), mp = path.join(mockDir, f)
+    if (!byteEqual(rp, mp)) {
+      if (COSMETIC_DIFFER.has(key) && snapshotDiffIsOnlyTimestamp(rp, mp)) findings.cosmetic.push(key)
+      else findings.differ.push(key)
     }
   }
   for (const f of walk(realDir)) {
