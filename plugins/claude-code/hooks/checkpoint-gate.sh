@@ -114,8 +114,10 @@ REPO_ROOT="$(resolve_repo_root "$CWD")"
 # missing binary makes `node` exit non-zero → "" → the gate keeps blocking
 # (fail-closed, B1). Never re-resolves the root — the consult passes REPO_ROOT as
 # --marker-root (F4).
-# RFC-008 P4d / Principle 12: engine co-located with this gate, not global.
+# RFC-008 P4d / Principle 12: engine co-located with this gate. Global path is a
+# legacy fallback only (fresh P4d installs ship no global engine).
 ENFORCE_CONTRACT="$HOOK_DIR/enforce-contract.mjs"
+[ -f "$ENFORCE_CONTRACT" ] || ENFORCE_CONTRACT="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
 
 # Canonical WRITE paths. Used in block-message paths so the agent knows
 # where to write the checkpoint block.
@@ -747,6 +749,7 @@ _arm_checkpoint_required_if_missing() {
   # sid is valid here (the approval check requires it).
   ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
   local helper="$HOOK_DIR/checkpoint-marker.mjs"  # P4d/P12: co-located marker writer
+  [ -f "$helper" ] || helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"  # legacy fallback
   if [ -f "$helper" ]; then
     CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
       --target .checkpoint-required \
@@ -1638,6 +1641,7 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
     ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
     if validate_session_id "$MY_SID"; then
       HELPER_CKM_PUSH="$HOOK_DIR/checkpoint-marker.mjs"  # P4d/P12: co-located
+      [ -f "$HELPER_CKM_PUSH" ] || HELPER_CKM_PUSH="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
       if [ -f "$HELPER_CKM_PUSH" ]; then
         # CAPTURE stdout (codex C3: the gate previously discarded it) and parse
         # the helper's authoritative `noop` field.
@@ -1762,6 +1766,7 @@ case "$TOOL_NAME" in
         # CLAUDE_CODE_SESSION_ID is exported to the helper subprocess via the
         # hook's inherited env (claude code sets it for all hooks).
         HELPER_CKM="$HOOK_DIR/checkpoint-marker.mjs"  # P4d/P12: co-located
+        [ -f "$HELPER_CKM" ] || HELPER_CKM="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
         if [ -f "$HELPER_CKM" ]; then
           CLAUDE_CODE_SESSION_ID="$MY_SID" node "$HELPER_CKM" \
             --target .post-checkpoint-required \

@@ -67,9 +67,16 @@ CWD="$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")"
 # repoint — a missing/erroring binary MUST block loud, never degrade to
 # allow-always.
 HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-ENFORCE="$HOOK_DIR/enforce-contract.mjs"
-if [ ! -f "$ENFORCE" ]; then
-  echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract.mjs not found co-located in the project hooks dir. Re-run install.mjs --install-enforcement."}'
+# Resolve the engine CO-LOCATED first (installed per-project, P12). The global path
+# is a legacy/back-compat fallback only — fresh P4d installs ship NO global engine
+# (test-p12-global-clean proves global is empty), so co-located always wins in a
+# real install; the fallback exists so a pre-P4d global install still resolves.
+ENFORCE=""
+for _ec in "$HOOK_DIR/enforce-contract.mjs" "$HOME/.episodic-memory/scripts/enforce-contract.mjs"; do
+  [ -f "$_ec" ] && { ENFORCE="$_ec"; break; }
+done
+if [ -z "$ENFORCE" ]; then
+  echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract.mjs not found (co-located project hooks dir or legacy global). Re-run install.mjs --install-enforcement."}'
   exit 0
 fi
 
