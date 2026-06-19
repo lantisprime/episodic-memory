@@ -44,6 +44,13 @@ const tool = flag('--tool')
 const projectDir = flag('--project') || process.cwd()
 const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
+// RFC-008 P4d / Principle 12: enforcement hooks (files + libs + scripts +
+// registrations) install ONLY per-project via --install-enforcement, into
+// <project>/.claude/. INTERNAL/undocumented until S3 resolves the cross-deps
+// ($REPO_ROOT scripts/bundles + the SessionEnd .mjs libs) — S2 acceptance is
+// registration-green, NOT functional-safe (the registered gates hard-deny on
+// missing deps in a non-this-repo project until S3).
+const installEnforcement = argv.includes('--install-enforcement')
 const installSecondOpinion = argv.includes('--install-second-opinion')
 const bootstrapLastPrompt = argv.includes('--bootstrap-last-prompt')
 const REPO_HOOKS = path.join(REPO_DIR, 'plugins', 'claude-code', 'hooks')
@@ -1160,13 +1167,23 @@ function installHookFile(repoFile, destFile, force) {
   return 'skipped-divergent'
 }
 
-if (installHooks) {
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
-  const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+if (installHooks || installEnforcement) {
+  // P12 (RFC-008 P4d): enforcement artifacts (hook files, libs, registrations)
+  // install PER-PROJECT under <project>/.claude/ — NEVER global. The substrate
+  // co-deploys (taxonomy/contract/_index) stay global and are gated on
+  // --install-hooks. --install-enforcement does the per-project enforcement.
+  const settingsPath = path.join(projectDir, '.claude', 'settings.json')
+  const userHooksDir = path.join(projectDir, '.claude', 'hooks')
   const userHooksLibDir = path.join(userHooksDir, 'lib')
   const REPO_HOOKS_LIB = path.join(REPO_HOOKS, 'lib')
   const touched = { hooks: [], settings: [], hookLib: [] }
   try {
+   // Shared enforcement lib-install state, hoisted so every installEnforcement
+   // sub-block (5_lib, 5c registration gating, classifier-sync warning) sees it.
+   const libResults = {}
+   let hookLibFiles = []
+   let anyLibSkippedDivergent = false
+   if (installEnforcement) {
     // 5_lib. Deploy hooks/lib/ alongside hooks/. Session 1 (#86 PR-B / #89 /
     // #101) introduces hooks/lib/command-classifier.sh and hooks/lib/repo-root.sh
     // sourced by plan-gate.sh and checkpoint-gate.sh via $BASH_SOURCE/cd -P.
@@ -1178,9 +1195,6 @@ if (installHooks) {
     // lib was skipped-divergent — registered hook would source stale/missing
     // lib at runtime and fail loud (or worse, silently behave wrong if user's
     // divergent lib is incomplete).
-    const libResults = {}
-    let hookLibFiles = []
-    let anyLibSkippedDivergent = false
     if (fs.existsSync(REPO_HOOKS_LIB)) {
       fs.mkdirSync(userHooksLibDir, { recursive: true })
       hookLibFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh')).sort()
@@ -1244,7 +1258,13 @@ if (installHooks) {
         're-run with --install-hooks-force'
       )
     }
+   } // end if (installEnforcement) — enforcement hook libs (per-project)
 
+   if (installHooks) {
+    // SUBSTRATE co-deploys (global, hook-free) — taxonomy + contract set +
+    // plugins/_index. Coupled to --install-hooks (NOT --install-enforcement):
+    // the project-side gates read these from the global $HOME/.episodic-memory
+    // substrate root at runtime.
     // 5a-tax. RFC-008 P3c (R4/F4): co-deploy patterns/taxonomy.json to the SAME
     // global root the classifier reads at runtime (candidate 1 =
     // $HOME/.episodic-memory/patterns/taxonomy.json; GLOBAL_DIR = os.homedir()/
@@ -1322,7 +1342,9 @@ if (installHooks) {
         console.log(`WARNING: could not verify enforce-contract set coupling: ${e.message}`)
       }
     }
+   } // end if (installHooks) — substrate co-deploys (global)
 
+   if (installEnforcement) {
     // RFC-008 P3c (R4/F4, codex R1-P1b): if the command classifier was KEPT as a
     // divergent local edit while taxonomy.json was (re)deployed just above, the
     // installed classifier and the global taxonomy may disagree. Two cases,
@@ -1354,14 +1376,11 @@ if (installHooks) {
       }
     }
 
-    // 5a. Hook specs imported from scripts/lib/install-manifest.mjs (single
-    // source of truth shared with tools/migration-cutover.mjs). Closes
-    // Codex round-2 implementation attention point: avoid a second
-    // hardcoded copy list.
-    const { HOOK_SPECS } = await import(
-      new URL('./scripts/lib/install-manifest.mjs', import.meta.url).href
-    )
+    // 5a. Hook specs from scripts/lib/install-manifest.mjs (single source of
+    // truth, statically imported at top). Ensure the PROJECT hooks dir exists
+    // (P12: enforcement hook files live under <project>/.claude/hooks/).
     const hookSpecs = HOOK_SPECS
+    fs.mkdirSync(userHooksDir, { recursive: true })
 
     // 5b. Copy hook files; track which got installed for registration eligibility.
     const fileResults = {} // spec.file → result
@@ -1389,6 +1408,20 @@ if (installHooks) {
           console.log(`Note: ${repoFile} not found in repo, skipped`)
           break
       }
+    }
+
+    // 5b-se. The SessionEnd hook SCRIPT (em-session-end-prompt.mjs) is an
+    // enforcement hook script (P12) — copy it from scripts/ into the PROJECT
+    // hooks dir too, so its registration points at <project>/.claude/hooks/.
+    const seRepo = path.join(REPO_SCRIPTS, SESSION_END_SCRIPT)
+    const seDest = path.join(userHooksDir, SESSION_END_SCRIPT)
+    const seFileResult = installHookFile(seRepo, seDest, installHooksForce)
+    fileResults[SESSION_END_SCRIPT] = seFileResult
+    if (seFileResult === 'copied' || seFileResult === 'forced') {
+      console.log(`Installed SessionEnd hook script: ${seDest}`)
+      touched.hooks.push(seDest)
+    } else if (seFileResult === 'unchanged') {
+      console.log(`SessionEnd hook script already current: ${seDest}`)
     }
 
     // 5c. Read settings, run migration, register hooks.
@@ -1472,8 +1505,9 @@ if (installHooks) {
       if (result === 'added') touched.settings.push(`${spec.event} → ${spec.file}`)
     }
 
-    // SessionEnd em-session-end-prompt.mjs (Phase 1; canonical at SCRIPTS_DIR).
-    const seCmd = `node ${shellQuote(path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'))}`
+    // SessionEnd em-session-end-prompt.mjs — registered at its PER-PROJECT
+    // location (P12): <project>/.claude/hooks/em-session-end-prompt.mjs.
+    const seCmd = `node ${shellQuote(path.join(userHooksDir, SESSION_END_SCRIPT))}`
     const seResult = addHookEntry(settings.hooks, 'SessionEnd', seCmd, { timeout: 10 })
     console.log(`SessionEnd em-session-end-prompt.mjs: ${seResult}`)
     if (seResult === 'added') touched.settings.push('SessionEnd → em-session-end-prompt.mjs')
@@ -1481,7 +1515,7 @@ if (installHooks) {
     // P2 (code review): warn about stale canonical-named entries left behind
     // by migration so the user can prune them. Run AFTER all registrations.
     const canonicalByBasename = {
-      'em-session-end-prompt.mjs': path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'),
+      'em-session-end-prompt.mjs': path.join(userHooksDir, 'em-session-end-prompt.mjs'),
       'checkpoint-gate.sh': path.join(userHooksDir, 'checkpoint-gate.sh'),
       'plan-gate.sh': path.join(userHooksDir, 'plan-gate.sh'),
       'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh'),
@@ -1500,13 +1534,6 @@ if (installHooks) {
     writeJSONAtomic(settingsPath, settings)
     if (touched.settings.length > 0) touched.hooks.push(settingsPath)
 
-    const manifestPath = path.join(GLOBAL_DIR, 'hook-install.json')
-    const manifest = buildHookFreshnessManifest(hookSpecs, hookLibFiles, userHooksDir, userHooksLibDir)
-    if (writeJSONAtomicIfChanged(manifestPath, manifest)) {
-      console.log(`Wrote hook freshness manifest: ${manifestPath}`)
-      touched.hooks.push(manifestPath)
-    }
-
     // 5d. Consent legibility (Codex non-blocking guidance): list everything
     // touched so the user can audit the install.
     if (touched.hooks.length > 0 || touched.settings.length > 0) {
@@ -1522,6 +1549,7 @@ if (installHooks) {
     } else {
       console.log('--- Hook install summary: nothing to do (already current) ---')
     }
+   } // end if (installEnforcement) — enforcement hook files + registration (per-project)
   } catch (e) {
     console.log(`Note: could not install hooks: ${e.message}`)
   }
