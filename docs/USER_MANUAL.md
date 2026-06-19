@@ -74,7 +74,7 @@ The checkpoint / plan / stop / preflight / second-opinion gates are opt-in via `
 - **Turn it all off for this project** — `{"active": false}`. Silences *every* episodic-memory gate for this repo only; your other projects keep their hooks (R5). Cleaner than removing the global hook entry, which would disable enforcement across all repos.
 - **Relax a single gate** — `{"bp-001": {"plan_approval": "MEDIUM"}}`. Lowers one gate's tier (clamps DOWN only; never raises).
 
-Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON. (`enforce-config.json` is human-authored — the installer ships the *schema*, never a config instance.)
+Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON. (`enforce-config.json` is operator-owned — `--install-enforcement` **seeds** a default `{"active": true}`, create-if-absent, and never overwrites your edits; a deliberate `{"active": false}` survives reinstalls, even with `--install-hooks-force`.)
 
 ### Instruction-only skill adapters
 

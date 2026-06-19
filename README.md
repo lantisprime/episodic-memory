@@ -93,7 +93,7 @@ The installer:
 4. Copies the appropriate instruction file for your tool
 5. With `--install-hooks`: copies `plugins/claude-code/hooks/*.sh` into `~/.claude/hooks/` and `plugins/claude-code/hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
 
-**Per-project enforcement config (optional, RFC-008 P4).** With `--install-hooks` active, tune enforcement **per project** by dropping `<project>/.episodic-memory/enforce-config.json` — no need to touch global hooks:
+**Per-project enforcement config (optional, RFC-008 P4).** With `--install-enforcement`, the installer **seeds** a default `<project>/.episodic-memory/enforce-config.json` = `{"active": true}` (create-if-absent, never overwriting your edits — a deliberate `{"active": false}` survives reinstalls, even with `--install-hooks-force`). Tune enforcement **per project** by editing it — no need to touch global hooks:
 
 - `{"active": false}` — layer-wide **kill switch**: silences *all* episodic-memory gates (checkpoint, plan, stop, preflight, second-opinion) for that project only; your other repos keep their hooks (R5).
 - `{"bp-001": {"plan_approval": "MEDIUM"}}` — relax an individual gate (clamps tier DOWN only; never raises).

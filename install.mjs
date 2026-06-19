@@ -1459,6 +1459,40 @@ if (installHooks || installEnforcement) {
       }
     }
 
+    // 5b-ec-cfg. RFC-008 P4d S4 (P12 invariant 2 — per-project on/off switch):
+    // SEED a default enforce-config.json so the operator has a discoverable switch
+    // to edit. It lives at the MARKER root (<project>/.episodic-memory/), exactly
+    // where loadEnforceConfig reads it (NOT the contract root — §6 two-root split).
+    //
+    // CREATE-IF-ABSENT, never overwrite — even under --install-hooks-force: the file
+    // is operator-owned mutable state (R5 kill switch), and a reinstall must never
+    // flip a deliberate {"active":false} back on (P12: each project OWNS its switch).
+    // Exclusive-create (flag:'wx') is race-free (no existsSync-then-write TOCTOU):
+    // EEXIST ⇒ preserved; any OTHER errno (EACCES/ENOSPC/EROFS) ⇒ non-fatal error log
+    // (the install proceeds). A write failure costs only the seeded switch, never
+    // safety — at runtime an absent file fails closed to identity {active:true} →
+    // enforce-ON (loadEnforceConfig). A torn/partial write is likewise safe (runtime
+    // JSON.parse fail → identity{active:true} → enforce-ON), so the non-atomic single
+    // write needs no temp+rename. Seeded as gitignored local state by design
+    // (.episodic-memory/ ignore at §2 above) — a per-checkout switch, not committed
+    // team policy. Seeded instances pin an explicit active:true and do NOT auto-track
+    // the absent-file identity default; a future change to the safe default would need
+    // an S6 migration of seeded files.
+    const enforceConfigPath = path.join(localDir, 'enforce-config.json')
+    // localDir already exists (created unconditionally at §2, alongside episodes/).
+    try {
+      fs.writeFileSync(enforceConfigPath, '{\n  "active": true\n}\n', { flag: 'wx' })
+      console.log(`Provisioned per-project enforcement switch: ${enforceConfigPath} (active:true)`)
+      touched.hooks.push(enforceConfigPath)
+    } catch (e) {
+      if (e.code === 'EEXIST') {
+        console.log(`Enforcement switch already present (operator-owned, preserved): ${enforceConfigPath}`)
+      } else {
+        console.log(`WARNING: could not provision ${enforceConfigPath}: ${e.message} ` +
+          '(enforcement still defaults ON at runtime; re-run install to retry)')
+      }
+    }
+
     // 5c. Read settings, run migration, register hooks.
     let settings = {}
     if (fs.existsSync(settingsPath)) {
