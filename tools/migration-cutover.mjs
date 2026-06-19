@@ -51,7 +51,14 @@ function compareFiles(repoPath, installedPath) {
   return a.equals(b) ? 'OK' : 'DIFF'
 }
 
-const manifest = buildInstallManifest(REPO_DIR, HOME_DIR)
+// RFC-008 P4d / Principle 12: this cutover verifies the GLOBAL installed copies
+// are byte-identical to repo (the legacy-fallback-removal migration), so it keeps
+// ONLY global-substrate entries (no scope tag). Non-global scopes are excluded:
+// scope:'project' (enforcement hooks + engine + classifier + markers + bp1 + their
+// relocated-only libs) install per-project; scope:'repo' (repo-dev/CI validators)
+// ship nowhere. Their integrity is covered by the per-project install + the
+// test-p12-global-clean / activation-scoping E2E suites.
+const manifest = buildInstallManifest(REPO_DIR, HOME_DIR).filter(e => !e.scope)
 const results = manifest.map(entry => ({
   relativePath: entry.relativePath,
   installedPath: entry.installedPath,

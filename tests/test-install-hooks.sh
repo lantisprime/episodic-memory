@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
-# test-install-hooks.sh — Tests for install.mjs --install-hooks (PR-B per #59)
+# test-install-hooks.sh — Tests for install.mjs --install-enforcement (PR-B per #59)
+#
+# RFC-008 P4d / Principle 12: enforcement hooks + the enforcement runtime moved
+# from GLOBAL to PER-PROJECT install. Enforcement now installs under the flag
+# --install-enforcement (NOT --install-hooks) to per-project locations:
+#   - hook .sh + .mjs files → <project>/.claude/hooks/
+#   - hook libs (.sh + .mjs) → <project>/.claude/hooks/lib/
+#   - registrations → <project>/.claude/settings.json (NOT global)
+#   - contract config (taxonomy/bp-001/events/enforce-config.schema.json) →
+#     <project>/.claude/hooks/patterns/
+#   - plugins/_index.json → <project>/.claude/hooks/plugins/_index.json
+# The global hook-freshness manifest ($HOME/.episodic-memory/hook-install.json)
+# is NO LONGER WRITTEN. --install-hooks-force still controls force-overwrite of
+# divergent files, alongside --install-enforcement.
 #
 # Verifies the realistic upgrade path observed locally on 2026-05-02:
 #   - Pre-existing settings.json with unrelated PreToolUse / SessionStart hooks
@@ -65,111 +78,89 @@ assert_eq() {
 echo "[T1] Fresh install: hook files copied, settings.json populated"
 # ---------------------------------------------------------------------------
 reset_state
-run_installer --install-hooks
+run_installer --install-enforcement
 
-[ -x "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" ] && r=true || r=false
+[ -x "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" ] && r=true || r=false
 assert_eq "T1a checkpoint-gate.sh installed and executable" "true" "$r"
 
-[ -x "$TEST_HOME/.claude/hooks/em-recall-sessionstart.sh" ] && r=true || r=false
+[ -x "$TEST_PROJECT/.claude/hooks/em-recall-sessionstart.sh" ] && r=true || r=false
 assert_eq "T1b em-recall-sessionstart.sh installed and executable" "true" "$r"
 
 # Issue #86 PR-A: plan-gate.sh canonicalized into repo + deployed by installer.
-[ -x "$TEST_HOME/.claude/hooks/plan-gate.sh" ] && r=true || r=false
+[ -x "$TEST_PROJECT/.claude/hooks/plan-gate.sh" ] && r=true || r=false
 assert_eq "T1b2 plan-gate.sh installed and executable (#86 PR-A)" "true" "$r"
 
-# Session 1 (#86 PR-B / #89 / #101): hooks/lib/ deployed alongside hooks/.
-[ -f "$TEST_HOME/.claude/hooks/lib/command-classifier.sh" ] && r=true || r=false
+# Session 1 (#86 PR-B / #89 / #101): hooks/lib/ deployed alongside hooks/
+# (per-project: <project>/.claude/hooks/lib/).
+[ -f "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh" ] && r=true || r=false
 assert_eq "T1b3 hooks/lib/command-classifier.sh installed (Session 1)" "true" "$r"
-[ -f "$TEST_HOME/.claude/hooks/lib/repo-root.sh" ] && r=true || r=false
+[ -f "$TEST_PROJECT/.claude/hooks/lib/repo-root.sh" ] && r=true || r=false
 assert_eq "T1b4 hooks/lib/repo-root.sh installed (Session 1)" "true" "$r"
 # Hooks should be able to source the lib (smoke test).
-HOME="$TEST_HOME" bash -c "source $TEST_HOME/.claude/hooks/lib/command-classifier.sh && type classify_command >/dev/null 2>&1" && r=true || r=false
+HOME="$TEST_HOME" bash -c "source $TEST_PROJECT/.claude/hooks/lib/command-classifier.sh && type classify_command >/dev/null 2>&1" && r=true || r=false
 assert_eq "T1b5 installed lib sources successfully and exports classify_command" "true" "$r"
 
-[ -f "$TEST_HOME/.episodic-memory/hook-install.json" ] && r=true || r=false
-assert_eq "T1b6 hook freshness manifest written (#103)" "true" "$r"
+# (RFC-008 P4d) hook-freshness manifest removed — enforcement installs per-project; see test-p12-global-clean.mjs
 
-manifest_source=$(jq -r '.source_repo' "$TEST_HOME/.episodic-memory/hook-install.json")
-assert_eq "T1b7 hook freshness manifest records source repo (#103)" "$REPO_ROOT" "$manifest_source"
-
-managed_count=$(jq '[.files[]? | select(.relative_path | test("^plugins/claude-code/hooks/.*\\.sh$"))] | length' "$TEST_HOME/.episodic-memory/hook-install.json")
-# 7 hook .sh files (checkpoint-gate, plan-gate, preflight-gate,
-# preflight-prompt-helper, em-recall-sessionstart, session-handoff-prompt,
-# stop-gate) + 6 hooks/lib/.sh files (command-classifier, repo-root,
-# marker-paths, session-id, agent-classifier, agent-classifier-deny-reason) = 13.
-# NOTE (PR-B): was hardcoded "10" and went stale when PR #331 added the
-# classifier lib (this test runs in no CI workflow). Corrected to 11, then to 12
-# when PR-B2 (#351) added the 3-way deny-hint lib agent-classifier-deny-reason.sh,
-# then to 13 when checkpoint-hygiene F3 brought session-handoff-prompt.sh under
-# HOOK_SPECS. The test is wired into CI (plan-marker-validate.yml) to catch
-# future drift.
-assert_eq "T1b8 hook freshness manifest covers managed hooks and libs (#103)" "13" "$managed_count"
-
-pg_manifest=$(jq -r '.files[] | select(.relative_path == "plugins/claude-code/hooks/plan-gate.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
-assert_eq "T1b9 hook freshness manifest records plan-gate install path (#103)" "$TEST_HOME/.claude/hooks/plan-gate.sh" "$pg_manifest"
-
-cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1c PreToolUse contains exactly one checkpoint-gate entry" "1" "$cg_count"
 
-pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1c2 PreToolUse contains exactly one plan-gate entry (#86 PR-A)" "1" "$pg_count"
 
 # plan-gate.sh registers with NO matcher (per design — must run on every
 # PreToolUse so the tool-name allowlist is the sole filter).
-pg_matcher=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("plan-gate")) | .matcher // "<none>"' "$TEST_HOME/.claude/settings.json")
+pg_matcher=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("plan-gate")) | .matcher // "<none>"' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1c3 plan-gate registered with no matcher (runs on every PreToolUse)" "<none>" "$pg_matcher"
 
-ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_HOME/.claude/settings.json")
+ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1d SessionStart contains exactly one em-recall-sessionstart entry" "1" "$ss_count"
 
 # session-handoff-prompt.sh tracking (checkpoint-hygiene F3): copied,
-# registered exactly once with timeout 5, manifest row, and ordered AFTER
+# registered exactly once with timeout 5, and ordered AFTER
 # em-recall-sessionstart (matches the pre-existing manual registration).
-[ -f "$TEST_HOME/.claude/hooks/session-handoff-prompt.sh" ] && r=true || r=false
-assert_eq "T1d2 session-handoff-prompt.sh copied to ~/.claude/hooks/ (F3)" "true" "$r"
+[ -f "$TEST_PROJECT/.claude/hooks/session-handoff-prompt.sh" ] && r=true || r=false
+assert_eq "T1d2 session-handoff-prompt.sh copied to <project>/.claude/hooks/ (F3)" "true" "$r"
 
-shp_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+shp_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1d3 SessionStart contains exactly one session-handoff-prompt entry (F3)" "1" "$shp_count"
 
-shp_timeout=$(jq -r '.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt")) | .timeout' "$TEST_HOME/.claude/settings.json")
+shp_timeout=$(jq -r '.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt")) | .timeout' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1d4 session-handoff-prompt entry timeout=5s (F3)" "5" "$shp_timeout"
 
-shp_manifest=$(jq -r '.files[] | select(.relative_path == "plugins/claude-code/hooks/session-handoff-prompt.sh") | .installed_path' "$TEST_HOME/.episodic-memory/hook-install.json")
-assert_eq "T1d5 hook freshness manifest records session-handoff-prompt install path (F3)" "$TEST_HOME/.claude/hooks/session-handoff-prompt.sh" "$shp_manifest"
-
-shp_order=$(jq '[.hooks.SessionStart[].hooks[0].command] as $c | ($c | map(test("em-recall-sessionstart")) | index(true)) < ($c | map(test("session-handoff-prompt")) | index(true))' "$TEST_HOME/.claude/settings.json")
+shp_order=$(jq '[.hooks.SessionStart[].hooks[0].command] as $c | ($c | map(test("em-recall-sessionstart")) | index(true)) < ($c | map(test("session-handoff-prompt")) | index(true))' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1d6 em-recall-sessionstart registered before session-handoff-prompt (F3)" "true" "$shp_order"
 
-se_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+se_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1e SessionEnd contains exactly one em-session-end-prompt entry (nested shape)" "1" "$se_count"
 
-cg_matcher=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("checkpoint-gate")) | .matcher' "$TEST_HOME/.claude/settings.json")
+cg_matcher=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("checkpoint-gate")) | .matcher' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1f checkpoint-gate matcher is canonical PreToolUse pattern" "Edit|Write|MultiEdit|Bash|NotebookEdit" "$cg_matcher"
 
-cg_type=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("checkpoint-gate")) | .hooks[0].type' "$TEST_HOME/.claude/settings.json")
+cg_type=$(jq -r '.hooks.PreToolUse[] | select(.hooks[]?.command|test("checkpoint-gate")) | .hooks[0].type' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T1g checkpoint-gate hook entry has type=command" "command" "$cg_type"
 
 # ---------------------------------------------------------------------------
 echo "[T2] Re-run idempotence: no duplicate entries, no diff in hook files"
 # ---------------------------------------------------------------------------
-sha_before=$(shasum "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
-run_installer --install-hooks
-sha_after=$(shasum "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+sha_before=$(shasum "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+run_installer --install-enforcement
+sha_after=$(shasum "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
 assert_eq "T2a checkpoint-gate.sh unchanged after re-run" "$sha_before" "$sha_after"
 
-cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T2b still exactly one checkpoint-gate entry after re-run" "1" "$cg_count"
 
-pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T2b2 still exactly one plan-gate entry after re-run (#86 PR-A)" "1" "$pg_count"
 
-ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_HOME/.claude/settings.json")
+ss_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T2c still exactly one em-recall-sessionstart entry after re-run" "1" "$ss_count"
 
-shp_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+shp_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("session-handoff-prompt"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T2c2 still exactly one session-handoff-prompt entry after re-run (F3)" "1" "$shp_count"
 
-se_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+se_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T2d still exactly one em-session-end-prompt entry after re-run" "1" "$se_count"
 
 # ---------------------------------------------------------------------------
@@ -177,8 +168,8 @@ echo "[T3] Migration: pre-existing flat-shape SessionEnd entry rewritten"
 # Regression guard for the bug shipped before PR-B (Rule 15).
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude"
-cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
+mkdir -p "$TEST_PROJECT/.claude"
+cat > "$TEST_PROJECT/.claude/settings.json" <<'JSON'
 {
   "hooks": {
     "SessionEnd": [
@@ -190,27 +181,27 @@ cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-run_installer --install-hooks
+run_installer --install-enforcement
 
-flat_count=$(jq '[.hooks.SessionEnd[] | select(.command and (.hooks|not))] | length' "$TEST_HOME/.claude/settings.json")
+flat_count=$(jq '[.hooks.SessionEnd[] | select(.command and (.hooks|not))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T3a no flat-shape SessionEnd entries remain after migration" "0" "$flat_count"
 
 # Migration preserves the original command verbatim — does NOT replace the
-# /old/path/ pointer. The new canonical em-session-end-prompt at SCRIPTS_DIR
-# is then registered as a separate entry (different path, different command,
-# exact-path idempotence treats them distinctly).
-old_path_preserved=$(jq -r '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("/old/path/"))] | length' "$TEST_HOME/.claude/settings.json")
+# /old/path/ pointer. The new canonical em-session-end-prompt at the per-project
+# hooks dir is then registered as a separate entry (different path, different
+# command, exact-path idempotence treats them distinctly).
+old_path_preserved=$(jq -r '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("/old/path/"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T3b migrated entry preserves /old/path/ command verbatim" "1" "$old_path_preserved"
 
-old_path_type=$(jq -r '.hooks.SessionEnd[]?.hooks[]? | select(.command|test("/old/path/")) | .type' "$TEST_HOME/.claude/settings.json")
+old_path_type=$(jq -r '.hooks.SessionEnd[]?.hooks[]? | select(.command|test("/old/path/")) | .type' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T3c migrated entry has type=command" "command" "$old_path_type"
 
 # ---------------------------------------------------------------------------
 echo "[T4] Pre-existing unrelated hooks: appended, not replaced"
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude"
-cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
+mkdir -p "$TEST_PROJECT/.claude"
+cat > "$TEST_PROJECT/.claude/settings.json" <<'JSON'
 {
   "hooks": {
     "PreToolUse": [
@@ -230,29 +221,34 @@ cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-output=$(run_installer_capture --install-hooks)
+output=$(run_installer_capture --install-enforcement)
 
-pre_total=$(jq '.hooks.PreToolUse | length' "$TEST_HOME/.claude/settings.json")
+pre_total=$(jq '.hooks.PreToolUse | length' "$TEST_PROJECT/.claude/settings.json")
 # Post #86 PR-A: existing /some/user/plan-gate.sh + canonical checkpoint-gate
-# + canonical plan-gate = 3 entries. The stale /some/user/plan-gate.sh is
-# preserved verbatim (T4b) and the canonical is registered separately (T4b3).
+# + canonical plan-gate + canonical preflight-gate = 4 entries. The stale
+# /some/user/plan-gate.sh is preserved verbatim (T4b) and the canonical is
+# registered separately (T4b3).
 assert_eq "T4a PreToolUse now has 4 entries (existing plan-gate + canonical checkpoint-gate + canonical plan-gate + canonical preflight-gate)" "4" "$pre_total"
 
-plan_gate_existing=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command == "/some/user/plan-gate.sh")] | length' "$TEST_HOME/.claude/settings.json")
+plan_gate_existing=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command == "/some/user/plan-gate.sh")] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T4b existing /some/user/plan-gate.sh entry preserved verbatim" "1" "$plan_gate_existing"
 
-plan_gate_canonical_path="$TEST_HOME/.claude/hooks/plan-gate.sh"
-plan_gate_canonical=$(jq --arg p "$plan_gate_canonical_path" '[.hooks.PreToolUse[]?.hooks[]? | select(.command == $p)] | length' "$TEST_HOME/.claude/settings.json")
+plan_gate_canonical_path="$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+plan_gate_canonical=$(jq --arg p "$plan_gate_canonical_path" '[.hooks.PreToolUse[]?.hooks[]? | select(.command == $p)] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T4b2 canonical plan-gate.sh registered at exact installed path (#86 PR-A)" "1" "$plan_gate_canonical"
 
 # Stale-canonical warning surfaced by detectStaleCanonicalEntries.
 if echo "$output" | grep -q "stale PreToolUse entry for plan-gate.sh"; then r=true; else r=false; fi
 assert_eq "T4b3 stale-canonical warning printed for non-canonical /some/user/plan-gate.sh" "true" "$r"
 
-ss_total=$(jq '.hooks.SessionStart | length' "$TEST_HOME/.claude/settings.json")
-assert_eq "T4c SessionStart now has 3 entries (existing + em-recall-sessionstart + session-handoff-prompt)" "3" "$ss_total"
+ss_total=$(jq '.hooks.SessionStart | length' "$TEST_PROJECT/.claude/settings.json")
+# RFC-008 P4d: the always-on BP-1 activation layer (H1 approval-check + H2
+# sweep-on-session) registers 2 SessionStart entries on EVERY install,
+# independent of --install-enforcement. So: existing rules-check + bp1-H1 +
+# bp1-H2 + em-recall-sessionstart + session-handoff-prompt = 5.
+assert_eq "T4c SessionStart now has 5 entries (existing + bp1-H1 + bp1-H2 + em-recall-sessionstart + session-handoff-prompt)" "5" "$ss_total"
 
-rules_check_intact=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("rules-check"))] | length' "$TEST_HOME/.claude/settings.json")
+rules_check_intact=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command|test("rules-check"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T4d existing rules-check.sh entry preserved" "1" "$rules_check_intact"
 
 # ---------------------------------------------------------------------------
@@ -261,20 +257,20 @@ echo "[T5] Divergent local hook file: skipped + new settings registration WITHHE
 # content. New registration only happens when the canonical file is in place.
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-echo "# user-customized" >> "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-chmod +x "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-sha_before=$(shasum "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+echo "# user-customized" >> "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+sha_before=$(shasum "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
 
-output=$(run_installer_capture --install-hooks)
-sha_after=$(shasum "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+output=$(run_installer_capture --install-enforcement)
+sha_after=$(shasum "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
 assert_eq "T5a divergent checkpoint-gate.sh not overwritten" "$sha_before" "$sha_after"
 
 if echo "$output" | grep -q "Skipped (divergent local edit)"; then r=true; else r=false; fi
 assert_eq "T5b warning printed for divergent hook" "true" "$r"
 
-cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T5c new checkpoint-gate registration WITHHELD when file install skipped" "0" "$cg_count"
 
 if echo "$output" | grep -q "registration withheld (file install skipped)"; then r=true; else r=false; fi
@@ -282,12 +278,12 @@ assert_eq "T5d explicit 'registration withheld' message printed" "true" "$r"
 
 # T5e: divergent + prior registration exists → registration preserved, no duplicate.
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-echo "# user-customized" >> "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-chmod +x "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-canon_path="$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-cat > "$TEST_HOME/.claude/settings.json" <<JSON
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+echo "# user-customized" >> "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+canon_path="$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+cat > "$TEST_PROJECT/.claude/settings.json" <<JSON
 {
   "hooks": {
     "PreToolUse": [
@@ -301,8 +297,8 @@ cat > "$TEST_HOME/.claude/settings.json" <<JSON
   }
 }
 JSON
-output=$(run_installer_capture --install-hooks)
-cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+output=$(run_installer_capture --install-enforcement)
+cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T5e prior registration preserved when file install skipped" "1" "$cg_count"
 
 if echo "$output" | grep -q "existing registration preserved"; then r=true; else r=false; fi
@@ -312,23 +308,23 @@ assert_eq "T5f explicit 'existing registration preserved' message printed" "true
 echo "[T6] --install-hooks-force overrides divergent file AND registers"
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-echo "# user-customized" >> "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-chmod +x "$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-run_installer --install-hooks --install-hooks-force
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+echo "# user-customized" >> "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+run_installer --install-enforcement --install-hooks-force
 
 sha_repo=$(shasum "$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh" | awk '{print $1}')
-sha_dest=$(shasum "$TEST_HOME/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+sha_dest=$(shasum "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
 assert_eq "T6a --install-hooks-force overwrites divergent hook with repo version" "$sha_repo" "$sha_dest"
 
-cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T6b --install-hooks-force registers checkpoint-gate after overwrite" "1" "$cg_count"
 
 # ---------------------------------------------------------------------------
 echo "[T7] Identical existing hook: 'unchanged' status, registration proceeds"
 # ---------------------------------------------------------------------------
-output=$(run_installer_capture --install-hooks)
+output=$(run_installer_capture --install-enforcement)
 if echo "$output" | grep -q "Hook already current.*checkpoint-gate"; then r=true; else r=false; fi
 assert_eq "T7 identical hook reports 'already current'" "true" "$r"
 
@@ -336,14 +332,14 @@ assert_eq "T7 identical hook reports 'already current'" "true" "$r"
 echo "[T8] Missing settings.json: created with correct shape"
 # ---------------------------------------------------------------------------
 reset_state
-[ -f "$TEST_HOME/.claude/settings.json" ] && r=true || r=false
+[ -f "$TEST_PROJECT/.claude/settings.json" ] && r=true || r=false
 assert_eq "T8a settings.json absent before install" "false" "$r"
 
-run_installer --install-hooks
-[ -f "$TEST_HOME/.claude/settings.json" ] && r=true || r=false
+run_installer --install-enforcement
+[ -f "$TEST_PROJECT/.claude/settings.json" ] && r=true || r=false
 assert_eq "T8b settings.json created" "true" "$r"
 
-hooks_present=$(jq 'has("hooks")' "$TEST_HOME/.claude/settings.json")
+hooks_present=$(jq 'has("hooks")' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T8c created settings.json has hooks key" "true" "$hooks_present"
 
 # ---------------------------------------------------------------------------
@@ -352,24 +348,24 @@ echo "[T9] Atomic settings.json write: orphan .tmp does not corrupt original"
 # scenario leaves the existing settings.json intact.
 # ---------------------------------------------------------------------------
 reset_state
-run_installer --install-hooks
-sha_settings_before=$(shasum "$TEST_HOME/.claude/settings.json" | awk '{print $1}')
+run_installer --install-enforcement
+sha_settings_before=$(shasum "$TEST_PROJECT/.claude/settings.json" | awk '{print $1}')
 
 # Plant an orphan .tmp from a notional crashed prior run. The installer's next
 # atomic write must overwrite the .tmp via fs.writeFileSync (truncate semantics)
 # then rename atomically — leaving no .tmp behind and the real settings.json
 # valid JSON post-run.
-echo "{ partial garbage" > "$TEST_HOME/.claude/settings.json.tmp"
-run_installer --install-hooks
+echo "{ partial garbage" > "$TEST_PROJECT/.claude/settings.json.tmp"
+run_installer --install-enforcement
 
-if [ -f "$TEST_HOME/.claude/settings.json.tmp" ]; then r=true; else r=false; fi
+if [ -f "$TEST_PROJECT/.claude/settings.json.tmp" ]; then r=true; else r=false; fi
 assert_eq "T9a orphan .tmp cleared after atomic write (renamed away)" "false" "$r"
 
-if jq empty "$TEST_HOME/.claude/settings.json" 2>/dev/null; then r=true; else r=false; fi
+if jq empty "$TEST_PROJECT/.claude/settings.json" 2>/dev/null; then r=true; else r=false; fi
 assert_eq "T9b settings.json is valid JSON after atomic write" "true" "$r"
 
 # Re-running without changes should be byte-identical (atomic determinism).
-sha_settings_after=$(shasum "$TEST_HOME/.claude/settings.json" | awk '{print $1}')
+sha_settings_after=$(shasum "$TEST_PROJECT/.claude/settings.json" | awk '{print $1}')
 assert_eq "T9c second atomic write yields byte-identical settings.json" "$sha_settings_before" "$sha_settings_after"
 
 # ---------------------------------------------------------------------------
@@ -379,8 +375,8 @@ echo "[T10] Exact-path idempotence: same basename at different path is NOT a dup
 # false-positive and skip the canonical registration.
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude"
-cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
+mkdir -p "$TEST_PROJECT/.claude"
+cat > "$TEST_PROJECT/.claude/settings.json" <<'JSON'
 {
   "hooks": {
     "PreToolUse": [
@@ -394,29 +390,37 @@ cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-run_installer --install-hooks
+run_installer --install-enforcement
 
-cg_total=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+cg_total=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T10a both checkpoint-gate registrations coexist (different paths)" "2" "$cg_total"
 
 # Non-canonical entry preserved verbatim.
-nc=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command == "/somewhere/else/checkpoint-gate.sh")] | length' "$TEST_HOME/.claude/settings.json")
+nc=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command == "/somewhere/else/checkpoint-gate.sh")] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T10b non-canonical /somewhere/else/checkpoint-gate.sh entry preserved" "1" "$nc"
 
-canonical_path="$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-canon_count=$(jq --arg p "$canonical_path" '[.hooks.PreToolUse[]?.hooks[]? | select(.command == $p)] | length' "$TEST_HOME/.claude/settings.json")
+canonical_path="$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+canon_count=$(jq --arg p "$canonical_path" '[.hooks.PreToolUse[]?.hooks[]? | select(.command == $p)] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T10c canonical checkpoint-gate.sh registered at exact installed path" "1" "$canon_count"
 
 # ---------------------------------------------------------------------------
-echo "[T11] Code-review P2: --install-hooks-force without --install-hooks warns + no-ops"
+echo "[T11] Code-review P2: --install-hooks-force without --install-hooks/--install-enforcement warns + no enforcement install"
 # ---------------------------------------------------------------------------
 reset_state
 output=$(run_installer_capture --install-hooks-force)
 if echo "$output" | grep -q "Warning: --install-hooks-force has no effect without --install-hooks"; then r=true; else r=false; fi
 assert_eq "T11a warning printed when force flag passed alone" "true" "$r"
 
-[ -f "$TEST_HOME/.claude/settings.json" ] && r=true || r=false
-assert_eq "T11b no settings.json created (hook block was correctly skipped)" "false" "$r"
+# RFC-008 P4d: the enforcement block is gated on --install-enforcement, so a
+# bare --install-hooks-force installs NO enforcement gate. (The always-on BP-1
+# activation layer still creates settings.json with its 2 SessionStart hooks —
+# that is the substrate activation layer, not enforcement.) Assert no
+# enforcement hook (checkpoint-gate) was registered.
+cg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json" 2>/dev/null || echo 0)
+assert_eq "T11b no enforcement hook registered (enforcement block correctly skipped)" "0" "$cg_count"
+
+[ -f "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" ] && r=true || r=false
+assert_eq "T11c no enforcement hook file installed (enforcement block correctly skipped)" "false" "$r"
 
 # ---------------------------------------------------------------------------
 echo "[T12] Code-review P2: stale-canonical detection after migration"
@@ -425,8 +429,8 @@ echo "[T12] Code-review P2: stale-canonical detection after migration"
 # is added separately. Installer must warn about the resulting stale entry.
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude"
-cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
+mkdir -p "$TEST_PROJECT/.claude"
+cat > "$TEST_PROJECT/.claude/settings.json" <<'JSON'
 {
   "hooks": {
     "SessionEnd": [
@@ -438,12 +442,12 @@ cat > "$TEST_HOME/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-output=$(run_installer_capture --install-hooks)
+output=$(run_installer_capture --install-enforcement)
 if echo "$output" | grep -q "stale SessionEnd entry for em-session-end-prompt.mjs"; then r=true; else r=false; fi
 assert_eq "T12a stale-canonical warning printed for migrated /old/bogus/path/" "true" "$r"
 
 # Both entries coexist: canonical (newly registered) + stale (migrated, preserved verbatim).
-sec=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_HOME/.claude/settings.json")
+sec=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T12b both em-session-end-prompt entries coexist (canonical + stale)" "2" "$sec"
 
 # ---------------------------------------------------------------------------
@@ -460,9 +464,9 @@ if [[ "$TEST_HOME" != *" "* ]]; then
 fi
 
 if [[ "$TEST_HOME" == *" "* ]]; then
-  run_installer --install-hooks
+  run_installer --install-enforcement
 
-  cg_cmd=$(jq -r '.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate")) | .command' "$TEST_HOME/.claude/settings.json")
+  cg_cmd=$(jq -r '.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate")) | .command' "$TEST_PROJECT/.claude/settings.json")
   case "$cg_cmd" in
     "'"*"'") r=true ;;
     *) r=false ;;
@@ -475,12 +479,12 @@ if [[ "$TEST_HOME" == *" "* ]]; then
   if echo "$cg_err" | grep -q "No such file"; then r=true; else r=false; fi
   assert_eq "T13b checkpoint-gate command resolves under sh -c (no 'No such file')" "false" "$r"
 
-  ss_cmd=$(jq -r '.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart")) | .command' "$TEST_HOME/.claude/settings.json")
+  ss_cmd=$(jq -r '.hooks.SessionStart[]?.hooks[]? | select(.command|test("em-recall-sessionstart")) | .command' "$TEST_PROJECT/.claude/settings.json")
   ss_err=$(sh -c "$ss_cmd </dev/null 2>&1" || true)
   if echo "$ss_err" | grep -q "No such file"; then r=true; else r=false; fi
   assert_eq "T13c sessionstart command resolves under sh -c" "false" "$r"
 
-  se_cmd=$(jq -r '.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt")) | .command' "$TEST_HOME/.claude/settings.json")
+  se_cmd=$(jq -r '.hooks.SessionEnd[]?.hooks[]? | select(.command|test("em-session-end-prompt")) | .command' "$TEST_PROJECT/.claude/settings.json")
   # Extract the quoted path arg (everything after `node `) and verify the file exists.
   se_path=$(echo "$se_cmd" | sed -E "s/^node //; s/^'(.*)'\$/\1/")
   [ -f "$se_path" ] && r=true || r=false
@@ -495,18 +499,17 @@ echo "[T14] Codex post-PR review: v1→v2 upgrade idempotence on spaced paths"
 # ---------------------------------------------------------------------------
 if [[ "$TEST_HOME" == *" "* ]]; then
   # Hand-craft a v1-style unquoted entry.
-  legacy_cmd="$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
   cleanup
   TEST_HOME=$(mktemp -d -t "em hooks ")
   TEST_PROJECT=$(mktemp -d -t "em proj ")
-  legacy_cmd="$TEST_HOME/.claude/hooks/checkpoint-gate.sh"
-  mkdir -p "$TEST_HOME/.claude/hooks"
+  legacy_cmd="$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+  mkdir -p "$TEST_PROJECT/.claude/hooks"
   # First place a copy of the canonical hook so installHookFile reports
   # 'unchanged' (file install eligibility succeeds) — so addHookEntry's
   # idempotence check is what determines whether we duplicate.
   cp "$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh" "$legacy_cmd"
   chmod +x "$legacy_cmd"
-  cat > "$TEST_HOME/.claude/settings.json" <<JSON
+  cat > "$TEST_PROJECT/.claude/settings.json" <<JSON
 {
   "hooks": {
     "PreToolUse": [
@@ -520,9 +523,9 @@ if [[ "$TEST_HOME" == *" "* ]]; then
   }
 }
 JSON
-  run_installer --install-hooks
+  run_installer --install-enforcement
 
-  cg_total=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+  cg_total=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("checkpoint-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
   assert_eq "T14 v1 unquoted entry is recognized as canonical; no duplicate added" "1" "$cg_total"
 fi
 
@@ -533,30 +536,30 @@ echo "[T15] Issue #86 PR-A: divergent local plan-gate.sh — skipped + reg withh
 # not point Claude at unreviewed custom content.
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/plan-gate.sh"
-echo "# user-customized plan-gate" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
-chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
-sha_before=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+echo "# user-customized plan-gate" >> "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+sha_before=$(shasum "$TEST_PROJECT/.claude/hooks/plan-gate.sh" | awk '{print $1}')
 
-output=$(run_installer_capture --install-hooks)
-sha_after=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
+output=$(run_installer_capture --install-enforcement)
+sha_after=$(shasum "$TEST_PROJECT/.claude/hooks/plan-gate.sh" | awk '{print $1}')
 assert_eq "T15a divergent plan-gate.sh not overwritten" "$sha_before" "$sha_after"
 
 if echo "$output" | grep -q "Skipped (divergent local edit).*plan-gate.sh"; then r=true; else r=false; fi
 assert_eq "T15b warning printed for divergent plan-gate" "true" "$r"
 
-pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T15c new plan-gate registration WITHHELD when file install skipped" "0" "$pg_count"
 
 # T15d: divergent plan-gate + prior canonical registration → preserved.
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/plan-gate.sh"
-echo "# user-customized" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
-chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
-canon_pg_path="$TEST_HOME/.claude/hooks/plan-gate.sh"
-cat > "$TEST_HOME/.claude/settings.json" <<JSON
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+echo "# user-customized" >> "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+canon_pg_path="$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+cat > "$TEST_PROJECT/.claude/settings.json" <<JSON
 {
   "hooks": {
     "PreToolUse": [
@@ -569,8 +572,8 @@ cat > "$TEST_HOME/.claude/settings.json" <<JSON
   }
 }
 JSON
-output=$(run_installer_capture --install-hooks)
-pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+output=$(run_installer_capture --install-enforcement)
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T15d prior plan-gate registration preserved when file install skipped" "1" "$pg_count"
 
 # P2 (code review): assert the user-visible "existing registration preserved"
@@ -584,17 +587,17 @@ assert_eq "T15e explicit 'existing registration preserved' message printed for p
 echo "[T16] Issue #86 PR-A: --install-hooks-force overwrites divergent plan-gate AND registers"
 # ---------------------------------------------------------------------------
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/plan-gate.sh"
-echo "# user-customized" >> "$TEST_HOME/.claude/hooks/plan-gate.sh"
-chmod +x "$TEST_HOME/.claude/hooks/plan-gate.sh"
-run_installer --install-hooks --install-hooks-force
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+echo "# user-customized" >> "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/plan-gate.sh"
+run_installer --install-enforcement --install-hooks-force
 
 sha_repo=$(shasum "$REPO_ROOT/plugins/claude-code/hooks/plan-gate.sh" | awk '{print $1}')
-sha_dest=$(shasum "$TEST_HOME/.claude/hooks/plan-gate.sh" | awk '{print $1}')
+sha_dest=$(shasum "$TEST_PROJECT/.claude/hooks/plan-gate.sh" | awk '{print $1}')
 assert_eq "T16a --install-hooks-force overwrites divergent plan-gate with repo version" "$sha_repo" "$sha_dest"
 
-pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_HOME/.claude/settings.json")
+pg_count=$(jq '[.hooks.PreToolUse[]?.hooks[]? | select(.command|test("plan-gate"))] | length' "$TEST_PROJECT/.claude/settings.json")
 assert_eq "T16b --install-hooks-force registers plan-gate after overwrite" "1" "$pg_count"
 
 # ---------------------------------------------------------------------------
@@ -603,11 +606,11 @@ assert_eq "T16b --install-hooks-force registers plan-gate after overwrite" "1" "
 echo ""
 echo "--- T17: UserPromptSubmit hook wiring (#238 C6) ---"
 reset_state
-run_installer --install-hooks
+run_installer --install-enforcement
 
 # Hook file copied
-if [ -f "$TEST_HOME/.claude/hooks/preflight-prompt-helper.sh" ]; then
-  echo "  ✓ T17a preflight-prompt-helper.sh copied to ~/.claude/hooks/"
+if [ -f "$TEST_PROJECT/.claude/hooks/preflight-prompt-helper.sh" ]; then
+  echo "  ✓ T17a preflight-prompt-helper.sh copied to <project>/.claude/hooks/"
   ((passed++))
 else
   echo "  ✗ T17a preflight-prompt-helper.sh missing"
@@ -615,15 +618,15 @@ else
 fi
 
 # Registered under UserPromptSubmit (event-agnostic addHookEntry path)
-ups_count=$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper"))] | length' "$TEST_HOME/.claude/settings.json" 2>/dev/null || echo 0)
+ups_count=$(jq '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper"))] | length' "$TEST_PROJECT/.claude/settings.json" 2>/dev/null || echo 0)
 assert_eq "T17b preflight-prompt-helper registered on UserPromptSubmit" "1" "$ups_count"
 
 # No matcher on the entry (UserPromptSubmit always fires per hooks ref:85)
-ups_matcher=$(jq -r '.hooks.UserPromptSubmit[]? | select(.hooks[].command | test("preflight-prompt-helper")) | .matcher // "absent"' "$TEST_HOME/.claude/settings.json" 2>/dev/null)
+ups_matcher=$(jq -r '.hooks.UserPromptSubmit[]? | select(.hooks[].command | test("preflight-prompt-helper")) | .matcher // "absent"' "$TEST_PROJECT/.claude/settings.json" 2>/dev/null)
 assert_eq "T17c UserPromptSubmit entry has no matcher" "absent" "$ups_matcher"
 
 # Timeout from HOOK_SPECS (5s)
-ups_timeout=$(jq -r '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper")) | .timeout' "$TEST_HOME/.claude/settings.json" 2>/dev/null)
+ups_timeout=$(jq -r '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper")) | .timeout' "$TEST_PROJECT/.claude/settings.json" 2>/dev/null)
 assert_eq "T17d UserPromptSubmit entry timeout=5s" "5" "$ups_timeout"
 
 # ---------------------------------------------------------------------------
@@ -701,15 +704,18 @@ echo "[T19] PR-B orphan sweep: renamed llm-classifier.* deleted when new files c
 reset_state
 # Pre-seed stale installed copies of the OLD names (as if upgrading from a
 # pre-PR-B install). The repo no longer ships these basenames, so the glob copy
-# won't touch them; the conditional sweep must delete them.
-mkdir -p "$TEST_HOME/.claude/hooks/lib" "$TEST_HOME/.episodic-memory/scripts"
-echo "# stale old wrapper" > "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh"
+# won't touch them; the conditional sweep must delete them. RFC-008 P4d: the
+# lib .sh orphan now lives per-project at <project>/.claude/hooks/lib/; the
+# .mjs dispatch orphan stays at the GLOBAL $HOME/.episodic-memory/scripts/
+# (SCRIPTS_DIR in install.mjs RENAMED_REMOVED).
+mkdir -p "$TEST_PROJECT/.claude/hooks/lib" "$TEST_HOME/.episodic-memory/scripts"
+echo "# stale old wrapper" > "$TEST_PROJECT/.claude/hooks/lib/llm-classifier.sh"
 echo "// stale old dispatcher" > "$TEST_HOME/.episodic-memory/scripts/llm-classifier-dispatch.mjs"
-output=$(run_installer_capture --install-hooks)
+output=$(run_installer_capture --install-enforcement)
 
-[ -f "$TEST_HOME/.claude/hooks/lib/agent-classifier.sh" ] && r=true || r=false
+[ -f "$TEST_PROJECT/.claude/hooks/lib/agent-classifier.sh" ] && r=true || r=false
 assert_eq "T19a new agent-classifier.sh installed" "true" "$r"
-[ -e "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh" ] && r=true || r=false
+[ -e "$TEST_PROJECT/.claude/hooks/lib/llm-classifier.sh" ] && r=true || r=false
 assert_eq "T19b stale llm-classifier.sh swept (deleted)" "false" "$r"
 [ -e "$TEST_HOME/.episodic-memory/scripts/llm-classifier-dispatch.mjs" ] && r=true || r=false
 assert_eq "T19c stale llm-classifier-dispatch.mjs swept (deleted)" "false" "$r"
@@ -719,57 +725,78 @@ assert_eq "T19d sweep logged the removal" "true" "$r"
 # T19e: sweep WITHHELD when command-classifier.sh is divergent (skipped) — must
 # not delete an orphan a still-divergent command-classifier.sh might source.
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks/lib"
-echo "#!/bin/bash" > "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
-echo "# user-customized divergent classifier" >> "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
-echo "# stale old wrapper" > "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh"
-output=$(run_installer_capture --install-hooks)
+mkdir -p "$TEST_PROJECT/.claude/hooks/lib"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+echo "# user-customized divergent classifier" >> "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+echo "# stale old wrapper" > "$TEST_PROJECT/.claude/hooks/lib/llm-classifier.sh"
+output=$(run_installer_capture --install-enforcement)
 
-[ -e "$TEST_HOME/.claude/hooks/lib/llm-classifier.sh" ] && r=true || r=false
+[ -e "$TEST_PROJECT/.claude/hooks/lib/llm-classifier.sh" ] && r=true || r=false
 assert_eq "T19e stale llm-classifier.sh NOT swept while command-classifier.sh divergent" "true" "$r"
 if echo "$output" | grep -q "Skipped orphan sweep"; then r=true; else r=false; fi
 assert_eq "T19f sweep-withheld message printed on divergent command-classifier" "true" "$r"
 
 # ---------------------------------------------------------------------------
-# T20: RFC-008 P3c — taxonomy.json runtime-sourcing co-deploy + divergent WARN
+# T20: RFC-008 P4d / P3c — taxonomy.json + contract-set PER-PROJECT co-deploy + divergent WARN
 # ---------------------------------------------------------------------------
-# T20a: an --install-hooks install co-deploys patterns/taxonomy.json to the SAME
-# global root the classifier reads at runtime ($HOME/.episodic-memory/patterns),
-# byte-equal to the repo (codex R2-P2 install/runtime root parity). Coupled to
-# the classifier deploy so taxonomy never advances on its own.
+# RFC-008 P4d / Principle 12: the enforce-contract runtime config (taxonomy.json,
+# bp-001/events/enforce-config.schema.json, plugins/_index.json) is ENFORCEMENT,
+# not substrate — it now deploys PER-PROJECT under <project>/.claude/hooks/patterns/
+# (co-located with the engine), NOT to the global $HOME/.episodic-memory/patterns/.
+# T20a: an --install-enforcement install deploys patterns/taxonomy.json to the
+# per-project root the classifier reads at runtime, byte-equal to the repo.
 reset_state
-run_installer --install-hooks >/dev/null 2>&1
-GLOBAL_TAX="$TEST_HOME/.episodic-memory/patterns/taxonomy.json"
-[ -f "$GLOBAL_TAX" ] && r=true || r=false
-assert_eq "T20a taxonomy.json co-deployed to global patterns dir (--install-hooks)" "true" "$r"
-if cmp -s "$REPO_ROOT/patterns/taxonomy.json" "$GLOBAL_TAX"; then r=true; else r=false; fi
+run_installer --install-enforcement >/dev/null 2>&1
+PROJ_TAX="$TEST_PROJECT/.claude/hooks/patterns/taxonomy.json"
+[ -f "$PROJ_TAX" ] && r=true || r=false
+assert_eq "T20a taxonomy.json deployed to per-project patterns dir (--install-enforcement)" "true" "$r"
+if cmp -s "$REPO_ROOT/patterns/taxonomy.json" "$PROJ_TAX"; then r=true; else r=false; fi
 assert_eq "T20b deployed taxonomy.json is byte-equal to repo" "true" "$r"
 
-# T20a2 (PR-level codex BLOCKER regression): a NO-hooks install must NOT deploy
-# the global taxonomy — otherwise it would advance runtime candidate-1 while an
-# already-installed classifier stays stale + unwarned (silent taxonomy_drift).
+# T20b2: the contract set (bp-001/events/enforce-config.schema) + plugins/_index.json
+# co-deploy per-project alongside taxonomy.
+[ -f "$TEST_PROJECT/.claude/hooks/patterns/bp-001.json" ] && \
+  [ -f "$TEST_PROJECT/.claude/hooks/patterns/events.json" ] && \
+  [ -f "$TEST_PROJECT/.claude/hooks/patterns/enforce-config.schema.json" ] && \
+  [ -f "$TEST_PROJECT/.claude/hooks/plugins/_index.json" ] && r=true || r=false
+assert_eq "T20b3 contract set + plugins/_index.json co-deployed per-project" "true" "$r"
+
+# T20b4: the global $HOME/.episodic-memory/patterns/ holds NO enforcement contract
+# config — ONLY the substrate behavioral-pattern registry (_index.json) stays global.
+[ -f "$TEST_HOME/.episodic-memory/patterns/taxonomy.json" ] && r=true || r=false
+assert_eq "T20b4 taxonomy.json ABSENT from global patterns dir (per-project only)" "false" "$r"
+[ -f "$TEST_HOME/.episodic-memory/patterns/bp-001.json" ] && r=true || r=false
+assert_eq "T20b5 contract set ABSENT from global patterns dir (per-project only)" "false" "$r"
+[ -f "$TEST_HOME/.episodic-memory/patterns/_index.json" ] && r=true || r=false
+assert_eq "T20b6 substrate _index.json STILL deployed to global patterns dir (unchanged)" "true" "$r"
+
+# T20a2 (PR-level codex BLOCKER regression): a NO-enforcement install must NOT
+# deploy taxonomy anywhere — neither per-project nor global. Taxonomy is gated
+# on --install-enforcement (it is enforcement config, not substrate).
 reset_state
 run_installer >/dev/null 2>&1
+[ -f "$TEST_PROJECT/.claude/hooks/patterns/taxonomy.json" ] && r=true || r=false
+assert_eq "T20a2 no-enforcement install does NOT deploy per-project taxonomy (coupling)" "false" "$r"
 [ -f "$TEST_HOME/.episodic-memory/patterns/taxonomy.json" ] && r=true || r=false
-assert_eq "T20a2 no-hooks install does NOT deploy global taxonomy (coupling)" "false" "$r"
+assert_eq "T20a3 no-enforcement install does NOT deploy global taxonomy" "false" "$r"
 
 # T20c: pre-P3c divergent classifier (no _ensure_taxonomy_synced helper) kept +
 # taxonomy redeployed → WARN that the gate is NOT taxonomy-synced (codex R1-P1b).
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks/lib"
+mkdir -p "$TEST_PROJECT/.claude/hooks/lib"
 printf '#!/bin/bash\n# user-customized divergent classifier (pre-P3c, no helper)\n' \
-  > "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
-output=$(run_installer_capture --install-hooks)
+  > "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+output=$(run_installer_capture --install-enforcement)
 if echo "$output" | grep -q "pre-P3c"; then r=true; else r=false; fi
 assert_eq "T20c pre-P3c divergent classifier emits 'not taxonomy-synced' WARN" "true" "$r"
 
 # T20d: post-P3c divergent classifier (HAS the helper) kept + taxonomy redeployed
 # → WARN that it will FAIL CLOSED on drift (the other split branch).
 reset_state
-mkdir -p "$TEST_HOME/.claude/hooks/lib"
+mkdir -p "$TEST_PROJECT/.claude/hooks/lib"
 printf '#!/bin/bash\n_ensure_taxonomy_synced() { :; }\n# divergent local edit, post-P3c\n' \
-  > "$TEST_HOME/.claude/hooks/lib/command-classifier.sh"
-output=$(run_installer_capture --install-hooks)
+  > "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+output=$(run_installer_capture --install-enforcement)
 if echo "$output" | grep -q "FAIL CLOSED"; then r=true; else r=false; fi
 assert_eq "T20d post-P3c divergent classifier emits 'FAIL CLOSED' WARN" "true" "$r"
 

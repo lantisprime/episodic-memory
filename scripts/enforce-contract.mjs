@@ -220,6 +220,21 @@ function dottedGet(obj, dotted) {
  * ambient parent's patterns/).
  */
 export function resolveContractRoot() {
+  // Candidate 0 — CO-LOCATED with this module (RFC-008 P4d / Principle 12). The
+  // engine + its contract config install together per-project under
+  // <project>/.claude/hooks/, so patterns/ + plugins/ sit beside enforce-contract.mjs.
+  // Self-relative: works in EVERY invocation mode with no markerRoot dependency, and
+  // it is what makes enforcement fully project-local (zero reach into global). Accepted
+  // iff the deployed bp-001 contract is present beside the module. In the dev/repo
+  // layout the module sits at scripts/ (no scripts/patterns/) so this falls through to
+  // the candidate-2 in-repo climb below; an installed module finds it here.
+  const self0 = realpathOrNull(fileURLToPath(import.meta.url))
+  if (self0) {
+    const selfDir0 = path.dirname(self0)
+    if (fs.existsSync(path.join(selfDir0, 'patterns', 'bp-001.json'))) return selfDir0
+  }
+  // Candidate 1 — legacy global install root. Retained for back-compat with any
+  // pre-P4d global deploy; fresh P4d installs ship no global contract so this misses.
   const c1 = path.join(os.homedir(), '.episodic-memory')
   if (fs.existsSync(path.join(c1, 'patterns', 'bp-001.json'))) {
     return realpathOrNull(c1) || c1

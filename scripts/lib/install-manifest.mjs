@@ -95,10 +95,189 @@ export const HOOK_SPECS = [
   }
 ]
 
-// SessionEnd hook is em-session-end-prompt.mjs invoked from the global
-// scripts dir (canonical at $HOME/.episodic-memory/scripts/). The hook
-// command string is built by install.mjs at registration time.
+// SessionEnd hook is em-session-end-prompt.mjs. Per RFC-008 P4d + Principle 12
+// it is an ENFORCEMENT hook script (it runs ONLY as the SessionEnd hook), so it
+// installs PER-PROJECT under <project>/.claude/hooks/ and is EXCLUDED from the
+// global scripts-scan — it is NOT a global substrate script.
 export const SESSION_END_SCRIPT = 'em-session-end-prompt.mjs'
+
+// Enforcement hook SCRIPTS (.mjs that exist only to be run by a hook) — these
+// must NEVER deploy to the global scripts dir (Principle 12); they install
+// per-project. install.mjs's global scripts-scan filters these out.
+export const ENFORCEMENT_HOOK_SCRIPTS = [SESSION_END_SCRIPT]
+
+// DERIVED (Rule 14) from HOOK_SPECS + SESSION_END_SCRIPT — single source of
+// truth so the harness drift guard (A4) and install can't diverge.
+//
+// enforcementHookFileBasenames(): the 8 enforcement hook FILES that install
+// per-project — the unique HOOK_SPECS .sh gates (stop-gate.sh once) plus the
+// SessionEnd hook script. Drives project-side copy AND global prune.
+export function enforcementHookFileBasenames() {
+  return [...new Set(HOOK_SPECS.map((s) => s.file)), ...ENFORCEMENT_HOOK_SCRIPTS]
+}
+
+// enforcementRegistrations(): the 9 enforcement registrations (8 HOOK_SPECS
+// event-entries — stop-gate twice — plus the SessionEnd entry). Drives
+// project-side registration, global de-registration, and the A4 drift guard.
+export function enforcementRegistrations() {
+  return [
+    ...HOOK_SPECS.map((s) => ({ file: s.file, event: s.event, matcher: s.matcher, timeout: s.timeout })),
+    { file: SESSION_END_SCRIPT, event: 'SessionEnd', timeout: 10 },
+  ]
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// RFC-008 P4d / Principle 12 — enforcement SCRIPTS + their lib closure relocate
+// per-project; global holds ONLY substrate + dev/CI tooling.
+//
+// An "enforcement ENTRY script" is a .mjs under scripts/ that exists ONLY to be
+// run by a hook: the enforcement ENGINE (enforce-contract), the classifier suite,
+// the marker writers, and the bp1 orchestration. By the P12 FUNCTION test these
+// are enforcement artifacts however packaged → they install under
+// <project>/.claude/hooks/ and NEVER deploy to the global substrate scripts dir.
+//
+// The set is DERIVED (explicit list + the bp1-* family by prefix) so a newly
+// added enforcement script is classified automatically and can't silently leak to
+// global. The transitive relative-import closure (computeLibClosure) decides which
+// scripts/lib/*.mjs travel with them — no hand-maintained lib list to drift.
+// ───────────────────────────────────────────────────────────────────────────
+const ENFORCEMENT_ENTRY_EXPLICIT = new Set([
+  'enforce-contract.mjs',
+  'agent-classifier-dispatch.mjs', 'classifier-config-loader.mjs', 'classifier-marker.mjs',
+  'classifier-override-lookup.mjs', 'classifier-override-persist.mjs', 'classify-correction.mjs',
+  'llm-classify.mjs',
+  'checkpoint-marker.mjs', 'plan-marker.mjs', 'preflight-marker-write.mjs',
+])
+
+export function isEnforcementEntryScript(basename) {
+  return ENFORCEMENT_ENTRY_EXPLICIT.has(basename) || /^bp1-.+\.mjs$/.test(basename)
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// SUBSTRATE allowlist (P12 / user directive 2026-06-19). The global
+// ~/.episodic-memory/scripts dir holds the memory SUBSTRATE ONLY: the em-* tools
+// plus the second-opinion review CAPABILITY harness. This is an ALLOWLIST, not a
+// denylist — the prior "every .mjs that isn't enforcement → global" rule silently
+// leaked repo-dev/CI validators (validate-*, scaffold-bp, test-plugin,
+// check-automode-defaults) into the substrate. By the P12 FUNCTION test those
+// exist only to police the repo/enforcement layer; they are NOT substrate. They
+// ship NOWHERE (CI runs them repo-relative: `node scripts/validate-*.mjs`).
+//
+// Three disjoint classes for scripts/*.mjs:
+//   substrate   → global       (isSubstrateScript)
+//   enforcement → per-project  (isEnforcementEntryScript + ENFORCEMENT_HOOK_SCRIPTS)
+//   repo-dev    → nowhere       (isRepoDevScript — the remainder)
+// ───────────────────────────────────────────────────────────────────────────
+const SUBSTRATE_CAPABILITY_SCRIPTS = new Set(['second-opinion.mjs'])
+export function isSubstrateScript(basename) {
+  if (ENFORCEMENT_HOOK_SCRIPTS.includes(basename)) return false
+  return /^em-.+\.mjs$/.test(basename) || SUBSTRATE_CAPABILITY_SCRIPTS.has(basename)
+}
+
+// Repo-only dev/CI scripts: not substrate, not enforcement. Installed NOWHERE.
+export function isRepoDevScript(basename) {
+  return basename.endsWith('.mjs')
+    && !isSubstrateScript(basename)
+    && !isEnforcementEntryScript(basename)
+    && !ENFORCEMENT_HOOK_SCRIPTS.includes(basename)
+}
+
+function listRepoScripts(repoDir) {
+  const d = path.join(repoDir, 'scripts')
+  return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.mjs')) : []
+}
+
+// Transitive relative-import closure (restricted to scripts/lib/*.mjs) of a set of
+// entry scripts. Static parse of three import FORMS — `... from '<spec>'`,
+// dynamic `import('<spec>')`, and bare side-effect `import '<spec>'` — relative
+// specifiers only. Returns a Set of lib basenames.
+//
+// This closure is the SOLE guarantee that the per-project enforcement bundle is
+// import-complete (a dropped transitive lib breaks the relocated engine in a
+// non-this-repo project, and this repo's CI can't catch it — it runs dev-relative
+// where scripts/lib/ is fully present). So all three static forms are matched
+// (review F3). LIMITATION: a COMPUTED dynamic import — `import(variable)` /
+// `import(`./${x}.mjs`)` — cannot be resolved by static analysis; none exist in
+// scripts/ today (grep-verified) and the convention is literal specifiers only.
+// tests/test-lib-closure.mjs asserts the bare-import form is captured.
+export function computeLibClosure(repoDir, entryBasenames) {
+  const scriptsDir = path.join(repoDir, 'scripts')
+  const libDir = path.join(scriptsDir, 'lib')
+  const libs = new Set()
+  const seen = new Set()
+  const walk = (abs) => {
+    if (seen.has(abs)) return
+    seen.add(abs)
+    let src
+    try { src = fs.readFileSync(abs, 'utf8') } catch { return }
+    // Fresh matcher per call — a single /g regex shares lastIndex across the
+    // recursive walk and would skip imports of nested modules. The `import\s+`
+    // alternative (require whitespace) matches bare side-effect imports
+    // `import './x.mjs'` without false-matching identifiers; `import(` is caught
+    // by the earlier `import\s*\(` alternative, `import x from` by `from\s*`.
+    for (const m of src.matchAll(/(?:from\s*|import\s*\(\s*|import\s+)['"]([^'"]+)['"]/g)) {
+      const spec = m[1]
+      if (!spec.startsWith('.')) continue
+      let resolved = path.resolve(path.dirname(abs), spec)
+      if (!resolved.endsWith('.mjs') && !fs.existsSync(resolved)) resolved += '.mjs'
+      if (path.dirname(resolved) === libDir) libs.add(path.basename(resolved))
+      walk(resolved)
+    }
+  }
+  for (const e of entryBasenames) {
+    const abs = path.join(scriptsDir, e)
+    if (fs.existsSync(abs)) walk(abs)
+  }
+  return libs
+}
+
+// Enforcement entry scripts present in the repo (engine + classifier + markers + bp1).
+export function enforcementEntryScripts(repoDir) {
+  return listRepoScripts(repoDir).filter(isEnforcementEntryScript)
+}
+
+// Scripts that STAY global: SUBSTRATE ONLY — the em-* tools + the second-opinion
+// capability harness (isSubstrateScript allowlist). Enforcement entries relocate
+// per-project; repo-dev/CI tools (validate-*, scaffold-bp, …) ship nowhere.
+export function globalEntryScripts(repoDir) {
+  return listRepoScripts(repoDir).filter(isSubstrateScript)
+}
+
+// Lib closure that STAYS global — every scripts/lib/*.mjs imported (transitively)
+// by a retained-global script. These are NOT removed from global even if an
+// enforcement script also imports them (e.g. local-dir.mjs, json-instance-validate).
+export function globalScriptLibs(repoDir) {
+  return computeLibClosure(repoDir, globalEntryScripts(repoDir))
+}
+
+// Lib closure that travels INTO the per-project enforcement bundle — every
+// scripts/lib/*.mjs the enforcement entries (incl. the SessionEnd hook script)
+// import. Includes shared substrate libs (local-dir.mjs, …) so the relocated
+// scripts resolve all imports co-located, never reaching into global.
+export function enforcementBundleLibs(repoDir) {
+  return computeLibClosure(repoDir, [...enforcementEntryScripts(repoDir), SESSION_END_SCRIPT])
+}
+
+// Libs that move OUT of global (enforcement-only): in the enforcement bundle and
+// NOT in any retained-global script's closure. Drives the global lib filter + the
+// D4 prune sweep + the P12 global-clean guardrail.
+export function relocatedOnlyLibs(repoDir) {
+  const keep = globalScriptLibs(repoDir)
+  return [...enforcementBundleLibs(repoDir)].filter((l) => !keep.has(l)).sort()
+}
+
+// BP-1 (RFC-004 auto-pilot) is a BEHAVIOR PATTERN, deployed PER-PROJECT alongside
+// its SessionStart hooks on CORE install (not gated on --install-enforcement). Its
+// scripts (bp1-*.mjs) + their lib closure co-locate with the bp1 hooks under
+// <project>/.claude/hooks/. They are still enforcement-by-function for the GLOBAL
+// exclusion (isEnforcementEntryScript matches bp1-* so they never land in global) —
+// these helpers only drive the per-project co-deploy with the bp1 hooks.
+export function bp1EntryScripts(repoDir) {
+  return listRepoScripts(repoDir).filter((f) => /^bp1-.+\.mjs$/.test(f))
+}
+export function bp1ClosureLibs(repoDir) {
+  return [...computeLibClosure(repoDir, bp1EntryScripts(repoDir))]
+}
 
 const HOME_HOOKS = (homeDir) => path.join(homeDir, '.claude', 'hooks')
 const HOME_HOOKS_LIB = (homeDir) => path.join(homeDir, '.claude', 'hooks', 'lib')
@@ -135,7 +314,11 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
       relativePath: rel,
       repoPath: path.join(repoDir, rel),
       installedPath: path.join(HOME_HOOKS(homeDir), spec.file),
-      kind: 'hook'
+      kind: 'hook',
+      // RFC-008 P4d / Principle 12: enforcement hooks install per-project, not
+      // global. migration-cutover excludes scope:'project' (the installedPath
+      // above is the legacy global location, no longer written).
+      scope: 'project'
     })
   }
 
@@ -148,35 +331,53 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_HOOKS_LIB(homeDir), f),
-        kind: 'hook-lib'
+        kind: 'hook-lib',
+        // P12: hook libs install per-project alongside their hooks.
+        scope: 'project'
       })
     }
   }
 
-  // Scripts — every .mjs under scripts/.
+  // Scripts — every .mjs under scripts/ EXCEPT enforcement hook scripts
+  // (em-session-end-prompt.mjs), which install per-project (Principle 12) and
+  // must not appear as global substrate. Three disjoint scopes:
+  //   substrate (em-* + second-opinion) → global (no scope tag)
+  //   enforcement (engine/classifier/markers/bp1) → scope:'project' (relocated to
+  //     <project>/.claude/hooks/; installedPath below is the legacy global loc)
+  //   repo-dev/CI (validate-*, scaffold-bp, …) → scope:'repo' (shipped NOWHERE;
+  //     CI runs them repo-relative). migration-cutover + global-clean exclude both
+  //     non-global scopes; only substrate is verified at the global installedPath.
   const repoScripts = path.join(repoDir, 'scripts')
   if (fs.existsSync(repoScripts)) {
-    for (const f of fs.readdirSync(repoScripts).filter(n => n.endsWith('.mjs'))) {
+    for (const f of fs.readdirSync(repoScripts).filter(n => n.endsWith('.mjs') && !ENFORCEMENT_HOOK_SCRIPTS.includes(n))) {
       const rel = `scripts/${f}`
+      const scope = isEnforcementEntryScript(f) ? 'project'
+        : isSubstrateScript(f) ? undefined
+        : 'repo'
       entries.push({
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_SCRIPTS(homeDir), f),
-        kind: 'script'
+        kind: 'script',
+        ...(scope ? { scope } : {}),
       })
     }
   }
 
-  // Script lib — every .mjs under scripts/lib/.
+  // Script lib — every .mjs under scripts/lib/. Enforcement-only libs
+  // (relocatedOnlyLibs) travel per-project with their scripts → scope:'project'.
+  // Libs shared with a retained-global script stay global (no scope).
   const repoScriptsLib = path.join(repoDir, 'scripts', 'lib')
   if (fs.existsSync(repoScriptsLib)) {
+    const relocated = new Set(relocatedOnlyLibs(repoDir))
     for (const f of fs.readdirSync(repoScriptsLib).filter(n => n.endsWith('.mjs'))) {
       const rel = `scripts/lib/${f}`
       entries.push({
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_SCRIPTS_LIB(homeDir), f),
-        kind: 'script-lib'
+        kind: 'script-lib',
+        ...(relocated.has(f) ? { scope: 'project' } : {}),
       })
     }
   }

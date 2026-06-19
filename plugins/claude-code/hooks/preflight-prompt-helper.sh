@@ -105,17 +105,20 @@ if [ -z "$REPO_ROOT" ] || [ ! -d "$REPO_ROOT" ]; then
   _log_and_exit_safe "repo root unresolved from cwd=$CWD; skipping"
 fi
 
-# Locate the canon lib + marker-write helper. Prefer in-repo paths
-# (development), fall back to the global install (~/.episodic-memory/).
+# Locate the canon lib + marker-write helper. RFC-008 P4d / Principle 12: prefer
+# the CO-LOCATED per-project copies ($HOOK_DIR — enforcement installs together,
+# never global); then in-repo (development); then legacy global install.
 CANON_LIB=""
 HELPER=""
 for cand in \
+  "$HOOK_DIR/lib/preflight-prompt-canon.mjs" \
   "$REPO_ROOT/scripts/lib/preflight-prompt-canon.mjs" \
   "${HOME:-/}/.episodic-memory/scripts/lib/preflight-prompt-canon.mjs"
 do
   if [ -f "$cand" ]; then CANON_LIB="$cand"; break; fi
 done
 for cand in \
+  "$HOOK_DIR/preflight-marker-write.mjs" \
   "$REPO_ROOT/scripts/preflight-marker-write.mjs" \
   "${HOME:-/}/.episodic-memory/scripts/preflight-marker-write.mjs"
 do

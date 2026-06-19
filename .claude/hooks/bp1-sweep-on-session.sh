@@ -20,13 +20,12 @@ set -e
 #   - Passes `--project "$CWD"` explicitly to BOTH subprocesses; does NOT rely
 #     on subprocess `process.cwd()` defaulting.
 #
-# Script resolution (codex code-review A1, 2026-05-07):
-#   bp1 scripts are installed GLOBALLY at $HOME/.episodic-memory/scripts/ by
-#   install.mjs section 1 (lines 82-99). NOT under <projectRoot>/scripts/.
-#   Resolving via $CWD/scripts would silently no-op for any installed project
-#   that isn't this repo (which is the only one where the source-of-truth and
-#   the install destination overlap). Mirrors em-recall-sessionstart.sh:38
-#   resolution pattern.
+# Script resolution (RFC-008 P4d / Principle 12 — relocated per-project 2026-06-19;
+# was codex code-review A1, 2026-05-07):
+#   bp1 scripts install CO-LOCATED with this hook under <project>/.claude/hooks/
+#   (the BP-1 behavior pattern is per-project, never in the global substrate).
+#   They are resolved via $HOOK_DIR (this script's own dir, BASH_SOURCE-derived),
+#   NOT via $CWD/scripts and NOT via the global $HOME/.episodic-memory/scripts/.
 #
 # Idempotent: re-firing on the same project is harmless. Sweep is stateless.
 
@@ -41,7 +40,13 @@ if ! cd "$CWD" 2>/dev/null; then
   exit 0
 fi
 
-EM_SCRIPTS_DIR="$HOME/.episodic-memory/scripts"
+# RFC-008 P4d / Principle 12: bp1 scripts install CO-LOCATED with this hook under
+# <project>/.claude/hooks/, NOT in the global substrate. BASH_SOURCE is absolute
+# (Claude Code registers hooks by absolute path), so this is cd-safe.
+EM_SCRIPTS_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+# Co-located install (P4d) first; legacy global fallback if the bp1 scripts are
+# not beside this hook (fresh installs co-locate; the fallback is inert there).
+[ -f "$EM_SCRIPTS_DIR/bp1-flag-check.mjs" ] || EM_SCRIPTS_DIR="$HOME/.episodic-memory/scripts"
 FLAG_CHECK="$EM_SCRIPTS_DIR/bp1-flag-check.mjs"
 SWEEP="$EM_SCRIPTS_DIR/bp1-deadline-sweep.mjs"
 

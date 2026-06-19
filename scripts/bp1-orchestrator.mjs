@@ -79,10 +79,18 @@ import { writeMarker, cleanupApprovalMarker } from './lib/bp1-marker.mjs'
 import { loadActiveRunsForSweep } from './lib/bp1-sweep-loader.mjs'
 import { scanForCandidates, PATH_B_AGE_THRESHOLD_MS } from './lib/bp1-sweep.mjs'
 
-const REPO_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-const FLAG_CHECK = path.join(REPO_DIR, 'scripts', 'bp1-flag-check.mjs')
-const RFC_SCAN = path.join(REPO_DIR, 'scripts', 'bp1-rfc-scan.mjs')
-const EM_STORE = path.join(REPO_DIR, 'scripts', 'em-store.mjs')
+// RFC-008 P4d / Principle 12: bp1 scripts install per-project (enforcement). The
+// bp1 siblings are CO-LOCATED with this module (dev: scripts/; installed:
+// <project>/.claude/hooks/), so resolve them from SCRIPT_DIR, not a hardcoded
+// <root>/scripts/ segment. em-store is SUBSTRATE (stays global): co-located in the
+// dev/repo layout, else resolved from the global substrate root — enforcement may
+// call the global substrate.
+const SCRIPT_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname))
+const FLAG_CHECK = path.join(SCRIPT_DIR, 'bp1-flag-check.mjs')
+const RFC_SCAN = path.join(SCRIPT_DIR, 'bp1-rfc-scan.mjs')
+const EM_STORE = fs.existsSync(path.join(SCRIPT_DIR, 'em-store.mjs'))
+  ? path.join(SCRIPT_DIR, 'em-store.mjs')
+  : path.join(os.homedir(), '.episodic-memory', 'scripts', 'em-store.mjs')
 
 const INPUT_SHA256_RE = /^[a-f0-9]{64}$/
 const EPISODE_ID_RE = /^[a-z0-9-]+$/

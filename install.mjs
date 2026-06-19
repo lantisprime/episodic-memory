@@ -22,6 +22,12 @@ import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { eventsVersion } from './scripts/lib/version-hash.mjs'
 import { findEnforcementTokens } from './scripts/lib/em-recall-purity.mjs'
+import {
+  HOOK_SPECS, SESSION_END_SCRIPT, ENFORCEMENT_HOOK_SCRIPTS,
+  enforcementHookFileBasenames, enforcementRegistrations,
+  isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
+  globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
+} from './scripts/lib/install-manifest.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
@@ -40,6 +46,13 @@ const tool = flag('--tool')
 const projectDir = flag('--project') || process.cwd()
 const installHooks = argv.includes('--install-hooks')
 const installHooksForce = argv.includes('--install-hooks-force')
+// RFC-008 P4d / Principle 12: enforcement hooks (files + libs + scripts +
+// registrations) install ONLY per-project via --install-enforcement, into
+// <project>/.claude/. INTERNAL/undocumented until S3 resolves the cross-deps
+// ($REPO_ROOT scripts/bundles + the SessionEnd .mjs libs) — S2 acceptance is
+// registration-green, NOT functional-safe (the registered gates hard-deny on
+// missing deps in a non-this-repo project until S3).
+const installEnforcement = argv.includes('--install-enforcement')
 const installSecondOpinion = argv.includes('--install-second-opinion')
 const bootstrapLastPrompt = argv.includes('--bootstrap-last-prompt')
 const REPO_HOOKS = path.join(REPO_DIR, 'plugins', 'claude-code', 'hooks')
@@ -213,19 +226,34 @@ fs.mkdirSync(path.join(GLOBAL_DIR, 'episodes'), { recursive: true })
 
 let scriptFiles
 try {
-  scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(f => f.endsWith('.mjs'))
+  // P12 (RFC-008 P4d): global = SUBSTRATE ONLY — the em-* tools + the second-opinion
+  // capability harness (isSubstrateScript ALLOWLIST). Two other classes ship
+  // elsewhere/nowhere: enforcement SCRIPTS (engine, classifier, markers, bp1,
+  // SessionEnd hook) install per-project under --install-enforcement; repo-dev/CI
+  // tools (validate-*, scaffold-bp, test-plugin, check-automode-defaults) ship
+  // NOWHERE — CI runs them repo-relative. An allowlist (not the prior denylist)
+  // ensures a newly added non-substrate script cannot silently leak into global.
+  scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(
+    f => f.endsWith('.mjs') && isSubstrateScript(f)
+  )
   for (const file of scriptFiles) {
     const src = path.join(REPO_SCRIPTS, file)
     const dst = path.join(SCRIPTS_DIR, file)
     fs.copyFileSync(src, dst)
     fs.chmodSync(dst, 0o755)
   }
-  // scripts/lib/ — shared helpers (e.g. local-dir.mjs for #85). Imported by em-* scripts.
+  // scripts/lib/ — shared helpers (e.g. local-dir.mjs for #85). Imported by em-*
+  // scripts. P12: ENFORCEMENT-ONLY libs (relocatedOnlyLibs — the closure of the
+  // enforcement entries minus anything a retained-global script imports) move
+  // per-project with their scripts and are EXCLUDED here. Libs shared by both a
+  // global and an enforcement script (local-dir, json-instance-validate, …) stay
+  // global AND get a co-located copy in the per-project bundle.
   const REPO_SCRIPTS_LIB = path.join(REPO_SCRIPTS, 'lib')
   if (fs.existsSync(REPO_SCRIPTS_LIB)) {
     const libDst = path.join(SCRIPTS_DIR, 'lib')
+    const relocatedLibs = new Set(relocatedOnlyLibs(REPO_DIR))
     fs.mkdirSync(libDst, { recursive: true })
-    for (const file of fs.readdirSync(REPO_SCRIPTS_LIB).filter(f => f.endsWith('.mjs'))) {
+    for (const file of fs.readdirSync(REPO_SCRIPTS_LIB).filter(f => f.endsWith('.mjs') && !relocatedLibs.has(f))) {
       fs.copyFileSync(path.join(REPO_SCRIPTS_LIB, file), path.join(libDst, file))
     }
   }
@@ -324,12 +352,14 @@ if (fs.existsSync(repoPatternsIndex)) {
   console.log(`Installed patterns/_index.json to ${globalPatternsDir}`)
 }
 
-// NOTE: patterns/taxonomy.json is a RUNTIME dependency of command-classifier.sh,
-// NOT a global-validation artifact like _index.json — so it is co-deployed WITH
-// the classifier inside the `if (installHooks)` block (§5a-tax below), never
-// unconditionally here. Deploying it in the main body would advance runtime
-// candidate-1 on a no-hooks install while leaving an already-installed classifier
-// stale + unwarned (PR-level codex BLOCKER; R4/F4 root parity + sync coupling).
+// NOTE (RFC-008 P4d / Principle 12): patterns/taxonomy.json is a RUNTIME
+// dependency of the relocated command-classifier — it is an ENFORCEMENT contract
+// artifact, NOT a global-validation artifact like _index.json. Post-S2 it is
+// co-deployed with the classifier PER-PROJECT under <project>/.claude/hooks/patterns/
+// inside the `if (installEnforcement)` block (§5b-ec), never global. Only
+// _index.json (the substrate pattern registry) stays global, unconditionally (§1b
+// above). Deploying taxonomy globally would re-leak an enforcement artifact into
+// the substrate (the exact P12 violation S2 closes).
 
 // ---------------------------------------------------------------------------
 // 2. Create local .episodic-memory in target project
@@ -439,6 +469,26 @@ if (tool === 'claude-code' || tool === 'all') {
     console.log(`Warning: BP-1 H2 hook source not found at ${repoH2HookSrc}; skipping wiring.`)
   } else {
     fs.mkdirSync(projHooksDir, { recursive: true })
+
+    // RFC-008 P4d / Principle 12: the BP-1 behavior-pattern SCRIPTS (bp1-*.mjs +
+    // their lib closure) install CO-LOCATED with the bp1 SessionStart hooks here,
+    // per-project — NEVER in the global substrate (they are excluded from the
+    // global scripts-scan by isEnforcementEntryScript). The hooks resolve them at
+    // $HOOK_DIR, so core install ships a self-contained BP-1 (no global reach).
+    {
+      const projHooksLibDir = path.join(projHooksDir, 'lib')
+      fs.mkdirSync(projHooksLibDir, { recursive: true })
+      for (const f of bp1EntryScripts(REPO_DIR)) {
+        const dst = path.join(projHooksDir, f)
+        fs.copyFileSync(path.join(REPO_SCRIPTS, f), dst)
+        fs.chmodSync(dst, 0o755)
+      }
+      for (const f of bp1ClosureLibs(REPO_DIR)) {
+        const src = path.join(REPO_SCRIPTS, 'lib', f)
+        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(projHooksLibDir, f))
+      }
+    }
+
     let h2HookCopied = false
     let h2DivergentSkipped = false
     if (!fs.existsSync(projH2HookDst)) {
@@ -1153,13 +1203,33 @@ function installHookFile(repoFile, destFile, force) {
   return 'skipped-divergent'
 }
 
-if (installHooks) {
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
-  const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+if (installHooks && !installEnforcement) {
+  // P12 (RFC-008 P4d) transitional honesty (review F2): post-S2 ALL enforcement
+  // (gates, libs, taxonomy/contract config, registrations) installs PER-PROJECT
+  // via --install-enforcement. --install-hooks alone no longer deploys any
+  // enforcement artifact — every inner block below is gated `if (installEnforcement)`.
+  // Surface that rather than silently no-op'ing the previously load-bearing flag.
+  console.log('Note: enforcement now installs per-project via --install-enforcement (RFC-008 P4d). --install-hooks alone no longer deploys enforcement gates.')
+}
+
+if (installHooks || installEnforcement) {
+  // P12 (RFC-008 P4d): enforcement artifacts (hook files, libs, taxonomy/contract
+  // config, registrations) install PER-PROJECT under <project>/.claude/ — NEVER
+  // global — and ONLY under --install-enforcement (every substantive inner block
+  // is gated `if (installEnforcement)`). The lone global substrate artifact,
+  // patterns/_index.json, is deployed unconditionally far above (§1b).
+  const settingsPath = path.join(projectDir, '.claude', 'settings.json')
+  const userHooksDir = path.join(projectDir, '.claude', 'hooks')
   const userHooksLibDir = path.join(userHooksDir, 'lib')
   const REPO_HOOKS_LIB = path.join(REPO_HOOKS, 'lib')
   const touched = { hooks: [], settings: [], hookLib: [] }
   try {
+   // Shared enforcement lib-install state, hoisted so every installEnforcement
+   // sub-block (5_lib, 5c registration gating, classifier-sync warning) sees it.
+   const libResults = {}
+   let hookLibFiles = []
+   let anyLibSkippedDivergent = false
+   if (installEnforcement) {
     // 5_lib. Deploy hooks/lib/ alongside hooks/. Session 1 (#86 PR-B / #89 /
     // #101) introduces hooks/lib/command-classifier.sh and hooks/lib/repo-root.sh
     // sourced by plan-gate.sh and checkpoint-gate.sh via $BASH_SOURCE/cd -P.
@@ -1171,9 +1241,6 @@ if (installHooks) {
     // lib was skipped-divergent — registered hook would source stale/missing
     // lib at runtime and fail loud (or worse, silently behave wrong if user's
     // divergent lib is incomplete).
-    const libResults = {}
-    let hookLibFiles = []
-    let anyLibSkippedDivergent = false
     if (fs.existsSync(REPO_HOOKS_LIB)) {
       fs.mkdirSync(userHooksLibDir, { recursive: true })
       hookLibFiles = fs.readdirSync(REPO_HOOKS_LIB).filter(f => f.endsWith('.sh')).sort()
@@ -1237,85 +1304,16 @@ if (installHooks) {
         're-run with --install-hooks-force'
       )
     }
+   } // end if (installEnforcement) — enforcement hook libs (per-project)
 
-    // 5a-tax. RFC-008 P3c (R4/F4): co-deploy patterns/taxonomy.json to the SAME
-    // global root the classifier reads at runtime (candidate 1 =
-    // $HOME/.episodic-memory/patterns/taxonomy.json; GLOBAL_DIR = os.homedir()/
-    // .episodic-memory, no EPISODIC_MEMORY_HOME indirection — codex R2-P2 root
-    // parity). This is INSIDE the installHooks block so taxonomy and classifier
-    // advance together: a no-hooks install touches neither (PR-level codex
-    // BLOCKER — taxonomy must not advance candidate-1 while the installed
-    // classifier stays stale + unwarned).
-    const repoTaxonomy = path.join(REPO_DIR, 'patterns', 'taxonomy.json')
-    if (fs.existsSync(repoTaxonomy)) {
-      fs.mkdirSync(globalPatternsDir, { recursive: true })
-      fs.copyFileSync(repoTaxonomy, path.join(globalPatternsDir, 'taxonomy.json'))
-      console.log(`Installed patterns/taxonomy.json to ${globalPatternsDir}`)
-    }
+   // RFC-008 P4d / Principle 12: the enforce-contract RUNTIME config (taxonomy.json,
+   // the bp-001/events/schema contract set, plugins/_index.json) is ENFORCEMENT, not
+   // substrate — it now deploys PER-PROJECT, co-located with the engine, in the
+   // `if (installEnforcement)` 5b-ec block above. It is no longer co-deployed to the
+   // global $HOME/.episodic-memory under --install-hooks (that was the config half of
+   // the P12 leak). No global contract co-deploy remains.
 
-    // 5a-contract. RFC-008 P3b-2 (R5/R6/R8): co-deploy the enforce-contract RUNTIME
-    // contract set to the SAME global root enforce-contract.mjs reads at runtime
-    // (candidate 1 = $HOME/.episodic-memory/patterns/). COUPLED to the hook install
-    // exactly like the P3c taxonomy deploy above — stop-gate.sh invokes
-    // enforce-contract.mjs (a hook), so a no-hooks install must NOT advance the
-    // global contract while the installed gate stays stale (the P3c PR-level
-    // BLOCKER class). enforce-config.json itself is per-PROJECT + human-authored:
-    // ship the SCHEMA only, never a config instance.
-    //
-    // F-NEW-4 atomic multi-file deploy: bp-001.json embeds events_version (a sha
-    // over events.json). Land events.json + the schema FIRST and the sha-referencer
-    // bp-001.json LAST, so the candidate-1 gate (which keys on bp-001.json presence)
-    // flips to "present" only once the whole coupled set is on disk; a reader during
-    // the window falls through to candidate-2 and never sees new-bp-001 + stale-events.
-    const repoBp001 = path.join(REPO_DIR, 'patterns', 'bp-001.json')
-    let deployedContractSet = false
-    if (fs.existsSync(repoBp001)) {
-      fs.mkdirSync(globalPatternsDir, { recursive: true })
-      for (const f of ['events.json', 'enforce-config.schema.json']) {
-        const src = path.join(REPO_DIR, 'patterns', f)
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(globalPatternsDir, f))
-      }
-      fs.copyFileSync(repoBp001, path.join(globalPatternsDir, 'bp-001.json')) // LAST — sha-referencer
-      deployedContractSet = true
-      console.log(`Installed enforce-contract set (bp-001.json, events.json, enforce-config.schema.json) to ${globalPatternsDir}`)
-    }
-
-    // PR-level review PR-1 (R3/R6/R8): enforce-contract reads the harness-capability
-    // registry at runtime from <contractRoot>/plugins/_index.json (resolveHarnessCap),
-    // and the installed contractRoot is candidate-1 = $HOME/.episodic-memory. WITHOUT
-    // this deploy the runtime registry is always null in prod → the harness-cap min()
-    // leg is dead AND the M8 duplicate-binding + CLASS-C(a) fail-closed checks are
-    // unreachable (they only fired in dev/CI where candidate-2 = the repo root). Deploy
-    // plugins/_index.json to the global plugins/ tree, coupled to the same --install-hooks
-    // block. (resolveHarnessCap reads only entry.capabilities — no manifest needed here.)
-    const repoPluginsIndex = path.join(REPO_DIR, 'plugins', '_index.json')
-    if (fs.existsSync(repoPluginsIndex)) {
-      const globalPluginsDir = path.join(GLOBAL_DIR, 'plugins')
-      fs.mkdirSync(globalPluginsDir, { recursive: true })
-      fs.copyFileSync(repoPluginsIndex, path.join(globalPluginsDir, '_index.json'))
-      console.log(`Installed plugins/_index.json to ${globalPluginsDir}`)
-    }
-    // F-NEW-4 coupling assertion: the DEPLOYED bp-001.events_version must equal the
-    // sha over the DEPLOYED events.json. A mismatch means a partial/torn deploy —
-    // WARN (enforce-contract fails CLOSED to STRONG on a contract it can't trust,
-    // so this is hardening, not a fail-open fix).
-    if (deployedContractSet) {
-      try {
-        const depBp = JSON.parse(fs.readFileSync(path.join(globalPatternsDir, 'bp-001.json'), 'utf8'))
-        const depEvents = JSON.parse(fs.readFileSync(path.join(globalPatternsDir, 'events.json'), 'utf8'))
-        const liveEv = eventsVersion(depEvents)
-        if (depBp.events_version !== liveEv) {
-          console.log(
-            `WARNING: deployed bp-001.events_version (${depBp.events_version}) != sha of deployed ` +
-            `events.json (${liveEv}) — contract set is divergent/torn; enforce-contract will fail ` +
-            'CLOSED (stay STRONG). Re-run with --install-hooks-force to resync.'
-          )
-        }
-      } catch (e) {
-        console.log(`WARNING: could not verify enforce-contract set coupling: ${e.message}`)
-      }
-    }
-
+   if (installEnforcement) {
     // RFC-008 P3c (R4/F4, codex R1-P1b): if the command classifier was KEPT as a
     // divergent local edit while taxonomy.json was (re)deployed just above, the
     // installed classifier and the global taxonomy may disagree. Two cases,
@@ -1347,14 +1345,11 @@ if (installHooks) {
       }
     }
 
-    // 5a. Hook specs imported from scripts/lib/install-manifest.mjs (single
-    // source of truth shared with tools/migration-cutover.mjs). Closes
-    // Codex round-2 implementation attention point: avoid a second
-    // hardcoded copy list.
-    const { HOOK_SPECS } = await import(
-      new URL('./scripts/lib/install-manifest.mjs', import.meta.url).href
-    )
+    // 5a. Hook specs from scripts/lib/install-manifest.mjs (single source of
+    // truth, statically imported at top). Ensure the PROJECT hooks dir exists
+    // (P12: enforcement hook files live under <project>/.claude/hooks/).
     const hookSpecs = HOOK_SPECS
+    fs.mkdirSync(userHooksDir, { recursive: true })
 
     // 5b. Copy hook files; track which got installed for registration eligibility.
     const fileResults = {} // spec.file → result
@@ -1381,6 +1376,86 @@ if (installHooks) {
         case 'missing-source':
           console.log(`Note: ${repoFile} not found in repo, skipped`)
           break
+      }
+    }
+
+    // 5b-se. The SessionEnd hook SCRIPT (em-session-end-prompt.mjs) is an
+    // enforcement hook script (P12) — copy it from scripts/ into the PROJECT
+    // hooks dir too, so its registration points at <project>/.claude/hooks/.
+    const seRepo = path.join(REPO_SCRIPTS, SESSION_END_SCRIPT)
+    const seDest = path.join(userHooksDir, SESSION_END_SCRIPT)
+    const seFileResult = installHookFile(seRepo, seDest, installHooksForce)
+    fileResults[SESSION_END_SCRIPT] = seFileResult
+    if (seFileResult === 'copied' || seFileResult === 'forced') {
+      console.log(`Installed SessionEnd hook script: ${seDest}`)
+      touched.hooks.push(seDest)
+    } else if (seFileResult === 'unchanged') {
+      console.log(`SessionEnd hook script already current: ${seDest}`)
+    }
+
+    // 5b-ec. RFC-008 P4d / Principle 12 — relocate the enforcement RUNTIME (engine +
+    // classifier + markers + bp1 + their lib closure + the contract config) INTO the
+    // project so global holds zero enforcement. The per-project gates resolve all of
+    // it co-located ($HOOK_DIR), never reaching into $HOME/.episodic-memory.
+    //
+    //   entry scripts → <project>/.claude/hooks/         (siblings of the gates)
+    //   lib closure   → <project>/.claude/hooks/lib/      (relative ./lib/ imports resolve)
+    //   contract cfg  → <project>/.claude/hooks/patterns/ + .../plugins/  (engine candidate-0)
+    fs.mkdirSync(userHooksLibDir, { recursive: true })
+    const entryScripts = enforcementEntryScripts(REPO_DIR)
+    for (const f of entryScripts) {
+      const dst = path.join(userHooksDir, f)
+      fs.copyFileSync(path.join(REPO_SCRIPTS, f), dst)
+      fs.chmodSync(dst, 0o755)
+      touched.hooks.push(dst)
+    }
+    for (const f of enforcementBundleLibs(REPO_DIR)) {
+      const src = path.join(REPO_SCRIPTS, 'lib', f)
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(userHooksLibDir, f))
+    }
+    console.log(`Installed enforcement runtime (${entryScripts.length} scripts + lib closure) to ${userHooksDir}`)
+
+    // Contract config co-located with the engine (enforce-contract candidate-0 =
+    // <selfDir>/patterns). F-NEW-4 atomic order: events.json + schema FIRST, the
+    // sha-referencer bp-001.json LAST, so the candidate gate (keys on bp-001.json)
+    // flips to present only once the whole coupled set is on disk.
+    const projPatternsDir = path.join(userHooksDir, 'patterns')
+    const projPluginsDir = path.join(userHooksDir, 'plugins')
+    fs.mkdirSync(projPatternsDir, { recursive: true })
+    let deployedContractSet = false
+    const repoTaxonomy = path.join(REPO_DIR, 'patterns', 'taxonomy.json')
+    if (fs.existsSync(repoTaxonomy)) {
+      fs.copyFileSync(repoTaxonomy, path.join(projPatternsDir, 'taxonomy.json'))
+    }
+    const repoBp001 = path.join(REPO_DIR, 'patterns', 'bp-001.json')
+    if (fs.existsSync(repoBp001)) {
+      for (const f of ['events.json', 'enforce-config.schema.json']) {
+        const src = path.join(REPO_DIR, 'patterns', f)
+        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(projPatternsDir, f))
+      }
+      fs.copyFileSync(repoBp001, path.join(projPatternsDir, 'bp-001.json')) // LAST — sha-referencer
+      deployedContractSet = true
+    }
+    const repoPluginsIndex = path.join(REPO_DIR, 'plugins', '_index.json')
+    if (fs.existsSync(repoPluginsIndex)) {
+      fs.mkdirSync(projPluginsDir, { recursive: true })
+      fs.copyFileSync(repoPluginsIndex, path.join(projPluginsDir, '_index.json'))
+    }
+    if (deployedContractSet) {
+      console.log(`Installed enforce-contract config set to ${projPatternsDir}`)
+      try {
+        const depBp = JSON.parse(fs.readFileSync(path.join(projPatternsDir, 'bp-001.json'), 'utf8'))
+        const depEvents = JSON.parse(fs.readFileSync(path.join(projPatternsDir, 'events.json'), 'utf8'))
+        const liveEv = eventsVersion(depEvents)
+        if (depBp.events_version !== liveEv) {
+          console.log(
+            `WARNING: deployed bp-001.events_version (${depBp.events_version}) != sha of deployed ` +
+            `events.json (${liveEv}) — contract set is divergent/torn; enforce-contract will fail ` +
+            'CLOSED (stay STRONG). Re-run with --install-hooks-force to resync.'
+          )
+        }
+      } catch (e) {
+        console.log(`WARNING: could not verify enforce-contract set coupling: ${e.message}`)
       }
     }
 
@@ -1465,8 +1540,9 @@ if (installHooks) {
       if (result === 'added') touched.settings.push(`${spec.event} → ${spec.file}`)
     }
 
-    // SessionEnd em-session-end-prompt.mjs (Phase 1; canonical at SCRIPTS_DIR).
-    const seCmd = `node ${shellQuote(path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'))}`
+    // SessionEnd em-session-end-prompt.mjs — registered at its PER-PROJECT
+    // location (P12): <project>/.claude/hooks/em-session-end-prompt.mjs.
+    const seCmd = `node ${shellQuote(path.join(userHooksDir, SESSION_END_SCRIPT))}`
     const seResult = addHookEntry(settings.hooks, 'SessionEnd', seCmd, { timeout: 10 })
     console.log(`SessionEnd em-session-end-prompt.mjs: ${seResult}`)
     if (seResult === 'added') touched.settings.push('SessionEnd → em-session-end-prompt.mjs')
@@ -1474,7 +1550,7 @@ if (installHooks) {
     // P2 (code review): warn about stale canonical-named entries left behind
     // by migration so the user can prune them. Run AFTER all registrations.
     const canonicalByBasename = {
-      'em-session-end-prompt.mjs': path.join(SCRIPTS_DIR, 'em-session-end-prompt.mjs'),
+      'em-session-end-prompt.mjs': path.join(userHooksDir, 'em-session-end-prompt.mjs'),
       'checkpoint-gate.sh': path.join(userHooksDir, 'checkpoint-gate.sh'),
       'plan-gate.sh': path.join(userHooksDir, 'plan-gate.sh'),
       'em-recall-sessionstart.sh': path.join(userHooksDir, 'em-recall-sessionstart.sh'),
@@ -1493,13 +1569,6 @@ if (installHooks) {
     writeJSONAtomic(settingsPath, settings)
     if (touched.settings.length > 0) touched.hooks.push(settingsPath)
 
-    const manifestPath = path.join(GLOBAL_DIR, 'hook-install.json')
-    const manifest = buildHookFreshnessManifest(hookSpecs, hookLibFiles, userHooksDir, userHooksLibDir)
-    if (writeJSONAtomicIfChanged(manifestPath, manifest)) {
-      console.log(`Wrote hook freshness manifest: ${manifestPath}`)
-      touched.hooks.push(manifestPath)
-    }
-
     // 5d. Consent legibility (Codex non-blocking guidance): list everything
     // touched so the user can audit the install.
     if (touched.hooks.length > 0 || touched.settings.length > 0) {
@@ -1515,6 +1584,7 @@ if (installHooks) {
     } else {
       console.log('--- Hook install summary: nothing to do (already current) ---')
     }
+   } // end if (installEnforcement) — enforcement hook files + registration (per-project)
   } catch (e) {
     console.log(`Note: could not install hooks: ${e.message}`)
   }
@@ -1536,7 +1606,13 @@ if (installHooks) {
 // --install-hooks alongside --install-second-opinion.
 // ---------------------------------------------------------------------------
 if (installSecondOpinion) {
-  const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+  // P12 (RFC-008 P4d): second-opinion-gate.mjs is a PreToolUse hook — its code
+  // (gate + libs + runbooks) installs PER-PROJECT under <project>/.claude/hooks/,
+  // never global. (The providers.json snapshot is a generated data artifact read
+  // via the shared snapshotPath() resolver; fully relocating the runtime snapshot
+  // path is S3 dep-class scope. The P12 guardrail tracks hook CODE files (.sh/.mjs),
+  // which this moves out of global.)
+  const userHooksDir = path.join(projectDir, '.claude', 'hooks')
   const userHooksLibDir = path.join(userHooksDir, 'lib')
   const userRunbooksDir = path.join(userHooksDir, 'runbooks')
 

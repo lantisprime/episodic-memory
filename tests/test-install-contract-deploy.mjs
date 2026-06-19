@@ -1,16 +1,17 @@
 #!/usr/bin/env node
-// test-install-contract-deploy.mjs — RFC-008 P3b-2 (§10 install-runtime contract
-// deploy; mirrors the P3c T20a2 coupling regression). The enforce-contract runtime
-// contract set (bp-001.json + events.json + enforce-config.schema.json) is
-// co-deployed to $HOME/.episodic-memory/patterns/ ONLY inside --install-hooks
-// (COUPLED to the hook install, like the P3c taxonomy deploy): stop-gate.sh invokes
-// enforce-contract.mjs, so a no-hooks install must NOT advance the global contract
-// while the installed gate stays stale.
+// test-install-contract-deploy.mjs — RFC-008 P4d / Principle 12 (relocated
+// 2026-06-19; was P3b-2 §10 global-contract deploy). The enforce-contract RUNTIME
+// contract set (bp-001.json + events.json + enforce-config.schema.json + taxonomy.json)
+// + plugins/_index.json is the engine's CONFIG. By the P12 function test it is
+// ENFORCEMENT, not substrate, so it deploys PER-PROJECT — CO-LOCATED with the engine
+// under <project>/.claude/hooks/{patterns,plugins}/ — under --install-enforcement,
+// and NEVER to the global $HOME/.episodic-memory/patterns/.
 //
-//   T1 — --install-hooks deploys the full coupled set, byte-equal to the repo.
+//   T1 — --install-enforcement deploys the full coupled set per-project, byte-equal repo.
 //   T2 — F-NEW-4 coupling: deployed bp-001.events_version == sha(deployed events.json).
-//   T3 — no-hooks install leaves the contract set ABSENT (the T20a2 analog), while
-//        the unconditional patterns/_index.json IS deployed.
+//   T3 — GLOBAL stays clean: the contract set is ABSENT from ~/.episodic-memory/patterns/
+//        even WITH --install-enforcement (P12), while the substrate patterns/_index.json
+//        IS deployed global unconditionally.
 
 import fs from 'fs'
 import os from 'os'
@@ -36,54 +37,64 @@ function mkSandbox(label) {
   execFileSync('git', ['init', '-q'], { cwd: project })
   return { home, project }
 }
-function runInstall({ home, project, hooks }) {
+function runInstall({ home, project, enforcement }) {
   const args = [INSTALL, '--tool', 'claude-code', '--project', project]
-  if (hooks) args.push('--install-hooks')
+  if (enforcement) args.push('--install-enforcement')
   return spawnSync('node', args, { cwd: project, encoding: 'utf8', env: { ...process.env, HOME: home } })
 }
+// Engine candidate-0 contract root: co-located with the engine under the project hooks dir.
+function projectContractRoot(project) { return path.join(project, '.claude', 'hooks') }
+function projectPatterns(project) { return path.join(projectContractRoot(project), 'patterns') }
 function globalPatterns(home) { return path.join(home, '.episodic-memory', 'patterns') }
 function byteEqual(a, b) { return fs.readFileSync(a).equals(fs.readFileSync(b)) }
 
-console.log('=== T1/T2: --install-hooks deploys the coupled contract set ===')
+console.log('=== T1/T2: --install-enforcement deploys the coupled contract set PER-PROJECT ===')
 {
-  const { home, project } = mkSandbox('hooks')
-  const r = runInstall({ home, project, hooks: true })
-  truthy('T1: install --install-hooks exits 0', r.status === 0, `status=${r.status} stderr=${(r.stderr || '').slice(-400)}`)
-  const gp = globalPatterns(home)
+  const { home, project } = mkSandbox('enforce')
+  const r = runInstall({ home, project, enforcement: true })
+  truthy('T1: install --install-enforcement exits 0', r.status === 0, `status=${r.status} stderr=${(r.stderr || '').slice(-400)}`)
+  const pp = projectPatterns(project)
   for (const f of CONTRACT_SET) {
-    const dep = path.join(gp, f)
-    truthy(`T1: ${f} deployed`, fs.existsSync(dep), `missing ${dep}`)
+    const dep = path.join(pp, f)
+    truthy(`T1: ${f} deployed per-project`, fs.existsSync(dep), `missing ${dep}`)
     if (fs.existsSync(dep)) truthy(`T1: ${f} byte-equal repo`, byteEqual(dep, path.join(REPO, 'patterns', f)), 'deployed bytes differ from repo')
   }
+  // taxonomy.json travels with the contract set (the classifier reads it co-located).
+  truthy('T1: taxonomy.json deployed per-project', fs.existsSync(path.join(pp, 'taxonomy.json')), `missing ${path.join(pp, 'taxonomy.json')}`)
   // T2 — coupling assertion: deployed bp-001.events_version == sha(deployed events.json).
   try {
-    const depBp = JSON.parse(fs.readFileSync(path.join(gp, 'bp-001.json'), 'utf8'))
-    const depEvents = JSON.parse(fs.readFileSync(path.join(gp, 'events.json'), 'utf8'))
+    const depBp = JSON.parse(fs.readFileSync(path.join(pp, 'bp-001.json'), 'utf8'))
+    const depEvents = JSON.parse(fs.readFileSync(path.join(pp, 'events.json'), 'utf8'))
     truthy('T2: deployed bp-001.events_version == sha(deployed events.json)', depBp.events_version === eventsVersion(depEvents),
       `bp=${depBp.events_version} live=${eventsVersion(depEvents)}`)
   } catch (e) { bad('T2: coupling readable', e.message) }
-  // PR-1 (R3/R6/R8): the harness-cap registry the runtime reads from
-  // <contractRoot>/plugins/_index.json MUST be deployed to the global plugins/
-  // tree — else resolveHarnessCap is dead in prod and M8/CLASS-C(a) never fire.
-  const depRegistry = path.join(home, '.episodic-memory', 'plugins', '_index.json')
-  truthy('PR-1: plugins/_index.json deployed to global plugins/ (--install-hooks)', fs.existsSync(depRegistry), `missing ${depRegistry}`)
+  // The harness-cap registry the engine reads from <contractRoot>/plugins/_index.json
+  // is co-located with the engine, per-project.
+  const depRegistry = path.join(projectContractRoot(project), 'plugins', '_index.json')
+  truthy('PR-1: plugins/_index.json deployed per-project (co-located with engine)', fs.existsSync(depRegistry), `missing ${depRegistry}`)
   if (fs.existsSync(depRegistry)) truthy('PR-1: deployed registry byte-equal repo', byteEqual(depRegistry, path.join(REPO, 'plugins', '_index.json')), 'deployed registry differs from repo')
+
+  // P12: the contract set must NOT appear in GLOBAL ~/.episodic-memory/patterns/.
+  const gp = globalPatterns(home)
+  for (const f of [...CONTRACT_SET, 'taxonomy.json']) {
+    truthy(`P12: ${f} ABSENT from global patterns (even with --install-enforcement)`, !fs.existsSync(path.join(gp, f)), `LEAKED to global: ${path.join(gp, f)}`)
+  }
+  truthy('P12: global plugins/_index.json ABSENT (contract registry is per-project)', !fs.existsSync(path.join(home, '.episodic-memory', 'plugins', '_index.json')), 'contract plugins index leaked to global')
 }
 
 console.log('')
-console.log('=== T3: no-hooks install leaves the contract set ABSENT (T20a2 analog) ===')
+console.log('=== T3: substrate patterns/_index.json still deployed global unconditionally ===')
 {
   const { home, project } = mkSandbox('nohooks')
-  const r = runInstall({ home, project, hooks: false })
-  truthy('T3: install (no hooks) exits 0', r.status === 0, `status=${r.status} stderr=${(r.stderr || '').slice(-400)}`)
+  const r = runInstall({ home, project, enforcement: false })
+  truthy('T3: install (core) exits 0', r.status === 0, `status=${r.status} stderr=${(r.stderr || '').slice(-400)}`)
   const gp = globalPatterns(home)
-  for (const f of CONTRACT_SET) {
-    truthy(`T3: ${f} ABSENT without --install-hooks`, !fs.existsSync(path.join(gp, f)), `unexpectedly present: ${path.join(gp, f)}`)
+  // The substrate behavioral-pattern registry IS deployed global even on core.
+  truthy('T3: patterns/_index.json (substrate) deployed unconditionally', fs.existsSync(path.join(gp, '_index.json')), 'expected _index.json present')
+  // The enforce-contract config set is NEVER global.
+  for (const f of [...CONTRACT_SET, 'taxonomy.json']) {
+    truthy(`T3: ${f} ABSENT from global patterns`, !fs.existsSync(path.join(gp, f)), `unexpectedly present: ${path.join(gp, f)}`)
   }
-  // The unconditional patterns/_index.json IS deployed even without hooks (existing behavior).
-  truthy('T3: patterns/_index.json deployed unconditionally', fs.existsSync(path.join(gp, '_index.json')), 'expected _index.json present')
-  // PR-1: the global plugins/_index.json is coupled to --install-hooks → absent without it.
-  truthy('T3: plugins/_index.json ABSENT without --install-hooks', !fs.existsSync(path.join(home, '.episodic-memory', 'plugins', '_index.json')), 'unexpectedly present')
 }
 
 console.log('')

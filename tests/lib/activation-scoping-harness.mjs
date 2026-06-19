@@ -23,10 +23,66 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
+import {
+  enforcementEntryScripts, relocatedOnlyLibs, isSubstrateScript,
+} from '../../scripts/lib/install-manifest.mjs'
 
 export const REPO_ROOT = path.resolve(
   path.dirname(new URL(import.meta.url).pathname), '..', '..'
 )
+
+// The enforce-contract CONFIG files that relocate per-project (RFC-008 P4d / P12 —
+// co-located with the engine under <project>/.claude/hooks/patterns/). NOTE:
+// patterns/_index.json is SUBSTRATE (the behavioral-pattern registry) and stays
+// global by design — it is deliberately NOT in this list.
+export const CONTRACT_CONFIG_FILES = [
+  'bp-001.json', 'events.json', 'enforce-config.schema.json', 'taxonomy.json',
+]
+
+// Enforcement RUNTIME found in GLOBAL scope under `home`: the engine + classifier
+// + markers + bp1 entry scripts (manifest enforcementEntryScripts), the
+// relocated-only libs, the contract config, and the contract plugins index — none
+// may live in ~/.episodic-memory/. Manifest-derived so a newly added enforcement
+// script is covered automatically (no hand-list to drift). Returns sorted
+// rel-paths; [] == P12-clean. Complements enforcementFilesInGlobalScope (hooks)
+// and hookCodeFilesInGlobalScope (~/.claude/hooks/).
+export function enforcementRuntimeInGlobalScope(home) {
+  const out = []
+  const gScripts = path.join(home, '.episodic-memory', 'scripts')
+  for (const f of enforcementEntryScripts(REPO_ROOT)) {
+    if (fs.existsSync(path.join(gScripts, f))) out.push(`.episodic-memory/scripts/${f}`)
+  }
+  const gLib = path.join(gScripts, 'lib')
+  for (const f of relocatedOnlyLibs(REPO_ROOT)) {
+    if (fs.existsSync(path.join(gLib, f))) out.push(`.episodic-memory/scripts/lib/${f}`)
+  }
+  const gPatterns = path.join(home, '.episodic-memory', 'patterns')
+  for (const f of CONTRACT_CONFIG_FILES) {
+    if (fs.existsSync(path.join(gPatterns, f))) out.push(`.episodic-memory/patterns/${f}`)
+  }
+  if (fs.existsSync(path.join(home, '.episodic-memory', 'plugins', '_index.json'))) {
+    out.push('.episodic-memory/plugins/_index.json')
+  }
+  return out.sort()
+}
+
+// COMPREHENSIVE global-substrate check (P12 / user directive 2026-06-19): the
+// global ~/.episodic-memory/scripts dir must hold SUBSTRATE ONLY (em-* + the
+// second-opinion harness). List any *.mjs there that is NOT substrate — this
+// catches BOTH enforcement-runtime leaks AND repo-dev/CI-validator leaks
+// (validate-*, scaffold-bp, …), the class that slipped past the enforcement-set-
+// only enforcementRuntimeInGlobalScope check. Returns sorted rel-paths; [] ==
+// substrate-clean. The second-opinion/ harness SUBTREE (recursively copied) is
+// legitimate substrate and is excluded by only scanning the top-level .mjs files.
+export function nonSubstrateScriptsInGlobalScope(home) {
+  const gScripts = path.join(home, '.episodic-memory', 'scripts')
+  let entries
+  try { entries = fs.readdirSync(gScripts) } catch { return [] }
+  return entries
+    .filter((f) => f.endsWith('.mjs') && !isSubstrateScript(f))
+    .map((f) => `.episodic-memory/scripts/${f}`)
+    .sort()
+}
 
 // Command-string fragments that identify an RFC-008 ENFORCEMENT hook.
 //
@@ -53,6 +109,61 @@ export const ENFORCEMENT_HOOK_MARKERS = [
   'em-session-end-prompt',
   'second-opinion-gate',
 ]
+
+// Enforcement hook FILE basenames that must live ONLY under <project>/.claude/
+// (P12) — never in global ~/.claude/hooks/ or, for the SessionEnd hook script,
+// ~/.episodic-memory/scripts/. 7 gate/recall/.sh hooks + the SessionEnd hook
+// script. Distinct from ENFORCEMENT_HOOK_MARKERS (command-string fragments for
+// settings-registration detection): this is about FILES on disk.
+export const ENFORCEMENT_HOOK_FILES = [
+  'checkpoint-gate.sh',
+  'plan-gate.sh',
+  'preflight-gate.sh',
+  'stop-gate.sh',
+  'preflight-prompt-helper.sh',
+  'em-recall-sessionstart.sh',
+  'session-handoff-prompt.sh',
+  'em-session-end-prompt.mjs',
+]
+
+// Return enforcement artifacts found in GLOBAL scope under `home` — any
+// enforcement hook FILE in ~/.claude/hooks/ plus the SessionEnd hook script if
+// present at ~/.episodic-memory/scripts/. Empty array == P12-clean (no hook
+// file in global). This is the on-disk half of the PRINCIPLES.md §12 "Test
+// this" clause; hasEnforcementHook(globalSettings) is the registration half.
+export function enforcementFilesInGlobalScope(home) {
+  const found = []
+  const globalHooks = path.join(home, '.claude', 'hooks')
+  for (const f of ENFORCEMENT_HOOK_FILES) {
+    if (f.endsWith('.mjs')) continue // SessionEnd hook script handled below
+    if (fs.existsSync(path.join(globalHooks, f))) found.push(`.claude/hooks/${f}`)
+  }
+  const sessionEndGlobal = path.join(home, '.episodic-memory', 'scripts', 'em-session-end-prompt.mjs')
+  if (fs.existsSync(sessionEndGlobal)) found.push('.episodic-memory/scripts/em-session-end-prompt.mjs')
+  return found
+}
+
+// Recursively list EVERY hook CODE file (.sh / .mjs) under global
+// ~/.claude/hooks/. P12: none may exist there — ALL hook code is per-project.
+// This is the COMPREHENSIVE check (any hook file, not just a hand-maintained
+// enforcement list), closing the blind spot where second-opinion-gate.mjs
+// slipped past the enforcement-set-only assertion. Returns sorted rel paths.
+export function hookCodeFilesInGlobalScope(home) {
+  const root = path.join(home, '.claude', 'hooks')
+  const out = []
+  const walk = (dir, rel) => {
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const abs = path.join(dir, e.name)
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) walk(abs, r)
+      else if (e.name.endsWith('.sh') || e.name.endsWith('.mjs')) out.push(`.claude/hooks/${r}`)
+    }
+  }
+  walk(root, '')
+  return out.sort()
+}
 
 // Env vars that, if inherited from the test runner's real environment, would
 // defeat HOME isolation: CLAUDE_CONFIG_DIR repoints the settings dir, and the

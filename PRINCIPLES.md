@@ -121,10 +121,21 @@ Core decisions — what is a request, what is a verdict, what closes a request �
 
 ---
 
+## 12. Enforcement is per-project; the substrate is global
+
+Enforcement — hooks, gates, classifiers — is activated and controlled **per project, never globally**. A project owns a single switch that enables or disables its own hooks and enforcement; flipping it affects only that project. **Every enforcement artifact lives in the project: the hook FILES and hook SCRIPTS (gate `.sh`, their hook libs, the SessionEnd/SessionStart hook scripts, the enforcement engine they invoke) are installed under `<project>/.claude/`, and their registrations go in `<project>/.claude/settings.json` — NEVER in `~/.claude/hooks/` or `~/.claude/settings.json`.** A script that exists only to be run by a hook is an enforcement artifact, not substrate, however it is packaged. The memory substrate — the episode store, the `em-*` memory tools (`em-store`/`em-search`/`em-recall`/`em-revise`/`em-list`/`em-rebuild-index`), `patterns/`, and the skill — is the ONLY thing that stays global, and it stays **hook-free**: it never registers, copies, or depends on a hook to function.
+
+**Why:** A hook in global `~/.claude/settings.json` fires in *every* project — Claude Code merges hooks across scopes and a project cannot subtract a global one — so global enforcement reaches into unrelated projects and breaks them (a gate looking for a project-local lib that isn't there denies real work). Enforcement that cannot be scoped or switched off per project defeats the entire point of RFC-008: decoupling enforcement from the substrate. Memory must stay usable everywhere without dragging enforcement along.
+
+**How to apply:** Enforcement adapters install their hook FILES + libs + hook-invoked scripts into the activating project's `<project>/.claude/hooks/` and register them only into `<project>/.claude/settings.json` (never `~/.claude/hooks/` or `~/.claude/settings.json`). Global install deploys ONLY substrate (the `em-*` memory tools, `patterns/`, the skill); it copies zero hook files and writes zero hook registrations. Each project carries its own enable/disable switch — `<project>/.episodic-memory/enforce-config.json` `active`, plus the presence of its hook registrations. Installers expose enforcement as an explicit per-project opt-in (Principle 3) with per-project uninstall (Principle 10); a project that did not opt in runs zero enforcement hooks. Core memory operations never depend on any hook being installed (Principle 9). **Test this:** a mock-project E2E must assert that after any global/core install, `~/.claude/hooks/` contains no enforcement file and `~/.claude/settings.json` contains no enforcement registration; that the enforcement set is installed only under `<project>/.claude/`; and any design/code/test that places an enforcement artifact in global scope is a P12 violation.
+
+---
+
 ## How these principles relate
 
 - **Substrate** (1, 2, 9, 11): episodes are the only data, definitions are JSON, adapters are shallow.
 - **Install contract** (3, 10): detect to suggest, activate to commit, undo as a first-class action.
+- **Enforcement contract** (3, 10, 12): enforcement activates per-project, switches off per-project, and never reaches global; the substrate stays global and hook-free.
 - **Honesty contract** (4, 5, 6): don't pretend parity, don't burn tokens silently, don't shift load onto the user.
 - **Integrity contract** (7, 8): lifecycle is auditable, messages carry their context.
 

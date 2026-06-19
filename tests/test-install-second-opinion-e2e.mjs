@@ -211,14 +211,26 @@ test('happy install: exit 0, Done!, full surface populated, snapshot valid', () 
   assert.ok(r.stdout.includes('Done!'), `expected Done! in stdout; got: ${r.stdout}`)
 
   // Active surface populated.
+  // RFC-008 P4d / Principle 12: the PreToolUse gate code (gate + libs +
+  // runbooks) installs PER-PROJECT under <project>/.claude/hooks/, never
+  // global. The harness RUNTIME (scripts/second-opinion.mjs) stays GLOBAL
+  // under ~/.episodic-memory/ (substrate/review tooling), and the providers
+  // snapshot (second-opinion-providers.json) stays GLOBAL under
+  // ~/.claude/hooks/ (generated data artifact read via snapshotPath()).
   const harness = path.join(tempHome, '.episodic-memory/scripts/second-opinion.mjs')
-  const hook = path.join(tempHome, '.claude/hooks/second-opinion-gate.mjs')
-  const hookLib = path.join(tempHome, '.claude/hooks/lib/registry-validator.mjs')
+  const hook = path.join(tempProject, '.claude/hooks/second-opinion-gate.mjs')
+  const hookLib = path.join(tempProject, '.claude/hooks/lib/registry-validator.mjs')
+  const runbook = path.join(tempProject, '.claude/hooks/runbooks/second-opinion-harness.md')
   const snapshot = path.join(tempHome, '.claude/hooks/second-opinion-providers.json')
-  assert.ok(fs.existsSync(harness), `harness must exist at ${harness}`)
-  assert.ok(fs.existsSync(hook), `hook must exist at ${hook}`)
-  assert.ok(fs.existsSync(hookLib), `hook lib must exist at ${hookLib}`)
-  assert.ok(fs.existsSync(snapshot), `snapshot must exist at ${snapshot}`)
+  assert.ok(fs.existsSync(harness), `harness (global runtime) must exist at ${harness}`)
+  assert.ok(fs.existsSync(hook), `hook (per-project) must exist at ${hook}`)
+  assert.ok(fs.existsSync(hookLib), `hook lib (per-project) must exist at ${hookLib}`)
+  assert.ok(fs.existsSync(runbook), `hook runbook (per-project) must exist at ${runbook}`)
+  assert.ok(fs.existsSync(snapshot), `snapshot (global) must exist at ${snapshot}`)
+
+  // The gate code must NOT land in GLOBAL ~/.claude/hooks/ anymore (P12).
+  assert.ok(!fs.existsSync(path.join(tempHome, '.claude/hooks/second-opinion-gate.mjs')),
+    'gate must NOT install to global ~/.claude/hooks/ (per-project only, P12)')
 
   // Snapshot has at least one provider (stub is always available()).
   const snap = JSON.parse(fs.readFileSync(snapshot, 'utf8'))

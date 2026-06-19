@@ -39,14 +39,22 @@
 # marker artifact entirely. Helper resolution is hard-bound to
 # installed-runtime OR repo-source paths — both authoritative.
 __agent_classifier_resolve_marker_helper() {
+  local self_dir
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # RFC-008 P4d / Principle 12: enforcement scripts install CO-LOCATED per-project
+  # (hooks/lib/ → ../classifier-marker.mjs). Authoritative installed-runtime path,
+  # checked before the legacy global root. No env seam (PR #271 attack class).
+  local colocated="$self_dir/../classifier-marker.mjs"
+  if [ -f "$colocated" ]; then
+    printf '%s' "$colocated"
+    return 0
+  fi
   local global="$HOME/.episodic-memory/scripts/classifier-marker.mjs"
   if [ -f "$global" ]; then
     printf '%s' "$global"
     return 0
   fi
   # Repo-source fallback (dev / pre-install).
-  local self_dir
-  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local repo="$self_dir/../../../../scripts/classifier-marker.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"
@@ -59,13 +67,19 @@ __agent_classifier_resolve_marker_helper() {
 # runtime first, repo-source fallback. NO env-var override seam (PR #271
 # attack class — ambient env paths can be hijacked).
 __agent_classifier_resolve_persist_helper() {
+  local self_dir
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # P4d/P12: co-located per-project install first; then legacy global; then repo.
+  local colocated="$self_dir/../classifier-override-persist.mjs"
+  if [ -f "$colocated" ]; then
+    printf '%s' "$colocated"
+    return 0
+  fi
   local global="$HOME/.episodic-memory/scripts/classifier-override-persist.mjs"
   if [ -f "$global" ]; then
     printf '%s' "$global"
     return 0
   fi
-  local self_dir
-  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local repo="$self_dir/../../../../scripts/classifier-override-persist.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"
@@ -128,13 +142,19 @@ __agent_classifier_resolve_legacy_dispatcher() {
     printf '%s' "$_dispatch_path"
     return 0
   fi
+  local self_dir
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # P4d/P12: co-located per-project install first; then legacy global; then repo.
+  local colocated="$self_dir/../agent-classifier-dispatch.mjs"
+  if [ -f "$colocated" ]; then
+    printf '%s' "$colocated"
+    return 0
+  fi
   local global="$HOME/.episodic-memory/scripts/agent-classifier-dispatch.mjs"
   if [ -f "$global" ]; then
     printf '%s' "$global"
     return 0
   fi
-  local self_dir
-  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local repo="$self_dir/../../../../scripts/agent-classifier-dispatch.mjs"
   if [ -f "$repo" ]; then
     printf '%s' "$repo"

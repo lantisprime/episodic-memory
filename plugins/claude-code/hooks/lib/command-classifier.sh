@@ -1633,16 +1633,18 @@ _classify_segment() {
   if [ $env_prefix_count -eq 0 ] && [ -f "$target_root/.episodic-memory/classifier-overrides.jsonl" ]; then
     # Resolve helper path (installed-runtime preferred, repo-source fallback).
     local __t0_helper=""
+    local __t0_self_dir
+    __t0_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    # P4d/P12: co-located per-project install first (hooks/lib/ → ../X.mjs).
+    local __t0_colocated="$__t0_self_dir/../classifier-override-lookup.mjs"
     local __t0_global="$HOME/.episodic-memory/scripts/classifier-override-lookup.mjs"
-    if [ -f "$__t0_global" ]; then
+    local __t0_repo="$__t0_self_dir/../../../../scripts/classifier-override-lookup.mjs"
+    if [ -f "$__t0_colocated" ]; then
+      __t0_helper="$__t0_colocated"
+    elif [ -f "$__t0_global" ]; then
       __t0_helper="$__t0_global"
-    else
-      local __t0_self_dir
-      __t0_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-      local __t0_repo="$__t0_self_dir/../../../../scripts/classifier-override-lookup.mjs"
-      if [ -f "$__t0_repo" ]; then
-        __t0_helper="$__t0_repo"
-      fi
+    elif [ -f "$__t0_repo" ]; then
+      __t0_helper="$__t0_repo"
     fi
     if [ -n "$__t0_helper" ]; then
       # Reconstruct command text from tokens (same shape Tier 2/3 dispatch uses).
@@ -2459,15 +2461,25 @@ _priority_arm_labels() {
 
 # Echo the resolved taxonomy.json path, or empty + return 1 if none qualifies.
 _taxonomy_resolve_path() {
-  # Candidate 1 — global install root (== install.mjs GLOBAL_DIR).
+  local self_dir climbed
+  self_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+  # Candidate 0 — CO-LOCATED per-project install (RFC-008 P4d / Principle 12: the
+  # classifier config installs beside the hooks under <project>/.claude/hooks/; the
+  # lib sits at hooks/lib/, so taxonomy is ../patterns/taxonomy.json). Authoritative
+  # installed-runtime path, like candidate 1.
+  local c0="$self_dir/../patterns/taxonomy.json"
+  if [ -f "$c0" ]; then
+    _taxonomy_file_realpath "$c0" 2>/dev/null || printf '%s' "$c0"
+    return 0
+  fi
+  # Candidate 1 — legacy global install root (== install.mjs GLOBAL_DIR).
   local c1="$HOME/.episodic-memory/patterns/taxonomy.json"
   if [ -f "$c1" ]; then
     _taxonomy_file_realpath "$c1" 2>/dev/null || printf '%s' "$c1"
     return 0
   fi
   # Candidate 2 — in-repo copy, CONDITIONAL on a repo-layout proof predicate.
-  local self_dir climbed
-  self_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+  local climbed
   climbed="$(cd -P "$self_dir/../../../.." 2>/dev/null && pwd)" || return 1
   # (a) repo sentinels present at the climbed root.
   [ -f "$climbed/patterns/taxonomy.schema.json" ] || return 1

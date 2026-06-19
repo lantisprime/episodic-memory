@@ -34,10 +34,13 @@
 # bare basename last (agent resolves via its own runtime). Mirrors
 # __agent_classifier_resolve_marker_helper in agent-classifier.sh.
 __agent_classifier_deny_resolve_helper() {
-  local global="$HOME/.episodic-memory/scripts/classifier-marker.mjs"
-  if [ -f "$global" ]; then printf '%s' "$global"; return 0; fi
   local self_dir
   self_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  # P4d/P12: co-located per-project install first (hooks/lib/ → ../X.mjs).
+  local colocated="$self_dir/../classifier-marker.mjs"
+  if [ -f "$colocated" ]; then printf '%s' "$colocated"; return 0; fi
+  local global="$HOME/.episodic-memory/scripts/classifier-marker.mjs"
+  if [ -f "$global" ]; then printf '%s' "$global"; return 0; fi
   local repo="$self_dir/../../../../scripts/classifier-marker.mjs"
   if [ -f "$repo" ]; then printf '%s' "$repo"; return 0; fi
   printf '%s' "classifier-marker.mjs"
