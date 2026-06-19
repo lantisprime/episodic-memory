@@ -28,20 +28,44 @@ export const REPO_ROOT = path.resolve(
   path.dirname(new URL(import.meta.url).pathname), '..', '..'
 )
 
-// Command-string fragments that identify an RFC-008 ENFORCEMENT gate (the
-// --install-hooks / --install-second-opinion bundle). BP-1 SessionStart hooks
-// (bp1-approval-check / bp1-sweep-on-session) are SUBSTRATE hygiene
-// (activation-gated, RFC-004) and are deliberately NOT in this set — their
+// Command-string fragments that identify an RFC-008 ENFORCEMENT hook.
+//
+// Rule (one unambiguous definition, S1 review F1): a marker names EVERY hook
+// that `--install-hooks` / `--install-second-opinion` registers — i.e. the
+// install-manifest `HOOK_SPECS` bundle (all of which are enforcement; no
+// substrate hook lives in HOOK_SPECS) + the SessionEnd script + the
+// second-opinion gate (registered by --install-second-opinion, outside
+// HOOK_SPECS). The BP-1 SessionStart hooks (bp1-approval-check /
+// bp1-sweep-on-session) are wired by a SEPARATE install path, are SUBSTRATE
+// hygiene (activation-gated, RFC-004), and are deliberately absent here — their
 // project-scoped presence is expected and correct.
+//
+// test-activation-scoping-e2e.mjs (A4) asserts this set covers every HOOK_SPECS
+// file + SESSION_END_SCRIPT, so it cannot silently drift behind install (Rule 14).
 export const ENFORCEMENT_HOOK_MARKERS = [
   'plan-gate',
   'checkpoint-gate',
   'preflight-gate',
   'stop-gate',
-  'second-opinion-gate',
   'em-recall-sessionstart',
+  'preflight-prompt-helper',
+  'session-handoff-prompt',
   'em-session-end-prompt',
+  'second-opinion-gate',
 ]
+
+// Env vars that, if inherited from the test runner's real environment, would
+// defeat HOME isolation: CLAUDE_CONFIG_DIR repoints the settings dir, and the
+// SO_* paths are read by second-opinion-gate.mjs (it would resolve the REAL
+// snapshot/runbook instead of the mock). One source so the three runners can't
+// drift (S1 review F2). Mutates `env` in place and returns it.
+function scrubEnv(env) {
+  delete env.CLAUDE_CONFIG_DIR
+  delete env.SO_INSTALL_SNAPSHOT_PATH
+  delete env.SO_RUNBOOK_PATH
+  delete env.SO_QUICKREF_PATH
+  return env
+}
 
 const _tmpDirs = []
 process.on('exit', () => {
@@ -75,10 +99,7 @@ export function mkMock(label = 'mock') {
  * the mock's caller dir (kept distinct from --project).
  */
 export function runInstall({ home, project, callerCwd, flags = [], tool = 'claude-code', extraEnv = {} }) {
-  const env = { ...process.env, HOME: home, ...extraEnv }
-  // Scrub inherited overrides that would break HOME isolation.
-  delete env.SO_INSTALL_SNAPSHOT_PATH
-  delete env.CLAUDE_CONFIG_DIR
+  const env = scrubEnv({ ...process.env, HOME: home, ...extraEnv })
   return spawnSync('node', [
     path.join(REPO_ROOT, 'install.mjs'),
     '--tool', tool,
@@ -103,8 +124,7 @@ export function deployedScript(home, name) {
  * json } — json is the parsed last JSON line, or null if unparseable.
  */
 export function runScript(home, name, args = [], { cwd, extraEnv = {} } = {}) {
-  const env = { ...process.env, HOME: home, ...extraEnv }
-  delete env.CLAUDE_CONFIG_DIR
+  const env = scrubEnv({ ...process.env, HOME: home, ...extraEnv })
   const r = spawnSync('node', [deployedScript(home, name), ...args], {
     cwd: cwd || home,
     env,
@@ -120,10 +140,9 @@ export function runScript(home, name, args = [], { cwd, extraEnv = {} } = {}) {
  * stderr }.
  */
 export function runHook(hookPath, event, { home, project, extraEnv = {} } = {}) {
-  const env = { ...process.env, ...extraEnv }
+  const env = scrubEnv({ ...process.env, ...extraEnv })
   if (home) env.HOME = home
   if (project) env.CLAUDE_PROJECT_DIR = project
-  delete env.CLAUDE_CONFIG_DIR
   const input = typeof event === 'string' ? event : JSON.stringify(event)
   const r = spawnSync('bash', [hookPath], {
     cwd: project || home || process.cwd(),

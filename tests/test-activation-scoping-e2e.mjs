@@ -36,7 +36,9 @@ import assert from 'node:assert'
 import {
   mkMock, runInstall, runScript, runHook, readSettings,
   hasEnforcementHook, enforcementHookCommands, flattenHookCommands, deployedScript,
+  ENFORCEMENT_HOOK_MARKERS,
 } from './lib/activation-scoping-harness.mjs'
+import { HOOK_SPECS, SESSION_END_SCRIPT } from '../scripts/lib/install-manifest.mjs'
 
 let passed = 0
 let failed = 0
@@ -111,6 +113,21 @@ test('A3: BP-1 SessionStart hook runs + exits 0 silently when not activated', ()
     { hook_event_name: 'SessionStart', session_id: 's1', cwd: M.project },
     { home: M.home, project: M.project })
   assert.strictEqual(r.status, 0, `BP-1 hook must exit 0 when not activated; stderr=${r.stderr}`)
+})
+
+test('A4: ENFORCEMENT_HOOK_MARKERS covers every HOOK_SPECS hook + SessionEnd (Rule 14 drift guard)', () => {
+  // Every hook --install-hooks registers (HOOK_SPECS) and the SessionEnd
+  // script must be detectable by a marker, so a future bundle hook can't slip
+  // past hasEnforcementHook — the helper S2 uses to prove "no enforcement leaks
+  // to global" (S1 review F1).
+  const bundleStems = [
+    ...HOOK_SPECS.map((s) => s.file.replace(/\.(sh|mjs)$/, '')),
+    SESSION_END_SCRIPT.replace(/\.(sh|mjs)$/, ''),
+  ]
+  for (const stem of bundleStems) {
+    assert.ok(ENFORCEMENT_HOOK_MARKERS.some((m) => stem.includes(m) || m === stem),
+      `HOOK_SPECS hook "${stem}" has no ENFORCEMENT_HOOK_MARKERS entry — marker set drifted behind install`)
+  }
 })
 
 console.log('\n## C — substrate round-trips with ZERO enforcement hooks (RQ3)')
