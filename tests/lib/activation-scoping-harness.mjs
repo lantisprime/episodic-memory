@@ -1,0 +1,215 @@
+/**
+ * activation-scoping-harness.mjs — mock-project E2E fixture lib for the
+ * RFC-008 P4d enforcement-activation-scoping suite.
+ *
+ * Built S1; reused by S2–S8. Every helper runs the REAL install.mjs / REAL
+ * deployed scripts / REAL hooks against an isolated HOME + mock git project —
+ * NO mental tracing (feedback_mock_project_test_not_mental_trace).
+ *
+ * Empirically grounded against current code (2026-06-19):
+ *   - `--project` is a NAMESPACE LABEL, not a path; local scope resolves to
+ *     the process cwd's repo root. So local-scope round-trips MUST set
+ *     cwd = mock project (not pass --project <path>).
+ *   - macOS canonicalizes /tmp → /private/tmp; mkMock realpaths the base so
+ *     path comparisons against script-reported paths hold.
+ *   - A core install (no --install-hooks) writes NO global settings.json and
+ *     wires ONLY BP-1 H1/H2 SessionStart (activation-gated) project-scoped —
+ *     ZERO enforcement gates anywhere.
+ *
+ * Zero deps. Node stdlib only.
+ */
+
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import { spawnSync } from 'node:child_process'
+
+export const REPO_ROOT = path.resolve(
+  path.dirname(new URL(import.meta.url).pathname), '..', '..'
+)
+
+// Command-string fragments that identify an RFC-008 ENFORCEMENT hook.
+//
+// Rule (one unambiguous definition, S1 review F1): a marker names EVERY hook
+// that `--install-hooks` / `--install-second-opinion` registers — i.e. the
+// install-manifest `HOOK_SPECS` bundle (all of which are enforcement; no
+// substrate hook lives in HOOK_SPECS) + the SessionEnd script + the
+// second-opinion gate (registered by --install-second-opinion, outside
+// HOOK_SPECS). The BP-1 SessionStart hooks (bp1-approval-check /
+// bp1-sweep-on-session) are wired by a SEPARATE install path, are SUBSTRATE
+// hygiene (activation-gated, RFC-004), and are deliberately absent here — their
+// project-scoped presence is expected and correct.
+//
+// test-activation-scoping-e2e.mjs (A4) asserts this set covers every HOOK_SPECS
+// file + SESSION_END_SCRIPT, so it cannot silently drift behind install (Rule 14).
+export const ENFORCEMENT_HOOK_MARKERS = [
+  'plan-gate',
+  'checkpoint-gate',
+  'preflight-gate',
+  'stop-gate',
+  'em-recall-sessionstart',
+  'preflight-prompt-helper',
+  'session-handoff-prompt',
+  'em-session-end-prompt',
+  'second-opinion-gate',
+]
+
+// Env vars that, if inherited from the test runner's real environment, would
+// defeat HOME isolation: CLAUDE_CONFIG_DIR repoints the settings dir, and the
+// SO_* paths are read by second-opinion-gate.mjs (it would resolve the REAL
+// snapshot/runbook instead of the mock). One source so the three runners can't
+// drift (S1 review F2). Mutates `env` in place and returns it.
+function scrubEnv(env) {
+  delete env.CLAUDE_CONFIG_DIR
+  delete env.SO_INSTALL_SNAPSHOT_PATH
+  delete env.SO_RUNBOOK_PATH
+  delete env.SO_QUICKREF_PATH
+  return env
+}
+
+const _tmpDirs = []
+process.on('exit', () => {
+  for (const d of _tmpDirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
+  }
+})
+// 'exit' doesn't fire on a forced signal (local SIGINT, CI timeout SIGTERM);
+// re-exit through process.exit so the cleanup above runs (S1 PR-review F3).
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
+
+/**
+ * Create an isolated fixture: a fresh HOME, a mock git project, and a separate
+ * caller cwd (so caller-cwd != --project leakage is detectable). Returns
+ * absolute, realpath-canonicalized paths.
+ */
+export function mkMock(label = 'mock') {
+  const base = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), `p4d-${label}-`))
+  )
+  _tmpDirs.push(base)
+  const home = path.join(base, 'home')
+  const project = path.join(base, 'project')
+  const callerCwd = path.join(base, 'caller')
+  fs.mkdirSync(home, { recursive: true })
+  fs.mkdirSync(path.join(project, '.git'), { recursive: true }) // mark git root
+  fs.mkdirSync(callerCwd, { recursive: true })
+  return { base, home, project, callerCwd }
+}
+
+/**
+ * Run the real install.mjs with HOME overridden to the mock home. `flags`
+ * defaults to [] (core install — no enforcement hooks). Caller cwd defaults to
+ * the mock's caller dir (kept distinct from --project).
+ */
+export function runInstall({ home, project, callerCwd, flags = [], tool = 'claude-code', extraEnv = {} }) {
+  const env = scrubEnv({ ...process.env, HOME: home, ...extraEnv })
+  return spawnSync('node', [
+    path.join(REPO_ROOT, 'install.mjs'),
+    '--tool', tool,
+    '--project', project,
+    ...flags,
+  ], {
+    cwd: callerCwd || project,
+    env,
+    encoding: 'utf8',
+    timeout: 120000,
+  })
+}
+
+/** Absolute path of a deployed substrate script under the mock home. */
+export function deployedScript(home, name) {
+  return path.join(home, '.episodic-memory', 'scripts', name)
+}
+
+/**
+ * Run a deployed em-* script (by filename) under isolated HOME. For
+ * local-scope ops, pass cwd = mock project. Returns { status, stdout, stderr,
+ * json } — json is the parsed last JSON line, or null if unparseable.
+ */
+export function runScript(home, name, args = [], { cwd, extraEnv = {} } = {}) {
+  const env = scrubEnv({ ...process.env, HOME: home, ...extraEnv })
+  const r = spawnSync('node', [deployedScript(home, name), ...args], {
+    cwd: cwd || home,
+    env,
+    encoding: 'utf8',
+    timeout: 60000,
+  })
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, json: parseLastJson(r.stdout) }
+}
+
+/**
+ * Run a hook script (absolute path) with a JSON event on stdin. `event` may be
+ * an object (JSON.stringify'd) or a raw string. Returns { status, stdout,
+ * stderr }.
+ */
+export function runHook(hookPath, event, { home, project, extraEnv = {} } = {}) {
+  const env = scrubEnv({ ...process.env, ...extraEnv })
+  if (home) env.HOME = home
+  if (project) env.CLAUDE_PROJECT_DIR = project
+  const input = typeof event === 'string' ? event : JSON.stringify(event)
+  const r = spawnSync('bash', [hookPath], {
+    cwd: project || home || process.cwd(),
+    env,
+    input,
+    encoding: 'utf8',
+    timeout: 60000,
+  })
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr }
+}
+
+/**
+ * Read settings.json for a scope. scope='global' → <home>/.claude/settings.json;
+ * scope='project' → <project>/.claude/settings.json. Returns the parsed object,
+ * or null if the file is absent.
+ */
+export function readSettings(scope, { home, project }) {
+  const p = scope === 'global'
+    ? path.join(home, '.claude', 'settings.json')
+    : path.join(project, '.claude', 'settings.json')
+  if (!fs.existsSync(p)) return null
+  return JSON.parse(fs.readFileSync(p, 'utf8'))
+}
+
+/**
+ * Flatten every hook command string across all events in a settings object.
+ * Returns string[] (empty if settings is null or has no hooks).
+ */
+export function flattenHookCommands(settings) {
+  const out = []
+  if (!settings || !settings.hooks) return out
+  for (const event of Object.keys(settings.hooks)) {
+    const matchers = settings.hooks[event]
+    if (!Array.isArray(matchers)) continue
+    for (const m of matchers) {
+      const hooks = m && Array.isArray(m.hooks) ? m.hooks : []
+      for (const h of hooks) {
+        if (h && typeof h.command === 'string') out.push(h.command)
+      }
+    }
+  }
+  return out
+}
+
+/** True if any enforcement-gate marker appears in the settings' hook commands. */
+export function hasEnforcementHook(settings) {
+  const cmds = flattenHookCommands(settings)
+  return cmds.some((c) => ENFORCEMENT_HOOK_MARKERS.some((m) => c.includes(m)))
+}
+
+/** List enforcement-gate command strings found in a settings object. */
+export function enforcementHookCommands(settings) {
+  return flattenHookCommands(settings).filter(
+    (c) => ENFORCEMENT_HOOK_MARKERS.some((m) => c.includes(m))
+  )
+}
+
+function parseLastJson(stdout) {
+  if (!stdout) return null
+  const lines = stdout.trim().split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (!line.startsWith('{') && !line.startsWith('[')) continue
+    try { return JSON.parse(line) } catch { /* keep scanning up */ }
+  }
+  return null
+}

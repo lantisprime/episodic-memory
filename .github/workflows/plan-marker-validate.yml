@@ -123,6 +123,9 @@ jobs:
       - name: Run install-runtime contract-set deploy coupling (RFC-008 P3b-2, §10)
         run: node tests/test-install-contract-deploy.mjs
 
+      - name: Run activation-scoping mock-project E2E (RFC-008 P4d S1 — substrate hook-independence A0-A3 + em-* round-trips C1-C7)
+        run: node tests/test-activation-scoping-e2e.mjs
+
       - name: Run preflight-gate regression tests
         run: bash tests/test-preflight-gate.sh
 
