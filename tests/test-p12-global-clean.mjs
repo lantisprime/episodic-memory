@@ -25,6 +25,7 @@ import {
   mkMock, runInstall, readSettings,
   hasEnforcementHook, enforcementHookCommands, enforcementFilesInGlobalScope,
   hookCodeFilesInGlobalScope, enforcementRuntimeInGlobalScope,
+  nonSubstrateScriptsInGlobalScope,
 } from './lib/activation-scoping-harness.mjs'
 
 let passed = 0
@@ -89,6 +90,16 @@ for (const v of VARIANTS) {
     const globalRuntime = enforcementRuntimeInGlobalScope(M.home)
     assert.deepStrictEqual(globalRuntime, [],
       `P12 VIOLATION — enforcement runtime in global ~/.episodic-memory/ after '${v.label}': ${globalRuntime.join(', ')}`)
+
+    // (e) SUBSTRATE-ONLY: global ~/.episodic-memory/scripts holds NOTHING but
+    // substrate (em-* + second-opinion). Catches the repo-dev/CI-validator leak
+    // class (validate-*, scaffold-bp, test-plugin, check-automode-defaults) that
+    // (d) — scoped to the enforcement set only — does not. By the P12 FUNCTION
+    // test those validators exist only to police the repo/enforcement layer; they
+    // are not substrate and must ship nowhere.
+    const nonSubstrate = nonSubstrateScriptsInGlobalScope(M.home)
+    assert.deepStrictEqual(nonSubstrate, [],
+      `P12 VIOLATION — non-substrate scripts in global ~/.episodic-memory/scripts after '${v.label}': ${nonSubstrate.join(', ')}`)
   })
 }
 

@@ -24,7 +24,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import {
-  enforcementEntryScripts, relocatedOnlyLibs,
+  enforcementEntryScripts, relocatedOnlyLibs, isSubstrateScript,
 } from '../../scripts/lib/install-manifest.mjs'
 
 export const REPO_ROOT = path.resolve(
@@ -64,6 +64,24 @@ export function enforcementRuntimeInGlobalScope(home) {
     out.push('.episodic-memory/plugins/_index.json')
   }
   return out.sort()
+}
+
+// COMPREHENSIVE global-substrate check (P12 / user directive 2026-06-19): the
+// global ~/.episodic-memory/scripts dir must hold SUBSTRATE ONLY (em-* + the
+// second-opinion harness). List any *.mjs there that is NOT substrate — this
+// catches BOTH enforcement-runtime leaks AND repo-dev/CI-validator leaks
+// (validate-*, scaffold-bp, …), the class that slipped past the enforcement-set-
+// only enforcementRuntimeInGlobalScope check. Returns sorted rel-paths; [] ==
+// substrate-clean. The second-opinion/ harness SUBTREE (recursively copied) is
+// legitimate substrate and is excluded by only scanning the top-level .mjs files.
+export function nonSubstrateScriptsInGlobalScope(home) {
+  const gScripts = path.join(home, '.episodic-memory', 'scripts')
+  let entries
+  try { entries = fs.readdirSync(gScripts) } catch { return [] }
+  return entries
+    .filter((f) => f.endsWith('.mjs') && !isSubstrateScript(f))
+    .map((f) => `.episodic-memory/scripts/${f}`)
+    .sort()
 }
 
 // Command-string fragments that identify an RFC-008 ENFORCEMENT hook.

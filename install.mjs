@@ -25,7 +25,7 @@ import { findEnforcementTokens } from './scripts/lib/em-recall-purity.mjs'
 import {
   HOOK_SPECS, SESSION_END_SCRIPT, ENFORCEMENT_HOOK_SCRIPTS,
   enforcementHookFileBasenames, enforcementRegistrations,
-  isEnforcementEntryScript, enforcementEntryScripts, enforcementBundleLibs,
+  isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
 } from './scripts/lib/install-manifest.mjs'
 
@@ -226,15 +226,15 @@ fs.mkdirSync(path.join(GLOBAL_DIR, 'episodes'), { recursive: true })
 
 let scriptFiles
 try {
-  // P12 (RFC-008 P4d): enforcement SCRIPTS — the engine (enforce-contract), the
-  // classifier suite, the marker writers, the bp1 orchestration, and the SessionEnd
-  // hook script — exist ONLY to be run by a hook, so they install per-project under
-  // --install-enforcement and are EXCLUDED from the global substrate scripts-scan.
-  // Global = substrate (em-*) + dev/CI tooling only. The enforcement set is DERIVED
-  // (isEnforcementEntryScript: explicit list + the bp1-* family) so a new enforcement
-  // script cannot silently leak to global.
+  // P12 (RFC-008 P4d): global = SUBSTRATE ONLY — the em-* tools + the second-opinion
+  // capability harness (isSubstrateScript ALLOWLIST). Two other classes ship
+  // elsewhere/nowhere: enforcement SCRIPTS (engine, classifier, markers, bp1,
+  // SessionEnd hook) install per-project under --install-enforcement; repo-dev/CI
+  // tools (validate-*, scaffold-bp, test-plugin, check-automode-defaults) ship
+  // NOWHERE — CI runs them repo-relative. An allowlist (not the prior denylist)
+  // ensures a newly added non-substrate script cannot silently leak into global.
   scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(
-    f => f.endsWith('.mjs') && !isEnforcementEntryScript(f) && !ENFORCEMENT_HOOK_SCRIPTS.includes(f)
+    f => f.endsWith('.mjs') && isSubstrateScript(f)
   )
   for (const file of scriptFiles) {
     const src = path.join(REPO_SCRIPTS, file)
@@ -352,12 +352,14 @@ if (fs.existsSync(repoPatternsIndex)) {
   console.log(`Installed patterns/_index.json to ${globalPatternsDir}`)
 }
 
-// NOTE: patterns/taxonomy.json is a RUNTIME dependency of command-classifier.sh,
-// NOT a global-validation artifact like _index.json — so it is co-deployed WITH
-// the classifier inside the `if (installHooks)` block (§5a-tax below), never
-// unconditionally here. Deploying it in the main body would advance runtime
-// candidate-1 on a no-hooks install while leaving an already-installed classifier
-// stale + unwarned (PR-level codex BLOCKER; R4/F4 root parity + sync coupling).
+// NOTE (RFC-008 P4d / Principle 12): patterns/taxonomy.json is a RUNTIME
+// dependency of the relocated command-classifier — it is an ENFORCEMENT contract
+// artifact, NOT a global-validation artifact like _index.json. Post-S2 it is
+// co-deployed with the classifier PER-PROJECT under <project>/.claude/hooks/patterns/
+// inside the `if (installEnforcement)` block (§5b-ec), never global. Only
+// _index.json (the substrate pattern registry) stays global, unconditionally (§1b
+// above). Deploying taxonomy globally would re-leak an enforcement artifact into
+// the substrate (the exact P12 violation S2 closes).
 
 // ---------------------------------------------------------------------------
 // 2. Create local .episodic-memory in target project
@@ -1201,11 +1203,21 @@ function installHookFile(repoFile, destFile, force) {
   return 'skipped-divergent'
 }
 
+if (installHooks && !installEnforcement) {
+  // P12 (RFC-008 P4d) transitional honesty (review F2): post-S2 ALL enforcement
+  // (gates, libs, taxonomy/contract config, registrations) installs PER-PROJECT
+  // via --install-enforcement. --install-hooks alone no longer deploys any
+  // enforcement artifact — every inner block below is gated `if (installEnforcement)`.
+  // Surface that rather than silently no-op'ing the previously load-bearing flag.
+  console.log('Note: enforcement now installs per-project via --install-enforcement (RFC-008 P4d). --install-hooks alone no longer deploys enforcement gates.')
+}
+
 if (installHooks || installEnforcement) {
-  // P12 (RFC-008 P4d): enforcement artifacts (hook files, libs, registrations)
-  // install PER-PROJECT under <project>/.claude/ — NEVER global. The substrate
-  // co-deploys (taxonomy/contract/_index) stay global and are gated on
-  // --install-hooks. --install-enforcement does the per-project enforcement.
+  // P12 (RFC-008 P4d): enforcement artifacts (hook files, libs, taxonomy/contract
+  // config, registrations) install PER-PROJECT under <project>/.claude/ — NEVER
+  // global — and ONLY under --install-enforcement (every substantive inner block
+  // is gated `if (installEnforcement)`). The lone global substrate artifact,
+  // patterns/_index.json, is deployed unconditionally far above (§1b).
   const settingsPath = path.join(projectDir, '.claude', 'settings.json')
   const userHooksDir = path.join(projectDir, '.claude', 'hooks')
   const userHooksLibDir = path.join(userHooksDir, 'lib')

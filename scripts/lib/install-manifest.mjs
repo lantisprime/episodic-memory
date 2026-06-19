@@ -153,15 +153,54 @@ export function isEnforcementEntryScript(basename) {
   return ENFORCEMENT_ENTRY_EXPLICIT.has(basename) || /^bp1-.+\.mjs$/.test(basename)
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// SUBSTRATE allowlist (P12 / user directive 2026-06-19). The global
+// ~/.episodic-memory/scripts dir holds the memory SUBSTRATE ONLY: the em-* tools
+// plus the second-opinion review CAPABILITY harness. This is an ALLOWLIST, not a
+// denylist — the prior "every .mjs that isn't enforcement → global" rule silently
+// leaked repo-dev/CI validators (validate-*, scaffold-bp, test-plugin,
+// check-automode-defaults) into the substrate. By the P12 FUNCTION test those
+// exist only to police the repo/enforcement layer; they are NOT substrate. They
+// ship NOWHERE (CI runs them repo-relative: `node scripts/validate-*.mjs`).
+//
+// Three disjoint classes for scripts/*.mjs:
+//   substrate   → global       (isSubstrateScript)
+//   enforcement → per-project  (isEnforcementEntryScript + ENFORCEMENT_HOOK_SCRIPTS)
+//   repo-dev    → nowhere       (isRepoDevScript — the remainder)
+// ───────────────────────────────────────────────────────────────────────────
+const SUBSTRATE_CAPABILITY_SCRIPTS = new Set(['second-opinion.mjs'])
+export function isSubstrateScript(basename) {
+  if (ENFORCEMENT_HOOK_SCRIPTS.includes(basename)) return false
+  return /^em-.+\.mjs$/.test(basename) || SUBSTRATE_CAPABILITY_SCRIPTS.has(basename)
+}
+
+// Repo-only dev/CI scripts: not substrate, not enforcement. Installed NOWHERE.
+export function isRepoDevScript(basename) {
+  return basename.endsWith('.mjs')
+    && !isSubstrateScript(basename)
+    && !isEnforcementEntryScript(basename)
+    && !ENFORCEMENT_HOOK_SCRIPTS.includes(basename)
+}
+
 function listRepoScripts(repoDir) {
   const d = path.join(repoDir, 'scripts')
   return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.mjs')) : []
 }
 
 // Transitive relative-import closure (restricted to scripts/lib/*.mjs) of a set of
-// entry scripts. Static parse of `... from '<spec>'` + dynamic `import('<spec>')`,
-// relative specifiers only. Returns a Set of lib basenames.
-function computeLibClosure(repoDir, entryBasenames) {
+// entry scripts. Static parse of three import FORMS — `... from '<spec>'`,
+// dynamic `import('<spec>')`, and bare side-effect `import '<spec>'` — relative
+// specifiers only. Returns a Set of lib basenames.
+//
+// This closure is the SOLE guarantee that the per-project enforcement bundle is
+// import-complete (a dropped transitive lib breaks the relocated engine in a
+// non-this-repo project, and this repo's CI can't catch it — it runs dev-relative
+// where scripts/lib/ is fully present). So all three static forms are matched
+// (review F3). LIMITATION: a COMPUTED dynamic import — `import(variable)` /
+// `import(`./${x}.mjs`)` — cannot be resolved by static analysis; none exist in
+// scripts/ today (grep-verified) and the convention is literal specifiers only.
+// tests/test-lib-closure.mjs asserts the bare-import form is captured.
+export function computeLibClosure(repoDir, entryBasenames) {
   const scriptsDir = path.join(repoDir, 'scripts')
   const libDir = path.join(scriptsDir, 'lib')
   const libs = new Set()
@@ -172,8 +211,11 @@ function computeLibClosure(repoDir, entryBasenames) {
     let src
     try { src = fs.readFileSync(abs, 'utf8') } catch { return }
     // Fresh matcher per call — a single /g regex shares lastIndex across the
-    // recursive walk and would skip imports of nested modules.
-    for (const m of src.matchAll(/(?:from\s*|import\s*\(\s*)['"]([^'"]+)['"]/g)) {
+    // recursive walk and would skip imports of nested modules. The `import\s+`
+    // alternative (require whitespace) matches bare side-effect imports
+    // `import './x.mjs'` without false-matching identifiers; `import(` is caught
+    // by the earlier `import\s*\(` alternative, `import x from` by `from\s*`.
+    for (const m of src.matchAll(/(?:from\s*|import\s*\(\s*|import\s+)['"]([^'"]+)['"]/g)) {
       const spec = m[1]
       if (!spec.startsWith('.')) continue
       let resolved = path.resolve(path.dirname(abs), spec)
@@ -194,13 +236,11 @@ export function enforcementEntryScripts(repoDir) {
   return listRepoScripts(repoDir).filter(isEnforcementEntryScript)
 }
 
-// Scripts that STAY global: substrate (em-*) + dev/CI tooling (validate-*, second-
-// opinion, scaffold-bp, …). Excludes enforcement entries AND the per-project
-// SessionEnd hook script.
+// Scripts that STAY global: SUBSTRATE ONLY — the em-* tools + the second-opinion
+// capability harness (isSubstrateScript allowlist). Enforcement entries relocate
+// per-project; repo-dev/CI tools (validate-*, scaffold-bp, …) ship nowhere.
 export function globalEntryScripts(repoDir) {
-  return listRepoScripts(repoDir).filter(
-    (f) => !isEnforcementEntryScript(f) && !ENFORCEMENT_HOOK_SCRIPTS.includes(f)
-  )
+  return listRepoScripts(repoDir).filter(isSubstrateScript)
 }
 
 // Lib closure that STAYS global — every scripts/lib/*.mjs imported (transitively)
@@ -300,21 +340,26 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
 
   // Scripts — every .mjs under scripts/ EXCEPT enforcement hook scripts
   // (em-session-end-prompt.mjs), which install per-project (Principle 12) and
-  // must not appear as global substrate. The enforcement ENTRY scripts (engine +
-  // classifier + markers + bp1) are emitted scope:'project' — they relocated to
-  // <project>/.claude/hooks/, so migration-cutover (which verifies the GLOBAL
-  // installed copies) excludes them; the installedPath below is the legacy global
-  // location, no longer written.
+  // must not appear as global substrate. Three disjoint scopes:
+  //   substrate (em-* + second-opinion) → global (no scope tag)
+  //   enforcement (engine/classifier/markers/bp1) → scope:'project' (relocated to
+  //     <project>/.claude/hooks/; installedPath below is the legacy global loc)
+  //   repo-dev/CI (validate-*, scaffold-bp, …) → scope:'repo' (shipped NOWHERE;
+  //     CI runs them repo-relative). migration-cutover + global-clean exclude both
+  //     non-global scopes; only substrate is verified at the global installedPath.
   const repoScripts = path.join(repoDir, 'scripts')
   if (fs.existsSync(repoScripts)) {
     for (const f of fs.readdirSync(repoScripts).filter(n => n.endsWith('.mjs') && !ENFORCEMENT_HOOK_SCRIPTS.includes(n))) {
       const rel = `scripts/${f}`
+      const scope = isEnforcementEntryScript(f) ? 'project'
+        : isSubstrateScript(f) ? undefined
+        : 'repo'
       entries.push({
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_SCRIPTS(homeDir), f),
         kind: 'script',
-        ...(isEnforcementEntryScript(f) ? { scope: 'project' } : {}),
+        ...(scope ? { scope } : {}),
       })
     }
   }
