@@ -79,6 +79,9 @@ fi
 # under <project>/.claude/hooks/, NOT in the global substrate. BASH_SOURCE is
 # absolute (Claude Code registers hooks by absolute path), so this is cd-safe.
 EM_SCRIPTS_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+# Co-located install (P4d) first; legacy global fallback if the bp1 scripts are
+# not beside this hook (fresh installs co-locate; the fallback is inert there).
+[ -f "$EM_SCRIPTS_DIR/bp1-flag-check.mjs" ] || EM_SCRIPTS_DIR="$HOME/.episodic-memory/scripts"
 FLAG_CHECK="$EM_SCRIPTS_DIR/bp1-flag-check.mjs"
 VALIDATE="$EM_SCRIPTS_DIR/bp1-marker-validate.mjs"
 EMIT_INVALID="$EM_SCRIPTS_DIR/bp1-emit-marker-invalid-evidence.mjs"

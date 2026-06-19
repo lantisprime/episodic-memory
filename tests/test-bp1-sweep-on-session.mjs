@@ -112,9 +112,15 @@ function writeConfig(homeDir, projectRoot, entry) {
 }
 
 function buildHashAgainstHome(projectRoot, homeDir) {
+  // RFC-008 P4d / Principle 12: bp1 scripts install CO-LOCATED per-project under
+  // <project>/.claude/hooks/. The unit fixtures stage them at the legacy global
+  // scripts dir; the real-install test (case 9) co-locates them. Resolve whichever
+  // exists so both shapes use the same artifact-manifest builder.
+  const coLocated = path.join(projectRoot, '.claude', 'hooks', 'bp1-build-artifact-manifest.mjs')
+  const global = path.join(homeDir, '.episodic-memory', 'scripts', 'bp1-build-artifact-manifest.mjs')
+  const script = fs.existsSync(coLocated) ? coLocated : global
   const out = execFileSync('node', [
-    path.join(homeDir, '.episodic-memory', 'scripts', 'bp1-build-artifact-manifest.mjs'),
-    '--project', projectRoot, '--json',
+    script, '--project', projectRoot, '--json',
   ], { encoding: 'utf8', env: { ...process.env, HOME: homeDir } })
   return JSON.parse(out).sha256
 }
