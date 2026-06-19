@@ -126,6 +126,9 @@ jobs:
       - name: Run activation-scoping mock-project E2E (RFC-008 P4d S1 — substrate hook-independence A0-A3 + em-* round-trips C1-C7)
         run: node tests/test-activation-scoping-e2e.mjs
 
+      - name: Run S4 gate-toggle mock-project E2E (RFC-008 P4d S4 — seeded enforce-config.json toggles the REAL deployed stop-gate.sh block↔allow)
+        run: node tests/test-s4-gate-e2e.mjs
+
       - name: Run P12 global-clean guardrail (RFC-008 P4d — global scope has ZERO enforcement hooks/scripts/libs/config across every install variant)
         run: node tests/test-p12-global-clean.mjs
 
