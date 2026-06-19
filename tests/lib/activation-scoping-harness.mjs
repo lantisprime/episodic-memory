@@ -73,6 +73,9 @@ process.on('exit', () => {
     try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
   }
 })
+// 'exit' doesn't fire on a forced signal (local SIGINT, CI timeout SIGTERM);
+// re-exit through process.exit so the cleanup above runs (S1 PR-review F3).
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
 
 /**
  * Create an isolated fixture: a fresh HOME, a mock git project, and a separate
