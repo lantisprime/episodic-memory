@@ -54,6 +54,39 @@ export const ENFORCEMENT_HOOK_MARKERS = [
   'second-opinion-gate',
 ]
 
+// Enforcement hook FILE basenames that must live ONLY under <project>/.claude/
+// (P12) — never in global ~/.claude/hooks/ or, for the SessionEnd hook script,
+// ~/.episodic-memory/scripts/. 7 gate/recall/.sh hooks + the SessionEnd hook
+// script. Distinct from ENFORCEMENT_HOOK_MARKERS (command-string fragments for
+// settings-registration detection): this is about FILES on disk.
+export const ENFORCEMENT_HOOK_FILES = [
+  'checkpoint-gate.sh',
+  'plan-gate.sh',
+  'preflight-gate.sh',
+  'stop-gate.sh',
+  'preflight-prompt-helper.sh',
+  'em-recall-sessionstart.sh',
+  'session-handoff-prompt.sh',
+  'em-session-end-prompt.mjs',
+]
+
+// Return enforcement artifacts found in GLOBAL scope under `home` — any
+// enforcement hook FILE in ~/.claude/hooks/ plus the SessionEnd hook script if
+// present at ~/.episodic-memory/scripts/. Empty array == P12-clean (no hook
+// file in global). This is the on-disk half of the PRINCIPLES.md §12 "Test
+// this" clause; hasEnforcementHook(globalSettings) is the registration half.
+export function enforcementFilesInGlobalScope(home) {
+  const found = []
+  const globalHooks = path.join(home, '.claude', 'hooks')
+  for (const f of ENFORCEMENT_HOOK_FILES) {
+    if (f.endsWith('.mjs')) continue // SessionEnd hook script handled below
+    if (fs.existsSync(path.join(globalHooks, f))) found.push(`.claude/hooks/${f}`)
+  }
+  const sessionEndGlobal = path.join(home, '.episodic-memory', 'scripts', 'em-session-end-prompt.mjs')
+  if (fs.existsSync(sessionEndGlobal)) found.push('.episodic-memory/scripts/em-session-end-prompt.mjs')
+  return found
+}
+
 // Env vars that, if inherited from the test runner's real environment, would
 // defeat HOME isolation: CLAUDE_CONFIG_DIR repoints the settings dir, and the
 // SO_* paths are read by second-opinion-gate.mjs (it would resolve the REAL

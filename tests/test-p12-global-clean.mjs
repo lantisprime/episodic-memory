@@ -1,0 +1,75 @@
+#!/usr/bin/env node
+/**
+ * test-p12-global-clean.mjs — RFC-008 P4d, the governing Principle 12 guardrail.
+ *
+ * PRINCIPLES.md §12 "Test this": after ANY global/core install variant, global
+ * scope must contain ZERO enforcement hook FILES and ZERO enforcement
+ * registrations. Enforcement artifacts (hook files, hook scripts, libs) live
+ * ONLY under <project>/.claude/. A script that runs only as a hook (e.g.
+ * em-session-end-prompt.mjs) is an enforcement artifact, not substrate.
+ *
+ * This test is parametrized over every install variant a user can run WITHOUT
+ * the per-project --install-enforcement opt-in. None of them may leave an
+ * enforcement file in ~/.claude/hooks/ or ~/.episodic-memory/scripts/, nor an
+ * enforcement registration in ~/.claude/settings.json.
+ *
+ * Pre-S2 this FAILS (--install-hooks writes hook files + registrations to
+ * global) — that failure is the proof the guardrail bites. S2 makes it pass by
+ * moving all enforcement per-project.
+ *
+ * Zero deps. Node assert + the activation-scoping fixture lib.
+ */
+
+import assert from 'node:assert'
+import {
+  mkMock, runInstall, readSettings,
+  hasEnforcementHook, enforcementHookCommands, enforcementFilesInGlobalScope,
+} from './lib/activation-scoping-harness.mjs'
+
+let passed = 0
+let failed = 0
+const failures = []
+
+function test(name, fn) {
+  try {
+    fn(); passed++; console.log(`  ✓ ${name}`)
+  } catch (e) {
+    failed++; failures.push({ name, error: e.stack || e.message })
+    console.log(`  ✗ ${name}: ${e.message}`)
+  }
+}
+
+console.log('# test-p12-global-clean (RFC-008 P4d — PRINCIPLES.md §12 guardrail)')
+
+// Every install variant a user can run WITHOUT the per-project enforcement
+// opt-in. None may place an enforcement artifact in global scope.
+const VARIANTS = [
+  { label: 'core (no flags)', flags: [] },
+  { label: '--install-hooks', flags: ['--install-hooks', '--install-hooks-force'] },
+  { label: '--install-second-opinion', flags: ['--install-second-opinion'] },
+  { label: '--install-hooks + --install-second-opinion', flags: ['--install-hooks', '--install-hooks-force', '--install-second-opinion'] },
+]
+
+for (const v of VARIANTS) {
+  test(`P12: after '${v.label}', global scope has ZERO enforcement files + registrations`, () => {
+    const M = mkMock('p12')
+    const r = runInstall({ home: M.home, project: M.project, callerCwd: M.callerCwd, flags: v.flags })
+    assert.strictEqual(r.status, 0, `install '${v.label}' must exit 0; stderr=${r.stderr}`)
+
+    // (a) No enforcement hook FILE in global scope.
+    const globalFiles = enforcementFilesInGlobalScope(M.home)
+    assert.deepStrictEqual(globalFiles, [],
+      `P12 VIOLATION — enforcement files in global scope after '${v.label}': ${globalFiles.join(', ')}`)
+
+    // (b) No enforcement REGISTRATION in global settings.json.
+    const g = readSettings('global', M)
+    assert.strictEqual(hasEnforcementHook(g), false,
+      `P12 VIOLATION — enforcement registrations in global settings after '${v.label}': ${enforcementHookCommands(g).join(', ')}`)
+  })
+}
+
+console.log(`\n${passed} passed, ${failed} failed`)
+if (failed > 0) {
+  for (const f of failures) console.error(`\n${f.name}\n${f.error}`)
+  process.exit(1)
+}

@@ -22,6 +22,10 @@ import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { eventsVersion } from './scripts/lib/version-hash.mjs'
 import { findEnforcementTokens } from './scripts/lib/em-recall-purity.mjs'
+import {
+  HOOK_SPECS, SESSION_END_SCRIPT, ENFORCEMENT_HOOK_SCRIPTS,
+  enforcementHookFileBasenames, enforcementRegistrations,
+} from './scripts/lib/install-manifest.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
@@ -213,7 +217,10 @@ fs.mkdirSync(path.join(GLOBAL_DIR, 'episodes'), { recursive: true })
 
 let scriptFiles
 try {
-  scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(f => f.endsWith('.mjs'))
+  // P12 (RFC-008 P4d): enforcement hook scripts (em-session-end-prompt.mjs) run
+  // ONLY as a hook, so they install per-project under --install-enforcement and
+  // are EXCLUDED from the global substrate scripts-scan. Global = substrate only.
+  scriptFiles = fs.readdirSync(REPO_SCRIPTS).filter(f => f.endsWith('.mjs') && !ENFORCEMENT_HOOK_SCRIPTS.includes(f))
   for (const file of scriptFiles) {
     const src = path.join(REPO_SCRIPTS, file)
     const dst = path.join(SCRIPTS_DIR, file)

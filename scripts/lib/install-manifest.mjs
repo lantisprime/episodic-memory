@@ -95,10 +95,36 @@ export const HOOK_SPECS = [
   }
 ]
 
-// SessionEnd hook is em-session-end-prompt.mjs invoked from the global
-// scripts dir (canonical at $HOME/.episodic-memory/scripts/). The hook
-// command string is built by install.mjs at registration time.
+// SessionEnd hook is em-session-end-prompt.mjs. Per RFC-008 P4d + Principle 12
+// it is an ENFORCEMENT hook script (it runs ONLY as the SessionEnd hook), so it
+// installs PER-PROJECT under <project>/.claude/hooks/ and is EXCLUDED from the
+// global scripts-scan — it is NOT a global substrate script.
 export const SESSION_END_SCRIPT = 'em-session-end-prompt.mjs'
+
+// Enforcement hook SCRIPTS (.mjs that exist only to be run by a hook) — these
+// must NEVER deploy to the global scripts dir (Principle 12); they install
+// per-project. install.mjs's global scripts-scan filters these out.
+export const ENFORCEMENT_HOOK_SCRIPTS = [SESSION_END_SCRIPT]
+
+// DERIVED (Rule 14) from HOOK_SPECS + SESSION_END_SCRIPT — single source of
+// truth so the harness drift guard (A4) and install can't diverge.
+//
+// enforcementHookFileBasenames(): the 8 enforcement hook FILES that install
+// per-project — the unique HOOK_SPECS .sh gates (stop-gate.sh once) plus the
+// SessionEnd hook script. Drives project-side copy AND global prune.
+export function enforcementHookFileBasenames() {
+  return [...new Set(HOOK_SPECS.map((s) => s.file)), ...ENFORCEMENT_HOOK_SCRIPTS]
+}
+
+// enforcementRegistrations(): the 9 enforcement registrations (8 HOOK_SPECS
+// event-entries — stop-gate twice — plus the SessionEnd entry). Drives
+// project-side registration, global de-registration, and the A4 drift guard.
+export function enforcementRegistrations() {
+  return [
+    ...HOOK_SPECS.map((s) => ({ file: s.file, event: s.event, matcher: s.matcher, timeout: s.timeout })),
+    { file: SESSION_END_SCRIPT, event: 'SessionEnd', timeout: 10 },
+  ]
+}
 
 const HOME_HOOKS = (homeDir) => path.join(homeDir, '.claude', 'hooks')
 const HOME_HOOKS_LIB = (homeDir) => path.join(homeDir, '.claude', 'hooks', 'lib')
@@ -135,7 +161,11 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
       relativePath: rel,
       repoPath: path.join(repoDir, rel),
       installedPath: path.join(HOME_HOOKS(homeDir), spec.file),
-      kind: 'hook'
+      kind: 'hook',
+      // RFC-008 P4d / Principle 12: enforcement hooks install per-project, not
+      // global. migration-cutover excludes scope:'project' (the installedPath
+      // above is the legacy global location, no longer written).
+      scope: 'project'
     })
   }
 
@@ -148,15 +178,19 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_HOOKS_LIB(homeDir), f),
-        kind: 'hook-lib'
+        kind: 'hook-lib',
+        // P12: hook libs install per-project alongside their hooks.
+        scope: 'project'
       })
     }
   }
 
-  // Scripts — every .mjs under scripts/.
+  // Scripts — every .mjs under scripts/ EXCEPT enforcement hook scripts
+  // (em-session-end-prompt.mjs), which install per-project (Principle 12) and
+  // must not appear as global substrate.
   const repoScripts = path.join(repoDir, 'scripts')
   if (fs.existsSync(repoScripts)) {
-    for (const f of fs.readdirSync(repoScripts).filter(n => n.endsWith('.mjs'))) {
+    for (const f of fs.readdirSync(repoScripts).filter(n => n.endsWith('.mjs') && !ENFORCEMENT_HOOK_SCRIPTS.includes(n))) {
       const rel = `scripts/${f}`
       entries.push({
         relativePath: rel,
