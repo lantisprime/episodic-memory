@@ -300,7 +300,11 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
 
   // Scripts — every .mjs under scripts/ EXCEPT enforcement hook scripts
   // (em-session-end-prompt.mjs), which install per-project (Principle 12) and
-  // must not appear as global substrate.
+  // must not appear as global substrate. The enforcement ENTRY scripts (engine +
+  // classifier + markers + bp1) are emitted scope:'project' — they relocated to
+  // <project>/.claude/hooks/, so migration-cutover (which verifies the GLOBAL
+  // installed copies) excludes them; the installedPath below is the legacy global
+  // location, no longer written.
   const repoScripts = path.join(repoDir, 'scripts')
   if (fs.existsSync(repoScripts)) {
     for (const f of fs.readdirSync(repoScripts).filter(n => n.endsWith('.mjs') && !ENFORCEMENT_HOOK_SCRIPTS.includes(n))) {
@@ -309,21 +313,26 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_SCRIPTS(homeDir), f),
-        kind: 'script'
+        kind: 'script',
+        ...(isEnforcementEntryScript(f) ? { scope: 'project' } : {}),
       })
     }
   }
 
-  // Script lib — every .mjs under scripts/lib/.
+  // Script lib — every .mjs under scripts/lib/. Enforcement-only libs
+  // (relocatedOnlyLibs) travel per-project with their scripts → scope:'project'.
+  // Libs shared with a retained-global script stay global (no scope).
   const repoScriptsLib = path.join(repoDir, 'scripts', 'lib')
   if (fs.existsSync(repoScriptsLib)) {
+    const relocated = new Set(relocatedOnlyLibs(repoDir))
     for (const f of fs.readdirSync(repoScriptsLib).filter(n => n.endsWith('.mjs'))) {
       const rel = `scripts/lib/${f}`
       entries.push({
         relativePath: rel,
         repoPath: path.join(repoDir, rel),
         installedPath: path.join(HOME_SCRIPTS_LIB(homeDir), f),
-        kind: 'script-lib'
+        kind: 'script-lib',
+        ...(relocated.has(f) ? { scope: 'project' } : {}),
       })
     }
   }
