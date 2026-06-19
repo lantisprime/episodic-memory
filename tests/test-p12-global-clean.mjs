@@ -24,6 +24,7 @@ import assert from 'node:assert'
 import {
   mkMock, runInstall, readSettings,
   hasEnforcementHook, enforcementHookCommands, enforcementFilesInGlobalScope,
+  hookCodeFilesInGlobalScope,
 } from './lib/activation-scoping-harness.mjs'
 
 let passed = 0
@@ -56,12 +57,19 @@ for (const v of VARIANTS) {
     const r = runInstall({ home: M.home, project: M.project, callerCwd: M.callerCwd, flags: v.flags })
     assert.strictEqual(r.status, 0, `install '${v.label}' must exit 0; stderr=${r.stderr}`)
 
-    // (a) No enforcement hook FILE in global scope.
+    // (a) No KNOWN enforcement hook FILE in global scope.
     const globalFiles = enforcementFilesInGlobalScope(M.home)
     assert.deepStrictEqual(globalFiles, [],
       `P12 VIOLATION — enforcement files in global scope after '${v.label}': ${globalFiles.join(', ')}`)
 
-    // (b) No enforcement REGISTRATION in global settings.json.
+    // (b) COMPREHENSIVE: NO hook code file (.sh/.mjs) of ANY kind under global
+    // ~/.claude/hooks/ — not just the hand-maintained enforcement set. This is
+    // the check that catches review tooling (second-opinion-gate.mjs) too.
+    const globalHookCode = hookCodeFilesInGlobalScope(M.home)
+    assert.deepStrictEqual(globalHookCode, [],
+      `P12 VIOLATION — hook code files in global ~/.claude/hooks/ after '${v.label}': ${globalHookCode.join(', ')}`)
+
+    // (c) No enforcement REGISTRATION in global settings.json.
     const g = readSettings('global', M)
     assert.strictEqual(hasEnforcementHook(g), false,
       `P12 VIOLATION — enforcement registrations in global settings after '${v.label}': ${enforcementHookCommands(g).join(', ')}`)

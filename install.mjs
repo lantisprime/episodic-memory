@@ -1571,7 +1571,13 @@ if (installHooks || installEnforcement) {
 // --install-hooks alongside --install-second-opinion.
 // ---------------------------------------------------------------------------
 if (installSecondOpinion) {
-  const userHooksDir = path.join(os.homedir(), '.claude', 'hooks')
+  // P12 (RFC-008 P4d): second-opinion-gate.mjs is a PreToolUse hook — its code
+  // (gate + libs + runbooks) installs PER-PROJECT under <project>/.claude/hooks/,
+  // never global. (The providers.json snapshot is a generated data artifact read
+  // via the shared snapshotPath() resolver; fully relocating the runtime snapshot
+  // path is S3 dep-class scope. The P12 guardrail tracks hook CODE files (.sh/.mjs),
+  // which this moves out of global.)
+  const userHooksDir = path.join(projectDir, '.claude', 'hooks')
   const userHooksLibDir = path.join(userHooksDir, 'lib')
   const userRunbooksDir = path.join(userHooksDir, 'runbooks')
 

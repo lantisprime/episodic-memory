@@ -87,6 +87,28 @@ export function enforcementFilesInGlobalScope(home) {
   return found
 }
 
+// Recursively list EVERY hook CODE file (.sh / .mjs) under global
+// ~/.claude/hooks/. P12: none may exist there — ALL hook code is per-project.
+// This is the COMPREHENSIVE check (any hook file, not just a hand-maintained
+// enforcement list), closing the blind spot where second-opinion-gate.mjs
+// slipped past the enforcement-set-only assertion. Returns sorted rel paths.
+export function hookCodeFilesInGlobalScope(home) {
+  const root = path.join(home, '.claude', 'hooks')
+  const out = []
+  const walk = (dir, rel) => {
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const abs = path.join(dir, e.name)
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) walk(abs, r)
+      else if (e.name.endsWith('.sh') || e.name.endsWith('.mjs')) out.push(`.claude/hooks/${r}`)
+    }
+  }
+  walk(root, '')
+  return out.sort()
+}
+
 // Env vars that, if inherited from the test runner's real environment, would
 // defeat HOME isolation: CLAUDE_CONFIG_DIR repoints the settings dir, and the
 // SO_* paths are read by second-opinion-gate.mjs (it would resolve the REAL
