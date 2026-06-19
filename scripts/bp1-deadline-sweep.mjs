@@ -51,6 +51,7 @@
 'use strict'
 
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
@@ -91,7 +92,11 @@ const emit = !bool('--no-emit')
 
 const SCRIPT_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname))
 const FLAG_CHECK = path.join(SCRIPT_DIR, 'bp1-flag-check.mjs')
-const EM_STORE = path.join(SCRIPT_DIR, 'em-store.mjs')
+// em-store is SUBSTRATE (stays global): co-located in dev/repo, else the global
+// substrate root (RFC-008 P4d / Principle 12 — enforcement may call the substrate).
+const EM_STORE = fs.existsSync(path.join(SCRIPT_DIR, 'em-store.mjs'))
+  ? path.join(SCRIPT_DIR, 'em-store.mjs')
+  : path.join(os.homedir(), '.episodic-memory', 'scripts', 'em-store.mjs')
 
 // ---------------------------------------------------------------------------
 // Resolve project root

@@ -34,7 +34,11 @@ INPUT="$(cat)"
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""')"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-ENFORCE="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+# RFC-008 P4d / Principle 12: enforce-contract.mjs is the enforcement ENGINE,
+# installed CO-LOCATED with this hook under <project>/.claude/hooks/, never in the
+# global substrate. Resolve via BASH_SOURCE (symlink-safe).
+HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+ENFORCE="$HOOK_DIR/enforce-contract.mjs"
 
 _em_join_list() {
   local out=""

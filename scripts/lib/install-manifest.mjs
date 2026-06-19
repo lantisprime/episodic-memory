@@ -126,6 +126,119 @@ export function enforcementRegistrations() {
   ]
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// RFC-008 P4d / Principle 12 — enforcement SCRIPTS + their lib closure relocate
+// per-project; global holds ONLY substrate + dev/CI tooling.
+//
+// An "enforcement ENTRY script" is a .mjs under scripts/ that exists ONLY to be
+// run by a hook: the enforcement ENGINE (enforce-contract), the classifier suite,
+// the marker writers, and the bp1 orchestration. By the P12 FUNCTION test these
+// are enforcement artifacts however packaged → they install under
+// <project>/.claude/hooks/ and NEVER deploy to the global substrate scripts dir.
+//
+// The set is DERIVED (explicit list + the bp1-* family by prefix) so a newly
+// added enforcement script is classified automatically and can't silently leak to
+// global. The transitive relative-import closure (computeLibClosure) decides which
+// scripts/lib/*.mjs travel with them — no hand-maintained lib list to drift.
+// ───────────────────────────────────────────────────────────────────────────
+const ENFORCEMENT_ENTRY_EXPLICIT = new Set([
+  'enforce-contract.mjs',
+  'agent-classifier-dispatch.mjs', 'classifier-config-loader.mjs', 'classifier-marker.mjs',
+  'classifier-override-lookup.mjs', 'classifier-override-persist.mjs', 'classify-correction.mjs',
+  'llm-classify.mjs',
+  'checkpoint-marker.mjs', 'plan-marker.mjs', 'preflight-marker-write.mjs',
+])
+
+export function isEnforcementEntryScript(basename) {
+  return ENFORCEMENT_ENTRY_EXPLICIT.has(basename) || /^bp1-.+\.mjs$/.test(basename)
+}
+
+function listRepoScripts(repoDir) {
+  const d = path.join(repoDir, 'scripts')
+  return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.mjs')) : []
+}
+
+// Transitive relative-import closure (restricted to scripts/lib/*.mjs) of a set of
+// entry scripts. Static parse of `... from '<spec>'` + dynamic `import('<spec>')`,
+// relative specifiers only. Returns a Set of lib basenames.
+function computeLibClosure(repoDir, entryBasenames) {
+  const scriptsDir = path.join(repoDir, 'scripts')
+  const libDir = path.join(scriptsDir, 'lib')
+  const libs = new Set()
+  const seen = new Set()
+  const walk = (abs) => {
+    if (seen.has(abs)) return
+    seen.add(abs)
+    let src
+    try { src = fs.readFileSync(abs, 'utf8') } catch { return }
+    // Fresh matcher per call — a single /g regex shares lastIndex across the
+    // recursive walk and would skip imports of nested modules.
+    for (const m of src.matchAll(/(?:from\s*|import\s*\(\s*)['"]([^'"]+)['"]/g)) {
+      const spec = m[1]
+      if (!spec.startsWith('.')) continue
+      let resolved = path.resolve(path.dirname(abs), spec)
+      if (!resolved.endsWith('.mjs') && !fs.existsSync(resolved)) resolved += '.mjs'
+      if (path.dirname(resolved) === libDir) libs.add(path.basename(resolved))
+      walk(resolved)
+    }
+  }
+  for (const e of entryBasenames) {
+    const abs = path.join(scriptsDir, e)
+    if (fs.existsSync(abs)) walk(abs)
+  }
+  return libs
+}
+
+// Enforcement entry scripts present in the repo (engine + classifier + markers + bp1).
+export function enforcementEntryScripts(repoDir) {
+  return listRepoScripts(repoDir).filter(isEnforcementEntryScript)
+}
+
+// Scripts that STAY global: substrate (em-*) + dev/CI tooling (validate-*, second-
+// opinion, scaffold-bp, …). Excludes enforcement entries AND the per-project
+// SessionEnd hook script.
+export function globalEntryScripts(repoDir) {
+  return listRepoScripts(repoDir).filter(
+    (f) => !isEnforcementEntryScript(f) && !ENFORCEMENT_HOOK_SCRIPTS.includes(f)
+  )
+}
+
+// Lib closure that STAYS global — every scripts/lib/*.mjs imported (transitively)
+// by a retained-global script. These are NOT removed from global even if an
+// enforcement script also imports them (e.g. local-dir.mjs, json-instance-validate).
+export function globalScriptLibs(repoDir) {
+  return computeLibClosure(repoDir, globalEntryScripts(repoDir))
+}
+
+// Lib closure that travels INTO the per-project enforcement bundle — every
+// scripts/lib/*.mjs the enforcement entries (incl. the SessionEnd hook script)
+// import. Includes shared substrate libs (local-dir.mjs, …) so the relocated
+// scripts resolve all imports co-located, never reaching into global.
+export function enforcementBundleLibs(repoDir) {
+  return computeLibClosure(repoDir, [...enforcementEntryScripts(repoDir), SESSION_END_SCRIPT])
+}
+
+// Libs that move OUT of global (enforcement-only): in the enforcement bundle and
+// NOT in any retained-global script's closure. Drives the global lib filter + the
+// D4 prune sweep + the P12 global-clean guardrail.
+export function relocatedOnlyLibs(repoDir) {
+  const keep = globalScriptLibs(repoDir)
+  return [...enforcementBundleLibs(repoDir)].filter((l) => !keep.has(l)).sort()
+}
+
+// BP-1 (RFC-004 auto-pilot) is a BEHAVIOR PATTERN, deployed PER-PROJECT alongside
+// its SessionStart hooks on CORE install (not gated on --install-enforcement). Its
+// scripts (bp1-*.mjs) + their lib closure co-locate with the bp1 hooks under
+// <project>/.claude/hooks/. They are still enforcement-by-function for the GLOBAL
+// exclusion (isEnforcementEntryScript matches bp1-* so they never land in global) —
+// these helpers only drive the per-project co-deploy with the bp1 hooks.
+export function bp1EntryScripts(repoDir) {
+  return listRepoScripts(repoDir).filter((f) => /^bp1-.+\.mjs$/.test(f))
+}
+export function bp1ClosureLibs(repoDir) {
+  return [...computeLibClosure(repoDir, bp1EntryScripts(repoDir))]
+}
+
 const HOME_HOOKS = (homeDir) => path.join(homeDir, '.claude', 'hooks')
 const HOME_HOOKS_LIB = (homeDir) => path.join(homeDir, '.claude', 'hooks', 'lib')
 const HOME_SCRIPTS = (homeDir) => path.join(homeDir, '.episodic-memory', 'scripts')

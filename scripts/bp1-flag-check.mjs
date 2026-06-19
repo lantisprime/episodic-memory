@@ -33,6 +33,7 @@
  */
 
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
@@ -142,7 +143,12 @@ function tryEmitEpisode(code, reason, extra) {
   // violation episodes).
   try {
     const repoScripts = path.resolve(path.dirname(new URL(import.meta.url).pathname))
-    const emStore = path.join(repoScripts, 'em-store.mjs')
+    // em-store is SUBSTRATE (global): co-located in dev/repo, else the global root
+    // (RFC-008 P4d / Principle 12 — enforcement may call the global substrate).
+    const _coLocated = path.join(repoScripts, 'em-store.mjs')
+    const emStore = fs.existsSync(_coLocated)
+      ? _coLocated
+      : path.join(os.homedir(), '.episodic-memory', 'scripts', 'em-store.mjs')
     if (!fs.existsSync(emStore)) return
     const projectName = extra.project_root ? path.basename(extra.project_root) : 'unknown'
     const summary = `bp1-flag-check ${code}: ${reason}`
@@ -232,7 +238,11 @@ if (bypass.ok) {
   if (emit) {
     try {
       const repoScripts = path.resolve(path.dirname(new URL(import.meta.url).pathname))
-      const emStore = path.join(repoScripts, 'em-store.mjs')
+      // em-store is SUBSTRATE (global): co-located in dev/repo, else the global root.
+      const _coLocated = path.join(repoScripts, 'em-store.mjs')
+      const emStore = fs.existsSync(_coLocated)
+        ? _coLocated
+        : path.join(os.homedir(), '.episodic-memory', 'scripts', 'em-store.mjs')
       if (fs.existsSync(emStore)) {
         execFileSync('node', [
           emStore,

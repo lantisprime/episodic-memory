@@ -23,10 +23,48 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
+import {
+  enforcementEntryScripts, relocatedOnlyLibs,
+} from '../../scripts/lib/install-manifest.mjs'
 
 export const REPO_ROOT = path.resolve(
   path.dirname(new URL(import.meta.url).pathname), '..', '..'
 )
+
+// The enforce-contract CONFIG files that relocate per-project (RFC-008 P4d / P12 —
+// co-located with the engine under <project>/.claude/hooks/patterns/). NOTE:
+// patterns/_index.json is SUBSTRATE (the behavioral-pattern registry) and stays
+// global by design — it is deliberately NOT in this list.
+export const CONTRACT_CONFIG_FILES = [
+  'bp-001.json', 'events.json', 'enforce-config.schema.json', 'taxonomy.json',
+]
+
+// Enforcement RUNTIME found in GLOBAL scope under `home`: the engine + classifier
+// + markers + bp1 entry scripts (manifest enforcementEntryScripts), the
+// relocated-only libs, the contract config, and the contract plugins index — none
+// may live in ~/.episodic-memory/. Manifest-derived so a newly added enforcement
+// script is covered automatically (no hand-list to drift). Returns sorted
+// rel-paths; [] == P12-clean. Complements enforcementFilesInGlobalScope (hooks)
+// and hookCodeFilesInGlobalScope (~/.claude/hooks/).
+export function enforcementRuntimeInGlobalScope(home) {
+  const out = []
+  const gScripts = path.join(home, '.episodic-memory', 'scripts')
+  for (const f of enforcementEntryScripts(REPO_ROOT)) {
+    if (fs.existsSync(path.join(gScripts, f))) out.push(`.episodic-memory/scripts/${f}`)
+  }
+  const gLib = path.join(gScripts, 'lib')
+  for (const f of relocatedOnlyLibs(REPO_ROOT)) {
+    if (fs.existsSync(path.join(gLib, f))) out.push(`.episodic-memory/scripts/lib/${f}`)
+  }
+  const gPatterns = path.join(home, '.episodic-memory', 'patterns')
+  for (const f of CONTRACT_CONFIG_FILES) {
+    if (fs.existsSync(path.join(gPatterns, f))) out.push(`.episodic-memory/patterns/${f}`)
+  }
+  if (fs.existsSync(path.join(home, '.episodic-memory', 'plugins', '_index.json'))) {
+    out.push('.episodic-memory/plugins/_index.json')
+  }
+  return out.sort()
+}
 
 // Command-string fragments that identify an RFC-008 ENFORCEMENT hook.
 //

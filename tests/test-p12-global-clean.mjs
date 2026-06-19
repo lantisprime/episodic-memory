@@ -24,7 +24,7 @@ import assert from 'node:assert'
 import {
   mkMock, runInstall, readSettings,
   hasEnforcementHook, enforcementHookCommands, enforcementFilesInGlobalScope,
-  hookCodeFilesInGlobalScope,
+  hookCodeFilesInGlobalScope, enforcementRuntimeInGlobalScope,
 } from './lib/activation-scoping-harness.mjs'
 
 let passed = 0
@@ -44,11 +44,17 @@ console.log('# test-p12-global-clean (RFC-008 P4d — PRINCIPLES.md §12 guardra
 
 // Every install variant a user can run WITHOUT the per-project enforcement
 // opt-in. None may place an enforcement artifact in global scope.
+// Core + the opt-in variants. --install-enforcement is INCLUDED here even though
+// it is the per-project enforcement opt-in: P12's whole point is that enforcement
+// goes to the PROJECT, so even WITH --install-enforcement, GLOBAL scope must stay
+// enforcement-clean. That is the strongest form of the guarantee.
 const VARIANTS = [
   { label: 'core (no flags)', flags: [] },
   { label: '--install-hooks', flags: ['--install-hooks', '--install-hooks-force'] },
   { label: '--install-second-opinion', flags: ['--install-second-opinion'] },
   { label: '--install-hooks + --install-second-opinion', flags: ['--install-hooks', '--install-hooks-force', '--install-second-opinion'] },
+  { label: '--install-enforcement', flags: ['--install-enforcement'] },
+  { label: '--install-enforcement + --install-second-opinion', flags: ['--install-enforcement', '--install-second-opinion'] },
 ]
 
 for (const v of VARIANTS) {
@@ -73,6 +79,16 @@ for (const v of VARIANTS) {
     const g = readSettings('global', M)
     assert.strictEqual(hasEnforcementHook(g), false,
       `P12 VIOLATION — enforcement registrations in global settings after '${v.label}': ${enforcementHookCommands(g).join(', ')}`)
+
+    // (d) COMPREHENSIVE RUNTIME: no enforcement ENGINE / classifier / markers /
+    // bp1 entry scripts, no relocated-only libs, no contract config, no contract
+    // plugins index in global ~/.episodic-memory/. This is the script+config half
+    // of the leak the 2026-06-19 audit found (the per-project gates used to shim
+    // back into a global enforce-contract.mjs). Manifest-derived, so it cannot
+    // drift behind a newly added enforcement script.
+    const globalRuntime = enforcementRuntimeInGlobalScope(M.home)
+    assert.deepStrictEqual(globalRuntime, [],
+      `P12 VIOLATION — enforcement runtime in global ~/.episodic-memory/ after '${v.label}': ${globalRuntime.join(', ')}`)
   })
 }
 

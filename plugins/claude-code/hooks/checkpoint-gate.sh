@@ -114,7 +114,8 @@ REPO_ROOT="$(resolve_repo_root "$CWD")"
 # missing binary makes `node` exit non-zero → "" → the gate keeps blocking
 # (fail-closed, B1). Never re-resolves the root — the consult passes REPO_ROOT as
 # --marker-root (F4).
-ENFORCE_CONTRACT="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+# RFC-008 P4d / Principle 12: engine co-located with this gate, not global.
+ENFORCE_CONTRACT="$HOOK_DIR/enforce-contract.mjs"
 
 # Canonical WRITE paths. Used in block-message paths so the agent knows
 # where to write the checkpoint block.
@@ -745,7 +746,7 @@ _arm_checkpoint_required_if_missing() {
   fi
   # sid is valid here (the approval check requires it).
   ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
-  local helper="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+  local helper="$HOOK_DIR/checkpoint-marker.mjs"  # P4d/P12: co-located marker writer
   if [ -f "$helper" ]; then
     CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
       --target .checkpoint-required \
@@ -1115,9 +1116,16 @@ _validate_classifier_marker_helper() {
   local script_canon
   script_canon="$(_canonicalize_possibly_nonexistent "$script_path")"
   [ -z "$script_canon" ] && return 1
-  local allowed_global allowed_repo
+  local allowed_global allowed_repo allowed_hookdir
+  # RFC-008 P4d / Principle 12: the classifier-marker writer installs CO-LOCATED
+  # with this gate (<project>/.claude/hooks/) — allow that path. Legacy global +
+  # in-repo paths kept for back-compat / dev.
+  allowed_hookdir="$(_canonicalize_possibly_nonexistent "$HOOK_DIR/classifier-marker.mjs")"
   allowed_global="$(_canonicalize_possibly_nonexistent "$HOME/.episodic-memory/scripts/classifier-marker.mjs")"
   allowed_repo="$(_canonicalize_possibly_nonexistent "$repo_root/scripts/classifier-marker.mjs")"
+  if [ -n "$allowed_hookdir" ] && [ "$script_canon" = "$allowed_hookdir" ]; then
+    return 0
+  fi
   if [ -n "$allowed_global" ] && [ "$script_canon" = "$allowed_global" ]; then
     return 0
   fi
@@ -1629,7 +1637,7 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
   if [ "$POST_SILENCED" != "1" ] && ! checkpoint_marker_exists_for_session .post-checkpoint-required "$MY_SID"; then
     ensure_primary_dir "$REPO_ROOT" 2>/dev/null || true
     if validate_session_id "$MY_SID"; then
-      HELPER_CKM_PUSH="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+      HELPER_CKM_PUSH="$HOOK_DIR/checkpoint-marker.mjs"  # P4d/P12: co-located
       if [ -f "$HELPER_CKM_PUSH" ]; then
         # CAPTURE stdout (codex C3: the gate previously discarded it) and parse
         # the helper's authoritative `noop` field.
@@ -1753,7 +1761,7 @@ case "$TOOL_NAME" in
         # Prefer helper for unified marker_write classification + atomic write.
         # CLAUDE_CODE_SESSION_ID is exported to the helper subprocess via the
         # hook's inherited env (claude code sets it for all hooks).
-        HELPER_CKM="$HOME/.episodic-memory/scripts/checkpoint-marker.mjs"
+        HELPER_CKM="$HOOK_DIR/checkpoint-marker.mjs"  # P4d/P12: co-located
         if [ -f "$HELPER_CKM" ]; then
           CLAUDE_CODE_SESSION_ID="$MY_SID" node "$HELPER_CKM" \
             --target .post-checkpoint-required \

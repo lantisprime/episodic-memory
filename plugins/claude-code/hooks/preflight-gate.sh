@@ -314,7 +314,7 @@ fi
 # non-`inactive` string — falls through to enforcement (2>/dev/null discards the
 # node stderr so it can never leak into the captured token).
 # ---------------------------------------------------------------------------
-LAYER_ACTIVE_CONSULT="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+LAYER_ACTIVE_CONSULT="$HOOK_DIR/enforce-contract.mjs"  # P4d/P12: co-located engine, not global
 set +e
 LAYER_DISP="$(node "$LAYER_ACTIVE_CONSULT" --layer-active --marker-root "$REPO_ROOT" 2>/dev/null)"
 set -e

@@ -56,18 +56,20 @@ fi
 CWD="$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")"
 [ -z "$CWD" ] && CWD="$(pwd)"
 
-# Resolve enforce-contract.mjs at canonical global install path. The hook does
-# not attempt to use the in-repo script — production hooks invoke globally
-# installed copies, which is what install.mjs --install-hooks deploys.
+# Resolve enforce-contract.mjs CO-LOCATED with this gate. RFC-008 P4d / Principle
+# 12: the enforcement engine installs per-project alongside the gates under
+# <project>/.claude/hooks/ — NOT in the global substrate. Resolve via BASH_SOURCE
+# (symlink-safe) so the gate calls its own project's engine.
 #
 # RFC-008 P3b-1: the stop decision moved OUT of the memory substrate
 # (em-recall.mjs --gate stop) INTO the enforcement layer (enforce-contract.mjs),
 # byte-identical. CLASS-C(c): this loud-fail-if-missing is PRESERVED on the
 # repoint — a missing/erroring binary MUST block loud, never degrade to
 # allow-always.
-ENFORCE="$HOME/.episodic-memory/scripts/enforce-contract.mjs"
+HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+ENFORCE="$HOOK_DIR/enforce-contract.mjs"
 if [ ! -f "$ENFORCE" ]; then
-  echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract.mjs not found at canonical global path. Re-run install.mjs."}'
+  echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract.mjs not found co-located in the project hooks dir. Re-run install.mjs --install-enforcement."}'
   exit 0
 fi
 
