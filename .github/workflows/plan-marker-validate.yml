@@ -138,6 +138,9 @@ jobs:
       - name: Run P12 global-clean guardrail (RFC-008 P4d — global scope has ZERO enforcement hooks/scripts/libs/config across every install variant)
         run: node tests/test-p12-global-clean.mjs
 
+      - name: Run enforcement-scope correction E2E (RFC-008 P4d ESC — gates block ONLY repo-source writes; episodes/reads/plan-files/off-repo allowed; per-project, no global touch)
+        run: node tests/test-enforcement-scope.mjs
+
       - name: Run install-manifest scope + migration-cutover (RFC-008 P4d — enforcement scope:project excluded from global cutover)
         run: node tests/test-migration-cutover.mjs
 

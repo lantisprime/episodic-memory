@@ -18,7 +18,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { mkMock, runInstall, runHook, deployedScript } from './lib/activation-scoping-harness.mjs'
+import { mkMock, runInstall, runHook, deployedScript, hookCodeFilesInGlobalScope } from './lib/activation-scoping-harness.mjs'
 
 let pass = 0, fail = 0
 const ok = (n) => { pass++; console.log(`  ✓ ${n}`) }
@@ -247,8 +247,24 @@ function t_offrepo_relative_escape() {
   }
 }
 
+// ── t_no_global_touch (REQ-11, P12) ─────────────────────────────────────────
+// ESC deploys enforcement gates per-project only; the global ~/.claude/hooks/
+// tree stays empty of enforcement code. Asserts the substrate-stays-hook-free
+// invariant for the exact --install-enforcement path this suite drives (the
+// same install freshProject() uses), not a stub.
+function t_no_global_touch() {
+  const M = freshProject('esc-no-global')
+  const globalHookCode = hookCodeFilesInGlobalScope(M.home)
+  if (globalHookCode.length === 0) {
+    ok('t_no_global_touch: ~/.claude/hooks/ has zero enforcement code after --install-enforcement (REQ-11)')
+  } else {
+    bad('t_no_global_touch', `expected [] (P12 global-clean), got ${JSON.stringify(globalHookCode)}`)
+  }
+}
+
 t_checkpoint_parity()
 t_offrepo_relative_escape()
+t_no_global_touch()
 t_em_allowed_all_states()
 t_planfile_allowed()
 t_nonsrc_carveouts_allowed()
