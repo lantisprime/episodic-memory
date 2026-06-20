@@ -49,12 +49,18 @@ function mkTmpRepo() {
   fs.mkdirSync(path.join(real, '.claude'), { recursive: true })
   // Real git init so the resolver finds this as the repo root.
   spawnSync('git', ['init', '-q'], { cwd: real })
-  // Stage the hook + libs the gate sources.
+  // Stage the hook + ALL libs it sources. Copy the WHOLE lib dir (not a
+  // hardcoded list): plan-gate.sh hard-fails (lib-missing block) if any required
+  // lib is absent, so a gate gaining a new required lib must not silently drift
+  // this harness. Regression: RFC-008 P4d ESC added repo-source.sh as a required
+  // lib; the old hardcoded list omitted it, blocking every plan-gate call and
+  // flipping X1/X12 (expect-allow) red while expect-block tests passed spuriously.
   const hooksLib = path.join(real, 'hooks', 'lib')
   fs.mkdirSync(hooksLib, { recursive: true })
   fs.cpSync(path.join(REPO, 'plugins', 'claude-code', 'hooks', 'plan-gate.sh'), path.join(real, 'hooks', 'plan-gate.sh'))
-  for (const lib of ['command-classifier.sh', 'repo-root.sh', 'marker-paths.sh', 'session-id.sh']) {
-    fs.cpSync(path.join(REPO, 'plugins', 'claude-code', 'hooks', 'lib', lib), path.join(hooksLib, lib))
+  const srcLib = path.join(REPO, 'plugins', 'claude-code', 'hooks', 'lib')
+  for (const lib of fs.readdirSync(srcLib)) {
+    if (lib.endsWith('.sh')) fs.cpSync(path.join(srcLib, lib), path.join(hooksLib, lib))
   }
   cleanups.push(() => fs.rmSync(real, { recursive: true, force: true }))
   return real
@@ -97,18 +103,24 @@ function check(cond, label) {
 }
 
 // ---------------- X1: A's orphan, session B Write → ALLOW (the #268 fix) ----
+// Target is a REPO-SOURCE path: under ESC (R3) an off-repo write would allow
+// regardless of the #268 logic, masking this test. A repo-source target proves
+// the cross-session orphan genuinely does NOT block a write that otherwise would.
 {
   const root = mkTmpRepo()
   fs.writeFileSync(path.join(root, '.checkpoints', '.plan-approval-pending.session-A'), '')
-  const r = runPlanGate({ root, sid: 'session-B', toolName: 'Write', toolInput: { file_path: '/tmp/x' } })
+  const r = runPlanGate({ root, sid: 'session-B', toolName: 'Write', toolInput: { file_path: path.join(root, 'scripts', 'x.mjs') } })
   check(r.decision === 'allow', `X1 cross-session orphan → ALLOW (the #268 fix; got ${r.decision})`)
 }
 
 // ---------------- X2: A's own marker, session A → BLOCK ---------------------
+// Repo-source target: ESC (R3) gates ONLY repo-source writes, so an off-repo
+// /tmp path would (correctly) ALLOW even with the own marker present. The
+// "own marker → block" invariant holds for a repo-source write.
 {
   const root = mkTmpRepo()
   fs.writeFileSync(path.join(root, '.checkpoints', '.plan-approval-pending.session-A'), '')
-  const r = runPlanGate({ root, sid: 'session-A', toolName: 'Write', toolInput: { file_path: '/tmp/x' } })
+  const r = runPlanGate({ root, sid: 'session-A', toolName: 'Write', toolInput: { file_path: path.join(root, 'scripts', 'x.mjs') } })
   check(r.decision === 'block', `X2 own marker → BLOCK (got ${r.decision})`)
 }
 
@@ -116,7 +128,8 @@ function check(cond, label) {
 {
   const root = mkTmpRepo()
   fs.writeFileSync(path.join(root, '.checkpoints', '.plan-approval-pending'), '')
-  const r = runPlanGate({ root, sid: 'session-A', toolName: 'Write', toolInput: { file_path: '/tmp/x' } })
+  // Repo-source target (see X2): ESC gates only repo-source writes under R3.
+  const r = runPlanGate({ root, sid: 'session-A', toolName: 'Write', toolInput: { file_path: path.join(root, 'scripts', 'x.mjs') } })
   check(r.decision === 'block', `X3 legacy → BLOCK (got ${r.decision})`)
 }
 
