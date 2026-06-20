@@ -94,8 +94,8 @@ esac
 # Use BASH_SOURCE for symlink safety.
 HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 LIB_DIR="$HOOK_DIR/lib"
-if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ] || [ ! -f "$LIB_DIR/session-id.sh" ]; then
-  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh, session-id.sh). Re-run install.mjs --install-hooks."}'
+if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ] || [ ! -f "$LIB_DIR/session-id.sh" ] || [ ! -f "$LIB_DIR/repo-source.sh" ]; then
+  echo '{"decision": "block", "reason": "checkpoint-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh, session-id.sh, repo-source.sh). Re-run install.mjs --install-hooks."}'
   exit 0
 fi
 # shellcheck disable=SC1091
@@ -106,6 +106,8 @@ source "$LIB_DIR/command-classifier.sh"
 source "$LIB_DIR/marker-paths.sh"
 # shellcheck disable=SC1091
 source "$LIB_DIR/session-id.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/repo-source.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 
@@ -842,183 +844,27 @@ _bash_reason_is_unevaluated_novel() {
 # (methodology negotiation, recommended land-then-review per shape (b)).
 # ---------------------------------------------------------------------------
 
-# Canonicalize a path that may not exist, may be a broken symlink, or may
-# have symlinked ancestors. macOS- and Linux-safe.
-#
-# Codex R2/P1: existing file/symlink-file targets must canonicalize via
-# parent-pwd-P + readlink loop, not walk-up-only.
-# Codex R3/P1: broken symlink leaves [ -e ] false, so we also accept [ -L ]
-# as "existing surface to resolve."
-_canonicalize_possibly_nonexistent() {
-  local p="$1"
-  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
-
-  if [ -e "$p" ] || [ -L "$p" ]; then
-    if [ -d "$p" ]; then
-      (cd "$p" 2>/dev/null && pwd -P) || printf '%s' "$p"
-      return
-    fi
-    local parent leaf parent_canon resolved hops=0
-    parent="$(dirname "$p")"
-    leaf="$(basename "$p")"
-    parent_canon="$( (cd "$parent" 2>/dev/null && pwd -P) || printf '%s' "$parent" )"
-    resolved="$parent_canon/$leaf"
-    while [ -L "$resolved" ] && [ $hops -lt 32 ]; do
-      local target rp_parent rp_leaf rp_parent_canon
-      target="$(readlink "$resolved")" || break
-      case "$target" in
-        /*) resolved="$target" ;;
-        *) resolved="$(dirname "$resolved")/$target" ;;
-      esac
-      hops=$((hops+1))
-      rp_parent="$(dirname "$resolved")"
-      rp_leaf="$(basename "$resolved")"
-      rp_parent_canon="$( (cd "$rp_parent" 2>/dev/null && pwd -P) || printf '%s' "$rp_parent" )"
-      resolved="$rp_parent_canon/$rp_leaf"
-    done
-    printf '%s' "$resolved"
-    return
-  fi
-
-  # Nonexistent and not a symlink: walk up to nearest existing ancestor.
-  local tail="" cur="$p"
-  while [ -n "$cur" ] && [ ! -e "$cur" ] && [ ! -L "$cur" ]; do
-    tail="/$(basename "$cur")${tail}"
-    local up
-    up="$(dirname "$cur")"
-    [ "$up" = "$cur" ] && break
-    cur="$up"
-  done
-  if [ -e "$cur" ] || [ -L "$cur" ]; then
-    if [ -d "$cur" ]; then
-      local cur_canon
-      cur_canon="$( (cd "$cur" 2>/dev/null && pwd -P) || printf '%s' "$cur" )"
-      printf '%s%s' "$cur_canon" "$tail"
-    else
-      # Non-directory ancestor (file or broken symlink) — recurse on $cur.
-      # Bounded: recursive call hits the first branch immediately (depth ≤ 1).
-      local cur_canon
-      cur_canon="$(_canonicalize_possibly_nonexistent "$cur")"
-      printf '%s%s' "$cur_canon" "$tail"
-    fi
-  else
-    printf '%s' "$p"
-  fi
-}
+# _canonicalize_possibly_nonexistent() moved to lib/repo-source.sh (Rule 14:
+# ONE definition, shared with plan-gate.sh). Sourced above.
 
 # Decide whether the current tool call targets project source. Returns 0
 # (yes, repo-touching, block as normal) or 1 (no, off-repo, allow).
 #
-# Bash (codex R1 6b): all non-marker_write Bash returns 0. Smart-arming
-# does NOT relieve Bash friction — that's a separate classifier PR.
-# Edit/Write/MultiEdit/NotebookEdit: compare FILE_PATH against REPO_ROOT
-# via both raw-prefix (catches symlink-out author intent) AND canonical-
-# prefix (catches symlink-in / traversal / nonexistent paths).
+# Path/label authority is the SHARED predicate (lib/repo-source.sh, §12) —
+# the same one plan-gate.sh consults (Rule 14: ONE definition). It covers the
+# .review-store / .checkpoints / .git / .episodic-memory / docs/plans carve-outs,
+# raw+canonical repo-prefix membership, and the .gitignore deferral. The agent
+# path-verdict downgrade below is checkpoint-gate-LOCAL (arming bypass) and is
+# deliberately NOT part of the shared predicate / NOT adopted by plan-gate.
 _tool_call_targets_repo_source() {
   local repo_root="$1" tool="$2" file_path="$3" label="$4"
-
-  if [ "$tool" = "Bash" ]; then
-    # Legitimate marker_write allowances exit 0 in the upstream Bash branch
-    # BEFORE reaching the pre-block site, so any Bash that falls through to
-    # the predicate is by construction "needs the pre-block." Including
-    # marker_write that wasn't approved upstream (e.g. POST_DONE write when
-    # POST_REQ not armed — test 17 regression class).
-    # PR-B2 §14-F4(a): nonsrc_write joins read_only as "not repo source" for
-    # consistency with the verdict inversion. (This Bash branch is currently
-    # reached only defensively — the gate's lone caller is Edit/Write-cased —
-    # but keeping it aligned with the LABEL taxonomy avoids a latent surprise
-    # if a future caller routes Bash through this predicate.)
-    case "$label" in
-      read_only|nonsrc_write) return 1 ;;
-      *)                      return 0 ;;
-    esac
-  fi
-
-  # Edit/Write/MultiEdit/NotebookEdit branch.
-  # Empty path = defensive conservative-block (per R4/P1 fix: relative path
-  # with no absolute cwd authority sets FILE_PATH="" upstream).
-  if [ -z "$file_path" ]; then
-    return 0
-  fi
-
-  local repo_canon
-  repo_canon="$( (cd "$repo_root" 2>/dev/null && pwd -P) || printf '%s' "$repo_root" )"
-  local fp_canon
-  fp_canon="$(_canonicalize_possibly_nonexistent "$file_path")"
-
-  # Is the target inside the repo at all? Raw-prefix (codex R1 attack class 3 —
-  # symlink-out author intent) OR canonical-prefix (symlink-in / traversal /
-  # nonexistent leaf). Off-repo (memory, skills, settings) → not repo source.
-  local in_repo=1
-  case "$file_path" in
-    "$repo_root"/*|"$repo_root") in_repo=0 ;;
-  esac
-  if [ "$in_repo" != "0" ]; then
-    case "$fp_canon" in
-      "$repo_canon"/*|"$repo_canon") in_repo=0 ;;
-    esac
-  fi
-  [ "$in_repo" = "0" ] || return 1
-
-  # In-repo target. Four downgrades make it NOT count as repo source (PR-B2 §11):
-  #
-  #  (1) .review-store/ carve-out — second-opinion review artifacts the harness
-  #      stages in-project (.review-store/) are never repo source, so a review
-  #      write must never arm the pre-checkpoint. (.review-store/ is untracked
-  #      but NOT in .gitignore, so it needs its own arm independent of (1c).)
-  case "$fp_canon" in
-    "$repo_canon"/.review-store|"$repo_canon"/.review-store/*) return 1 ;;
-  esac
-  #
-  #  (1b) .checkpoints/ carve-out — gate infrastructure (markers, classify cache,
-  #      the runbook-ack marker, and the pending command-files the command-
-  #      classification deny-hint itself tells the agent to write to
-  #      <repo>/.checkpoints/classify/pending-*.cmd) is never repo source.
-  #      Without this, that prescribed write arms the pre-checkpoint and
-  #      deadlocks the classify protocol (reproduced 2026-05-27). Marker CONTENT
-  #      validation still happens in the marker_write path; this governs ARMING
-  #      only. Canonical-anchored + kept as a hard infra invariant independent of
-  #      .gitignore drift (it ships gitignored, but the gate must never arm on
-  #      its own substrate even if a user edits .gitignore).
-  case "$fp_canon" in
-    "$repo_canon"/.checkpoints|"$repo_canon"/.checkpoints/*) return 1 ;;
-  esac
-  #
-  #  (1b') .git/ carve-out — git internals (commit-message scratch, PR-body files,
-  #      rebase/merge todo lists, hooks, refs, index) are never tracked repo
-  #      source. git check-ignore does NOT flag .git/ (it is structurally excluded
-  #      from the worktree, not via .gitignore — verified: `git check-ignore
-  #      .git/<f>` exits 1), so without this an Edit/Write under .git/ returns 0
-  #      (repo source) and would arm the pre-checkpoint AND let EDIT 3 clear a
-  #      satisfied post-checkpoint on a NON-source write. Live E2E (this PR) hit
-  #      exactly that: writing the PR body to .git/ cleared POST_DONE between the
-  #      push and gh pr create. Canonical-anchored; a hard infra invariant
-  #      independent of .gitignore (git never tracks its own dir). No bypass:
-  #      .git/ content is not the worktree, so this cannot smuggle tracked source
-  #      past the gate, and the push-gate still independently blocks pushes.
-  case "$fp_canon" in
-    "$repo_canon"/.git|"$repo_canon"/.git/*) return 1 ;;
-  esac
-  #
-  #  (1c) .gitignore carve-out — a gitignored target is by definition NOT tracked
-  #      repo source (covers .episodic-memory/ episodes, scratch/, analysis/,
-  #      node_modules/, .codex/, etc.). Defer to git's own notion of "source"
-  #      rather than enumerating directories — gating on an open-ended directory
-  #      list is the enumeration treadmill. Fail-closed: git absent / path
-  #      outside the worktree / not-ignored → fall through and arm conservatively.
-  if command -v git >/dev/null 2>&1 \
-     && git -C "$repo_canon" check-ignore -q -- "$fp_canon" 2>/dev/null; then
+  # Shared path/label authority (incl. docs/plans carve-out, §12).
+  _tool_targets_repo_source_shared "$repo_root" "$tool" "$file_path" "$label" || return 1
+  # checkpoint-gate-LOCAL arming bypass: agent path-verdict downgrade (NOT shared;
+  # NOT adopted by plan-gate). Edit/Write only.
+  if [ "$tool" != "Bash" ] && [ -n "$file_path" ] && _path_verdict_downgrades "$file_path"; then
     return 1
   fi
-  #
-  #  (2) Path verdict — the agent classified THIS target nonsrc_write/read_only
-  #      via classifier-marker.mjs --target-path. Verdict-over-heuristic
-  #      inversion (de-assume the pure path heuristic): a plan/scratch/doc/
-  #      generated file the agent declares non-source does not arm.
-  if _path_verdict_downgrades "$file_path"; then
-    return 1
-  fi
-
   return 0
 }
 
