@@ -114,7 +114,7 @@ if (bootstrapLastPrompt) {
 }
 
 if (!tool) {
-  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-hooks-force]
+  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-enforcement] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
@@ -125,15 +125,31 @@ Tools:
   windsurf     Install .windsurfrules (or append to existing)
   all          Install for all supported tools except opencode (avoids duplicate OpenCode-visible skills)
 
-Hook flags (claude-code / Phase 3b):
-  --install-hooks         Copy plugins/claude-code/hooks/*.sh into ~/.claude/hooks/ and register
-                          checkpoint-gate + plan-gate (PreToolUse),
-                          em-recall-sessionstart (SessionStart), and
-                          em-session-end-prompt (SessionEnd) in
-                          ~/.claude/settings.json. Skips divergent local
-                          hook files AND withholds new settings registration
-                          for them (re-run with --install-hooks-force to
+Hook flags (claude-code / RFC-008 P4d — enforcement is PER-PROJECT, never global):
+  --install-hooks         Install the NON-enforcement hooks into
+                          <project>/.claude/ and register them in
+                          <project>/.claude/settings.json: em-recall
+                          (SessionStart), session-handoff (SessionStart), and
+                          em-session-end-prompt (SessionEnd). Post-P4d this
+                          flag alone NO LONGER deploys the enforcement gates
+                          (checkpoint/plan/preflight/stop) — use
+                          --install-enforcement for those. Skips divergent
+                          local hook files AND withholds their settings
+                          registration (re-run with --install-hooks-force to
                           accept). Atomic settings.json write (temp+rename).
+  --install-enforcement   Install the PER-PROJECT enforcement layer under
+                          <project>/.claude/ (NEVER ~/.claude): the gate hooks
+                          (checkpoint-gate, plan-gate, preflight-gate,
+                          stop-gate) + their hooks/lib closure + the
+                          enforce-contract runtime config set
+                          (taxonomy.json, events.json, schema), register them
+                          in <project>/.claude/settings.json, and SEED a
+                          discoverable on/off switch at
+                          <project>/.episodic-memory/enforce-config.json
+                          ({active:true}, create-if-absent — never overwritten,
+                          even with --install-hooks-force). This is the only
+                          flag that arms enforcement, and it arms it for THIS
+                          project only.
   --install-hooks-force   Overwrite divergent hook files with repo versions
                           and proceed with registration.
 
@@ -1184,6 +1200,37 @@ function detectStaleCanonicalEntries(hooks, canonicalByBasename) {
   return stale
 }
 
+// Resolve the filesystem target a hook command points at: strip a leading
+// `bash`/`node`/`sh` runner and any surrounding shell quotes, take the first
+// path token (the script; flags follow), and resolve it to an absolute path.
+// Project-relative entries (e.g. `.claude/hooks/X.sh`) resolve against the
+// project dir — that is how Claude Code runs project-relative hook commands.
+// Returns null if no path token is recoverable.
+function hookCommandTargetPath(cmd, projectDir) {
+  if (typeof cmd !== 'string') return null
+  const stripped = cmd.trim().replace(/^(?:bash|node|sh)\s+/, '')
+  let tok = stripped.split(/\s+/)[0] || ''
+  if (tok.length > 1 &&
+      ((tok.startsWith("'") && tok.endsWith("'")) ||
+       (tok.startsWith('"') && tok.endsWith('"')))) {
+    tok = tok.slice(1, -1)
+  }
+  if (!tok) return null
+  return path.resolve(projectDir, tok)
+}
+
+// Remove every hook ENTRY in <event> whose hook list contains a command exactly
+// equal to <command>. Returns the count removed. Used to prune superseded
+// path-spelling duplicates (relative vs absolute) of an already-canonical hook.
+function removeHookEntryByCommand(hooks, event, command) {
+  const arr = hooks[event]
+  if (!Array.isArray(arr)) return 0
+  const before = arr.length
+  hooks[event] = arr.filter(e =>
+    !(e && Array.isArray(e.hooks) && e.hooks.some(h => h && h.command === command)))
+  return before - hooks[event].length
+}
+
 function installHookFile(repoFile, destFile, force) {
   if (!fs.existsSync(repoFile)) return 'missing-source'
   if (!fs.existsSync(destFile)) {
@@ -1595,9 +1642,27 @@ if (installHooks || installEnforcement) {
       'preflight-gate.sh': path.join(userHooksDir, 'preflight-gate.sh'),
       'preflight-prompt-helper.sh': path.join(userHooksDir, 'preflight-prompt-helper.sh')
     }
+    // RFC-008 P4d double-registration fix. A prior installer version registered
+    // hooks by PROJECT-RELATIVE path (`.claude/hooks/X`); this version registers
+    // the canonical ABSOLUTE path. addHookEntry's idempotence keys on the EXACT
+    // command string, so the two spellings don't unify — the absolute entry is
+    // ADDED beside the stale relative one and every hook fires twice. Resolve
+    // each stale entry's path: if it points at the SAME canonical file, it is a
+    // superseded spelling → auto-remove it (the canonical absolute entry stays).
+    // If it only shares the BASENAME but resolves elsewhere, it may be the
+    // operator's own hook → warn only, never auto-remove (original safety intent).
     const staleEntries = detectStaleCanonicalEntries(settings.hooks, canonicalByBasename)
     for (const { event, basename, command } of staleEntries) {
-      console.log(`Warning: stale ${event} entry for ${basename} at ${command} — canonical also registered; remove the stale entry manually if it never resolves.`)
+      const canonicalResolved = path.resolve(canonicalByBasename[basename])
+      if (hookCommandTargetPath(command, projectDir) === canonicalResolved) {
+        const removed = removeHookEntryByCommand(settings.hooks, event, command)
+        if (removed > 0) {
+          console.log(`Removed superseded duplicate ${event} registration: ${command} (canonical absolute entry kept)`)
+          touched.settings.push(`removed duplicate ${event} → ${basename}`)
+        }
+      } else {
+        console.log(`Warning: stale ${event} entry for ${basename} at ${command} — resolves to a non-canonical path; left in place. Remove manually if unintended.`)
+      }
     }
 
     writeJSONAtomic(settingsPath, settings)

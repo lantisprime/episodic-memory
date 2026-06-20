@@ -28,6 +28,13 @@ TEST_DIR="$(cd -P "$TEST_DIR" && pwd)"
 # TEST_DIR as a git repo so resolve_repo_root returns TEST_DIR.
 git -C "$TEST_DIR" init -q 2>/dev/null
 MARKER="$TEST_DIR/.claude/.plan-approval-pending"
+# P4a/P4d (#397/#401) hardened plan-gate to resolve per-session markers from the
+# PreToolUse stdin .session_id and to FAIL CLOSED when it is missing/invalid.
+# The mock JSON must therefore carry a valid session_id, else every read-only
+# "allow" case fails closed (blocks). A fixed UUID suffices — the gate checks
+# presence/shape, not membership. (Before this fix the test omitted session_id
+# and 8 read-only assertions fail-closed-blocked; it was also never wired into CI.)
+SID="11111111-1111-1111-1111-111111111111"
 passed=0
 failed=0
 
@@ -39,11 +46,11 @@ mock_json() {
   local tool_name="$1"
   local command="${2:-}"
   if [ -n "$command" ]; then
-    jq -n --arg tn "$tool_name" --arg cmd "$command" --arg cwd "$TEST_DIR" \
-      '{tool_name: $tn, tool_input: {command: $cmd}, cwd: $cwd}'
+    jq -n --arg tn "$tool_name" --arg cmd "$command" --arg cwd "$TEST_DIR" --arg sid "$SID" \
+      '{tool_name: $tn, tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}'
   else
-    jq -n --arg tn "$tool_name" --arg cwd "$TEST_DIR" \
-      '{tool_name: $tn, tool_input: {}, cwd: $cwd}'
+    jq -n --arg tn "$tool_name" --arg cwd "$TEST_DIR" --arg sid "$SID" \
+      '{tool_name: $tn, tool_input: {}, cwd: $cwd, session_id: $sid}'
   fi
 }
 
@@ -208,6 +215,29 @@ assert_allowed "9. Edit allowed without marker" \
 
 assert_allowed "10. Write allowed without marker" \
   "$(mock_json 'Write')"
+
+# ===========================================================================
+echo ""
+echo "--- Missing session_id (P4a/P4d #397/#401 fail-closed regression) ---"
+# With the marker armed, a read-only op that WOULD be allowed when a valid
+# session_id is present MUST fail closed (block) when .session_id is absent
+# from stdin — the gate cannot resolve the per-session marker namespace and
+# must never fail open. Guards the exact regression this test fix addresses.
+# ===========================================================================
+mkdir -p "$(dirname "$MARKER")"
+touch "$MARKER"
+
+assert_blocked "11. read-only Bash, marker armed, NO session_id → fail closed" \
+  "$(jq -n --arg cwd "$TEST_DIR" '{tool_name: "Bash", tool_input: {command: "ls -la"}, cwd: $cwd}')"
+
+# Read-only TOOLS (Read/Glob/etc.) sit on the unconditional allowlist checked
+# BEFORE session resolution, so they are allowed even without a session_id —
+# only classification-dependent Bash fails closed (test 11). Documents the
+# boundary so the fail-closed guard isn't over-read as "blocks everything".
+assert_allowed "12. Read tool, marker armed, NO session_id → still ALLOWED (read-only tools are session-independent)" \
+  "$(jq -n --arg cwd "$TEST_DIR" '{tool_name: "Read", tool_input: {}, cwd: $cwd}')"
+
+rm "$MARKER"
 
 # ===========================================================================
 echo ""
