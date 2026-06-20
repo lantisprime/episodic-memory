@@ -12,6 +12,22 @@ The design principles guiding the system are documented in [PRINCIPLES.md](PRINC
 >
 > **This does not break current usage.** The file-based store, the CLI, and the cross-tool behavior described below are unaffected today — the substrate (`em-store` / `em-recall` / `em-search`) stays a stable, zero-dependency store-and-recall API throughout the migration. Enforcement plugins beyond Claude Code arrive incrementally as later phases land.
 
+## Table of Contents
+
+- [Capabilities](#capabilities)
+- [Agentic Coding Disciplines](#agentic-coding-disciplines)
+- [How it works](#how-it-works)
+- [Installation](#installation)
+- [Supported Tools](#supported-tools)
+- [Skills](#skills)
+- [Episode Categories](#episode-categories)
+- [Data Locations](#data-locations)
+- [Self-Correction: Revision Chains](#self-correction-revision-chains)
+- [Behavioral Patterns](#behavioral-patterns)
+- [RFCs](#rfcs)
+- [Scripts Reference](#scripts-reference)
+- [License](#license)
+
 ## Capabilities
 
 - **Cross-tool memory sharing** — A decision Claude Code made yesterday surfaces when Cursor or Codex starts working on the same project today. All four agents read/write the same episode files; no tool is siloed.
@@ -24,6 +40,19 @@ The design principles guiding the system are documented in [PRINCIPLES.md](PRINC
 - **Proactive recall** — On session start, agents pull recent decisions, lessons, and prior violations relevant to the current project as pre-flight context.
 - **Violation tracking** — Structured records of behavioral-pattern violations, used to detect repeat offenses and escalate weak rules to mechanical enforcement (hooks).
 - **Zero dependencies** — Plain markdown + JSONL on the local filesystem. Node.js stdlib only. No database, no daemon, no network.
+
+## Agentic Coding Disciplines
+
+This repo is built by AI agents, and it applies the same disciplines it ships to its own development. The practices below are not aspirational. Most are enforced mechanically by hooks in this repo, and the rest are encoded in the plan template that every non-trivial change follows.
+
+- **Plan before code (Rule 18 workflow).** Non-trivial work runs a fixed sequence: plan, then an independent second-opinion review on the plan, then fix findings, then final plan and approval, then implement with tests written alongside the code, then code review, then fix, then an end-to-end test, then file every deferred finding. The `plan-gate` hook blocks repo-source writes until the plan is approved. Template: [docs/PLAN_TEMPLATE.md](docs/PLAN_TEMPLATE.md).
+- **Enforcement is mechanical, not documentation (bp-010).** Documentation-tier rules fail under task-end momentum, so the most-violated ones escalate to PreToolUse and Stop hooks: `plan-gate`, `checkpoint-gate`, and `stop-gate`. A command classifier gates only repo-source writes. It never blocks episode writes, reads, or work outside the repo. Gates fail closed.
+- **Verify by artifact, not narrative.** Every claim that something is done names the command and its output. Install, hook, and gate behavior is proven by an isolated-`HOME` mock-project test that drives the real deployed hook, never by reading the code and never by a stub. The plan template's falsifiable-verify rule requires every step's check to fail when the implementation is stubbed.
+- **Adversarial, multi-layer review.** Changes pass through a pluggable [second-opinion harness](#second-opinion-review-harness) and adversarial subagents. Review runs in three layers, per-artifact, cross-file, and whole-PR, because each layer catches a different class of bug.
+- **Self-correction over patching.** A wrong decision is superseded through a revision chain rather than edited away. Pattern violations are stored as evidence that escalates weak rules into hooks.
+- **One concern per PR, deploy after merge.** Each PR covers a single concern and carries a required review trailer. After merge the running hooks are redeployed and audited with `tools/deploy-audit.mjs`, because a merge is not the same as deployed.
+
+Governing docs: [PRINCIPLES.md](PRINCIPLES.md), [CAPABILITIES.md](CAPABILITIES.md), and [docs/PLAN_TEMPLATE.md](docs/PLAN_TEMPLATE.md).
 
 ## How it works
 
