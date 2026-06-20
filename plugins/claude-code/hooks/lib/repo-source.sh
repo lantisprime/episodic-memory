@@ -57,8 +57,17 @@ _path_is_repo_source() {
   local repo_canon fp_canon
   repo_canon="$( (cd "$repo_root" 2>/dev/null && pwd -P) || printf '%s' "$repo_root" )"
   fp_canon="$(_canonicalize_possibly_nonexistent "$file_path")"
+  # Raw-prefix catches symlink-OUT author intent (a real path literally under the
+  # repo root that a symlink would resolve outside) → treat as in-repo. BUT a `..`
+  # traversal segment makes a raw path spuriously match "$repo_root"/* while
+  # resolving off-repo, so skip the raw short-circuit for those and let
+  # canonicalization decide (R3: off-repo `..`-relative writes must be permitted,
+  # not over-blocked; the absolute-collapsed form must give the same verdict).
   local in_repo=1
-  case "$file_path" in "$repo_root"/*|"$repo_root") in_repo=0 ;; esac
+  case "$file_path" in
+    ../*|*/../*|*/..|..) ;;                       # has .. traversal → canonical-only
+    "$repo_root"/*|"$repo_root") in_repo=0 ;;
+  esac
   if [ "$in_repo" != 0 ]; then
     case "$fp_canon" in "$repo_canon"/*|"$repo_canon") in_repo=0 ;; esac
   fi

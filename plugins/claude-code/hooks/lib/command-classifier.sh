@@ -1136,6 +1136,7 @@ _classify_segment() {
   # default.
   local r
   local has_nonmarker_redirect=0
+  local nonmarker_redir_target="" nonmarker_redir_count=0
   for r in ${REDIRS[@]+"${REDIRS[@]}"}; do
     local rop="${r%%	*}"
     local rtarget="${r#*	}"
@@ -1219,9 +1220,15 @@ _classify_segment() {
         ;;
       *)
         has_nonmarker_redirect=1
+        nonmarker_redir_count=$((nonmarker_redir_count+1))
+        nonmarker_redir_target="$rtarget"
         ;;
     esac
   done
+
+  # F2: >1 non-marker redirect → target is ambiguous (mixed source/off-repo
+  # destinations). Clear it so plan-gate localizes nothing and gates conservatively.
+  [ "$nonmarker_redir_count" -gt 1 ] && nonmarker_redir_target=""
 
   # ---- Strip leading env-assignment tokens (VAR=value) ----
   # #268 fix F17/F18: also count how many env-prefix tokens were stripped
@@ -1740,7 +1747,7 @@ _classify_segment() {
           printf '%s\n' "$__rd_mv"
           return 0
         fi
-        printf '%s\t\t%s\n' "shared_write" "readonly_cmd_redirected"
+        printf '%s\t%s\t%s\n' "shared_write" "$nonmarker_redir_target" "readonly_cmd_redirected"
         return 0
       fi
       printf '%s\t\t%s\n' "read_only" "readonly_cmd"
@@ -1755,7 +1762,7 @@ _classify_segment() {
           printf '%s\n' "$__ec_mv"
           return 0
         fi
-        printf '%s\t\t%s\n' "shared_write" "echo_redirected"
+        printf '%s\t%s\t%s\n' "shared_write" "$nonmarker_redir_target" "echo_redirected"
         return 0
       fi
       printf '%s\t\t%s\n' "read_only" "echo_or_printf"
@@ -1779,7 +1786,7 @@ _classify_segment() {
       case "$_np_sub" in
         install|i|ci|add)
           if [ "$has_nonmarker_redirect" = "1" ]; then
-            printf '%s\t\t%s\n' "shared_write" "pkg_install_redirected"
+            printf '%s\t%s\t%s\n' "shared_write" "$nonmarker_redir_target" "pkg_install_redirected"
             return 0
           fi
           printf '%s\t\t%s\n' "nonsrc_write" "pkg_install"
@@ -1795,7 +1802,7 @@ _classify_segment() {
       # Files later added to the dir classify on their own. A redirect still
       # demotes to shared_write (the redirect target may be repo source).
       if [ "$has_nonmarker_redirect" = "1" ]; then
-        printf '%s\t\t%s\n' "shared_write" "dir_cmd_redirected"
+        printf '%s\t%s\t%s\n' "shared_write" "$nonmarker_redir_target" "dir_cmd_redirected"
         return 0
       fi
       printf '%s\t\t%s\n' "nonsrc_write" "dir_create_remove"
