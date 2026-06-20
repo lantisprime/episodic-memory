@@ -51,8 +51,8 @@ esac
 # Use BASH_SOURCE so symlinked hook invocations resolve correctly.
 HOOK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 LIB_DIR="$HOOK_DIR/lib"
-if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ] || [ ! -f "$LIB_DIR/session-id.sh" ]; then
-  echo '{"decision": "block", "reason": "plan-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh, session-id.sh). Re-run install.mjs --install-hooks."}'
+if [ ! -f "$LIB_DIR/command-classifier.sh" ] || [ ! -f "$LIB_DIR/repo-root.sh" ] || [ ! -f "$LIB_DIR/marker-paths.sh" ] || [ ! -f "$LIB_DIR/session-id.sh" ] || [ ! -f "$LIB_DIR/repo-source.sh" ]; then
+  echo '{"decision": "block", "reason": "plan-gate.sh: hooks/lib/ not found alongside hook (need command-classifier.sh, repo-root.sh, marker-paths.sh, session-id.sh, repo-source.sh). Re-run install.mjs --install-hooks."}'
   exit 0
 fi
 # shellcheck disable=SC1091
@@ -63,6 +63,8 @@ source "$LIB_DIR/command-classifier.sh"
 source "$LIB_DIR/marker-paths.sh"
 # shellcheck disable=SC1091
 source "$LIB_DIR/session-id.sh"
+# shellcheck disable=SC1091
+source "$LIB_DIR/repo-source.sh"
 
 REPO_ROOT="$(resolve_repo_root "$CWD")"
 
@@ -156,38 +158,53 @@ if ! $OWN_MARKER_EXISTS && ! $LEGACY_MARKER_EXISTS; then
   exit 0
 fi
 
-# Classifier-driven Bash gating
+# Classifier-driven gating — gate ONLY a repo-source write (R1/R2/R3).
 if [ "$TOOL_NAME" = "Bash" ]; then
   COMMAND="$(echo "$INPUT" | jq -r '.tool_input.command // ""')"
   # PR-A P1.1: thread parsed .cwd (absolute-normalized above) as authoritative
-  # caller cwd. See checkpoint-gate.sh:662 for rationale + codex R1 P1 evidence.
+  # caller cwd. See checkpoint-gate.sh cwd-binding rationale + codex R1 P1 evidence.
   RESULT="$(classify_command "$COMMAND" "$REPO_ROOT" "$CWD")"
   LABEL="${RESULT%%	*}"
   REST="${RESULT#*	}"
   TARGET="${REST%%	*}"
 
-  case "$LABEL" in
-    read_only)
-      exit 0
-      ;;
-    marker_write)
-      # Allow plan-marker rm/touch under primary or legacy marker dir, but
-      # ONLY for THIS session's basename (legacy suffix-less OR
-      # `.plan-approval-pending.<MY_SID>`). Other-session suffixed forms
-      # are NOT allowed — that's the codex r1 BLOCKER-B1 fix: without this
-      # narrowing, session A could `rm` session B's marker via direct Bash.
-      target_basename="${TARGET##*/}"
-      target_dir="${TARGET%/*}"
-      own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
-      if [ "$target_basename" = "$PLAN_MARKER_LEGACY_BASENAME" ] || [ "$target_basename" = "$own_session_basename" ]; then
-        if [ "$target_dir" = "$REPO_ROOT/$PRIMARY_MARKER_DIR" ] || [ "$target_dir" = "$REPO_ROOT/$LEGACY_MARKER_DIR" ]; then
-          exit 0
-        fi
+  # read_only → always allowed (R2 / REQ-6)
+  [ "$LABEL" = "read_only" ] && exit 0
+
+  # own-session plan-marker rm/touch → allow (deadlock prevention; unchanged
+  # BLOCKER-B1 narrowing — other-session suffixed markers are NOT allowed).
+  if [ "$LABEL" = "marker_write" ]; then
+    target_basename="${TARGET##*/}"
+    target_dir="${TARGET%/*}"
+    own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
+    if [ "$target_basename" = "$PLAN_MARKER_LEGACY_BASENAME" ] || [ "$target_basename" = "$own_session_basename" ]; then
+      if [ "$target_dir" = "$REPO_ROOT/$PRIMARY_MARKER_DIR" ] || [ "$target_dir" = "$REPO_ROOT/$LEGACY_MARKER_DIR" ]; then
+        exit 0
       fi
-      ;;
-  esac
+    fi
+  fi
+
+  # Absolute-normalize a relative redirect TARGET against the caller cwd so the
+  # predicate localizes it correctly (R3 off-repo redirects).
+  case "$TARGET" in /*|"") ;; *) TARGET="$CWD/$TARGET" ;; esac
+
+  # Gate ONLY a repo-source Bash write; nonsrc_write/off-repo/carve-out → allow.
+  if ! _tool_targets_repo_source_shared "$REPO_ROOT" "Bash" "$TARGET" "$LABEL"; then
+    exit 0
+  fi
+else
+  # Edit/Write/MultiEdit/NotebookEdit
+  FILE_PATH="$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""')"
+  case "$FILE_PATH" in /*|"") ;; *) FILE_PATH="$CWD/$FILE_PATH" ;; esac
+  if ! _path_is_repo_source "$REPO_ROOT" "$FILE_PATH"; then
+    exit 0
+  fi
 fi
 
-# Marker exists (own session or legacy) — block.
+# Repo-source write while plan approval pending → block (R2). Episodes, non-repo,
+# plan files, and reads are not blocked BY THIS gating step. (NF-1: the F14
+# invalid-session fail-closed path at plan-gate.sh above is an orthogonal
+# security block that does gate Bash em-* under a missing/forged session_id — an
+# accepted fail-closed exception; Claude Code always supplies a valid session_id.)
 jq -nc --arg path "$PLAN_PENDING_W" \
-  '{decision: "block", reason: ("Plan approval pending. Review the plan above and approve before implementation. To approve, say \"go\" or \"approved\". The " + $path + " marker will be removed and implementation will proceed.")}'
+  '{decision: "block", reason: ("Plan approval pending. Repo-source write blocked until the plan above is approved (say \"go\" or \"approved\"). Non-repo writes, episodes, plan files, and reads are NOT blocked. Marker: " + $path)}'
