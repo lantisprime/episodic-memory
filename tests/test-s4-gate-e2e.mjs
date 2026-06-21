@@ -20,6 +20,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { mkMock, runInstall, runHook } from './lib/activation-scoping-harness.mjs'
+import { ENFORCE_CONFIG_SEED } from '../scripts/lib/install-manifest.mjs'
 
 let pass = 0, fail = 0
 const ok = (n) => { pass++; console.log(`  ✓ ${n}`) }
@@ -57,7 +58,9 @@ if (!isBlock(b) && (b.stdout || '').trim() === '') ok('active:false (seed) → s
 else bad('active:false → allow', `stdout="${(b.stdout || '').trim()}" stderr=${(b.stderr || '').slice(-300)}`)
 
 // 3. Restore active:true → BLOCK again (control: the toggle, not state drift, is the cause).
-fs.writeFileSync(cfgPath, '{\n  "active": true\n}\n')
+// Use the canonical install seed (single-sourced in install-manifest.mjs) so a future
+// seed reflow can't leave a stale hand-typed copy here (RFC-008 P4d S6, Rule 14).
+fs.writeFileSync(cfgPath, ENFORCE_CONFIG_SEED)
 const c = fireStop()
 if (isBlock(c)) ok('restore active:true → stop-gate BLOCKS again (toggle is the cause)')
 else bad('restore → block', `stdout="${(c.stdout || '').trim()}" stderr=${(c.stderr || '').slice(-300)}`)

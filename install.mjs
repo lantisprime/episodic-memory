@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url'
 import { eventsVersion } from './scripts/lib/version-hash.mjs'
 import { findEnforcementTokens } from './scripts/lib/em-recall-purity.mjs'
 import {
-  HOOK_SPECS, SESSION_END_SCRIPT, ENFORCEMENT_HOOK_SCRIPTS,
+  HOOK_SPECS, SESSION_END_SCRIPT, ENFORCEMENT_HOOK_SCRIPTS, ENFORCE_CONFIG_SEED,
   enforcementHookFileBasenames, enforcementRegistrations, enforcementHookLibBasenames,
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
@@ -1723,11 +1723,15 @@ if (installHooks || installEnforcement) {
     // (.episodic-memory/ ignore at §2 above) — a per-checkout switch, not committed
     // team policy. Seeded instances pin an explicit active:true and do NOT auto-track
     // the absent-file identity default; a future change to the safe default would need
-    // an S6 migration of seeded files.
+    // a migration of EXISTING seeded files (out of S6 scope). The seed↔identity
+    // coupling for NEW seeds is single-sourced as ENFORCE_CONFIG_SEED and guarded by
+    // tests/test-enforce-config-seed-identity.mjs (RFC-008 P4d S6, REQ-7): the seeded
+    // literal normalizes to the SAME `active` disposition as loadEnforceConfig's
+    // absent-file identity, so the two can never silently diverge.
     const enforceConfigPath = path.join(localDir, 'enforce-config.json')
     // localDir already exists (created unconditionally at §2, alongside episodes/).
     try {
-      fs.writeFileSync(enforceConfigPath, '{\n  "active": true\n}\n', { flag: 'wx' })
+      fs.writeFileSync(enforceConfigPath, ENFORCE_CONFIG_SEED, { flag: 'wx' })
       console.log(`Provisioned per-project enforcement switch: ${enforceConfigPath} (active:true)`)
       touched.hooks.push(enforceConfigPath)
     } catch (e) {
