@@ -185,3 +185,10 @@ jobs:
 
       - name: Run install.mjs BP-1 run.key gitignore tests
         run: node tests/test-install-bp1-runkey-gitignore.mjs
+
+      - name: Reject stale P4 phase status in RFC-008 phase docs (closes #403)
+        run: |
+          if grep -rnE "P4b.*(remains|reduced|cutover)" docs/rfcs/RFC-008*; then
+            echo "::error::stale P4b phase status in docs/rfcs/RFC-008: refresh the phase index (#403)"
+            exit 1
+          fi
