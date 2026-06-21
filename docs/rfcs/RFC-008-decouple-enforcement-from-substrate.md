@@ -1205,15 +1205,15 @@ Serves R1, R6, R8 · depends on: P0, R0b′ · **DONE (P1a #373, P1b #374, P1c #
 
 #### P2 — BP contract instances + contract validators → [RFC-008/P2-bp-contracts.md](RFC-008/P2-bp-contracts.md)
 
-Serves R2, R3, R4 · depends on: P0 · queued (parallelizable with P1). `bp-001..006, bp-008..012.json` (11 contracts; **bp-007 absent**) + `scaffold-bp.mjs` + `validate-bp-contract.mjs` + `validate-schemas.mjs`; lands the shared-negative-corpus drift guard (issue #368).
+Serves R2, R3, R4 · depends on: P0 · **DONE (P2a #381, P2b #384, P2c #388).** `bp-001..006, bp-008..012.json` (11 contracts; **bp-007 absent**) + `scaffold-bp.mjs` + `validate-bp-contract.mjs` + `validate-schemas.mjs`; lands the shared-negative-corpus drift guard (issue #368).
 
 #### P3 — Thin waist + classifier runtime-sourcing + em-recall purification → [RFC-008/P3-thin-waist.md](RFC-008/P3-thin-waist.md)
 
-Serves R1, R2, R3, R4, R5, R9 (+ F38) · depends on: P0, P2 · queued. `enforce-contract.mjs` + `lib/marker-state.mjs` + classifier runtime-sourcing + **em-recall STRICT DELETION** (F38/F60). The load-bearing phase; where gauntlet steps 5/6 finally run.
+Serves R1, R2, R3, R4, R5, R9 (+ F38) · depends on: P0, P2 · **DONE (P3a #389, P3b-1 #391, P3c #392, P3b-2 #393, P3d #395).** `enforce-contract.mjs` + `lib/marker-state.mjs` + classifier runtime-sourcing + **em-recall STRICT DELETION** (F38/F60). The load-bearing phase; where gauntlet steps 5/6 finally run.
 
 #### P4 — Per-project `enforce-config.json` → [RFC-008/P4-enforce-config.md](RFC-008/P4-enforce-config.md)
 
-Serves R3, R5 · depends on: P3 · queued *(legacy "Phase 5")*. `effective_tier = min(harness, contract, project_config)` clamps DOWN only; `active: false` makes the classifier silent (R5).
+Serves R3, R5 · depends on: P3 · **IN PROGRESS**: P4a #397 + P4c #398 done; **P4d** per-project enforcement re-architecture (Principle 12) S1-S6 + ESC merged, S7-S8 open *(legacy "Phase 5")*. `effective_tier = min(harness, contract, project_config)` clamps DOWN only; `active: false` makes the classifier silent (R5).
 
 #### P5–P7 — Per-tool plugins (OpenCode / Codex / Pi Agent) → [RFC-008/P5-P7-tool-plugins.md](RFC-008/P5-P7-tool-plugins.md)
 
