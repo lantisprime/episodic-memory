@@ -142,6 +142,17 @@ export function enforcementHookLibBasenames(repoDir) {
   return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.sh')) : []
 }
 
+// ENFORCE_CONFIG_SEED — the EXACT bytes install.mjs seeds into a new
+// <project>/.episodic-memory/enforce-config.json (RFC-008 P4d S4, install.mjs
+// "5b-ec-cfg"). Single-sourced here (Rule 14) so install's write and the S6
+// coupling guard bind the SAME literal: the guard would be a tautology if the
+// test kept its own copy. RFC-008 P4d S6 (REQ-7) asserts this seed, run through
+// loadEnforceConfig's normalization, yields the SAME `active` disposition as the
+// absent-file identity {active:true} — so the seed can never silently diverge
+// from the fail-closed default. Coupling enforced by
+// tests/test-enforce-config-seed-identity.mjs.
+export const ENFORCE_CONFIG_SEED = '{\n  "active": true\n}\n'
+
 // ───────────────────────────────────────────────────────────────────────────
 // RFC-008 P4d / Principle 12 — enforcement SCRIPTS + their lib closure relocate
 // per-project; global holds ONLY substrate + dev/CI tooling.
