@@ -126,6 +126,22 @@ export function enforcementRegistrations() {
   ]
 }
 
+// enforcementHookLibBasenames(): the hooks/lib/*.sh closure that install's 5_lib
+// block deploys per-project under <project>/.claude/hooks/lib/. RFC-008 P4d S5:
+// --uninstall-enforcement subtracts this from disk. Readdir-coupled to the SAME
+// dir install's 5_lib reads (install.mjs ~1291), so the deploy set and the removal
+// set agree by construction — no second hand-maintained list to drift (N3, Rule 14).
+// These .sh libs are sourced ONLY by the enforcement gates (the core bp1 hook
+// sources none — OD-1 grep-verified), so they travel enforcement-only.
+// VERSION-SKEW (review F5, known limitation): this returns the CURRENT repo's set,
+// so uninstall removes current basenames. A project installed from an OLDER repo
+// whose .sh was since renamed would leave the old basename behind — same same-repo
+// readdir-coupling install itself assumes (renames handled via RENAMED_REMOVED).
+export function enforcementHookLibBasenames(repoDir) {
+  const d = path.join(repoDir, 'plugins', 'claude-code', 'hooks', 'lib')
+  return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.sh')) : []
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // RFC-008 P4d / Principle 12 — enforcement SCRIPTS + their lib closure relocate
 // per-project; global holds ONLY substrate + dev/CI tooling.

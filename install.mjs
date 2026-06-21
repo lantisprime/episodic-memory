@@ -24,7 +24,7 @@ import { eventsVersion } from './scripts/lib/version-hash.mjs'
 import { findEnforcementTokens } from './scripts/lib/em-recall-purity.mjs'
 import {
   HOOK_SPECS, SESSION_END_SCRIPT, ENFORCEMENT_HOOK_SCRIPTS,
-  enforcementHookFileBasenames, enforcementRegistrations,
+  enforcementHookFileBasenames, enforcementRegistrations, enforcementHookLibBasenames,
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
 } from './scripts/lib/install-manifest.mjs'
@@ -53,6 +53,13 @@ const installHooksForce = argv.includes('--install-hooks-force')
 // registration-green, NOT functional-safe (the registered gates hard-deny on
 // missing deps in a non-this-repo project until S3).
 const installEnforcement = argv.includes('--install-enforcement')
+// RFC-008 P4d S5: --uninstall-enforcement removes a project's enforcement-ONLY
+// set (gates + engine + classifier + markers + the 7 hooks/lib/*.sh + contract
+// config + plugins index + the 9 registrations) while PRESERVING the core bp1
+// set, the operator-owned enforce-config.json, and the global substrate.
+// --purge-config additionally deletes the operator switch (explicit opt-in).
+const uninstallEnforcement = argv.includes('--uninstall-enforcement')
+const purgeConfig = argv.includes('--purge-config')
 const installSecondOpinion = argv.includes('--install-second-opinion')
 const bootstrapLastPrompt = argv.includes('--bootstrap-last-prompt')
 const REPO_HOOKS = path.join(REPO_DIR, 'plugins', 'claude-code', 'hooks')
@@ -114,7 +121,7 @@ if (bootstrapLastPrompt) {
 }
 
 if (!tool) {
-  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-enforcement] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
@@ -152,6 +159,20 @@ Hook flags (claude-code / RFC-008 P4d — enforcement is PER-PROJECT, never glob
                           project only.
   --install-hooks-force   Overwrite divergent hook files with repo versions
                           and proceed with registration.
+  --uninstall-enforcement Reverse --install-enforcement for THIS project:
+                          prune the enforcement registrations and delete the
+                          enforcement-only files (gates + engine + classifier +
+                          markers + the hooks/lib/*.sh closure) and the
+                          enforcement-only hooks/patterns + hooks/plugins dirs,
+                          while PRESERVING the core bp1 set, the operator-owned
+                          enforce-config.json, and the global substrate. Never
+                          touches ~/.claude or ~/.episodic-memory. Like every
+                          claude-code install it also ensures the core bp1 set is
+                          present (bp1 is core, always-on). Does NOT reverse
+                          --install-second-opinion (separate capability).
+  --purge-config          With --uninstall-enforcement, ALSO delete the operator
+                          switch <project>/.episodic-memory/enforce-config.json
+                          (explicit destructive opt-in; default leaves it).
 
 Second-opinion harness:
   --install-second-opinion Write install snapshot at
@@ -1250,6 +1271,177 @@ function installHookFile(repoFile, destFile, force) {
   return 'skipped-divergent'
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// RFC-008 P4d S5 — --uninstall-enforcement. Reverse the per-project enforcement
+// delta: prune the 9 enforcement registrations + delete the enforcement-ONLY
+// files/dirs, while PRESERVING the core bp1 set, the operator-owned
+// enforce-config.json (unless --purge-config), and the global substrate. The
+// primary correctness proof is the REQ-12 core-state delta E2E
+// (core+enforce+uninstall ≡ core); this code only has to be list-correct enough
+// to satisfy it. Never touches global scope.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Fail-closed containment predicate (F-D/N2): a computed delete target must live
+// UNDER `root`. Realpath both sides where they exist so a symlinked projectDir or
+// hook file can't redirect the delete outside the tree (axes 4/5); fall back to
+// the lexical path when the target is already gone (ENOENT — idempotent, axis 6).
+// path.relative (not a bare startsWith) rejects sibling-prefix escapes like
+// .claude/hooks-backup/ that share a string prefix with the root.
+function assertContained(target, root) {
+  let t = target
+  let r = root
+  try { t = fs.realpathSync(target) } catch {}
+  try { r = fs.realpathSync(root) } catch {}
+  const rel = path.relative(r, t)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error('CONTAINMENT_VIOLATION: ' + target)
+  }
+}
+
+// Remove a command from settings.hooks[event] at COMMAND granularity: filter the
+// command out of each entry's hooks[] array, dropping an entry ONLY when WE emptied
+// it (it held commands, now holds none). Unlike removeHookEntryByCommand (whole-
+// entry removal, used at INSTALL time to prune single-command superseded duplicates),
+// this preserves an operator command that a settings merge/formatter bundled into the
+// SAME entry.hooks[] array as a gate (review F1 — reproduced operator-command data
+// loss with whole-entry removal). Returns the count of command occurrences removed.
+function removeHookCommandFromEvent(hooks, event, command) {
+  const arr = hooks[event]
+  if (!Array.isArray(arr)) return 0
+  let removed = 0
+  const kept = []
+  for (const entry of arr) {
+    if (!entry || !Array.isArray(entry.hooks)) { kept.push(entry); continue }
+    const before = entry.hooks.length
+    entry.hooks = entry.hooks.filter((h) => !(h && h.command === command))
+    const dropped = before - entry.hooks.length
+    removed += dropped
+    if (dropped > 0 && entry.hooks.length === 0) continue // drop only what we emptied
+    kept.push(entry)
+  }
+  hooks[event] = kept
+  return removed
+}
+
+// Reverse the enforcement install for ONE project. Returns an UninstallReport
+// { removedRegistrations, removedFiles, preserved, warnings }. Never throws on a
+// missing file/registration (idempotent); throws ONLY on a containment violation.
+// Atomic on malformed settings (F-C): parse FIRST; on a SyntaxError change NOTHING
+// (no file deletion, no settings write) so a half-uninstall can never leave hooks
+// pointing at deleted files.
+function runUninstallEnforcement(projectDir, { purgeConfig = false } = {}) {
+  const report = { removedRegistrations: [], removedFiles: [], preserved: [], warnings: [] }
+  const userHooksDir = path.join(projectDir, '.claude', 'hooks')
+  const userHooksLibDir = path.join(userHooksDir, 'lib')
+  const hooksRoot = userHooksDir
+  const settingsPath = path.join(projectDir, '.claude', 'settings.json')
+  const localDir = path.join(projectDir, '.episodic-memory')
+  const realpathOrLexical = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+
+  // (a) PARSE FIRST — atomic on malformed settings (F-C). On SyntaxError, abort
+  //     the WHOLE op: delete nothing, write nothing.
+  let settings = {}
+  let settingsPresent = false
+  if (fs.existsSync(settingsPath)) {
+    settingsPresent = true
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    } catch (e) {
+      report.warnings.push(`settings.json is not valid JSON (${e.message}); aborted — nothing changed`)
+      return report
+    }
+  }
+  if (!settings.hooks) settings.hooks = {}
+
+  // (b) PRUNE the 9 enforcement registrations. Remove the exact canonical command
+  //     (gates: bare path; SessionEnd: `node <abs>` — F8); then remove any remaining
+  //     same-event entry whose target realpath-resolves to the canonical file (legacy
+  //     relative spelling). A same-basename entry resolving ELSEWHERE is the operator's
+  //     own hook → warn + leave (REQ-5). Drop any event key left empty (BL-B).
+  let settingsChanged = false
+  for (const reg of enforcementRegistrations()) {
+    const canonicalFile = path.join(userHooksDir, reg.file)
+    const canonicalCmd = reg.file === SESSION_END_SCRIPT
+      ? `node ${shellQuote(canonicalFile)}`
+      : shellQuote(canonicalFile)
+    if (removeHookCommandFromEvent(settings.hooks, reg.event, canonicalCmd) > 0) {
+      settingsChanged = true
+      report.removedRegistrations.push(`${reg.event} → ${reg.file}`)
+    }
+    const arr = settings.hooks[reg.event]
+    if (Array.isArray(arr)) {
+      const canonicalResolved = realpathOrLexical(canonicalFile)
+      for (const entry of [...arr]) {
+        const cmds = (entry && Array.isArray(entry.hooks)) ? entry.hooks : []
+        for (const h of cmds) {
+          if (!h || typeof h.command !== 'string') continue
+          const tgt = hookCommandTargetPath(h.command, projectDir)
+          if (!tgt || path.basename(tgt) !== reg.file) continue
+          if (realpathOrLexical(tgt) === canonicalResolved) {
+            if (removeHookCommandFromEvent(settings.hooks, reg.event, h.command) > 0) {
+              settingsChanged = true
+              report.removedRegistrations.push(`${reg.event} → ${reg.file} (legacy spelling)`)
+            }
+          } else {
+            report.warnings.push(`left non-canonical ${reg.event} hook ${h.command} (resolves outside the canonical path)`)
+          }
+        }
+      }
+    }
+  }
+  for (const event of Object.keys(settings.hooks)) {
+    const list = settings.hooks[event]
+    if (Array.isArray(list) && list.length === 0) { delete settings.hooks[event]; settingsChanged = true }
+  }
+  if (settingsPresent && settingsChanged) writeJSONAtomic(settingsPath, settings)
+
+  // (c) FILE removal = (enforcement hook files ∪ enforcement entry scripts) under
+  //     hooks/, and (enforcement bundle libs ∪ enforcement hooks/lib .sh) under
+  //     hooks/lib/, each MINUS the core bp1 set so bp1 survives (EC7). A lib shared
+  //     by bp1 + enforcement stays (it is in the bp1 closure → subtracted from the
+  //     removal set). bp1-sweep-on-session.sh is core (deployed by the bp1 block).
+  const coreEntry = new Set(bp1EntryScripts(REPO_DIR))
+  const coreLibs = new Set(bp1ClosureLibs(REPO_DIR))
+  const rootRemove = [...new Set([...enforcementHookFileBasenames(), ...enforcementEntryScripts(REPO_DIR)])]
+    .filter((f) => !coreEntry.has(f) && f !== 'bp1-sweep-on-session.sh')
+  const libRemove = [...new Set([...enforcementBundleLibs(REPO_DIR), ...enforcementHookLibBasenames(REPO_DIR)])]
+    .filter((f) => !coreLibs.has(f))
+  const removeFile = (dir, f) => {
+    const target = path.join(dir, f)
+    if (!fs.existsSync(target)) return
+    assertContained(target, hooksRoot)
+    fs.rmSync(target, { force: true })
+    report.removedFiles.push(target)
+  }
+  for (const f of rootRemove) removeFile(userHooksDir, f)
+  for (const f of libRemove) removeFile(userHooksLibDir, f)
+
+  // (d) Enforcement-only DIRS removed wholesale — core never creates them, so this
+  //     covers the contract set + plugins index without a second basename list (F-G/BL-B).
+  for (const d of ['patterns', 'plugins']) {
+    const target = path.join(userHooksDir, d)
+    if (!fs.existsSync(target)) continue
+    assertContained(target, hooksRoot)
+    fs.rmSync(target, { recursive: true, force: true })
+    report.removedFiles.push(target)
+  }
+
+  // (e) Operator switch — default LEAVE (operator-owned R5 kill switch); delete only
+  //     under the explicit --purge-config. Second containment root: .episodic-memory.
+  const switchPath = path.join(localDir, 'enforce-config.json')
+  if (purgeConfig) {
+    if (fs.existsSync(switchPath)) {
+      assertContained(switchPath, localDir)
+      fs.rmSync(switchPath, { force: true })
+      report.removedFiles.push(switchPath)
+    }
+  } else if (fs.existsSync(switchPath)) {
+    report.preserved.push(switchPath)
+  }
+
+  return report
+}
+
 if (installHooks && !installEnforcement) {
   // P12 (RFC-008 P4d) transitional honesty (review F2): post-S2 ALL enforcement
   // (gates, libs, taxonomy/contract config, registrations) installs PER-PROJECT
@@ -1257,6 +1449,13 @@ if (installHooks && !installEnforcement) {
   // enforcement artifact — every inner block below is gated `if (installEnforcement)`.
   // Surface that rather than silently no-op'ing the previously load-bearing flag.
   console.log('Note: enforcement now installs per-project via --install-enforcement (RFC-008 P4d). --install-hooks alone no longer deploys enforcement gates.')
+}
+
+if (uninstallEnforcement) {
+  // RFC-008 P4d S5: mutually exclusive with install in one run — reverse the
+  // per-project enforcement set and report what was removed/preserved.
+  const rep = runUninstallEnforcement(projectDir, { purgeConfig })
+  console.log(JSON.stringify(rep, null, 2))
 }
 
 if (installHooks || installEnforcement) {
