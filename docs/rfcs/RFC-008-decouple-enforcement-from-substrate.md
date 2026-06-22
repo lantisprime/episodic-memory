@@ -1213,7 +1213,7 @@ Serves R1, R2, R3, R4, R5, R9 (+ F38) · depends on: P0, P2 · **DONE (P3a #389,
 
 #### P4 — Per-project `enforce-config.json` → [RFC-008/P4-enforce-config.md](RFC-008/P4-enforce-config.md)
 
-Serves R3, R5 · depends on: P3 · **IN PROGRESS**: P4a #397 + P4c #398 done; **P4d** per-project enforcement re-architecture (Principle 12) S1-S6 + ESC merged, S7-S8 open *(legacy "Phase 5")*. `effective_tier = min(harness, contract, project_config)` clamps DOWN only; `active: false` makes the classifier silent (R5).
+Serves R3, R5 · depends on: P3 · **DONE (P4a #397, P4c #398, P4d S1-S8 + ESC).** **P4d** per-project enforcement re-architecture (Principle 12): S1-S8 + ESC all merged (uninstall #416, seed-identity #417, docs #418, P12 CI gate #419); legacy P4b superseded by the P4d re-architecture *(legacy "Phase 5")*. `effective_tier = min(harness, contract, project_config)` clamps DOWN only; `active: false` makes the classifier silent (R5).
 
 #### P5–P7 — Per-tool plugins (OpenCode / Codex / Pi Agent) → [RFC-008/P5-P7-tool-plugins.md](RFC-008/P5-P7-tool-plugins.md)
 
