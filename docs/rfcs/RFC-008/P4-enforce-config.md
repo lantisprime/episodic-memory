@@ -3,7 +3,7 @@
 > Part of [RFC-008](../RFC-008-decouple-enforcement-from-substrate.md). Index:
 > [RFC-008/README.md](README.md).
 
-**Status:** IN PROGRESS: schema landed P3b-2 #393; **P4a #397** (per-project loader, 3 pre_tool_use contract gates) + **P4c #398** (layer-wide `active:false` kill switch across preflight + second-opinion + SessionStart, R5) merged + deployed. **P4d** (per-project enforcement re-architecture, Principle 12) S1-S6 + ESC merged; S7-S8 open. Original P4b superseded by the P4d re-architecture. *(Legacy "Phase 5".)*
+**Status:** DONE: schema landed P3b-2 #393; **P4a #397** (per-project loader, 3 pre_tool_use contract gates) + **P4c #398** (layer-wide `active:false` kill switch across preflight + second-opinion + SessionStart, R5) merged + deployed. **P4d** (per-project enforcement re-architecture, Principle 12) S1-S8 + ESC merged. Original P4b superseded by the P4d re-architecture. *(Legacy "Phase 5".)*
 **Serves:** R3, R5.
 **Depends on:** P3.
 **Estimate:** ~25K.
@@ -59,5 +59,5 @@ Slice status (phase index; full slice and PR detail live in the workplan episode
 | ESC | gates block ONLY repo-source writes (R1-R3) | merged (#409) |
 | S5 | `--uninstall-enforcement [--purge-config]` | merged (#416) |
 | S6 | install seed matches `loadEnforceConfig` identity (coupling guard) | merged (#417) |
-| S7 | this phase-index + Principle 12 docs refresh | in progress (closes #403) |
-| S8 | the 3 P12 invariants as a required CI gate | open |
+| S7 | this phase-index + Principle 12 docs refresh | merged (#418, closed #403) |
+| S8 | the 3 P12 invariants as a required CI gate | merged (#419); required-check toggle tracked #420 |
