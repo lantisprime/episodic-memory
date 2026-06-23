@@ -50,6 +50,20 @@ let threw = false;
 try { runGauntlet({ projectRoot: "/nonexistent-xyz-123-tp" }); } catch { threw = true; }
 assert(threw, "non-resolving --project throws (usage-error path)");
 
+// testHarnessDefault — default (no harness arg) resolves claude-code entry + claude-code/ fixture path.
+const rDefault = runGauntlet({ projectRoot: REPO });
+assert(rDefault.read_trace.some((p) => p.includes("plugins/claude-code/manifest.json")), "testHarnessDefault: read_trace includes plugins/claude-code/manifest.json");
+assert(rDefault.read_trace.some((p) => p.includes("harness-events/claude-code/")), "testHarnessDefault: read_trace includes harness-events/claude-code/ fixture path");
+
+// testHarnessUnknownThrows — harness:"zzz" throws with zzz in the error message.
+let harnessThrew = false, harnessErrMsg = "";
+try { runGauntlet({ projectRoot: REPO, harness: "zzz" }); } catch (e) { harnessThrew = true; harnessErrMsg = e.message || ""; }
+assert(harnessThrew, "testHarnessUnknownThrows: harness:zzz throws");
+assert(/zzz/.test(harnessErrMsg), "testHarnessUnknownThrows: error message contains harness name 'zzz'", harnessErrMsg);
+
+// testHarnessOpencode — added after P5-S2 ships the opencode fixtures.
+// (skip guard: opencode manifest + fixtures not yet authored; see S2)
+
 console.log(`\ntest-plugin-gauntlet: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
   console.error("\nFAILURES:");

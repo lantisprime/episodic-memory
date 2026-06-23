@@ -52,7 +52,7 @@ function resolveRoot(argProject, cwd) {
 // ---------------------------------------------------------------------------
 // The gauntlet. Each step returns { n, title, status: pass|deferred-P3|fail, detail }.
 // ---------------------------------------------------------------------------
-export function runGauntlet({ projectRoot, now = NOW, cwd = process.cwd() } = {}) {
+export function runGauntlet({ projectRoot, harness = "claude-code", now = NOW, cwd = process.cwd() } = {}) {
   const read_trace = [];
   const root = resolveRoot(projectRoot, cwd);
   const readJson = (rel) => { const abs = path.join(root, rel); const t = fs.readFileSync(abs, "utf8"); read_trace.push(abs); return JSON.parse(t); };
@@ -63,8 +63,8 @@ export function runGauntlet({ projectRoot, now = NOW, cwd = process.cwd() } = {}
 
   // Resolve the claude-code enforcement entry from the registry.
   const index = readJson("plugins/_index.json");
-  const entry = (index.plugins || []).find((p) => p.type === "enforcement" && p.id === "claude-code");
-  if (!entry) throw new UsageError("no enforcement entry 'claude-code' in plugins/_index.json");
+  const entry = (index.plugins || []).find((p) => p.type === "enforcement" && p.id === harness);
+  if (!entry) throw new UsageError(`no enforcement entry '${harness}' in plugins/_index.json`);
   const manifest = readJson(entry.manifest);
   const taxonomy = readJson("patterns/taxonomy.json");
   const events = readJson("patterns/events.json");
@@ -96,7 +96,7 @@ export function runGauntlet({ projectRoot, now = NOW, cwd = process.cwd() } = {}
   step(7, "capability honesty (M4a)", clean("M4a") ? "pass" : "fail", clean("M4a") ? "every declared {harness,event} has an honest bypass record" : why("M4a"));
 
   // Step 8 — event replay (F39) through the field_bindings interpreter (C1).
-  steps.push(stepEventReplay(root, readJson, readText, manifest, events, now, read_trace));
+  steps.push(stepEventReplay(root, readJson, readText, manifest, events, now, read_trace, entry.id));
 
   // Step 9 — runbook-derived invocation parity (F47) + N1 sandbox isolation.
   steps.push(stepInvocationParity(root, readText, manifest, read_trace));
@@ -130,7 +130,7 @@ function stepGoldenInputs(readJson, manifest, taxonomy) {
     : { n, title, status: "fail", detail: bad.slice(0, 3).join("; ") };
 }
 
-function stepEventReplay(root, readJson, readText, manifest, events, now, read_trace) {
+function stepEventReplay(root, readJson, readText, manifest, events, now, read_trace, harness = "claude-code") {
   const n = 8, title = "event replay (F39) — field_bindings → canonical payload";
   const trans = manifest.event_translations || {};
   const caps = manifest.capabilities || {};
@@ -140,7 +140,7 @@ function stepEventReplay(root, readJson, readText, manifest, events, now, read_t
   for (const [eventId, t] of Object.entries(trans)) {
     const dash = eventId.replace(/_/g, "-");
     let raw, schema;
-    try { raw = readJson(`tests/fixtures/harness-events/claude-code/${dash}.json`); }
+    try { raw = readJson(`tests/fixtures/harness-events/${harness}/${dash}.json`); }
     catch (e) { problems.push(`${eventId}: no harness-event fixture (${e.message})`); continue; }
     try { schema = readJson(`schemas/events/event-${dash}.schema.json`); }
     catch (e) { problems.push(`${eventId}: no event schema (${e.message})`); continue; }
@@ -315,10 +315,11 @@ function sandboxDispatch(root, manifest, am) {
 // CLI.
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const args = { project: null, json: false, help: false };
+  const args = { project: null, harness: "claude-code", json: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--project") args.project = argv[++i];
+    else if (a === "--harness") args.harness = argv[++i];
     else if (a === "--json") args.json = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else throw new UsageError(`unknown argument ${JSON.stringify(a)}`);
@@ -340,7 +341,7 @@ function main() {
   if (args.help) { process.stdout.write(HELP + "\n"); process.exit(0); }
 
   let result;
-  try { result = runGauntlet({ projectRoot: args.project }); }
+  try { result = runGauntlet({ projectRoot: args.project, harness: args.harness }); }
   catch (e) {
     process.stdout.write(JSON.stringify({ status: "usage_error", project_root: null, summary: { pass: 0, deferred: 0, fail: 0 }, steps: [], read_trace: [], violations: [{ detail: e.message }] }) + "\n");
     process.exit(2);
