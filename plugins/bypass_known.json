@@ -33,6 +33,35 @@
       "no_known_bypass_evidence": true,
       "last_audited_iso8601": "2026-06-06T00:00:00Z",
       "auditor": "rfc008-p1b-capability-audit"
+    },
+    {
+      "harness": "opencode",
+      "event": "pre_tool_use",
+      "no_known_bypass_evidence": true,
+      "last_audited_iso8601": "2026-06-23T00:00:00Z",
+      "auditor": "rfc008-p5-opencode-capability-audit"
+    },
+    {
+      "harness": "opencode",
+      "event": "tool_result",
+      "ceiling": "MEDIUM",
+      "citation": "tool.execute.after returns void; no proven result re-read; MEDIUM (observe) is the honest ceiling (RFC-008 P5 OD-1, B1)",
+      "last_audited_iso8601": "2026-06-23T00:00:00Z",
+      "auditor": "rfc008-p5-opencode-capability-audit"
+    },
+    {
+      "harness": "opencode",
+      "event": "session_start",
+      "no_known_bypass_evidence": true,
+      "last_audited_iso8601": "2026-06-23T00:00:00Z",
+      "auditor": "rfc008-p5-opencode-capability-audit"
+    },
+    {
+      "harness": "opencode",
+      "event": "stop",
+      "no_known_bypass_evidence": true,
+      "last_audited_iso8601": "2026-06-23T00:00:00Z",
+      "auditor": "rfc008-p5-opencode-capability-audit"
     }
   ]
 }

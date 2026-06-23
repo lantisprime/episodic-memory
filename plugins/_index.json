@@ -15,6 +15,21 @@
       "classifier": "default",
       "manifest": "plugins/claude-code/manifest.json",
       "status": "active"
+    },
+    {
+      "type": "enforcement",
+      "id": "opencode",
+      "harness": "opencode",
+      "directory": "plugins/opencode",
+      "capabilities": {
+        "pre_tool_use": "STRONG",
+        "tool_result": "MEDIUM",
+        "session_start": "MEDIUM",
+        "stop": "MEDIUM"
+      },
+      "classifier": "default",
+      "manifest": "plugins/opencode/manifest.json",
+      "status": "active"
     }
   ]
 }

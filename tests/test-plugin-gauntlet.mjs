@@ -61,8 +61,17 @@ try { runGauntlet({ projectRoot: REPO, harness: "zzz" }); } catch (e) { harnessT
 assert(harnessThrew, "testHarnessUnknownThrows: harness:zzz throws");
 assert(/zzz/.test(harnessErrMsg), "testHarnessUnknownThrows: error message contains harness name 'zzz'", harnessErrMsg);
 
-// testHarnessOpencode — added after P5-S2 ships the opencode fixtures.
-// (skip guard: opencode manifest + fixtures not yet authored; see S2)
+// testHarnessOpencode — opencode fixture-dir is parameterized (S1) + opencode plugin
+// shipped (S2). Steps 1,2,4,7,8 pass; steps 3+9 require the runbook (S3).
+const rOC = runGauntlet({ projectRoot: REPO, harness: "opencode" });
+assert(rOC.read_trace.some((p) => p.includes("plugins/opencode/manifest.json")), "testHarnessOpencode: read_trace includes plugins/opencode/manifest.json");
+assert(rOC.read_trace.some((p) => p.includes("harness-events/opencode/")), "testHarnessOpencode: read_trace includes harness-events/opencode/ fixture path");
+// Steps that must pass in S2 (1,2,4,7,8); 3+9 are expected to fail until S3.
+const ocPassRequired = [1, 2, 4, 7, 8];
+for (const n of ocPassRequired) {
+  const s = rOC.steps.find((st) => st.n === n);
+  assert(s && s.status === "pass", `testHarnessOpencode: step ${n} passes`, s ? s.detail : "step not found");
+}
 
 console.log(`\ntest-plugin-gauntlet: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
