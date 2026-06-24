@@ -12,7 +12,7 @@
   "events_version": "sha256:13f01e5a599272b349eabd66694b7898e68438e8aad6497e80a9b780bea34ab0",
   "event_translations": {
     "pre_tool_use": { "source_format": "opencode-tool-call", "field_bindings": { "tool": "$.tool" } },
-    "tool_result": { "source_format": "opencode-tool-result", "field_bindings": { "tool": "$.tool", "result": "$.result" } }
+    "session_end": { "source_format": "opencode-session-end", "field_bindings": { "session_id": "$.sessionID" } }
   },
   "runbook": { "full": "plugins/opencode/runbooks/enforcement.md", "quickref": "plugins/opencode/runbooks/enforcement.quickref.md" }
 }

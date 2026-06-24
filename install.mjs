@@ -1460,29 +1460,44 @@ function runUninstallEnforcement(projectDir, { purgeConfig = false } = {}) {
 //   <proj>/.opencode/plugins/episodic-memory/{manifest.json,runbooks/*}
 //   <proj>/.opencode/plugins/scripts/enforce-contract.mjs   (bridge ../../scripts/..)
 //   <proj>/.opencode/plugins/scripts/lib/*.mjs              (closure incl. repo-source.mjs)
+//   <proj>/.opencode/plugins/scripts/patterns/{bp-001,events,enforce-config.schema}.json
+//   <proj>/.opencode/plugins/scripts/plugins/_index.json    (project-local registry)
 //   <proj>/.opencode/plugins/patterns/repo-source-carveouts.json (repo-source.mjs cand-2)
-//   <proj>/.opencode/plugins/_index.json                    (audit only; see note)
 //   <proj>/opencode.json  plugin[] += "./.opencode/plugins/episodic-memory/capabilities/enforcement.ts"
 //
-// resolveContractRoot() finds no `patterns/bp-001.json` beside the deployed
-// enforce-contract.mjs (OD-4 ships no bp-001 for opencode), so it returns null:
-// registry/events stay null, gateDisposition fail-closes the pre_tool_use gate to
-// STRONG `enforce`, and the R5 kill switch is still read from the PROJECT's
-// .episodic-memory/enforce-config.json. Net: GATED write -> block, carve-out ->
-// allow, read -> allow, active:false -> allow. _index.json is decorative here.
+// PROJECT-LOCAL contract source (round-2 BLOCKER-1 fix). The contract set is
+// deployed BESIDE the deployed enforce-contract.mjs (under scripts/), so
+// resolveContractRoot() accepts candidate-0 (the `patterns/bp-001.json` sentinel)
+// and returns the deployed scripts/ dir — it NEVER falls through to the legacy
+// GLOBAL candidate-1 (~/.episodic-memory), so a project's enforcement decision is
+// owned entirely by the project (P12), deterministic across machines. Deploying
+// enforce-config.schema.json is what makes loadEnforceConfig able to VALIDATE the
+// operator's .episodic-memory/enforce-config.json, so the R5 kill switch
+// (active:false -> allow) actually works; without the schema it silently
+// fail-closed to active:true. bp-001.json is the resolve sentinel only — the
+// bridge passes contractTier/configTier=null (OD-4: no bp-001 lifecycle for
+// opencode). Net: GATED write -> block, carve-out -> allow, read -> allow,
+// active:false -> allow, no global ambient state consulted.
 function opencodeEnforcementPaths(projectDir) {
   const deployRoot = path.join(projectDir, '.opencode', 'plugins')
   const pluginDir = path.join(deployRoot, 'episodic-memory')
+  const scriptsDir = path.join(deployRoot, 'scripts')
   return {
     opencodeDir: path.join(projectDir, '.opencode'),
     deployRoot,
     pluginDir,
     capabilitiesDir: path.join(pluginDir, 'capabilities'),
     runbooksDir: path.join(pluginDir, 'runbooks'),
-    scriptsDir: path.join(deployRoot, 'scripts'),
-    scriptsLibDir: path.join(deployRoot, 'scripts', 'lib'),
-    patternsDir: path.join(deployRoot, 'patterns'),
-    indexPath: path.join(deployRoot, '_index.json'),
+    scriptsDir,
+    scriptsLibDir: path.join(scriptsDir, 'lib'),
+    // repo-source.mjs candidate-2 carve-out JSON: <deployRoot>/patterns (computed
+    // from repo-source.mjs's own ../../patterns).
+    carveoutPatternsDir: path.join(deployRoot, 'patterns'),
+    // Contract source BESIDE the deployed engine: resolveContractRoot candidate-0
+    // (bp-001.json sentinel) + the bridge's events.json / enforce-config.schema.json.
+    contractPatternsDir: path.join(scriptsDir, 'patterns'),
+    // Bridge registry: path.join(contractRoot='scriptsDir', 'plugins', '_index.json').
+    contractIndexPath: path.join(scriptsDir, 'plugins', '_index.json'),
     // Adapter spec registered in opencode.json — always forward-slash (config is
     // OS-portable JSON, not a host path).
     adapterSpec: './.opencode/plugins/episodic-memory/capabilities/enforcement.ts',
@@ -1493,6 +1508,20 @@ function opencodeEnforcementPaths(projectDir) {
 function installOpenCodeEnforcement(projectDir) {
   const report = { deployedFiles: [], registration: null, warnings: [] }
   const P = opencodeEnforcementPaths(projectDir)
+
+  // 0. PARSE the existing opencode.json FIRST — abort the WHOLE deploy on malformed
+  //    config (MAJOR-1 fix: symmetric with uninstall's parse-or-abort; never leave
+  //    unregistered files on disk that the agent then silently fails to enforce with).
+  let config
+  if (fs.existsSync(P.configPath)) {
+    try { config = JSON.parse(fs.readFileSync(P.configPath, 'utf8')) }
+    catch (e) {
+      report.warnings.push(`opencode.json is not valid JSON (${e.message}); aborted — nothing deployed`)
+      return report
+    }
+  } else {
+    config = { $schema: 'https://opencode.ai/config.json' }
+  }
 
   // 1. adapter + bridge (co-located) + manifest + runbooks.
   fs.mkdirSync(P.capabilitiesDir, { recursive: true })
@@ -1522,30 +1551,35 @@ function installOpenCodeEnforcement(projectDir) {
   // 3. carve-out JSON (repo-source.mjs candidate-2; inline fallback exists, deploy for fidelity).
   const coSrc = path.join(REPO_DIR, 'patterns', 'repo-source-carveouts.json')
   if (fs.existsSync(coSrc)) {
-    fs.mkdirSync(P.patternsDir, { recursive: true })
-    const coDst = path.join(P.patternsDir, 'repo-source-carveouts.json')
+    fs.mkdirSync(P.carveoutPatternsDir, { recursive: true })
+    const coDst = path.join(P.carveoutPatternsDir, 'repo-source-carveouts.json')
     fs.copyFileSync(coSrc, coDst)
     report.deployedFiles.push(coDst)
   }
 
-  // 4. registry index (audit only — not runtime-load-bearing under OD-4).
+  // 4. PROJECT-LOCAL contract set (BLOCKER-1 fix). bp-001.json is the
+  //    resolveContractRoot candidate-0 sentinel; events.json + enforce-config.schema.json
+  //    are read by the bridge's L2; _index.json is the project-local registry
+  //    (harnessCap). Deployed BESIDE the engine so resolution is project-local, never
+  //    the global candidate-1. enforce-config.schema.json presence is what lets the
+  //    R5 kill switch (active:false) be honored.
+  fs.mkdirSync(P.contractPatternsDir, { recursive: true })
+  for (const f of ['bp-001.json', 'events.json', 'enforce-config.schema.json']) {
+    const src = path.join(REPO_DIR, 'patterns', f)
+    if (fs.existsSync(src)) {
+      const dst = path.join(P.contractPatternsDir, f)
+      fs.copyFileSync(src, dst)
+      report.deployedFiles.push(dst)
+    }
+  }
   const idxSrc = path.join(REPO_DIR, 'plugins', '_index.json')
   if (fs.existsSync(idxSrc)) {
-    fs.copyFileSync(idxSrc, P.indexPath)
-    report.deployedFiles.push(P.indexPath)
+    fs.mkdirSync(path.dirname(P.contractIndexPath), { recursive: true })
+    fs.copyFileSync(idxSrc, P.contractIndexPath)
+    report.deployedFiles.push(P.contractIndexPath)
   }
 
-  // 5. register the adapter in opencode.json `plugin` array (parse-or-abort).
-  let config = {}
-  if (fs.existsSync(P.configPath)) {
-    try { config = JSON.parse(fs.readFileSync(P.configPath, 'utf8')) }
-    catch (e) {
-      report.warnings.push(`opencode.json is not valid JSON (${e.message}); left unchanged — files deployed, register the plugin manually`)
-      return report
-    }
-  } else {
-    config = { $schema: 'https://opencode.ai/config.json' }
-  }
+  // 5. register the adapter in opencode.json `plugin` array (config parsed in step 0).
   if (!Array.isArray(config.plugin)) config.plugin = []
   if (!config.plugin.includes(P.adapterSpec)) {
     config.plugin.push(P.adapterSpec)
@@ -1578,7 +1612,8 @@ function uninstallOpenCodeEnforcement(projectDir) {
   }
 
   // (b) remove ONLY what we deployed, each contained under <project>/.opencode (BL-B).
-  for (const target of [P.pluginDir, P.scriptsDir, P.patternsDir, P.indexPath]) {
+  //     scriptsDir is recursive, so it covers scripts/{lib,patterns,plugins,*.mjs}.
+  for (const target of [P.pluginDir, P.scriptsDir, P.carveoutPatternsDir]) {
     if (!fs.existsSync(target)) continue
     assertContained(target, P.opencodeDir)
     fs.rmSync(target, { recursive: true, force: true })

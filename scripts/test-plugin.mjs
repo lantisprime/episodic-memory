@@ -266,7 +266,7 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
       if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after a stateless-bridge dispatch (${iso.liveLeak})`);
       if (!iso.cwdHeld) problems.push(`N1 root-source breach: a .checkpoints/.* marker appeared under the divergent process cwd (${iso.procLeak})`);
     }
-    passDetail = `§9 surface-truth ok; stdout-decision bridge emitted action:${iso.decision && iso.decision.action} (exit ${iso.exit}); no marker mutated live or divergent-process-cwd (N1: root from input cwd)`;
+    passDetail = `§9 surface-truth ok; stdout-decision bridge emitted action:${iso.decision && iso.decision.action} (exit ${iso.exit}); stateless (no marker mutated anywhere); root-from-input-cwd proven by test-enforce-bridge cwd-divergence`;
   } else {
     problems.push(`unsupported expected_outputs.shape ${JSON.stringify(modality)} — step 9 cannot prove invocation parity`);
   }

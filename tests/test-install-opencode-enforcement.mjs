@@ -158,6 +158,98 @@ function runInstaller(extraArgs) {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: a fresh isolated (home, project) pair + an installer bound to them.
+// ---------------------------------------------------------------------------
+function freshSandbox() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "oc-install-home-"));
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "oc-install-proj-"));
+  execFileSync("git", ["init", "-q"], { cwd: proj });
+  const projReal = fs.realpathSync(proj);
+  return {
+    home, proj, projReal, D: deployed(projReal),
+    install: (extra) => spawnSync(process.execPath,
+      [INSTALL, "--tool", "opencode", "--project", projReal, ...extra],
+      { encoding: "utf8", timeout: 120000, env: { ...process.env, HOME: home } }),
+    cleanup: () => { try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+                     try { fs.rmSync(proj, { recursive: true, force: true }); } catch {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// testKillSwitchHonored (BLOCKER-1) — with the project enforce-config set to
+// {active:false}, the DEPLOYED bridge must ALLOW a repo-source write (R5). The
+// sandbox HOME carries NO global contract, so this cannot pass via a leaked
+// global — it proves the project-local enforce-config.schema.json is read.
+// ---------------------------------------------------------------------------
+{
+  const S = freshSandbox();
+  try {
+    const r = S.install(["--install-enforcement"]);
+    assert(r.status === 0, "killswitch: install exit 0", `${r.status}: ${(r.stderr || "").slice(0, 200)}`);
+    fs.mkdirSync(path.join(S.projReal, ".episodic-memory"), { recursive: true });
+    fs.writeFileSync(path.join(S.projReal, ".episodic-memory", "enforce-config.json"), JSON.stringify({ active: false }));
+    fs.mkdirSync(path.join(S.projReal, "src"), { recursive: true });
+    const env = {
+      harness: "opencode", event: "pre_tool_use",
+      normalized: { tool: "write", tool_args: { filePath: path.join(S.projReal, "src", "app.mjs"), content: "x" },
+        cwd: S.projReal, session_id: "ks", turn_index: 1, timestamp_iso8601: "2026-01-01T00:00:00Z" },
+    };
+    const rb = runDeployedBridge(S.D.bridge, env);
+    assert(rb.parsed && rb.parsed.action === "allow", "killswitch: active:false -> repo-src write ALLOWED (R5 honored)",
+      rb.parsed ? JSON.stringify(rb.parsed) : (rb.stderr || "").slice(0, 300));
+  } finally { S.cleanup(); }
+}
+
+// ---------------------------------------------------------------------------
+// testNoGlobalContractLeak (BLOCKER-1 / P12) — plant a POISON global contract
+// (bp-001 sentinel + a schema that rejects active:false) under the sandbox HOME.
+// resolveContractRoot must still pick the PROJECT-local candidate-0, so the
+// project's {active:false} validates against the PROJECT schema and the write is
+// allowed. If the bridge leaked to the global candidate-1, the poison schema
+// would reject active:false -> identity active:true -> BLOCK.
+// ---------------------------------------------------------------------------
+{
+  const S = freshSandbox();
+  try {
+    S.install(["--install-enforcement"]);
+    // Poison global contract under HOME/.episodic-memory.
+    const gPat = path.join(S.home, ".episodic-memory", "patterns");
+    fs.mkdirSync(gPat, { recursive: true });
+    fs.writeFileSync(path.join(gPat, "bp-001.json"), JSON.stringify({ schema_version: "1.0.0", gates: {} }));
+    fs.writeFileSync(path.join(gPat, "enforce-config.schema.json"),
+      JSON.stringify({ type: "object", properties: { active: { const: true } }, required: ["active"], additionalProperties: false }));
+    // Project opts out.
+    fs.mkdirSync(path.join(S.projReal, ".episodic-memory"), { recursive: true });
+    fs.writeFileSync(path.join(S.projReal, ".episodic-memory", "enforce-config.json"), JSON.stringify({ active: false }));
+    fs.mkdirSync(path.join(S.projReal, "src"), { recursive: true });
+    const env = {
+      harness: "opencode", event: "pre_tool_use",
+      normalized: { tool: "write", tool_args: { filePath: path.join(S.projReal, "src", "app.mjs"), content: "x" },
+        cwd: S.projReal, session_id: "gl", turn_index: 1, timestamp_iso8601: "2026-01-01T00:00:00Z" },
+    };
+    const rb = runDeployedBridge(S.D.bridge, env);
+    assert(rb.parsed && rb.parsed.action === "allow",
+      "no-global-leak: project-local contract wins over planted global poison (P12)",
+      rb.parsed ? JSON.stringify(rb.parsed) : (rb.stderr || "").slice(0, 300));
+  } finally { S.cleanup(); }
+}
+
+// ---------------------------------------------------------------------------
+// testMalformedConfigAbortsInstall (MAJOR-1) — a malformed opencode.json aborts
+// the WHOLE deploy: NO files land on disk (symmetry with uninstall's abort).
+// ---------------------------------------------------------------------------
+{
+  const S = freshSandbox();
+  try {
+    fs.writeFileSync(S.D.config, "{ this is : not json ]");
+    const r = S.install(["--install-enforcement"]);
+    assert(r.status === 0, "malformed-config: install still exits 0 (warns, no throw)", String(r.status));
+    assert(!fs.existsSync(S.D.bridge), "malformed-config: NO bridge deployed (deploy aborted, not orphaned)", S.D.bridge);
+    assert(!fs.existsSync(S.D.pluginDir), "malformed-config: NO pluginDir deployed", S.D.pluginDir);
+  } finally { S.cleanup(); }
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup + report.
 // ---------------------------------------------------------------------------
 try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch {}
