@@ -50,6 +50,30 @@ jobs:
       - name: Run plugin-registry conformance tests (path-contain regression lock)
         run: node tests/test-plugin-registry.mjs
 
+      - name: Run claude-code plugin gauntlet (REQ-1 regression lock)
+        run: node tests/test-plugin-gauntlet.mjs
+
+      - name: Run opencode plugin gauntlet (RFC-008 P5, REQ-1/REQ-12)
+        run: node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness opencode
+
+      - name: Run opencode translation tests (RFC-008 P5 S2, R3/R4)
+        run: node tests/test-opencode-translations.mjs
+
+      - name: Run repo-source parity tests (RFC-008 P5 S4, REQ-7 — bash/node single source)
+        run: node tests/test-repo-source-parity.mjs
+
+      - name: Run repo-source bash gate tests (RFC-008 P5 S4)
+        run: bash tests/test-repo-source.sh
+
+      - name: Run opencode enforce-bridge tests (RFC-008 P5 S5)
+        run: node tests/test-enforce-bridge.mjs
+
+      - name: Run opencode adapter tests (RFC-008 P5 S5, R1-R3 carve-out gate)
+        run: node tests/test-opencode-adapter.mjs
+
+      - name: Run opencode install/uninstall E2E (RFC-008 P5 S6, REQ-11)
+        run: node tests/test-install-opencode-enforcement.mjs
+
       - name: Run effective-tier algebra tests (RFC-008 P3b-2, R3 — shared min() fold)
         run: node tests/test-effective-tier.mjs
 
