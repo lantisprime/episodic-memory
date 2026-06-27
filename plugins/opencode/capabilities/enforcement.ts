@@ -11,6 +11,18 @@
  * Non-blocking events (tool_result, session_start, stop) are MEDIUM observe:
  * the bridge is invoked for audit/logging but never throws.
  *
+ * Hook surface is pinned to the INSTALLED @opencode-ai/plugin `interface Hooks`
+ * (dist/index.d.ts:173-316), NOT web docs. The host indexes hooks by FLAT
+ * DOTTED keys ("tool.execute.before") and calls them with TWO args
+ * (input, output); a nested object or single-arg signature is silently never
+ * invoked (fails OPEN). Ground truth:
+ *   "tool.execute.before"(input:{tool,sessionID,callID}, output:{args})
+ *   "tool.execute.after"(input:{tool,sessionID,callID,args}, output:{title,output,metadata})
+ *   "experimental.chat.system.transform"(input:{sessionID?,model}, output:{system})
+ *   event(input:{event})  — Event union; session end = type "session.idle"
+ * PluginInput carries `directory` (cwd source) but NO sessionId — sessionID
+ * comes from each hook's `input`.
+ *
  * Type-only import of @opencode-ai/plugin — no runtime dependency.
  *
  * OD-4 note: the bp-001 checkpoint/plan-approval MARKER lifecycle is NOT
@@ -58,132 +70,143 @@ function callBridge(envelope: Record<string, unknown>): { action: string; reason
   return parsed;
 }
 
-export const EpisodicEnforcement: Plugin = async (ctx) => ({
-  /**
-   * tool.execute.before — pre_tool_use (STRONG block).
-   * Invokes the bridge; throws on "block" or bridge failure.
-   */
-  tool: {
-    execute: {
-      before: async (params: { tool: string; args: Record<string, unknown> }) => {
-        const sessionId = ctx.sessionId as string ?? "unknown";
-        // EC3: synchronous increment before any await.
-        const turnIndex = nextTurnIndex(sessionId);
-        const cwd = realpathSync(ctx.directory as string);
+export const EpisodicEnforcement: Plugin = async (ctx) => {
+  // cwd source: PluginInput.directory. Resolved per-call (worktree can change).
+  const directoryOf = (): string => realpathSync(ctx.directory);
 
-        const envelope = {
-          harness: "opencode",
-          event: "pre_tool_use",
-          normalized: {
-            tool: params.tool,
-            tool_args: params.args,
-            cwd,
-            session_id: sessionId,
-            turn_index: turnIndex,
-            timestamp_iso8601: new Date().toISOString(),
-          },
-        };
+  return {
+    /**
+     * tool.execute.before — pre_tool_use (STRONG block).
+     * Real signature: (input:{tool,sessionID,callID}, output:{args}).
+     * tool_args live in `output.args`; sessionID in `input.sessionID`.
+     * Block by throwing; allow by returning.
+     */
+    "tool.execute.before": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: unknown },
+    ): Promise<void> => {
+      const sessionId = input.sessionID || "unknown";
+      // EC3: synchronous increment before any await.
+      const turnIndex = nextTurnIndex(sessionId);
+      const cwd = directoryOf();
 
-        const decision = callBridge(envelope);
-        if (decision.action === "block") {
-          throw new Error(decision.reason || "opencode-enforce: write blocked by enforcement gate");
-        }
-        // allow → return (no-op)
-      },
-
-      /**
-       * tool.execute.after — tool_result (MEDIUM observe).
-       * Invokes bridge for logging; never throws; never mutates result.
-       */
-      after: async (params: { tool: string; args: Record<string, unknown>; result: unknown }) => {
-        const sessionId = ctx.sessionId as string ?? "unknown";
-        const turnIndex = nextTurnIndex(sessionId);
-        const cwd = realpathSync(ctx.directory as string);
-
-        const envelope = {
-          harness: "opencode",
-          event: "tool_result",
-          normalized: {
-            tool: params.tool,
-            tool_args: params.args,
-            result: params.result,
-            cwd,
-            session_id: sessionId,
-            turn_index: turnIndex,
-            timestamp_iso8601: new Date().toISOString(),
-          },
-        };
-
-        try {
-          callBridge(envelope);
-        } catch {
-          // MEDIUM: observe only — log but do NOT rethrow.
-          // A bridge failure on tool_result must not interrupt the agent.
-        }
-        // return result UNCHANGED (MEDIUM — no mutation)
-      },
-    },
-  },
-
-  /**
-   * experimental.chat.system.transform — session_start (MEDIUM observe).
-   * Records session context; does not inject anything.
-   */
-  experimental: {
-    chat: {
-      system: {
-        transform: async (messages: unknown[]) => {
-          const sessionId = ctx.sessionId as string ?? "unknown";
-          const cwd = realpathSync(ctx.directory as string);
-
-          const envelope = {
-            harness: "opencode",
-            event: "session_start",
-            normalized: {
-              cwd,
-              session_id: sessionId,
-              harness: "opencode",
-              timestamp_iso8601: new Date().toISOString(),
-            },
-          };
-
-          try {
-            callBridge(envelope);
-          } catch {
-            // MEDIUM: observe only.
-          }
-          return messages; // unmodified
+      const envelope = {
+        harness: "opencode",
+        event: "pre_tool_use",
+        normalized: {
+          tool: input.tool,
+          tool_args: output.args ?? {},
+          cwd,
+          session_id: sessionId,
+          turn_index: turnIndex,
+          timestamp_iso8601: new Date().toISOString(),
         },
-      },
+      };
+
+      const decision = callBridge(envelope);
+      if (decision.action === "block") {
+        throw new Error(decision.reason || "opencode-enforce: write blocked by enforcement gate");
+      }
+      // allow → return (no-op)
     },
-  },
 
-  /**
-   * event — stop (MEDIUM observe).
-   * Records session end; does not refuse.
-   */
-  event: async (type: string, data: unknown) => {
-    if (type !== "session:stop") return;
-    const sessionId = ctx.sessionId as string ?? "unknown";
-    const cwd = realpathSync(ctx.directory as string);
-    const turnIndex = _turnIndex.get(sessionId) ?? 0;
+    /**
+     * tool.execute.after — tool_result (MEDIUM observe).
+     * Real signature: (input:{tool,sessionID,callID,args}, output:{title,output,metadata}).
+     * args live in `input.args`; the tool result text in `output.output`.
+     * Invokes bridge for audit; never throws; never mutates output.
+     */
+    "tool.execute.after": async (
+      input: { tool: string; sessionID: string; callID: string; args: unknown },
+      output: { title: string; output: string; metadata: unknown },
+    ): Promise<void> => {
+      const sessionId = input.sessionID || "unknown";
+      const turnIndex = nextTurnIndex(sessionId);
+      const cwd = directoryOf();
 
-    const envelope = {
-      harness: "opencode",
-      event: "stop",
-      normalized: {
-        cwd,
-        session_id: sessionId,
-        turn_index: turnIndex,
-        is_subagent: false,
-        timestamp_iso8601: new Date().toISOString(),
-      },
-    };
+      const envelope = {
+        harness: "opencode",
+        event: "tool_result",
+        normalized: {
+          tool: input.tool,
+          tool_args: input.args ?? {},
+          result: output.output,
+          cwd,
+          session_id: sessionId,
+          turn_index: turnIndex,
+          timestamp_iso8601: new Date().toISOString(),
+        },
+      };
 
-    try {
-      callBridge(envelope);
-    } catch {
-      // MEDIUM: observe only.
-    }
-  },
-});
+      try {
+        callBridge(envelope);
+      } catch {
+        // MEDIUM: observe only — log but do NOT rethrow.
+        // A bridge failure on tool_result must not interrupt the agent.
+      }
+      // output left UNCHANGED (MEDIUM — no mutation)
+    },
+
+    /**
+     * experimental.chat.system.transform — session_start (MEDIUM observe).
+     * Real signature: (input:{sessionID?,model}, output:{system:string[]}).
+     * Records session context; does not inject anything.
+     */
+    "experimental.chat.system.transform": async (
+      input: { sessionID?: string; model: unknown },
+      _output: { system: string[] },
+    ): Promise<void> => {
+      const sessionId = input.sessionID || "unknown";
+      const cwd = directoryOf();
+
+      const envelope = {
+        harness: "opencode",
+        event: "session_start",
+        normalized: {
+          cwd,
+          session_id: sessionId,
+          harness: "opencode",
+          timestamp_iso8601: new Date().toISOString(),
+        },
+      };
+
+      try {
+        callBridge(envelope);
+      } catch {
+        // MEDIUM: observe only.
+      }
+      // output.system left unmodified
+    },
+
+    /**
+     * event — stop (MEDIUM observe).
+     * Real signature: (input:{event}). The Event union carries `.type`;
+     * session end is "session.idle" with `.properties.sessionID`.
+     * No refuse-stop hook exists in OpenCode (stop is MEDIUM by construction).
+     */
+    event: async (input: { event: { type: string; properties?: { sessionID?: string } } }): Promise<void> => {
+      if (!input.event || input.event.type !== "session.idle") return;
+      const sessionId = input.event.properties?.sessionID || "unknown";
+      const cwd = directoryOf();
+      const turnIndex = _turnIndex.get(sessionId) ?? 0;
+
+      const envelope = {
+        harness: "opencode",
+        event: "stop",
+        normalized: {
+          cwd,
+          session_id: sessionId,
+          turn_index: turnIndex,
+          is_subagent: false,
+          timestamp_iso8601: new Date().toISOString(),
+        },
+      };
+
+      try {
+        callBridge(envelope);
+      } catch {
+        // MEDIUM: observe only.
+      }
+    },
+  };
+};

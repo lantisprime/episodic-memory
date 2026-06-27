@@ -45,7 +45,7 @@
       "harness": "opencode",
       "event": "tool_result",
       "ceiling": "MEDIUM",
-      "citation": "tool.execute.after returns void; no proven result re-read; MEDIUM (observe) is the honest ceiling (RFC-008 P5 OD-1, B1)",
+      "citation": "tool.execute.after output.output IS mutable (result rewrite mechanically possible), but model re-read of mutated output is not E2E-proven; MEDIUM (observe) is the honest ceiling pending that proof (RFC-008 P5 OD-1, B1)",
       "last_audited_iso8601": "2026-06-23T00:00:00Z",
       "auditor": "rfc008-p5-opencode-capability-audit"
     },

@@ -33,7 +33,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Node 24 (not the repo-standard 20): the OpenCode adapter is
+          # TypeScript and test-opencode-adapter-conformance.mjs LOADS it as a
+          # module. TS type-stripping is default-on from Node 23.6, so the
+          # conformance test (PR-level review BLOCKER-2 fix) needs >=23.6. All
+          # other steps here are stdlib .mjs/.sh and run unchanged on 24.
+          node-version: '24'
 
       - name: Validate schema docs + shared negative corpus (M1/M2, #368)
         run: node scripts/validate-schemas.mjs --project "$GITHUB_WORKSPACE"
@@ -70,6 +75,9 @@ jobs:
 
       - name: Run opencode adapter tests (RFC-008 P5 S5, R1-R3 carve-out gate)
         run: node tests/test-opencode-adapter.mjs
+
+      - name: Run opencode adapter conformance tests (PR-level BLOCKER-1/2 — loads enforcement.ts, asserts flat-key Hooks shape + STRONG block)
+        run: node tests/test-opencode-adapter-conformance.mjs
 
       - name: Run opencode install/uninstall E2E (RFC-008 P5 S6, REQ-11)
         run: node tests/test-install-opencode-enforcement.mjs
