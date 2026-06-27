@@ -12,8 +12,9 @@
     "stop": "MEDIUM"
   },
   "classifier": {
-    "mode": "default",
-    "emits_labels": ["read_only","nonsrc_write","shared_write","push_or_pr_create","marker_write","unsafe_complex","unknown"]
+    "mode": "override",
+    "emits_labels": ["read_only","shared_write","push_or_pr_create","marker_write","unsafe_complex"],
+    "override_path": "plugins/opencode/capabilities/enforce-bridge.mjs"
   },
   "taxonomy_ref": "patterns/taxonomy.json",
   "taxonomy_version": "sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4",

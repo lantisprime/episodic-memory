@@ -46,12 +46,21 @@ logs/records these events but does not block or modify the response.
 
 ## §3 — Classifier mode & emitted labels
 
-Mode is `default`: the plugin emits the full canonical taxonomy vocabulary and
-performs no override remapping. The seven labels are `read_only`,
-`nonsrc_write`, `shared_write`, `push_or_pr_create`, `marker_write`,
-`unsafe_complex`, and `unknown`. The two non-overridable labels — `marker_write`
-and `unsafe_complex` — are safety/deadlock-critical and may never be remapped by
-an override classifier (M5a).
+Mode is `override`: the OpenCode plugin ships its own harness-native classifier
+(`enforce-bridge.mjs` `classifyLabel`, declared via `classifier.override_path`)
+that maps OpenCode tool calls to a subset of the canonical taxonomy —
+`read_only`, `shared_write`, and `push_or_pr_create` — and fail-closes any
+unrecognized tool to `shared_write` (gated). It is not the canonical bash
+default classifier (`command-classifier.sh`); it is a node port covering the
+OpenCode tool surface. The two non-overridable labels — `marker_write` and
+`unsafe_complex` — are safety/deadlock-critical: they are DECLARED in the
+vocabulary (required by M5a) so the substrate keeps routing them and no override
+classifier can remap or drop them. `classifyLabel` does not itself emit
+`marker_write` yet — opencode's marker lifecycle is deferred (OD-4), so markers
+under `.checkpoints/` are handled by the repo-source carve-out, not by label
+routing. The runtime declared-vs-emitted check (M5b) that would assert emission
+lands in P3; until then the declaration is a static safety floor, not a claim of
+runtime emission.
 
 ## §4 — Repo-source gate scope
 
@@ -98,12 +107,10 @@ embedded markdown; drift = fail (same enforcement boundary as the §1 COMMON row
 | Label | plan_approval | pre_checkpoint | post_checkpoint | stop |
 |---|---|---|---|---|
 | `read_only` | allow | allow | allow | warn |
-| `nonsrc_write` | block | allow | allow | warn |
 | `shared_write` | block | block | allow | warn |
 | `push_or_pr_create` | block | allow | block | warn |
 | `marker_write` † | allow | allow | allow | warn |
 | `unsafe_complex` † | block | block | block | warn |
-| `unknown` | block | block | block | warn |
 
 `†` non-overridable label — cells immutable regardless of plugin (`taxonomy.non_overridable`).
 `stop` is label-independent: `effective_tier(stop) = min(harness_cap.stop, …)` reads marker state, not the command label (F10).
@@ -169,7 +176,7 @@ derived source-of-truth.
 
 - `taxonomy_ref`: `patterns/taxonomy.json`
 - `taxonomy_version`: `sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4`
-- `emits_labels`: `read_only`, `nonsrc_write`, `shared_write`, `push_or_pr_create`, `marker_write`, `unsafe_complex`, `unknown`
+- `emits_labels`: `read_only`, `shared_write`, `push_or_pr_create`, `marker_write`, `unsafe_complex`
 - `consumes_events`: `pre_tool_use`, `tool_result`, `session_start`, `stop`
 - `event_translations_summary`:
   - `pre_tool_use`: `opencode-tool-execute-before-normalized`

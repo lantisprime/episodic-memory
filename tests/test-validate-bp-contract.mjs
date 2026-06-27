@@ -404,13 +404,19 @@ classifierCase("7c: typo'd emit-site label literal (GAP-2)", () => {
   assert(s.exit === 0 && s.payload && s.payload.updated.length === 11, "stable-ID (c): scaffold refreshes all 11 contracts after taxonomy add", `exit=${s.exit} updated=${s.payload && s.payload.updated.length}`);
   const clsAbs = path.join(root, CLASSIFIER_REL);
   fs.writeFileSync(clsAbs, fs.readFileSync(clsAbs, "utf8").replace(/^(\s*)read_only\)(\s*)printf '1' ;;$/m, "$1new_label)$2printf '1' ;;\n$1read_only)$2printf '1' ;;"));
-  // A taxonomy change also stales the plugin manifest's hash binding (assertion
-  // 15 covers manifests; scaffold refreshes contracts only) — refresh it as the
-  // manifest author would.
-  const manRel = path.join("plugins", "claude-code", "manifest.json");
-  const man = readJsonAt(root, manRel);
-  man.taxonomy_version = taxonomyVersion(readJsonAt(root, path.join("patterns", "taxonomy.json")));
-  writeJsonAt(root, manRel, man);
+  // A taxonomy change also stales EVERY plugin manifest's hash binding (assertion
+  // 15 covers ALL manifests; scaffold refreshes contracts only) — refresh each as
+  // the manifest author would. (opencode added in P5: a single-manifest refresh
+  // here silently passed only while opencode failed an earlier assertion.)
+  const newTaxVer = taxonomyVersion(readJsonAt(root, path.join("patterns", "taxonomy.json")));
+  for (const manRel of [
+    path.join("plugins", "claude-code", "manifest.json"),
+    path.join("plugins", "opencode", "manifest.json"),
+  ]) {
+    const man = readJsonAt(root, manRel);
+    man.taxonomy_version = newTaxVer;
+    writeJsonAt(root, manRel, man);
+  }
   const r = run(["--project", root, "--json"]);
   assert(r.exit === 0, "stable-ID (c): pure add + scaffold refresh + classifier arm + manifest hash refresh = exit 0 (FP control)", `exit=${r.exit} violations=${JSON.stringify((r.payload && r.payload.violations || []).map((v) => v.check + ":" + v.detail.slice(0, 60)))}`);
 }
