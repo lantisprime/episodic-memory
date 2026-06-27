@@ -5,14 +5,14 @@
   "harness": "opencode",
   "version": "1.0.0",
   "invocation_modality": "agent",
-  "capabilities": { "pre_tool_use": "STRONG", "tool_result": "STRONG" },
+  "capabilities": { "pre_tool_use": "STRONG", "session_end": "STRONG" },
   "classifier": { "mode": "default", "emits_labels": ["read_only", "nonsrc_write", "shared_write", "push_or_pr_create", "marker_write", "unsafe_complex", "unknown"] },
   "taxonomy_ref": "patterns/taxonomy.json",
   "taxonomy_version": "sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4",
   "events_version": "sha256:13f01e5a599272b349eabd66694b7898e68438e8aad6497e80a9b780bea34ab0",
   "event_translations": {
     "pre_tool_use": { "source_format": "opencode-tool-call", "field_bindings": { "tool": "$.tool" } },
-    "tool_result": { "source_format": "opencode-tool-result", "field_bindings": { "tool": "$.tool", "result": "$.result" } }
+    "session_end": { "source_format": "opencode-session-end", "field_bindings": { "session_id": "$.sessionID" } }
   },
   "runbook": { "full": "plugins/opencode/runbooks/enforcement.md", "quickref": "plugins/opencode/runbooks/enforcement.quickref.md" }
 }

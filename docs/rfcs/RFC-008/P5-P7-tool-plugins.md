@@ -44,13 +44,20 @@ graph TB
 
 | Phase | Dir | Language | Declared capabilities |
 |-------|-----|----------|-----------------------|
-| **P5** | `plugins/opencode/` | TypeScript | `pre_tool_use: STRONG, tool_result: STRONG, session_start: MEDIUM, stop: MEDIUM` |
+| **P5** | `plugins/opencode/` | TypeScript | `pre_tool_use: STRONG, tool_result: MEDIUM` *(honesty downgrade, see note)*`, session_start: MEDIUM, stop: MEDIUM` |
 | **P6** | `plugins/codex/` | Python hooks | `pre_tool_use: MEDIUM` *(multi-edit bypass documented)*, `stop: STRONG, session_start: STRONG` |
 | **P7** | `plugins/pi-agent/` | `tool_call` + `session_shutdown`/`turn_end` | `pre_tool_use: STRONG, stop: MEDIUM, session_start: STRONG` |
 
 **Honesty note (P5 principle):** Codex `pre_tool_use` is declared **MEDIUM**, not STRONG —
 its PreToolUse has a known multi-edit bypass. Push-gate + stop-gate are the hard enforcement
 for Codex.
+
+**Honesty note (OpenCode `tool_result`):** declared **MEDIUM**, not STRONG. The installed
+`tool.execute.after` hook output (`output.output`) IS mutable, so result rewrite is mechanically
+possible — but that the OpenCode model actually re-reads the mutated output has not been
+end-to-end proven, so MEDIUM (observe) is the honest ceiling pending that proof (P5 OD-1, round-1
+B1). The adapter therefore observes `tool_result` without mutating. `bypass_known.json` records
+the same rationale.
 
 ## Done when ✓
 

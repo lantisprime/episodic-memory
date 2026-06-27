@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { validateRegistry } from "./validate-plugin-registry.mjs";
 import { validateInstance } from "./lib/json-instance-validate.mjs";
@@ -52,7 +52,7 @@ function resolveRoot(argProject, cwd) {
 // ---------------------------------------------------------------------------
 // The gauntlet. Each step returns { n, title, status: pass|deferred-P3|fail, detail }.
 // ---------------------------------------------------------------------------
-export function runGauntlet({ projectRoot, now = NOW, cwd = process.cwd() } = {}) {
+export function runGauntlet({ projectRoot, harness = "claude-code", now = NOW, cwd = process.cwd() } = {}) {
   const read_trace = [];
   const root = resolveRoot(projectRoot, cwd);
   const readJson = (rel) => { const abs = path.join(root, rel); const t = fs.readFileSync(abs, "utf8"); read_trace.push(abs); return JSON.parse(t); };
@@ -63,8 +63,8 @@ export function runGauntlet({ projectRoot, now = NOW, cwd = process.cwd() } = {}
 
   // Resolve the claude-code enforcement entry from the registry.
   const index = readJson("plugins/_index.json");
-  const entry = (index.plugins || []).find((p) => p.type === "enforcement" && p.id === "claude-code");
-  if (!entry) throw new UsageError("no enforcement entry 'claude-code' in plugins/_index.json");
+  const entry = (index.plugins || []).find((p) => p.type === "enforcement" && p.id === harness);
+  if (!entry) throw new UsageError(`no enforcement entry '${harness}' in plugins/_index.json`);
   const manifest = readJson(entry.manifest);
   const taxonomy = readJson("patterns/taxonomy.json");
   const events = readJson("patterns/events.json");
@@ -96,7 +96,7 @@ export function runGauntlet({ projectRoot, now = NOW, cwd = process.cwd() } = {}
   step(7, "capability honesty (M4a)", clean("M4a") ? "pass" : "fail", clean("M4a") ? "every declared {harness,event} has an honest bypass record" : why("M4a"));
 
   // Step 8 — event replay (F39) through the field_bindings interpreter (C1).
-  steps.push(stepEventReplay(root, readJson, readText, manifest, events, now, read_trace));
+  steps.push(stepEventReplay(root, readJson, readText, manifest, events, now, read_trace, entry.id));
 
   // Step 9 — runbook-derived invocation parity (F47) + N1 sandbox isolation.
   steps.push(stepInvocationParity(root, readText, manifest, read_trace));
@@ -130,7 +130,7 @@ function stepGoldenInputs(readJson, manifest, taxonomy) {
     : { n, title, status: "fail", detail: bad.slice(0, 3).join("; ") };
 }
 
-function stepEventReplay(root, readJson, readText, manifest, events, now, read_trace) {
+function stepEventReplay(root, readJson, readText, manifest, events, now, read_trace, harness = "claude-code") {
   const n = 8, title = "event replay (F39) — field_bindings → canonical payload";
   const trans = manifest.event_translations || {};
   const caps = manifest.capabilities || {};
@@ -140,7 +140,7 @@ function stepEventReplay(root, readJson, readText, manifest, events, now, read_t
   for (const [eventId, t] of Object.entries(trans)) {
     const dash = eventId.replace(/_/g, "-");
     let raw, schema;
-    try { raw = readJson(`tests/fixtures/harness-events/claude-code/${dash}.json`); }
+    try { raw = readJson(`tests/fixtures/harness-events/${harness}/${dash}.json`); }
     catch (e) { problems.push(`${eventId}: no harness-event fixture (${e.message})`); continue; }
     try { schema = readJson(`schemas/events/event-${dash}.schema.json`); }
     catch (e) { problems.push(`${eventId}: no event schema (${e.message})`); continue; }
@@ -215,28 +215,64 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
     }
   }
 
-  // N1 — exercise the gate dispatch in an ISOLATED tmpdir+git-init sandbox with
-  // hook stdin `.cwd` = absolute sandbox root, and assert NO new `.checkpoints/.*`
-  // marker appears under the live --project root (the gate resolves its root from
-  // stdin .cwd, not process cwd/env, so markers land in the sandbox by construction).
-  const iso = sandboxDispatch(root, manifest, am);
-  read_trace.push(...iso.read_trace);
-  if (iso.error) problems.push(`N1 sandbox: ${iso.error}`);
-  else {
-    // The dispatch must ACTUALLY produce a marker (else the absence-assertions
-    // below are vacuous — claude-subagent F1). A push_or_pr_create command
-    // self-arms `.post-checkpoint-required` under the gate's resolved REPO_ROOT.
-    if (!iso.markerArmedInSandbox) problems.push(`N1: dispatch armed no marker in the sandbox — the isolation assertion would be vacuous (expected push self-arm)`);
-    // N1 proper: the marker landed in the sandbox (stdin .cwd), NOT the live repo.
-    if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after dispatch (${iso.liveLeak})`);
-    // Root-source proof: process cwd is DIVERGENT from stdin .cwd; a gate that
-    // resolved its root from process cwd would have leaked here instead.
-    if (!iso.cwdHeld) problems.push(`N1 root-source breach: a marker appeared under the divergent process cwd (${iso.procLeak}) — gate used process cwd, not stdin .cwd`);
-    if (iso.exit != null && !(String(iso.exit) in am.return_codes)) problems.push(`dispatched gate exit ${iso.exit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+  // N1 — exercise the documented §9 invocation in an ISOLATED git-init sandbox and
+  // prove (non-vacuously) that the gate's root-source is the INPUT cwd, not the
+  // process cwd. The proof SHAPE depends on the harness enforcement modality the
+  // runbook declares in expected_outputs.shape (S1 parameterization — the two
+  // enforcement models differ and a single assertion cannot fit both):
+  //   "exit-code-only" — a marker-arming gate (claude-code checkpoint-gate.sh):
+  //       a push self-arms a `.checkpoints/.*` marker under the gate's resolved
+  //       REPO_ROOT; assert it lands in the sandbox (stdin .cwd) and NONE leaks to
+  //       the live --project or the divergent process cwd.
+  //   "json-object"   — a stateless stdout-decision bridge (opencode
+  //       enforce-bridge.mjs, OD-4): it writes NO marker by design and enforces by
+  //       emitting a decision to stdout. Assert the documented dispatch (a
+  //       pre_tool_use repo-source WRITE) actually resolves to action:block with an
+  //       exit in return_codes, and that NO `.checkpoints/.*` marker is mutated
+  //       under the live --project or the divergent process cwd.
+  const modality = (am.expected_outputs && am.expected_outputs.shape) || "";
+  let passDetail = "";
+  if (modality === "exit-code-only") {
+    const iso = sandboxDispatch(root, manifest, am);
+    read_trace.push(...iso.read_trace);
+    if (iso.error) problems.push(`N1 sandbox: ${iso.error}`);
+    else {
+      // The dispatch must ACTUALLY produce a marker (else the absence-assertions
+      // below are vacuous — claude-subagent F1). A push_or_pr_create command
+      // self-arms `.post-checkpoint-required` under the gate's resolved REPO_ROOT.
+      if (!iso.markerArmedInSandbox) problems.push(`N1: dispatch armed no marker in the sandbox — the isolation assertion would be vacuous (expected push self-arm)`);
+      // N1 proper: the marker landed in the sandbox (stdin .cwd), NOT the live repo.
+      if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after dispatch (${iso.liveLeak})`);
+      // Root-source proof: process cwd is DIVERGENT from stdin .cwd; a gate that
+      // resolved its root from process cwd would have leaked here instead.
+      if (!iso.cwdHeld) problems.push(`N1 root-source breach: a marker appeared under the divergent process cwd (${iso.procLeak}) — gate used process cwd, not stdin .cwd`);
+      if (iso.exit != null && !(String(iso.exit) in am.return_codes)) problems.push(`dispatched gate exit ${iso.exit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+    }
+    passDetail = `§9 surface-truth ok; gate self-armed in sandbox (${iso.sandboxMarkers}); live + divergent-process-cwd untouched (N1: root from stdin .cwd)`;
+  } else if (modality === "json-object") {
+    const iso = bridgeDispatch(root, manifest, am);
+    read_trace.push(...iso.read_trace);
+    if (iso.error) problems.push(`N1 bridge: ${iso.error}`);
+    else {
+      // Surface-truth (stdout-decision form): the documented dispatch must emit the
+      // documented decision. A repo-source write resolves to action:block (else the
+      // §9 dispatch_example lies about the invocation surface).
+      if (iso.exit == null || !(String(iso.exit) in am.return_codes)) problems.push(`dispatched bridge exit ${iso.exit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+      if (!iso.decision || typeof iso.decision !== "object") problems.push(`N1: bridge stdout did not parse as a json-object decision (expected_outputs.shape=json-object)`);
+      else if (iso.decision.action !== "block") problems.push(`N1 surface-truth: documented dispatch (repo-source write) did not resolve to action:block (got ${JSON.stringify(iso.decision.action)})`);
+      // Isolation: a stateless bridge mutates NO marker anywhere (live or divergent
+      // process cwd). Root-source is independently proven by the bridge's own
+      // cwd-divergence unit test (test-enforce-bridge.mjs::testBridgeCwdDivergence).
+      if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after a stateless-bridge dispatch (${iso.liveLeak})`);
+      if (!iso.cwdHeld) problems.push(`N1 root-source breach: a .checkpoints/.* marker appeared under the divergent process cwd (${iso.procLeak})`);
+    }
+    passDetail = `§9 surface-truth ok; stdout-decision bridge emitted action:${iso.decision && iso.decision.action} (exit ${iso.exit}); stateless (no marker mutated anywhere); root-from-input-cwd proven by test-enforce-bridge cwd-divergence`;
+  } else {
+    problems.push(`unsupported expected_outputs.shape ${JSON.stringify(modality)} — step 9 cannot prove invocation parity`);
   }
 
   return problems.length === 0
-    ? { n, title, status: "pass", detail: `§9 surface-truth ok; gate self-armed in sandbox (${iso.sandboxMarkers}); live + divergent-process-cwd untouched (N1: root from stdin .cwd)` }
+    ? { n, title, status: "pass", detail: passDetail }
     : { n, title, status: "fail", detail: problems.slice(0, 3).join("; ") };
 }
 
@@ -311,14 +347,89 @@ function sandboxDispatch(root, manifest, am) {
   };
 }
 
+// Dispatch a stateless stdout-decision bridge (opencode enforce-bridge.mjs, OD-4)
+// in a throwaway git-init sandbox and PROVE the json-object invocation surface is
+// truthful + isolated. Two deliberate design points mirror sandboxDispatch:
+//   1. The dispatch is the DOCUMENTED one — a pre_tool_use repo-source WRITE, which
+//      the bridge resolves to {action:"block"} on stdout (§9 dispatch_example). The
+//      sandbox holds a real src/ file so the L1 repo-source check is non-vacuous.
+//   2. The process cwd is a SEPARATE throwaway dir, DIVERGENT from the bridge's
+//      input cwd (normalized.cwd). The bridge resolves repo root from normalized.cwd
+//      ONLY (enforce-bridge.mjs:94-104), never process.cwd().
+// Asserts (in stepInvocationParity): decision.action === "block"; exit in
+// return_codes; NO `.checkpoints/.*` marker mutated under the live --project or the
+// divergent process cwd (a stateless bridge writes none).
+function bridgeDispatch(root, manifest, am) {
+  const read_trace = [];
+  const shape = (am.command_shapes || [])[0];
+  if (!Array.isArray(shape) || shape.length === 0) return { error: "no command_shape to dispatch", read_trace };
+  const pluginDir = path.join(root, "plugins", manifest.harness);
+  const argv = shape.map((tok) => (typeof tok === "string" ? tok.replace("{plugin_dir}", pluginDir) : tok));
+
+  const SID = "00000000-0000-4000-8000-000000000000";
+  const snapshot = (base) => { try { return new Set(fs.readdirSync(path.join(base, ".checkpoints"))); } catch { return new Set(); } };
+  const newMarkers = (base, before) => [...snapshot(base)].filter((f) => !before.has(f));
+
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tp-bridge-sbx-"));
+  const procCwd = fs.mkdtempSync(path.join(os.tmpdir(), "tp-bridge-cwd-")); // divergent process cwd
+  const liveBefore = snapshot(root);
+  const procBefore = snapshot(procCwd);
+
+  let exit = null, err = null, decision = null;
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: sandbox });
+    const sandboxRoot = fs.realpathSync(sandbox); // ABSOLUTE input cwd — bridge's authoritative root
+    fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
+    const target = path.join(sandboxRoot, "src", "SENTINEL.mjs");
+    fs.writeFileSync(target, "// sentinel\n");
+    const stdin = JSON.stringify({
+      harness: manifest.harness,
+      event: "pre_tool_use",
+      normalized: {
+        tool: "write",
+        tool_args: { filePath: target, content: "x" }, // repo-source write → action:block
+        cwd: sandboxRoot,
+        session_id: SID,
+        turn_index: 1,
+        timestamp_iso8601: "2026-01-01T00:00:00Z",
+      },
+    });
+    const r = spawnSync(argv[0], argv.slice(1), {
+      cwd: procCwd, // DIVERGENT from input cwd: a bridge reading process cwd resolves HERE
+      input: stdin,
+      encoding: "utf8",
+      timeout: 15000,
+      env: { ...process.env },
+    });
+    exit = typeof r.status === "number" ? r.status : null;
+    try { if (r.stdout) decision = JSON.parse(r.stdout.trim()); } catch { /* decision stays null */ }
+    if (exit == null && r.error) err = r.error.message;
+  } catch (e) { err = `bridge setup failed: ${e.message}`; }
+  finally {
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
+  }
+
+  const liveLeak = newMarkers(root, liveBefore);
+  const procLeak = newMarkers(procCwd, procBefore);
+  return {
+    exit, error: err, read_trace, decision,
+    isolationHeld: liveLeak.length === 0, // N1: no marker under the live --project
+    liveLeak: liveLeak.join(","),
+    cwdHeld: procLeak.length === 0, //       bridge used input cwd, not divergent process cwd
+    procLeak: procLeak.join(","),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // CLI.
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const args = { project: null, json: false, help: false };
+  const args = { project: null, harness: "claude-code", json: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--project") args.project = argv[++i];
+    else if (a === "--harness") args.harness = argv[++i];
     else if (a === "--json") args.json = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else throw new UsageError(`unknown argument ${JSON.stringify(a)}`);
@@ -340,7 +451,7 @@ function main() {
   if (args.help) { process.stdout.write(HELP + "\n"); process.exit(0); }
 
   let result;
-  try { result = runGauntlet({ projectRoot: args.project }); }
+  try { result = runGauntlet({ projectRoot: args.project, harness: args.harness }); }
   catch (e) {
     process.stdout.write(JSON.stringify({ status: "usage_error", project_root: null, summary: { pass: 0, deferred: 0, fail: 0 }, steps: [], read_trace: [], violations: [{ detail: e.message }] }) + "\n");
     process.exit(2);

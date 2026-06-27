@@ -412,6 +412,11 @@ function buildLiveProject() {
     "plugins/claude-code/manifest.json",
     "plugins/claude-code/runbooks/enforcement.md",
     "plugins/claude-code/runbooks/enforcement.quickref.md",
+    // RFC-008 P5 S2/S3: opencode is now a live _index.json entry — its manifest +
+    // runbooks must be on disk too, else M2/M8 fire (entry dir/manifest missing).
+    "plugins/opencode/manifest.json",
+    "plugins/opencode/runbooks/enforcement.md",
+    "plugins/opencode/runbooks/enforcement.quickref.md",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {

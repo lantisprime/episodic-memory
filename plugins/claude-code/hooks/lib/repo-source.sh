@@ -72,13 +72,38 @@ _path_is_repo_source() {
     case "$fp_canon" in "$repo_canon"/*|"$repo_canon") in_repo=0 ;; esac
   fi
   [ "$in_repo" = 0 ] || return 1
-  case "$fp_canon" in
-    "$repo_canon"/.episodic-memory|"$repo_canon"/.episodic-memory/*) return 1 ;;
-    "$repo_canon"/.checkpoints|"$repo_canon"/.checkpoints/*)         return 1 ;;
-    "$repo_canon"/.review-store|"$repo_canon"/.review-store/*)       return 1 ;;
-    "$repo_canon"/.git|"$repo_canon"/.git/*)                         return 1 ;;
-    "$repo_canon"/docs/plans|"$repo_canon"/docs/plans/*)             return 1 ;;
-  esac
+  # Load carve-out dirs from the shared JSON (Rule 14 single source).
+  # Resolution order (NEW-R3-1): (1) deployed canonical path used by the live
+  # ~/.claude/hooks/ copy; (2) in-repo dev/test relative path; (3) inline
+  # literals if both are unreadable (fail-safe — a deploy-lag never opens gate).
+  # Matching is EXACT SEGMENT: "<repo>/<dir>" or "<repo>/<dir>/*" only.
+  # Never substring — .github/ and .gitignore must NOT be carved.
+  local _co_json="" _co_json1 _co_json2
+  _co_json1="$HOME/.episodic-memory/patterns/repo-source-carveouts.json"
+  _co_json2="${BASH_SOURCE[0]%/*}/../../../../patterns/repo-source-carveouts.json"
+  if [ -f "$_co_json1" ] && _co_dirs="$(node -e "try{const c=require(process.argv[1]);process.stdout.write(c.exact_segment_dirs.join('\n'))}catch(e){process.exit(1)}" "$_co_json1" 2>/dev/null)"; then
+    _co_json="$_co_json1"
+  elif [ -f "$_co_json2" ] && _co_dirs="$(node -e "try{const c=require(process.argv[1]);process.stdout.write(c.exact_segment_dirs.join('\n'))}catch(e){process.exit(1)}" "$_co_json2" 2>/dev/null)"; then
+    _co_json="$_co_json2"
+  fi
+  if [ -n "$_co_json" ]; then
+    local _d
+    while IFS= read -r _d; do
+      [ -z "$_d" ] && continue
+      case "$fp_canon" in
+        "$repo_canon/$_d"|"$repo_canon/$_d"/*) return 1 ;;
+      esac
+    done <<< "$_co_dirs"
+  else
+    # Inline fallback — exact-segment match, never substring.
+    case "$fp_canon" in
+      "$repo_canon"/.episodic-memory|"$repo_canon"/.episodic-memory/*) return 1 ;;
+      "$repo_canon"/.checkpoints|"$repo_canon"/.checkpoints/*)         return 1 ;;
+      "$repo_canon"/.review-store|"$repo_canon"/.review-store/*)       return 1 ;;
+      "$repo_canon"/.git|"$repo_canon"/.git/*)                         return 1 ;;
+      "$repo_canon"/docs/plans|"$repo_canon"/docs/plans/*)             return 1 ;;
+    esac
+  fi
   if command -v git >/dev/null 2>&1 \
      && git -C "$repo_canon" check-ignore -q -- "$fp_canon" 2>/dev/null; then
     return 1

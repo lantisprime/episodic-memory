@@ -50,6 +50,29 @@ let threw = false;
 try { runGauntlet({ projectRoot: "/nonexistent-xyz-123-tp" }); } catch { threw = true; }
 assert(threw, "non-resolving --project throws (usage-error path)");
 
+// testHarnessDefault — default (no harness arg) resolves claude-code entry + claude-code/ fixture path.
+const rDefault = runGauntlet({ projectRoot: REPO });
+assert(rDefault.read_trace.some((p) => p.includes("plugins/claude-code/manifest.json")), "testHarnessDefault: read_trace includes plugins/claude-code/manifest.json");
+assert(rDefault.read_trace.some((p) => p.includes("harness-events/claude-code/")), "testHarnessDefault: read_trace includes harness-events/claude-code/ fixture path");
+
+// testHarnessUnknownThrows — harness:"zzz" throws with zzz in the error message.
+let harnessThrew = false, harnessErrMsg = "";
+try { runGauntlet({ projectRoot: REPO, harness: "zzz" }); } catch (e) { harnessThrew = true; harnessErrMsg = e.message || ""; }
+assert(harnessThrew, "testHarnessUnknownThrows: harness:zzz throws");
+assert(/zzz/.test(harnessErrMsg), "testHarnessUnknownThrows: error message contains harness name 'zzz'", harnessErrMsg);
+
+// testHarnessOpencode — opencode fixture-dir is parameterized (S1) + opencode plugin
+// shipped (S2). Steps 1,2,4,7,8 pass; steps 3+9 require the runbook (S3).
+const rOC = runGauntlet({ projectRoot: REPO, harness: "opencode" });
+assert(rOC.read_trace.some((p) => p.includes("plugins/opencode/manifest.json")), "testHarnessOpencode: read_trace includes plugins/opencode/manifest.json");
+assert(rOC.read_trace.some((p) => p.includes("harness-events/opencode/")), "testHarnessOpencode: read_trace includes harness-events/opencode/ fixture path");
+// Steps that must pass in S2 (1,2,4,7,8); 3+9 are expected to fail until S3.
+const ocPassRequired = [1, 2, 4, 7, 8];
+for (const n of ocPassRequired) {
+  const s = rOC.steps.find((st) => st.n === n);
+  assert(s && s.status === "pass", `testHarnessOpencode: step ${n} passes`, s ? s.detail : "step not found");
+}
+
 console.log(`\ntest-plugin-gauntlet: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
   console.error("\nFAILURES:");

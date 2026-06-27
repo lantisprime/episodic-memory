@@ -1,0 +1,5 @@
+{
+  "_comment": "Carve-out dirs matched by EXACT SEGMENT under repo root — never substring. .github/ and .gitignore must NOT match. Read by repo-source.sh (bash fallback) and scripts/lib/repo-source.mjs (node). Rule 14 single source.",
+  "exact_segment_dirs": [".episodic-memory", ".checkpoints", ".review-store", ".git", "docs/plans"],
+  "git_check_ignore": true
+}
