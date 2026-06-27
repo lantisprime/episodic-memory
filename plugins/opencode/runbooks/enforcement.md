@@ -170,7 +170,7 @@ derived source-of-truth.
 **10a — Configuration.**
 
 - `enforce_config_keys`: `active` (R5 project switch) + `bp-001.{plan_approval,post_checkpoint,pre_checkpoint,stop}` per-bp tier clamps (RFC-008 P4; schema `patterns/enforce-config.schema.json`; clamp-DOWN only; resolved by `enforce-contract --gate stop` / `--resolve-gate <gate>`).
-- `install_time_config`: hooks deployed under `~/.claude/hooks/` by `install.mjs --install-hooks`.
+- `install_time_config`: enforcement hooks deployed per-project under `<project>/.claude/` (or `<project>/.opencode/`), NEVER `~/.claude/` (Principle 12), by `install.mjs --install-hooks` / `--install-enforcement`.
 
 **10b — Taxonomies.**
 
