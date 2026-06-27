@@ -3,7 +3,7 @@
 > Part of [RFC-008](../RFC-008-decouple-enforcement-from-substrate.md). Index:
 > [RFC-008/README.md](README.md).
 
-**Status:** queued. *(Legacy "Phase 6 / 7 / 8".)*
+**Status:** P5 **DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425 `a7f66c9`). P6 / P7 queued. *(Legacy "Phase 6 / 7 / 8".)*
 **Serves:** R6 (plugin-to-harness binding), R10 (enforcement runbooks).
 **Depends on:** P3.
 **Estimate:** P5 ~45K · P6 ~40K · P7 ~35K.

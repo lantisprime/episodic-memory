@@ -1217,7 +1217,7 @@ Serves R3, R5 · depends on: P3 · **DONE (P4a #397, P4c #398, P4d S1-S8 + ESC).
 
 #### P5–P7 — Per-tool plugins (OpenCode / Codex / Pi Agent) → [RFC-008/P5-P7-tool-plugins.md](RFC-008/P5-P7-tool-plugins.md)
 
-Serves R6, R10 · depends on: P3 · queued *(legacy "Phase 6/7/8")*. Same template instantiated three times: `manifest.json` + adapter + 10-section runbook + fixtures, each at its declared capability tiers. Codex `pre_tool_use: MEDIUM` (multi-edit bypass documented).
+Serves R6, R10 · depends on: P3 · **P5 DONE (#424 `f5dbaef`, doc fix #425); P6 / P7 queued** *(legacy "Phase 6/7/8")*. Same template instantiated three times: `manifest.json` + adapter + 10-section runbook + fixtures, each at its declared capability tiers. Codex `pre_tool_use: MEDIUM` (multi-edit bypass documented).
 
 #### P8 — Cursor + Windsurf plugins → [RFC-008/P8-cursor-windsurf.md](RFC-008/P8-cursor-windsurf.md)
 
