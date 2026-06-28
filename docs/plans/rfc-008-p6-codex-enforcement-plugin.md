@@ -526,10 +526,11 @@ Runners: `node tests/test-codex-adapter-conformance.mjs`, `node tests/test-insta
 | Fail-closed + import-fail-closed (neg) | conformance `testFailClosed`/`testImportFailClosed` | exit 2 deny (incl. missing waist → 2, not 1) |
 | apply_patch + Bash safety | conformance `testApplyPatch*` + `testBash*` | multi/unparseable/bash-write block; docs/marker/read allow |
 | Install merges (mock E2E) | `node tests/test-install-codex-enforcement.mjs` | `6/6 pass`; user hook intact; skill untouched; trust printed |
-| Gauntlet | `node scripts/test-plugin.mjs --project . --harness codex` | `7 pass, 2 deferred-P3, 0 fail — OK` |
+| Gauntlet | `node scripts/test-plugin.mjs --project . --harness codex` | **S3 observed:** `7 pass, 2 deferred-P3, 0 fail — status:ok`; step 9 `codex-native deny exit 2 + permissionDecision:deny; allow exit 0; no marker leak (N1)` |
 | #17532 firing (real codex/tmux) | `manual: node tests/integration/codex-tmux-e2e.mjs --firing` | `PreToolUse fired` |
 | Enforcement (real codex/tmux) | `manual: … --enforcement` | `repo-source apply_patch DENIED; docs/plans ALLOWED; PreToolUse fired` + pane |
-| Regression | `--harness opencode` and (sep.) `--harness claude-code` | each `OK` (status:ok) |
+| Regression | `--harness opencode` and (sep.) `--harness claude-code` | **S3 observed:** each `7 pass, 2 deferred-P3, 0 fail — status:ok`; step 9 non-vacuous (opencode `cwd-divergence`, claude-code `divergent-process-cwd untouched`) |
+| S3 code review (BP-1 step 6) | interactive codex via cmux (gpt-5.5 high, codex 0.142.3) | **R1 HOLD** (1 P1: buildLiveProject omitted active codex plugin -> `test-plugin-registry.mjs` red) -> fixed inline (copy codex manifest+runbooks, mirror opencode) -> **R2 ACCEPT** (`test-plugin-registry.mjs` 199 pass/0 fail/1 env-skip). Reply-episode `20260628-130139-…-6728` (local) |
 | RFC corrected (block/Python) | `grep -rn "Codex.*Python\|{block:true}" docs/rfcs/` | 0 |
 | RFC tier retained MEDIUM, rationale corrected | `grep -c "declared MEDIUM, not STRONG" docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md` | 0 (old framing gone; tier cell stays MEDIUM; do NOT grep bare "multi-edit" — new annotations reuse it) |
 | Merged | `gh pr view <n> --json state,mergeCommit` | `<commit>` |
@@ -768,9 +769,9 @@ command per row.
 
 ## A.7 Per-slice step tables
 
-> Fully specified for **S0, S1, S2**. **S3** (gauntlet — focused-review), **S4** (install +
-> enforcement-proof), **S5** (CI/docs) filled after round-3 acceptance (§11 staging; §10 fixes each).
-> Executor: do not start S3/S4/S5 until their tables are filled.
+> Fully specified for **S0, S1, S2, S3**. **S4** (install + enforcement-proof) and **S5** (CI/docs)
+> filled after S3 acceptance (§11 staging; §10 fixes each). Executor: do not start S4/S5 until their
+> tables are filled.
 
 ### `P6-S0` — RFC + doc correction (REQ-1, REQ-4)
 
@@ -828,6 +829,50 @@ command per row.
 | 2.4 | `plugins/_index.json` | EDIT | APPEND a `codex` entry to `plugins[]`: `{type,id:"codex",harness:"codex",directory:"plugins/codex",capabilities:{pre_tool_use:"MEDIUM"},classifier:"override",manifest:"plugins/codex/manifest.json",status:"active"}`. | `node scripts/test-plugin.mjs --project . --harness codex --json` → steps 2 + 7 `pass` |
 | 2.4b | `plugins/bypass_known.json` | EDIT | **KEEP** the existing `{harness:"codex",event:"pre_tool_use",ceiling:"MEDIUM",citation:…}` record; refine its `citation` to the Bash-write lexing residual — the statically-**unlexable** forms outside the §12.1 MUST-CATCH table (`eval`/`sh -c`/`bash -c`, command-substitution, `$VAR`-expanded paths, here-docs, awk/`python -c`/`node -e`-internal writes; `repo-source.mjs`/§16 R8). Do **NOT** convert to a clean-audit and do **NOT** add a new pair — those unlexable forms escape the frozen extractor, so `no_known_bypass_evidence:true` would be dishonest. (`echo > src/x` / `sed -i src/x` are §12.1 MUST-CATCH and DO hard-block; they are not the escape.) (opencode declared clean-audit on the same gap — a precedent to FIX via backport, not copy.) | `node -e "JSON.parse(require('fs').readFileSync('plugins/bypass_known.json','utf8'))"` exits 0; `node scripts/test-plugin.mjs --project . --harness codex --json` → step 7 `pass`; `grep -c '"ceiling": "MEDIUM"' plugins/bypass_known.json` INCLUDES the codex line (record retained); `grep -c "no_known_bypass_evidence" plugins/bypass_known.json` does NOT add a codex entry |
 | 2.5 | — | — | Commit `P6-S2: Codex-native adapter + MEDIUM manifest + registry + MEDIUM-ceiling bypass_known + conformance (R6)` + trailer. | `git log -1 --oneline` → `P6-S2` |
+
+### `P6-S3` — gauntlet codex-native step-9 modality + runbook shape (REQ-12, REQ-16)
+
+**Files (one per step):** `schemas/runbook-agent-manifest.schema.json`,
+`plugins/codex/runbooks/enforcement.md`, `docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md`,
+`scripts/test-plugin.mjs` (3.4 = Add fn `codexDispatch`; 3.5 = fix the two existing dispatch helpers;
+3.6 = EDIT `stepInvocationParity`). **Read-only:** `plugins/codex/capabilities/codex-adapter.mjs`
+(deny contract — exit 2 + `hookSpecificOutput.permissionDecision:"deny"`, `codex-adapter.mjs:72-87`),
+the `bridgeDispatch`/`sandboxDispatch` precedents, the S1 fixture.
+
+> S3 edits the **shared high-blast** gauntlet (`test-plugin.mjs` is routed by all 3 harnesses) — §10
+> hard stop = **focused review BEFORE build** (step 3.0b). The codex adapter fits NEITHER existing
+> modality: opencode's `json-object` branch asserts `decision.action==="block"` (codex emits
+> `hookSpecificOutput.permissionDecision:"deny"`, not `action:block` — this is the one known-red check,
+> §10/handoff); claude-code's `exit-code-only` branch asserts a self-armed `.checkpoints/.*` marker
+> (the codex adapter is stateless, writes none). So S3 adds a THIRD `codex-native` modality (exit-2 +
+> permissionDecision driving the real adapter) and re-points the runbook's `expected_outputs.shape` at
+> it. Non-vacuity (S1 axis-5 lesson): `codexDispatch` drives a **discriminating pair** — a repo-source
+> write DENIED and a `docs/plans/` write ALLOWED — so a stub that always exits 2 (or always 0) fails.
+> The new `codex-native` value is also a closed enum member of `expected_outputs.shape` in
+> `schemas/runbook-agent-manifest.schema.json`, enforced by M7e (`validate-plugin-registry.mjs:466`);
+> the enum MUST be extended (step 3.1) BEFORE the runbook flips to it (step 3.2), or M7e + CI go red.
+>
+> **Codex pre-build review (step 3.0b, DONE this cycle, interactive) hardened three things** (verdict
+> HOLD → converged ACCEPT): (a) marker-leak snapshots are captured BEFORE the `finally` `rmSync` — the
+> existing `bridgeDispatch`/`sandboxDispatch` compute `procLeak` AFTER deleting `procCwd`
+> (`test-plugin.mjs:408` then `:413`), so today's `cwdHeld` is vacuous; S3 fixes all three (step 3.5);
+> (b) the branch asserts BOTH exits against the closed `return_codes` map and that the allow case emits
+> empty stdout (step 3.6); (c) `codex-native` is registered in RFC-008 prose (`:815`, `:1125`), not
+> only the schema enum (step 3.3).
+
+| Step | File | Kind | Exact action (anchor + literal change) | Verify (observed → expected; falsifiable, §A.6b) |
+|---|---|---|---|---|
+| 3.0 | — | — | Pre-flight §A.4. | passes |
+| 3.0b | — | — | **§10 hard stop — focused review BEFORE editing the shared gauntlet** (DONE this cycle, interactive codex). Reviewed the `codex-native` branch + `codexDispatch` design against the adapter deny contract (`codex-adapter.mjs:72-87`) and the `sandboxDispatch`/`bridgeDispatch` precedents. Verdict HOLD → converged ACCEPT; the 3 findings are folded into steps 3.3 (RFC prose), 3.4 (leaks-before-rm), 3.5 (pre-existing vacuous `cwdHeld` in both helpers), 3.6 (both-exits + allow-stdout-empty). | verdict recorded HOLD→ACCEPT; each finding maps to a step below |
+| 3.1 | `schemas/runbook-agent-manifest.schema.json` | EDIT | ANCHOR `        "shape": { "type": "string", "enum": ["ndjson-per-line", "json-object", "exit-code-only"] },` → REPLACE `        "shape": { "type": "string", "enum": ["ndjson-per-line", "json-object", "exit-code-only", "codex-native"] },`. (M7e schema-validates the runbook agent-manifest against this closed enum at `validate-plugin-registry.mjs:466`; the `codex-native` shape (step 3.2) would otherwise fail M7e → red `validate-plugin-registry` + S5 CI. Extend the enum BEFORE the runbook flip.) | `node -e "const s=JSON.parse(require('fs').readFileSync('schemas/runbook-agent-manifest.schema.json','utf8'));process.exit(s.properties.expected_outputs.properties.shape.enum.includes('codex-native')?0:1)"` → exit 0 |
+| 3.2 | `plugins/codex/runbooks/enforcement.md` | EDIT | ANCHOR `  "expected_outputs": { "shape": "json-object" },` → REPLACE `  "expected_outputs": { "shape": "codex-native" },`. (codex blocks via exit-2 + `permissionDecision:deny`, NOT opencode's `action:block`; leaving `json-object` routes step 9 to `bridgeDispatch`, which fails on `decision.action!=="block"`. M7e now accepts the value because step 3.1 extended the enum.) | `grep -c '"shape": "codex-native"' plugins/codex/runbooks/enforcement.md` → 1; `grep -c '"shape": "json-object"' plugins/codex/runbooks/enforcement.md` → 0; `node scripts/validate-plugin-registry.mjs --project .` → exit 0 (M7e green) |
+| 3.3 | `docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md` | EDIT | **(P2 — codex Q3; Rule 10 RFC-prose sync.)** Two anchored edits registering `codex-native` in the shape enumerations. (a) ANCHOR `(NDJSON/JSON-object/exit-only as declared)` → REPLACE `(NDJSON/JSON-object/exit-only/codex-native as declared)`. (b) ANCHOR `` `ndjson-per-line` | `json-object` | `exit-code-only`, with optional `schema_ref` `` → REPLACE `` `ndjson-per-line` | `json-object` | `exit-code-only` | `codex-native` (exit-2 + `hookSpecificOutput.permissionDecision:"deny"` for block, exit-0 no-output for allow), with optional `schema_ref` ``. | `grep -c "codex-native" docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md` → ≥2 |
+| 3.4 | `scripts/test-plugin.mjs` | Add fn | Add `function codexDispatch(root, manifest, am)` immediately BEFORE ANCHOR `// CLI.` (the `// ----…----` divider preceding `function parseArgs`). Mirror `bridgeDispatch`: `mkdtempSync` sandbox + `git init -q`; a DIVERGENT `procCwd` `mkdtempSync`; `.checkpoints` snapshot/`newMarkers` helpers. Expand `command_shapes[0]` (`{plugin_dir}` → `path.join(root,"plugins",manifest.harness)`). Run the adapter TWICE via `spawnSync(argv[0], argv.slice(1), {cwd:procCwd, input, encoding:"utf8", timeout:15000})` with **raw codex PreToolUse stdin** `{hook_event_name:"PreToolUse", tool_name:"Write", tool_input:{filePath:<target>, content:"x"}, cwd:fs.realpathSync(sandbox), session_id:SID}`: (a) DENY `target=<sandbox>/src/SENTINEL.mjs` (mkdir `src/`+write the file first); (b) ALLOW `target=<sandbox>/docs/plans/note.md` (mkdir `docs/plans/`). Parse each stdout in a `try` (null on failure); keep raw `denyStdout`/`allowStdout`. **codex P1a: declare `let liveLeak=[], procLeak=[];` and compute them BEFORE the `finally` `rmSync` (a deleted `procCwd` snapshots empty → vacuous `cwdHeld`).** Return `{denyExit, denyDecision, denyStdout, allowExit, allowStdout, isolationHeld:liveLeak.length===0, cwdHeld:procLeak.length===0, liveLeak, procLeak, read_trace, error}`. | `node --check scripts/test-plugin.mjs` → exits 0; `grep -c "function codexDispatch" scripts/test-plugin.mjs` → 1 |
+| 3.5 | `scripts/test-plugin.mjs` | EDIT | **(codex P1a — pre-existing vacuous `cwdHeld`.)** The pair `  const liveLeak = newMarkers(root, liveBefore);` + `  const procLeak = newMarkers(procCwd, procBefore);` appears IDENTICALLY after the `finally` in BOTH `bridgeDispatch` (`test-plugin.mjs:413-414`) and `sandboxDispatch` (`:337-338`), AFTER `procCwd` is `rmSync`'d in the `finally` (`:410`/`:334`) → `procLeak` is always empty. For EACH function: declare `let liveLeak=[], procLeak=[];` above the `try`, assign that pair inside the `finally` BEFORE the `fs.rmSync(procCwd,...)` line, and delete the post-`finally` duplicate. Behavior is unchanged unless a real `procCwd` leak was being hidden. Also update the step-9 modality comment (~`:221`) to name the third `codex-native` model. | `node scripts/test-plugin.mjs --project . --harness opencode --json` → step 9 `pass`; `node scripts/test-plugin.mjs --project . --harness claude-code --json` → step 9 `pass` (both now compute `procLeak` pre-rm — non-vacuous) |
+| 3.6 | `scripts/test-plugin.mjs` | EDIT | In `stepInvocationParity`, ANCHOR the fallback block `  } else {` + its body `    problems.push(\`unsupported expected_outputs.shape ${JSON.stringify(modality)} — step 9 cannot prove invocation parity\`);` → REPLACE by inserting, BEFORE that `} else {`, a new branch `} else if (modality === "codex-native") {` that calls `const iso = codexDispatch(root, manifest, am); read_trace.push(...iso.read_trace);` then (on `!iso.error`) pushes a problem unless ALL hold: `iso.denyExit === 2`; `iso.denyDecision && iso.denyDecision.hookSpecificOutput && iso.denyDecision.hookSpecificOutput.permissionDecision === "deny"`; `iso.denyStdout.trim() !== ""` (codex P1b diagnostic); `String(iso.denyExit) in am.return_codes` **and** `String(iso.allowExit) in am.return_codes` (codex P1b — both exits in the closed map); `iso.allowExit === 0` (discriminating pair — non-vacuous, S1 axis-5); `iso.allowStdout.trim() === ""` (codex P1b — allow = no output, `codex-adapter.mjs:9`); `iso.isolationHeld`; `iso.cwdHeld`. Set `passDetail` to name `denyExit`, the `permissionDecision`, and `allowExit`. KEEP the original `} else {` unsupported-shape push as the final fallback. | `node scripts/test-plugin.mjs --project . --harness codex --json` → step 9 `status:"pass"`; summary = `7 pass, 2 deferred-P3, 0 fail` (`status:"ok"`) |
+| 3.7 | — | — | **Regression — the shared file routes all 3 harnesses (§A.8).** Rerun the gauntlet for opencode and claude-code; both pre-existing step-9 branches green (and now non-vacuous, step 3.5). | `node scripts/test-plugin.mjs --project . --harness opencode --json` → step 9 `pass` (json-object branch intact); `node scripts/test-plugin.mjs --project . --harness claude-code --json` → step 9 `pass` (exit-code-only branch intact) |
+| 3.8 | — | — | **BP-1 step 6 — code review** the `test-plugin.mjs` + runbook + schema + RFC diff (interactive codex per session constraint, or `negative-scenario-reviewer`). Disposition findings via inline-FU heuristic; file deferred per step 9. Record reply-episode id in §15. | review reply-episode id in §15; every finding dispositioned (inline / issue / DEFER) |
+| 3.9 | — | — | Commit `P6-S3: gauntlet codex-native step-9 modality + runbook/schema/RFC registration + dispatch-helper leak-snapshot fix (R6)` + trailer. | `git log -1 --oneline` → `P6-S3` |
 
 ## A.8 Definition of done (mechanical)
 

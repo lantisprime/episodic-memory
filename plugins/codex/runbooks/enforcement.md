@@ -181,7 +181,7 @@ cross-checks `invocation_modality` against §8 and the manifest.
   ],
   "required_args": [],
   "optional_args": [],
-  "expected_outputs": { "shape": "json-object" },
+  "expected_outputs": { "shape": "codex-native" },
   "env_requirements": [],
   "return_codes": {
     "0": "allow — no output (or non-PreToolUse pass-through)",
