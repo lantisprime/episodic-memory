@@ -30,6 +30,18 @@
       "classifier": "override",
       "manifest": "plugins/opencode/manifest.json",
       "status": "active"
+    },
+    {
+      "type": "enforcement",
+      "id": "codex",
+      "harness": "codex",
+      "directory": "plugins/codex",
+      "capabilities": {
+        "pre_tool_use": "MEDIUM"
+      },
+      "classifier": "override",
+      "manifest": "plugins/codex/manifest.json",
+      "status": "active"
     }
   ]
 }

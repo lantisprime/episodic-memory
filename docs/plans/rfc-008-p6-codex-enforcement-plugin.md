@@ -427,7 +427,7 @@ a full shell parser (handoff_complete_bug_class: patch the class boundary, not e
 | Form | Examples | Operand rule |
 |---|---|---|
 | redirect to file | `> f`, `>> f`, `&> f`, `>& f`, fd-prefixed `2> f`, attached `>f`, quoted incl. spaces `> "a b.txt"`, multiple per command | remainder-of-token or next token; `/dev/null` + bare-digit fd-dup dropped (SINK) |
-| `sed -i[suffix]` | `sed -i src/x` | next non-flag operand |
+| `sed -i[suffix]` (GNU `-i`/`-i.bak`, BSD `-i ''`) | `sed -i 's/a/b/' src/x`, `sed -i -e 's/a/b/' src/x`, `sed -i '' 's/a/b/' src/x` | requires `-i`/`--in-place` (without it sed writes to stdout, not the file); sed grammar is `sed [opts] SCRIPT FILE…` so the FIRST non-flag operand is the SCRIPT unless `-e`/`-f` supplied it (then ALL operands are files); a bare `-i` consumes an EMPTY next token as the BSD suffix. (codex r7 S2-review: the old "next non-flag operand" rule mis-took the script for the file = false-deny on carveouts, and the BSD empty suffix for the file = false-ALLOW bypass.) |
 | `tee [-a]` | `tee src/x` | each following non-flag operand |
 | `dd … of=X` | `dd of=src/x` | the `of=` value |
 | `cp`/`mv`/`install` dest | `cp a src/x`, `cp -t src a b`, `mv a src/x`, `install a src/x` | dest = `-t`/`--target-directory[=]` value if present (GNU dest-first), else last non-flag operand; sources are READS |
@@ -721,7 +721,11 @@ STOP — step <n.m> blocked. Reason: <…>. File: <path>  Expected anchor: <verb
 //   //     matching §8.2; a still-unmatched quote after that strip is DYNAMIC.
 //   //       /dev/null → SINK (ignore); `>&<digit>` or bare-digit operand → fd-dup (ignore, N-r4-1);
 //   //       DYNAMIC → residual (ignore); else push. `&>FILE`/`>&FILE` non-digit ARE writes (N-r4).
-//   //   - `sed -i[suffix]` → next non-flag token.   - `tee [-a]` → each following non-flag operand.
+//   //   - `sed`: only when `-i`/`--in-place` present (else writes stdout). Grammar `sed [opts]
+//   //     SCRIPT FILE…`: first non-flag operand is the SCRIPT unless `-e`/`-f` gave it (then all
+//   //     operands are files); the rest are in-place targets. A bare `-i` consumes an EMPTY next
+//   //     token as the BSD suffix (codex r7 S2-review — script-vs-file + BSD `-i ''`).
+//   //   - `tee [-a]` → each following non-flag operand.
 //   //   - `dd … of=X` → X.
 //   //   - first word ∈ {cp,mv,install}: DEST = the value of `-t DEST` / `-tDEST` /
 //   //     `--target-directory DEST` / `--target-directory=DEST` IF PRESENT (GNU puts DEST first —
