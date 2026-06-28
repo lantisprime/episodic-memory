@@ -1,0 +1,16 @@
+{
+  "_note": "Real interactive Codex PreToolUse stdin (codex-cli 0.142.3, gpt-5.5), captured 2026-06-28 via tests/integration/codex-tmux-e2e.mjs from a single multi-file apply_patch. NORMALIZED form: cwd/transcript_path sanitized to the sample repo; synthesized integer turn_index:0 (Codex emits a string turn_id and NO turn_index). The S2 codex-adapter extractTargetPaths parses tool_input.command directives; conformance tests re-point cwd + patch paths into a mkdtemp sandbox.",
+  "session_id": "019f0d5b-dda0-7af0-9120-f07380e2d55d",
+  "turn_id": "019f0d5c-5700-7b30-9872-b080ae6e508f",
+  "turn_index": 0,
+  "transcript_path": "/Users/juan.delacruz/repo/.codex/sessions/2026/06/28/rollout.jsonl",
+  "cwd": "/Users/juan.delacruz/repo",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.5",
+  "permission_mode": "default",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Add File: src/probe.mjs\n+export const probe = 42;\n*** Add File: docs/plans/note.md\n+# note\n*** End Patch\n"
+  },
+  "tool_use_id": "call_Jp8xQ29vQinBqGhBZJK9l5zY"
+}
