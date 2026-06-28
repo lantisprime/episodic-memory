@@ -33,12 +33,39 @@
 // @ts-ignore — type-only; not compiled in this repo (zero-dep policy for test harness)
 import type { Plugin } from "@opencode-ai/plugin";
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, basename } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, "enforce-bridge.mjs");
+
+// Resolve a real `node` to run the .mjs bridge. CRITICAL: under opencode's
+// Bun-compiled runtime, process.execPath is the OPENCODE binary, NOT node — so
+// spawnSync(process.execPath, [BRIDGE]) makes opencode treat the .mjs path as a
+// project dir, fail to cd, exit 0 with EMPTY stdout, and the JSON.parse below
+// throws -> fail-closed on EVERY gated tool call (the bridge never runs). Use
+// process.execPath only when it IS node; otherwise locate node on PATH. Bug
+// reproduced 2026-06-28 by driving the live opencode TUI (the bridge-proxy /
+// direct-node tests masked it). Regression: tests/test-opencode-node-resolve.mjs.
+// Exported + parameterized for the regression test: a node-run test can't change
+// its own process.execPath, so it passes a simulated non-node exe to prove the
+// resolution. The default (no-arg) path is cached per process.
+let _nodeExe: string | null = null;
+export function resolveNodeExe(exe: string = process.execPath): string {
+  const useCache = exe === process.execPath;
+  if (useCache && _nodeExe) return _nodeExe;
+  let result: string;
+  if (/^node(\.exe)?$/i.test(basename(exe))) {
+    result = exe;
+  } else {
+    const finder = process.platform === "win32" ? "where" : "which";
+    const w = spawnSync(finder, ["node"], { encoding: "utf8" });
+    result = (w.stdout || "").split(/\r?\n/).map((s) => s.trim()).find((s) => s && existsSync(s)) || "node";
+  }
+  if (useCache) _nodeExe = result;
+  return result;
+}
 
 // Per-session turn_index counters. Incremented synchronously BEFORE any await
 // (EC3: no shared mutable state that a concurrent call could race on).
@@ -53,7 +80,7 @@ function nextTurnIndex(sessionId: string): number {
 /** Spawn the bridge, return parsed stdout decision. Throws on any error. */
 function callBridge(envelope: Record<string, unknown>): { action: string; reason: string; label: string | null; effective_tier: string | null } {
   const input = JSON.stringify(envelope);
-  const r = spawnSync(process.execPath, [BRIDGE], {
+  const r = spawnSync(resolveNodeExe(), [BRIDGE], {
     input,
     encoding: "utf8",
     timeout: 10000,
