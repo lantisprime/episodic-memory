@@ -333,7 +333,7 @@ Sibling to `taxonomy.json`, same authority, same hash-version pattern, same `val
       "fires_on": "About to invoke a tool (Bash/Edit/Write/etc.) — before side effects",
       "payload_schema": "schemas/events/event-pre-tool-use.schema.json",
       "actions": {
-        "STRONG": { "id": "block",  "semantics": "Tool call refused. Harness returns non-zero exit from hook (Claude Code: exit 2; OpenCode: throw; Codex: dict {block:true})." },
+        "STRONG": { "id": "block",  "semantics": "Tool call refused. Harness returns non-zero exit from hook (Claude Code: exit 2; OpenCode: throw; Codex: exit code 2 + stderr reason, or hookSpecificOutput.permissionDecision:\"deny\"; legacy {decision:\"block\"} also accepted)." },
         "MEDIUM": { "id": "warn",   "semantics": "Marker file written at canonical path; warning string surfaced via side-band log; tool call proceeds. Catches lifecycle-gated checks but cannot block real-time." },
         "WEAK":   { "id": "inject", "semantics": "Warning string injected into next model turn's system prompt (or harness equivalent). No programmatic effect this turn." }
       }
@@ -830,7 +830,7 @@ After this lands, a new plugin author writes ~3 things, not ~30:
 
 1. `manifest.json` (filled-in scaffold from `add-enforcement-plugin` skill).
 2. `capabilities/enforcement.{mjs,ts,py}` — the adapter (harness-specific I/O translation, ~100 LOC).
-3. **Harness-specific tests** — only for code paths the universal gauntlet can't cover (e.g., "does the Codex Python hook correctly read stdin when invoked from `~/.codex/hooks/`"). Anything cross-harness is covered by `test-plugin.mjs`.
+3. **Harness-specific tests** — only for code paths the universal gauntlet can't cover (e.g., "does the Codex node command hook correctly read stdin when invoked from `<project>/.codex/hooks/`"). Anything cross-harness is covered by `test-plugin.mjs`.
 
 Today, every gate-adjacent script ships its own 200–400 line bespoke test harness (`test-checkpoint-gate.sh` 343 cases, `test-command-classifier.sh` 428 cases, `test-classifier-marker.mjs` 30 cases, etc. — each reinvents fixture loading, assert helpers, and exit-code conventions). After this RFC ships: one harness, N plugins, deterministic.
 
@@ -916,7 +916,9 @@ effective_tier(gate, harness) = min(
 | Cursor | **STRONG** | **MEDIUM** | **MEDIUM** | **STRONG** | **STRONG** | `plugins/cursor/` |
 | Windsurf | — | — | — | **WEAK** | — | `plugins/windsurf/` |
 
-**Codex pre_tool_use correction (R3 → P5):** declared MEDIUM, not STRONG. Codex PreToolUse is a guardrail with a known multi-edit bypass — "Hard mechanical enforcement (block-on-fail)" per P5 is not satisfied. Bypass documented in the manifest.
+**Codex pre_tool_use correction (R3 → P6):** declared **MEDIUM** (mechanism STRONG). Empirically verified (real codex 0.142.3, `memory/knowledge_base/codex-hooks.md`): a project-local PreToolUse deny hook hard-blocked apply_patch and all 6 shell forms; no bypass reproduced — the prior multi-edit-bypass rationale is refuted and the mechanism is STRONG. The tier stays MEDIUM because the delivered capability includes Bash, whose write-target lexing has a known residual (the unlexable forms outside the bounded MUST-CATCH extractor scope; P6 plan §12.1) — a MEDIUM ceiling in bypass_known.json, not clean-audit.
+
+**Codex P6 scope (R6 → P6):** P6 ships pre_tool_use enforcement only (declared MEDIUM — mechanism STRONG, capped by the Bash-write lexing residual); the manifest declares pre_tool_use. stop/session_start (STRONG in the matrix above) are deferred — the canonical event schemas require fields (is_subagent, harness, integer turn_index) that raw codex stdin lacks and the binding grammar cannot synthesize from `$$const`; tracked in the P6 follow-up issue.
 
 **Cursor v11.1 correction (R3, R6; F43/OQ-3 closure):** Cursor was previously listed as `WEAK` across all events. Official Cursor docs (cached at `memory/knowledge_base/cursor-hooks.md`, fetched 2026-05-28) confirm Cursor exposes a 16+ event programmatic hook system including blocking hooks (`preToolUse`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`) that satisfy "Hard mechanical enforcement (block-on-fail)" via `permission: "deny"` + exit code `2`. Corrected matrix: pre_tool_use=STRONG (multiple blocking hooks), tool_result=MEDIUM (`postToolUse` can `updated_mcp_tool_output` + `additional_context` but not full result mutation), stop=MEDIUM (`stop` hook can trigger followup auto-submission via `followup_message` — re-enters loop rather than refuses stop cleanly, semantically MEDIUM), session_start=STRONG (`sessionStart` injects `additional_context` deterministically), session_end=STRONG (`sessionEnd` fires deterministically with audit payload). Cursor sits architecturally next to Claude Code / OpenCode, NOT next to Windsurf.
 
@@ -1186,7 +1188,7 @@ Summary (full file lists + architecture in the linked per-phase files):
 | **P3** | Thin waist + classifier runtime-sourcing + em-recall purification | 3 | 6 | ~55K | P0, P2 | R1, R2, R3, R4, R5, R9 |
 | **P4** | Per-project `enforce-config.json` | 1 | 3 | ~25K | P3 | R3, R5 |
 | **P5** | OpenCode plugin (TS) | 5 | 0 | ~45K | P3 | R6, R10 |
-| **P6** | Codex plugin (Python) | 5 | 0 | ~40K | P3 | R6, R10 |
+| **P6** | Codex plugin (node command hook) | 5 | 0 | ~40K | P3 | R6, R10 |
 | **P7** | Pi Agent plugin | 5 | 0 | ~35K | P3 | R6, R10 |
 | **P8** | Cursor (full adapter) + Windsurf (static-rules) plugins — added per F43 | 8 | 0 | ~45K | P3 | R6, R10 |
 | **P9** | Pluggable recall strategies — *deferred to its own RFC* | 5 | 1 | ~50K | — | R7 |
@@ -1217,7 +1219,7 @@ Serves R3, R5 · depends on: P3 · **DONE (P4a #397, P4c #398, P4d S1-S8 + ESC).
 
 #### P5–P7 — Per-tool plugins (OpenCode / Codex / Pi Agent) → [RFC-008/P5-P7-tool-plugins.md](RFC-008/P5-P7-tool-plugins.md)
 
-Serves R6, R10 · depends on: P3 · **P5 DONE (#424 `f5dbaef`, doc fix #425); P6 / P7 queued** *(legacy "Phase 6/7/8")*. Same template instantiated three times: `manifest.json` + adapter + 10-section runbook + fixtures, each at its declared capability tiers. Codex `pre_tool_use: MEDIUM` (multi-edit bypass documented).
+Serves R6, R10 · depends on: P3 · **P5 DONE (#424 `f5dbaef`, doc fix #425); P6 IN PROGRESS (Codex, plan codex-ACCEPTED 2026-06-28); P7 queued** *(legacy "Phase 6/7/8")*. Same template instantiated three times: `manifest.json` + adapter + 10-section runbook + fixtures, each at its declared capability tiers. Codex `pre_tool_use: MEDIUM` (mechanism STRONG; Bash-write lexing residual caps the tier — KB codex-hooks.md).
 
 #### P8 — Cursor + Windsurf plugins → [RFC-008/P8-cursor-windsurf.md](RFC-008/P8-cursor-windsurf.md)
 
@@ -1295,7 +1297,7 @@ Full analysis: episode `20260527-073522-deadlock-analysis-7-classes-traced-again
 | Keep gate decision inside `em-recall.mjs` (RFC-003:506 stance) | Collapses recall+react into one script; soft P1 violation and P9 tension. Blocks cross-tool reach — each new harness re-derives plumbing instead of declaring a capability mapping. This RFC supersedes that commitment. |
 | Single boolean `arms_pre_checkpoint` per label (v3 taxonomy) | Cannot express three gates with different label subsets. `push_or_pr_create` was factually wrong (arms post-checkpoint, not pre-checkpoint); `nonsrc_write` blocks plan-approval but not pre-checkpoint. Replaced by per-gate `gates: {plan_approval, pre_checkpoint, post_checkpoint}`. |
 | Make all taxonomy labels overridable | A plugin could redefine `unsafe_complex` as `read_only` (bypass all gates) or misclassify `marker_write` as `shared_write` (unrecoverable deadlock class 1). `unsafe_complex` + `marker_write` are non-overridable. |
-| Declare Codex `pre_tool_use` STRONG | Dishonest per P5 — Codex PreToolUse has a known multi-edit bypass. Declared MEDIUM with the bypass documented; push-gate + stop-gate are the hard enforcement for Codex. |
+| Declare Codex `pre_tool_use` STRONG | Dishonest per P5 — Codex PreToolUse has a known multi-edit bypass. Declared MEDIUM with the bypass documented; push-gate + stop-gate are the hard enforcement for Codex. **Refined (P6, 2026-06-28):** the probe (KB codex-hooks.md) refuted the multi-edit basis and proved the MECHANISM is STRONG, but the Bash-write lexing residual keeps the declared tier at MEDIUM (bypass_known ceiling) — declaring STRONG would still be dishonest. |
 | Two node spawns in Phase 3 (validate, then delegate) | Doubles startup latency. Single node entry with two invocation modes (in-process import for STRONG harnesses; CLI spawn for degrade). |
 | Include Phase 9 recall strategies in this RFC | Recall strategies are substrate-side, not enforcement. The semantic strategy's embedding dependency conflicts with P6 and must be decided in RFC-001/RFC-007. Carved out. |
 | Gate during planning/exploration (pre-R9 behavior) | Reintroduced planning-time friction — read-only node/inspection commands mis-blocked. R9 makes the pre-checkpoint inert until the implementation boundary; F1 RESIDUAL (#351) is the accepted trade. |
@@ -1317,7 +1319,7 @@ graph TD
     P3["P3 — Phase 3: enforce-contract.mjs thin waist<br/>(R1, R2, R3, R5, R9)"]
     P4["P4 — Phase 5: enforce-config.json<br/>(R3, R5)"]
     P5["P5 — Phase 6: OpenCode plugin (TS)<br/>(R6, R10)"]
-    P6["P6 — Phase 7: Codex plugin (Python)<br/>(R6, R10)"]
+    P6["P6 — Phase 7: Codex plugin (node command hook)<br/>(R6, R10)"]
     P7["P7 — Phase 8: Pi Agent plugin<br/>(R6, R10)"]
     BUG["Bug — plan-gate.sh:108-115 reorder<br/>(R4, deadlock class 2)"]
     P9["Phase 9 — recall strategies<br/>(R7) — CARVE TO OWN RFC"]
@@ -1365,7 +1367,7 @@ graph TD
 | 1 | Phase 3 double node spawn latency | Single node entry, two invocation modes (import vs CLI) | R1 |
 | 2 | Phase 1 70K estimate inflated | Corrected to ~25-30K (git mv + path patching) | P1 |
 | 3 | Phase 9 does not belong | Carve into own RFC; semantic has embedding dependency | R7 |
-| 4 | Codex pre_tool_use: STRONG dishonest | Corrected to MEDIUM with bypass documented | R3 |
+| 4 | Codex pre_tool_use: STRONG dishonest | Corrected to MEDIUM (R3); **basis refined (P6): multi-edit refuted, mechanism STRONG, but Bash-lexing residual caps the tier at MEDIUM — KB codex-hooks.md** | R3 |
 | 5 | Taxonomy drift | Canonical `patterns/taxonomy.json` + validator | R4 |
 | 6 | BP contract: repo vs episode | Contracts = git-versioned files; episodes = runtime state | R2 |
 | 7 | Effective-tier formula omits Phase 5 | Ternary `min(harness, contract, config)` | R3 |
