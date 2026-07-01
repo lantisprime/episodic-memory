@@ -115,6 +115,38 @@ function startCodex(t, win, mock) {
   t('send-keys', '-t', win, CODEX, 'Enter');
 }
 
+// Codex startup shows a VARIABLE sequence of prompts before it is ready: an optional
+// "Update available … Press enter to continue" notice, an optional directory-trust prompt,
+// and a hook-trust prompt ("Hooks need review"). The exact set + ordering + wording drifts
+// across codex builds, so drive it as a LOOP that dismisses whatever appears rather than a
+// fixed sequence. trustMode: 'all' (Trust all and continue) | 'none' (Continue without trusting).
+function navigateStartup(t, win, trustMode) {
+  const deadline = Date.now() + 120000;
+  let hookHandled = false;
+  while (Date.now() < deadline) {
+    const pane = capture(t, win);
+    // Ready once the hook-trust decision is made and the model status line is showing.
+    if (hookHandled && /gpt-5\.5\s+(high|medium|low|default|minimal)/i.test(pane)) return;
+    // Update notice — Skip (option 2). NEVER a bare Enter (could select "Update now" → brew).
+    if (/Update available/i.test(pane) && /Skip until next version|Press enter to continue/i.test(pane)) {
+      t('send-keys', '-t', win, '2', 'Enter'); sleepMs(1500); continue;
+    }
+    // Hook-trust — decide per mode. Checked BEFORE dir-trust: some builds show only this prompt.
+    if (!hookHandled && /Hooks need review|hook is new or changed/i.test(pane)) {
+      t('send-keys', '-t', win, trustMode === 'all' ? '2' : '3', 'Enter');
+      hookHandled = true; sleepMs(1500); continue;
+    }
+    // Directory-trust — accept (default option 1 = Yes). Match several wordings; exclude the
+    // hook-trust prompt (handled above) so we never mis-handle it here.
+    if (!/Hooks need review/i.test(pane) &&
+        /trust the contents of this directory|do you want to allow codex|allow codex to work|trust this (folder|directory)/i.test(pane)) {
+      t('send-keys', '-t', win, 'Enter'); sleepMs(1500); continue;
+    }
+    sleepMs(1000);
+  }
+  throw new Error(`navigateStartup timeout (trust=${trustMode}, hookHandled=${hookHandled})\n--- pane ---\n${capture(t, win)}`);
+}
+
 function waitFor(t, win, re, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
   let last = '';
@@ -156,12 +188,7 @@ function driveOnce(trust) {
   try {
     try { execFileSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server yet */ }
     startCodex(t, win, dir);
-    waitFor(t, win, /trust the contents of this directory/i, 30000, 'dir-trust');
-    t('send-keys', '-t', win, 'Enter');                       // option 1: Yes, continue
-    waitFor(t, win, /Hooks need review|hook is new or changed/i, 30000, 'hook-trust');
-    if (trust === 'all') t('send-keys', '-t', win, '2', 'Enter'); // Trust all and continue
-    else t('send-keys', '-t', win, '3', 'Enter');                 // Continue without trusting
-    waitFor(t, win, /gpt-5\.5\s+(high|medium|low|default|minimal)/i, 45000, 'model-ready');
+    navigateStartup(t, win, trust);
     sleepMs(3000);
     pastePrompt(t, win, PROMPT);
     sleepMs(2000);
@@ -246,11 +273,7 @@ function testEnforcementProof() {
   try {
     try { execFileSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server yet */ }
     startCodex(t, win, dir);
-    waitFor(t, win, /trust the contents of this directory/i, 30000, 'dir-trust');
-    t('send-keys', '-t', win, 'Enter');                       // option 1: Yes, continue
-    waitFor(t, win, /Hooks need review|hook is new or changed/i, 30000, 'hook-trust');
-    t('send-keys', '-t', win, '2', 'Enter');                  // Trust all and continue
-    waitFor(t, win, /gpt-5\.5\s+(high|medium|low|default|minimal)/i, 45000, 'model-ready');
+    navigateStartup(t, win, 'all');
     sleepMs(3000);
     pastePrompt(t, win, ENFORCE_PROMPT);
     sleepMs(2000);
@@ -274,7 +297,12 @@ function main() {
     console.log('SKIP - codex and/or tmux not available; this is a manual live-codex proof.');
     process.exit(0);
   }
-  const tests = [['firingProof', testFiringProof], ['trustGate', testTrustGate], ['enforcementProof', testEnforcementProof]];
+  const all = [['firingProof', testFiringProof], ['trustGate', testTrustGate], ['enforcementProof', testEnforcementProof]];
+  // Optional positional filter: `node codex-tmux-e2e.mjs enforcementProof` runs a subset (each
+  // drive is a slow real-codex session, so running one proof at a time is often what you want).
+  const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+  const tests = only.length ? all.filter(([n]) => only.includes(n)) : all;
+  if (!tests.length) { console.error(`no matching proof for: ${only.join(', ')} (have: ${all.map(([n]) => n).join(', ')})`); process.exit(1); }
   let pass = 0;
   for (const [name, fn] of tests) {
     try { fn(); console.log(`ok - ${name}`); pass++; }
