@@ -3,7 +3,7 @@
 > Part of [RFC-008](../RFC-008-decouple-enforcement-from-substrate.md). Index:
 > [RFC-008/README.md](README.md).
 
-**Status:** P5 **DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425 `a7f66c9`). **P6 DONE** (Codex plugin `plugins/codex/`, #431 `3b91f9b`). **P7 DONE** (Pi Agent in-process `tool_call` extension `plugins/pi-agent/`, MEDIUM-honest `pre_tool_use`; S0-S6 + conformance gauntlet; PR #TBD). *(Legacy "Phase 6 / 7 / 8".)*
+**Status:** P5 **DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425 `a7f66c9`). **P6 DONE** (Codex plugin `plugins/codex/`, #431 `3b91f9b`). **P7 DONE** (Pi Agent in-process `tool_call` extension `plugins/pi-agent/`, MEDIUM-honest `pre_tool_use`; S0-S6 + conformance gauntlet; #437). *(Legacy "Phase 6 / 7 / 8".)*
 **Serves:** R6 (plugin-to-harness binding), R10 (enforcement runbooks).
 **Depends on:** P3.
 **Estimate:** P5 ~45K · P6 ~40K · P7 ~35K.
