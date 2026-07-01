@@ -3,7 +3,7 @@
 > Part of [RFC-008](../RFC-008-decouple-enforcement-from-substrate.md). Index:
 > [RFC-008/README.md](README.md).
 
-**Status:** P5 **DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425 `a7f66c9`). **P6 DONE** (Codex plugin `plugins/codex/`, #431 `3b91f9b`). P7 queued. *(Legacy "Phase 6 / 7 / 8".)*
+**Status:** P5 **DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425 `a7f66c9`). **P6 DONE** (Codex plugin `plugins/codex/`, #431 `3b91f9b`). **P7 DONE** (Pi Agent in-process `tool_call` extension `plugins/pi-agent/`, MEDIUM-honest `pre_tool_use`; S0-S6 + conformance gauntlet; PR #TBD). *(Legacy "Phase 6 / 7 / 8".)*
 **Serves:** R6 (plugin-to-harness binding), R10 (enforcement runbooks).
 **Depends on:** P3.
 **Estimate:** P5 ~45K · P6 ~40K · P7 ~35K.
@@ -46,7 +46,7 @@ graph TB
 |-------|-----|----------|-----------------------|
 | **P5** | `plugins/opencode/` | TypeScript | `pre_tool_use: STRONG, tool_result: MEDIUM` *(honesty downgrade, see note)*`, session_start: MEDIUM, stop: MEDIUM` |
 | **P6** | `plugins/codex/` | node command hooks | `pre_tool_use: MEDIUM` *(mechanism STRONG; Bash-write lexing residual caps the tier — KB codex-hooks.md)*, `stop: STRONG, session_start: STRONG` |
-| **P7** | `plugins/pi-agent/` | `tool_call` + `session_shutdown`/`turn_end` | `pre_tool_use: STRONG, stop: MEDIUM, session_start: STRONG` |
+| **P7** | `plugins/pi-agent/` | `tool_call` (in-process extension) | `pre_tool_use: MEDIUM` *(honesty downgrade — mechanism STRONG, Bash-lexing residual caps the tier; see note)*; `session_start`/`stop` DEFERRED (#434) |
 
 **Honesty note (P5 principle):** Codex `pre_tool_use` is declared **MEDIUM** (mechanism STRONG).
 The empirical probe (codex 0.142.3, `memory/knowledge_base/codex-hooks.md`) blocked apply_patch + all
@@ -54,6 +54,19 @@ The empirical probe (codex 0.142.3, `memory/knowledge_base/codex-hooks.md`) bloc
 rationale is refuted; the tier stays MEDIUM because the Bash-write lexing residual (unlexable forms
 outside the bounded MUST-CATCH extractor scope) is a real known bypass (bypass_known MEDIUM ceiling,
 not clean-audit). stop/session_start deferred (schema/binding gap).
+
+**Honesty note (P7 `pre_tool_use`):** declared **MEDIUM**, NOT the RFC's original STRONG. Pi's
+`tool_call` MECHANISM is STRONG (the handler returns `{block:true}` synchronously pre-execution).
+Proven live against a real `pi` TUI (v0.80.3, cmux E2E): a `write`/`edit` tool call and a bash
+redirect to a repo-source path (`src/blocked.mjs`) are both hard-blocked
+(`repo-source write gated (tool=write|bash, tier=STRONG)`), and a carve-out write
+(`docs/plans/note.md`) is allowed (R1-R3). But the Bash-write lexing residual — unlexable
+interpreter-internal writes (`python3 -c`/`eval`/`$VAR`/command-substitution/`node -e`) — escapes the
+frozen extractor; reproduced live (`python3 -c "open('src/blocked.mjs','w').write(...)"` created the
+file the `write`/bash forms could not), which is exactly why the honest delivered tier is **MEDIUM**
+(`bypass_known.json` MEDIUM ceiling). Matches codex/opencode. `session_start` (STRONG via
+`before_agent_start`) + `stop` are DEFERRED to a follow-up (issue #434); the first PR ships
+`pre_tool_use` only.
 
 **Honesty note (OpenCode `tool_result`):** declared **MEDIUM**, not STRONG. The installed
 `tool.execute.after` hook output (`output.output`) IS mutable, so result rewrite is mechanically
