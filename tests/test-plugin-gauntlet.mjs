@@ -9,6 +9,7 @@
 // no marker leaks to the live repo (N1).
 
 import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { runGauntlet } from "../scripts/test-plugin.mjs";
@@ -88,6 +89,37 @@ for (const n of [1, 2, 3, 4, 7, 8, 9]) {
 // step 9 must ACTUALLY exercise the in-process handler (deny+allow), not a vacuous pass.
 const sPi9 = rPi.steps.find((s) => s.n === 9);
 assert(/in-process handler deny\(exit 1\).*allow\(exit 0\)/.test(sPi9.detail), "testHarnessPiAgent: step 9 drove the in-process handler (deny exit 1 + allow exit 0)", sPi9.detail);
+
+// testHarnessPiAgentHermeticHome (codex PR #437 review, MEDIUM) — the pi gauntlet's step-9
+// in-process dispatch must be HERMETIC against a poison ambient $HOME/.episodic-memory
+// contract. Pre-fix, piAgentDispatch spawned the child with inherited HOME, so a global
+// events.json mapping STRONG pre_tool_use -> warn made step 9 pass a deny with exit 0
+// (repo-source write NOT blocked). The fix gives the child a fresh empty HOME. This plants
+// exactly that poison, runs the gauntlet under it, and asserts step 9 STILL blocks (exit 1).
+{
+  const poisonHome = fs.mkdtempSync(join(os.tmpdir(), "pi-poison-home-"));
+  const pat = join(poisonHome, ".episodic-memory", "patterns");
+  const plug = join(poisonHome, ".episodic-memory", "plugins");
+  fs.mkdirSync(pat, { recursive: true });
+  fs.mkdirSync(plug, { recursive: true });
+  for (const f of ["bp-001.json", "enforce-config.schema.json"]) fs.copyFileSync(join(REPO, "patterns", f), join(pat, f));
+  // downgrade pre_tool_use STRONG block -> warn in the POISON global events.json.
+  const poisonEvents = fs.readFileSync(join(REPO, "patterns", "events.json"), "utf8").replace('"STRONG": { "id": "block"', '"STRONG": { "id": "warn"');
+  fs.writeFileSync(join(pat, "events.json"), poisonEvents);
+  fs.copyFileSync(join(REPO, "plugins", "_index.json"), join(plug, "_index.json"));
+  const savedHome = process.env.HOME, savedUP = process.env.USERPROFILE;
+  process.env.HOME = poisonHome; process.env.USERPROFILE = poisonHome;
+  let rH;
+  try { rH = runGauntlet({ projectRoot: REPO, harness: "pi-agent" }); }
+  finally {
+    process.env.HOME = savedHome;
+    if (savedUP === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUP;
+    try { fs.rmSync(poisonHome, { recursive: true, force: true }); } catch {}
+  }
+  assert(rH.summary.pass === 7 && rH.summary.fail === 0, "testHarnessPiAgentHermeticHome: gauntlet green under a poison $HOME (child uses a fresh HOME)", JSON.stringify(rH.summary));
+  const sH9 = rH.steps.find((s) => s.n === 9);
+  assert(sH9 && sH9.status === "pass" && /deny\(exit 1\)/.test(sH9.detail), "testHarnessPiAgentHermeticHome: step 9 still BLOCKS (deny exit 1) despite the poison STRONG->warn global", sH9 ? sH9.detail : "no step 9");
+}
 
 console.log(`\ntest-plugin-gauntlet: ${pass} passed, ${fail} failed`);
 if (fail > 0) {

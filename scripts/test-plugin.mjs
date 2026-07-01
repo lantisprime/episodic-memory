@@ -493,6 +493,13 @@ function piAgentDispatch(root, manifest, am) {
   const newMarkers = (base, before) => [...snapshot(base)].filter((f) => !before.has(f));
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tp-pi-sbx-"));
   const procCwd = fs.mkdtempSync(path.join(os.tmpdir(), "tp-pi-cwd-")); // divergent process cwd
+  // HERMETICITY (codex PR #437 review): the child imports the repo adapter, whose
+  // resolveContractRoot/loadCarveouts consult $HOME/.episodic-memory BEFORE the repo
+  // fallback. A stale/poison ambient global contract could otherwise change step 9
+  // (e.g. events.json downgrading STRONG->warn -> a covered write allowed) while
+  // read_trace shows only repo files. Give the child a FRESH empty HOME so it can only
+  // resolve the repo-local contract — the gauntlet becomes a hermetic proof.
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "tp-pi-home-"));
   const liveBefore = snapshot(root);
   const procBefore = snapshot(procCwd);
   // subprocess driver: import the entry, call handler, map decision -> exit code.
@@ -508,7 +515,7 @@ function piAgentDispatch(root, manifest, am) {
     const idxUrl = pathToFileURL(indexPath).href;
     const run = (rel) => spawnSync(process.execPath, ["--input-type=module", "-e", driver], {
       cwd: procCwd, encoding: "utf8", timeout: 15000,
-      env: { ...process.env, PI_INDEX: idxUrl, PI_CWD: sandboxRoot, PI_REL: rel },
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome, PI_INDEX: idxUrl, PI_CWD: sandboxRoot, PI_REL: rel },
     });
     const rd = run("src/app.mjs");        // repo-source write → deny (exit 1)
     const ra = run("docs/plans/note.md"); // carve-out write → allow (exit 0)
@@ -520,6 +527,7 @@ function piAgentDispatch(root, manifest, am) {
     procLeak = newMarkers(procCwd, procBefore);
     try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
     try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}
   }
 
   return {

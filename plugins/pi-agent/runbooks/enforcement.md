@@ -57,19 +57,18 @@ and out of scope for P7 (S3 deferred).
 
 ## §3 — Classifier mode & emitted labels
 
-Mode is `override`: the Pi plugin ships its own harness-native classifier
-(`enforcement.js`, declared via `classifier.override_path`) that maps Pi tool
-calls to a subset of the canonical taxonomy — `read_only`, `shared_write`,
-and `push_or_pr_create` — and treats any unrecognized write-surface tool as
-`shared_write`. The label is telemetry / deny-reason only; it does NOT gate
-(gating is per-path `isRepoSource`, §5). The two non-overridable labels —
-`marker_write` and `unsafe_complex` — are safety/deadlock-critical: they are
-DECLARED in the manifest `emits_labels` vocabulary (required by M5a) so the
-substrate keeps routing them and no override classifier can remap or drop them.
-`classifyLabel` does not itself emit `marker_write` or `unsafe_complex` yet —
-marker writes under `.checkpoints/` are handled by the repo-source carve-out
-(§4), not by label routing — so the declaration is a static safety floor, not a
-claim of runtime emission (same pattern as the codex and opencode plugins).
+Mode is `override`: the manifest declares `classifier.override_path` =
+`enforcement.js`. Unlike a label-emitting classifier, the Pi adapter gates by PATH
+directly (`isRepoSource`, §5) — it does NOT implement a `classifyLabel` function and
+does NOT emit taxonomy labels at runtime: a covered repo-source write returns
+`{block:true,reason}`, everything else returns `undefined`. The 5-label vocabulary
+(`read_only`, `shared_write`, `push_or_pr_create`, and the two non-overridable
+`marker_write` / `unsafe_complex`) is DECLARED in the manifest `emits_labels` (required
+by M5a) as a static safety FLOOR — the substrate keeps routing the non-overridable
+labels and no override may remap or drop them — NOT a claim of runtime emission. Marker
+writes under `.checkpoints/` are allowed by the repo-source carve-out (§4), not by label
+routing. (Same static-floor posture as the codex/opencode plugins, whose adapters map
+labels for telemetry; the Pi adapter does not.)
 
 ## §4 — Repo-source gate scope
 
