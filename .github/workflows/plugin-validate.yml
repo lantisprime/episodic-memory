@@ -64,6 +64,9 @@ jobs:
       - name: Run codex plugin gauntlet (RFC-008 P6, REQ-1/REQ-6)
         run: node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness codex
 
+      - name: Run pi-agent plugin gauntlet (RFC-008 P7, REQ-1/REQ-6 — in-process extension)
+        run: node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness pi-agent
+
       - name: Run opencode translation tests (RFC-008 P5 S2, R3/R4)
         run: node tests/test-opencode-translations.mjs
 
@@ -90,6 +93,15 @@ jobs:
 
       - name: Run codex install/uninstall E2E (RFC-008 P6 S4, REQ-11)
         run: node tests/test-install-codex-enforcement.mjs
+
+      - name: Run pi-agent install/uninstall E2E (RFC-008 P7 S5, P12 closure)
+        run: node tests/test-install-pi-enforcement.mjs
+
+      - name: Run pi-agent adapter unit tests (RFC-008 P7 S2)
+        run: node tests/test-pi-adapter.mjs
+
+      - name: Run pi-agent bash-extractor parity (RFC-008 P7 S2, OD-1)
+        run: node tests/test-pi-bash-parity.mjs
 
       - name: Run codex fixture + runbook §9 smoke (REQ-17)
         run: node tests/test-codex-fixture-smoke.mjs

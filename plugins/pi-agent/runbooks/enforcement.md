@@ -185,7 +185,7 @@ cross-checks `invocation_modality` against §8 and the manifest.
   "command_shapes": [["pi", "-e", "{plugin_dir}/index.js"]],
   "required_args": [],
   "optional_args": [],
-  "expected_outputs": { "shape": "json-object" },
+  "expected_outputs": { "shape": "in-process-decision" },
   "env_requirements": [],
   "return_codes": {
     "0": "allow — handler returns undefined (non-repo / carve-out / gitignored / no-target / read tool)",

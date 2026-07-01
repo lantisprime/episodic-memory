@@ -298,6 +298,25 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
         problems.push(`N1 codex-native root-source breach: marker appeared under divergent process cwd (${iso.procLeak}) — adapter used process cwd, not stdin cwd`);
     }
     passDetail = `§9 surface-truth ok; codex-native deny exit ${iso.denyExit} + permissionDecision:${iso.denyDecision && iso.denyDecision.hookSpecificOutput && iso.denyDecision.hookSpecificOutput.permissionDecision}; allow exit ${iso.allowExit}; no marker leak (N1)`;
+  } else if (modality === "in-process-decision") {
+    // A Pi-style in-process extension (pi-agent enforcement.js): the harness loads
+    // the entry module and calls handler(event, ctx) synchronously per tool_call,
+    // returning {block:true,reason} to deny / undefined to allow. Dispatched TWICE
+    // (deny repo-source + allow carve-out) via a subprocess that imports the entry
+    // and maps the decision to an exit code (1=deny, 0=allow). Stateless: the handler
+    // mutates NO marker, so N1 isolation is the no-leak assertion.
+    const iso = piAgentDispatch(root, manifest, am);
+    read_trace.push(...iso.read_trace);
+    if (iso.error) problems.push(`N1 in-process: ${iso.error}`);
+    else {
+      if (!iso.denyBlocked) problems.push(`N1 surface-truth: documented dispatch (repo-source write) did not deny (exit ${iso.denyExit}, out ${JSON.stringify((iso.denyOut || "").slice(0, 120))})`);
+      if (!iso.allowAllowed) problems.push(`N1 surface-truth: carve-out write was not allowed (exit ${iso.allowExit}) — over-block (R1)`);
+      if (iso.denyExit == null || !(String(iso.denyExit) in am.return_codes)) problems.push(`in-process deny exit ${iso.denyExit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+      if (iso.allowExit == null || !(String(iso.allowExit) in am.return_codes)) problems.push(`in-process allow exit ${iso.allowExit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+      if (!iso.isolationHeld) problems.push(`N1 isolation breach: a .checkpoints/.* marker appeared under the live --project after an in-process dispatch (${iso.liveLeak})`);
+      if (!iso.cwdHeld) problems.push(`N1 root-source breach: a .checkpoints/.* marker appeared under the divergent process cwd (${iso.procLeak})`);
+    }
+    passDetail = `§9 surface-truth ok; in-process handler deny(exit ${iso.denyExit}) on repo-source + allow(exit ${iso.allowExit}) on carve-out; stateless (no marker mutated); root from ctx.cwd`;
   } else {
     problems.push(`unsupported expected_outputs.shape ${JSON.stringify(modality)} — step 9 cannot prove invocation parity`);
   }
@@ -455,6 +474,62 @@ function bridgeDispatch(root, manifest, am) {
     liveLeak: liveLeak.join(","),
     cwdHeld: procLeak.length === 0, //       bridge used input cwd, not divergent process cwd
     procLeak: procLeak.join(","),
+  };
+}
+
+// Dispatch a Pi-style in-process extension (pi-agent enforcement.js) TWICE in a
+// throwaway git-init sandbox: deny (repo-source write) + allow (carve-out write).
+// The handler is async and returns a decision object, so a tiny ESM subprocess
+// imports the entry, calls handler(event, ctx), and maps {block:true}->exit 1 /
+// undefined->exit 0 (keeping the sync gauntlet sync). The process cwd is DIVERGENT
+// from ctx.cwd; the handler resolves repoRoot from ctx.cwd (git toplevel), never
+// process.cwd(). A stateless handler mutates NO marker, so N1 is the no-leak check.
+function piAgentDispatch(root, manifest, am) {
+  const read_trace = [];
+  const pluginDir = path.join(root, "plugins", manifest.harness);
+  const indexPath = path.join(pluginDir, "index.js");
+  read_trace.push(indexPath);
+  const snapshot = (base) => { try { return new Set(fs.readdirSync(path.join(base, ".checkpoints"))); } catch { return new Set(); } };
+  const newMarkers = (base, before) => [...snapshot(base)].filter((f) => !before.has(f));
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tp-pi-sbx-"));
+  const procCwd = fs.mkdtempSync(path.join(os.tmpdir(), "tp-pi-cwd-")); // divergent process cwd
+  const liveBefore = snapshot(root);
+  const procBefore = snapshot(procCwd);
+  // subprocess driver: import the entry, call handler, map decision -> exit code.
+  const driver = 'const {handler}=await import(process.env.PI_INDEX);const r=await handler({toolName:"write",input:{path:process.env.PI_REL}},{cwd:process.env.PI_CWD});process.stdout.write(JSON.stringify(r===undefined?{allow:true}:r));process.exit(r&&r.block===true?1:0);';
+
+  let err = null, deny = null, allow = null, liveLeak = [], procLeak = [];
+  try {
+    if (!fs.existsSync(indexPath)) throw new Error(`extension entry missing: ${indexPath}`);
+    execFileSync("git", ["init", "-q"], { cwd: sandbox });
+    const sandboxRoot = fs.realpathSync(sandbox); // ABSOLUTE ctx.cwd — handler's authoritative root
+    fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
+    fs.writeFileSync(path.join(sandboxRoot, "src", "SENTINEL.mjs"), "// sentinel\n");
+    const idxUrl = pathToFileURL(indexPath).href;
+    const run = (rel) => spawnSync(process.execPath, ["--input-type=module", "-e", driver], {
+      cwd: procCwd, encoding: "utf8", timeout: 15000,
+      env: { ...process.env, PI_INDEX: idxUrl, PI_CWD: sandboxRoot, PI_REL: rel },
+    });
+    const rd = run("src/app.mjs");        // repo-source write → deny (exit 1)
+    const ra = run("docs/plans/note.md"); // carve-out write → allow (exit 0)
+    deny = { exit: typeof rd.status === "number" ? rd.status : null, out: rd.stdout || "" };
+    allow = { exit: typeof ra.status === "number" ? ra.status : null, out: ra.stdout || "" };
+  } catch (e) { err = `pi dispatch failed: ${e.message}`; }
+  finally {
+    liveLeak = newMarkers(root, liveBefore);
+    procLeak = newMarkers(procCwd, procBefore);
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
+  }
+
+  return {
+    error: err, read_trace,
+    denyExit: deny ? deny.exit : null, denyOut: deny ? deny.out : "",
+    allowExit: allow ? allow.exit : null,
+    denyBlocked: !!(deny && deny.exit === 1),
+    allowAllowed: !!(allow && allow.exit === 0),
+    isolationHeld: liveLeak.length === 0, liveLeak: liveLeak.join(","),
+    cwdHeld: procLeak.length === 0, procLeak: procLeak.join(","),
   };
 }
 

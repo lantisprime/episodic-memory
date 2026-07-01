@@ -73,6 +73,22 @@ for (const n of ocPassRequired) {
   assert(s && s.status === "pass", `testHarnessOpencode: step ${n} passes`, s ? s.detail : "step not found");
 }
 
+// testHarnessPiAgent — pi-agent fixture-dir parameterized + plugin shipped (P7). Pi has a
+// runbook (S4) + a harness-event fixture + an in-process-decision §9 dispatch (S5.6), so ALL
+// non-deferred steps (1,2,3,4,7,8,9) pass; steps 5+6 are the universal P3 deferrals.
+const rPi = runGauntlet({ projectRoot: REPO, harness: "pi-agent" });
+assert(rPi.read_trace.some((p) => p.includes("plugins/pi-agent/manifest.json")), "testHarnessPiAgent: read_trace includes plugins/pi-agent/manifest.json");
+assert(rPi.read_trace.some((p) => p.includes("harness-events/pi-agent/")), "testHarnessPiAgent: read_trace includes harness-events/pi-agent/ fixture path");
+assert(rPi.summary.pass === 7 && rPi.summary.deferred === 2 && rPi.summary.fail === 0, "testHarnessPiAgent: summary 7 pass / 2 deferred / 0 fail", JSON.stringify(rPi.summary));
+assert(rPi.exit === 0, "testHarnessPiAgent: exit 0 (no failing step)", String(rPi.exit));
+for (const n of [1, 2, 3, 4, 7, 8, 9]) {
+  const s = rPi.steps.find((st) => st.n === n);
+  assert(s && s.status === "pass", `testHarnessPiAgent: step ${n} passes`, s ? s.detail : "step not found");
+}
+// step 9 must ACTUALLY exercise the in-process handler (deny+allow), not a vacuous pass.
+const sPi9 = rPi.steps.find((s) => s.n === 9);
+assert(/in-process handler deny\(exit 1\).*allow\(exit 0\)/.test(sPi9.detail), "testHarnessPiAgent: step 9 drove the in-process handler (deny exit 1 + allow exit 0)", sPi9.detail);
+
 console.log(`\ntest-plugin-gauntlet: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
   console.error("\nFAILURES:");

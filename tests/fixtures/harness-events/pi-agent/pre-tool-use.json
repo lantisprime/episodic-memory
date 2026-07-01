@@ -1,0 +1,8 @@
+{
+  "_note": "Pi tool_call event (NORMALIZED sample). The pi-agent manifest field_bindings map toolName->tool, input->tool_args, cwd->cwd, sessionId->session_id, turnIndex->turn_index, $$now->timestamp_iso8601. Spaced-path variant (src/a b.mjs) guards path.resolve quoting. cwd/sessionId sanitized to the sample repo.",
+  "toolName": "write",
+  "input": { "path": "src/a b.mjs", "content": "export const x = 1;" },
+  "cwd": "/Users/juan.delacruz/repo",
+  "sessionId": "019f0d5b-dda0-7af0-9120-f07380e2d55d",
+  "turnIndex": 0
+}
