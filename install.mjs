@@ -68,6 +68,8 @@ const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
 const REPO_PLUGIN_OPENCODE = path.join(REPO_DIR, 'plugins', 'opencode')
 // RFC-008 P6 S4: Codex enforcement plugin source (adapter + manifest + runbooks).
 const REPO_PLUGIN_CODEX = path.join(REPO_DIR, 'plugins', 'codex')
+// RFC-008 P7 S5: Pi enforcement extension source (adapter + manifest + runbooks).
+const REPO_PLUGIN_PI = path.join(REPO_DIR, 'plugins', 'pi-agent')
 
 // I-NEW-C: --install-second-opinion is atomic w.r.t. its own validation.
 // installFailed is tracked across all sub-steps so the final "Done!" banner
@@ -1823,6 +1825,120 @@ function uninstallCodexEnforcement(projectDir) {
   return report
 }
 
+// ---------------------------------------------------------------------------
+// RFC-008 P7 S5 — Pi enforcement extension install/uninstall (per-project .pi/).
+// Mirrors installCodexEnforcement but deploys under
+// <project>/.pi/extensions/episodic-memory/ and registers NOTHING: Pi
+// auto-discovers a nested .pi/extensions/<name>/index.js package in a TRUSTED
+// project (S5-prep probe, KB pi-agent-extensions.md), so there is no hooks.json
+// analogue (codex steps 0 + 5 + codexHookCommand are dropped). NEVER ~/.pi
+// (Principle 12). Activation = Pi project trust (`--approve` / interactive).
+// ---------------------------------------------------------------------------
+function piAgentEnforcementPaths(projectDir) {
+  // Normalize the project root once (realpath when it exists; resolve fallback).
+  let root
+  try { root = fs.realpathSync(projectDir) } catch { root = path.resolve(projectDir) }
+  const piDir = path.join(root, '.pi')
+  const extensionsDir = path.join(piDir, 'extensions')
+  const pluginDir = path.join(extensionsDir, 'episodic-memory')
+  const scriptsDir = path.join(pluginDir, 'scripts')
+  return {
+    piDir,
+    extensionsDir,
+    pluginDir,
+    runbooksDir: path.join(pluginDir, 'runbooks'),
+    scriptsDir,
+    scriptsLibDir: path.join(scriptsDir, 'lib'),
+    // repo-source.mjs self-relative candidate (../../patterns from scripts/lib) = pluginDir/patterns.
+    carveoutPatternsDir: path.join(pluginDir, 'patterns'),
+    // resolveContractRoot candidate-0 (bp-001.json) beside the deployed engine at pluginDir/scripts/patterns.
+    contractPatternsDir: path.join(scriptsDir, 'patterns'),
+    contractIndexPath: path.join(scriptsDir, 'plugins', '_index.json'),
+    // the extension entry Pi loads; also enforcement.js resolveScriptPath's __dirname.
+    adapterAbs: path.join(pluginDir, 'index.js'),
+  }
+}
+
+function installPiAgentEnforcement(projectDir) {
+  const report = { deployedFiles: [], registration: null, warnings: [] }
+  const P = piAgentEnforcementPaths(projectDir)
+
+  // 1. adapter (enforcement.js -> index.js) + manifest + runbooks.
+  fs.mkdirSync(P.pluginDir, { recursive: true })
+  const adDst = path.join(P.pluginDir, 'index.js')
+  fs.copyFileSync(path.join(REPO_PLUGIN_PI, 'capabilities', 'enforcement.js'), adDst)
+  report.deployedFiles.push(adDst)
+  const manDst = path.join(P.pluginDir, 'manifest.json')
+  fs.copyFileSync(path.join(REPO_PLUGIN_PI, 'manifest.json'), manDst)
+  report.deployedFiles.push(manDst)
+  const rbSrc = path.join(REPO_PLUGIN_PI, 'runbooks')
+  if (fs.existsSync(rbSrc)) { copyDirRecursive(rbSrc, P.runbooksDir); report.deployedFiles.push(P.runbooksDir) }
+
+  // 2. thin-waist closure: enforce-contract.mjs + ALL scripts/lib/*.mjs.
+  fs.mkdirSync(P.scriptsLibDir, { recursive: true })
+  const ecDst = path.join(P.scriptsDir, 'enforce-contract.mjs')
+  fs.copyFileSync(path.join(REPO_SCRIPTS, 'enforce-contract.mjs'), ecDst)
+  report.deployedFiles.push(ecDst)
+  const repoLib = path.join(REPO_SCRIPTS, 'lib')
+  for (const f of fs.readdirSync(repoLib).filter((f) => f.endsWith('.mjs')).sort()) {
+    const dst = path.join(P.scriptsLibDir, f)
+    fs.copyFileSync(path.join(repoLib, f), dst)
+    report.deployedFiles.push(dst)
+  }
+
+  // 3. carve-out JSON (repo-source.mjs self-relative candidate).
+  const coSrc = path.join(REPO_DIR, 'patterns', 'repo-source-carveouts.json')
+  if (fs.existsSync(coSrc)) {
+    fs.mkdirSync(P.carveoutPatternsDir, { recursive: true })
+    const coDst = path.join(P.carveoutPatternsDir, 'repo-source-carveouts.json')
+    fs.copyFileSync(coSrc, coDst)
+    report.deployedFiles.push(coDst)
+  }
+
+  // 4. project-local contract set beside the engine (resolveContractRoot candidate-0).
+  fs.mkdirSync(P.contractPatternsDir, { recursive: true })
+  for (const f of ['bp-001.json', 'events.json', 'enforce-config.schema.json']) {
+    const src = path.join(REPO_DIR, 'patterns', f)
+    if (fs.existsSync(src)) {
+      const dst = path.join(P.contractPatternsDir, f)
+      fs.copyFileSync(src, dst)
+      report.deployedFiles.push(dst)
+    }
+  }
+  const idxSrc = path.join(REPO_DIR, 'plugins', '_index.json')
+  if (fs.existsSync(idxSrc)) {
+    fs.mkdirSync(path.dirname(P.contractIndexPath), { recursive: true })
+    fs.copyFileSync(idxSrc, P.contractIndexPath)
+    report.deployedFiles.push(P.contractIndexPath)
+  }
+
+  // 5. NO hooks.json registration — Pi auto-discovers the nested extension in a
+  //    trusted project. File presence + trust is the load registration; the live
+  //    tool_call block is proven by the S6 E2E, not by install.
+  report.registration = 'pi auto-discovery (.pi/extensions/episodic-memory/index.js); no hooks.json'
+  console.log(`[pi-agent enforcement] deployed under ${P.pluginDir}. Run "pi" inside ${projectDir} and grant project trust (or "pi --approve") to activate enforcement.`)
+  return report
+}
+
+function uninstallPiAgentEnforcement(projectDir) {
+  const report = { removedFiles: [], removedRegistration: null, warnings: [] }
+  const P = piAgentEnforcementPaths(projectDir)
+
+  // .pi/extensions/episodic-memory is a namespace WE fully own -> recursive rm is
+  // safe (unlike codex's bare .codex/scripts). No hooks.json to surgically edit.
+  if (fs.existsSync(P.pluginDir)) {
+    assertContained(P.pluginDir, P.piDir)
+    fs.rmSync(P.pluginDir, { recursive: true, force: true })
+    report.removedFiles.push(P.pluginDir)
+    report.removedRegistration = 'pi auto-discovery (extension file removed)'
+  }
+  // prune empty .pi/extensions and .pi (leave them if the user has other files).
+  const pruneIfEmpty = (d) => { try { if (fs.existsSync(d) && fs.readdirSync(d).length === 0) { fs.rmdirSync(d); report.removedFiles.push(d) } } catch {} }
+  pruneIfEmpty(P.extensionsDir)
+  pruneIfEmpty(P.piDir)
+  return report
+}
+
 if (installHooks && !installEnforcement) {
   // P12 (RFC-008 P4d) transitional honesty (review F2): post-S2 ALL enforcement
   // (gates, libs, taxonomy/contract config, registrations) installs PER-PROJECT
@@ -1840,7 +1956,9 @@ if (uninstallEnforcement) {
     ? uninstallOpenCodeEnforcement(projectDir)
     : tool === 'codex'
       ? uninstallCodexEnforcement(projectDir)
-      : runUninstallEnforcement(projectDir, { purgeConfig })
+      : tool === 'pi-agent'
+        ? uninstallPiAgentEnforcement(projectDir)
+        : runUninstallEnforcement(projectDir, { purgeConfig })
   console.log(JSON.stringify(rep, null, 2))
 }
 
@@ -1855,6 +1973,13 @@ if (installEnforcement && tool === 'opencode') {
   // (NOT the claude-code .claude/hooks model) — handled wholly by installCodexEnforcement,
   // so it pre-empts the claude-code block below. Does NOT touch the `case 'codex'` skill.
   const rep = installCodexEnforcement(projectDir)
+  console.log(JSON.stringify(rep, null, 2))
+} else if (installEnforcement && tool === 'pi-agent') {
+  // RFC-008 P7 S5: the Pi enforcement layer deploys under
+  // <project>/.pi/extensions/episodic-memory/ (in-process extension, auto-loaded
+  // in a trusted project) — NOT the claude-code .claude/hooks model — handled
+  // wholly by installPiAgentEnforcement, so it pre-empts the claude-code block below.
+  const rep = installPiAgentEnforcement(projectDir)
   console.log(JSON.stringify(rep, null, 2))
 } else if (installHooks || installEnforcement) {
   // P12 (RFC-008 P4d): enforcement artifacts (hook files, libs, taxonomy/contract

@@ -73,14 +73,17 @@ _path_is_repo_source() {
   fi
   [ "$in_repo" = 0 ] || return 1
   # Load carve-out dirs from the shared JSON (Rule 14 single source).
-  # Resolution order (NEW-R3-1): (1) deployed canonical path used by the live
-  # ~/.claude/hooks/ copy; (2) in-repo dev/test relative path; (3) inline
-  # literals if both are unreadable (fail-safe — a deploy-lag never opens gate).
+  # Resolution order (NEW-R3-1; RFC-008 P7 increment-review BLOCKER 2 — self-relative
+  # FIRST so a per-project deployed closure trusts its own co-deployed carveouts over
+  # an ambient global, which a divergent/poison global would otherwise shadow,
+  # defeating Principle 12): (1) self-relative deployed / in-repo path; (2) legacy
+  # global $HOME copy; (3) inline literals if both are unreadable (fail-safe — a
+  # deploy-lag never opens gate). Kept byte-parallel to repo-source.mjs.
   # Matching is EXACT SEGMENT: "<repo>/<dir>" or "<repo>/<dir>/*" only.
   # Never substring — .github/ and .gitignore must NOT be carved.
   local _co_json="" _co_json1 _co_json2
-  _co_json1="$HOME/.episodic-memory/patterns/repo-source-carveouts.json"
-  _co_json2="${BASH_SOURCE[0]%/*}/../../../../patterns/repo-source-carveouts.json"
+  _co_json1="${BASH_SOURCE[0]%/*}/../../../../patterns/repo-source-carveouts.json"
+  _co_json2="$HOME/.episodic-memory/patterns/repo-source-carveouts.json"
   if [ -f "$_co_json1" ] && _co_dirs="$(node -e "try{const c=require(process.argv[1]);process.stdout.write(c.exact_segment_dirs.join('\n'))}catch(e){process.exit(1)}" "$_co_json1" 2>/dev/null)"; then
     _co_json="$_co_json1"
   elif [ -f "$_co_json2" ] && _co_dirs="$(node -e "try{const c=require(process.argv[1]);process.stdout.write(c.exact_segment_dirs.join('\n'))}catch(e){process.exit(1)}" "$_co_json2" 2>/dev/null)"; then
