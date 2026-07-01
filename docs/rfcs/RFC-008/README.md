@@ -19,7 +19,7 @@ requirement parent. Each phase file carries its own R-anchors and back-links to 
 | **P2** | [P2-bp-contracts.md](P2-bp-contracts.md) | R2, R3, R4 | P0 | **DONE** — P2a #381 + P2b #384 + P2c #388 |
 | **P3** | [P3-thin-waist.md](P3-thin-waist.md) | R1, R2, R3, R4, R5, R9 | P0, P2 | **DONE** — P3a #389 + P3b-1 #391 + P3c #392 + P3b-2 #393 (P4 schema folded in) + P3d #395 |
 | **P4** | [P4-enforce-config.md](P4-enforce-config.md) | R3, R5 | P3 | **DONE**: P4a #397 (per-project loader, 3 pre_tool_use gates) + P4c #398 (`active:false` kill switch); **P4d** per-project enforcement re-architecture (Principle 12: enforcement per-project, substrate global) S1-S8 + ESC merged (slice detail in workplan). Original P4b superseded by the P4d re-architecture. |
-| **P5–P7** | [P5-P7-tool-plugins.md](P5-P7-tool-plugins.md) | R6, R10 | P3 | **P5 DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425); **P6 DONE** (Codex enforcement plugin `plugins/codex/`, MEDIUM-honest `pre_tool_use` tier; S0-S5, #431 `3b91f9b`); **P7 queued** (Pi Agent) |
+| **P5–P7** | [P5-P7-tool-plugins.md](P5-P7-tool-plugins.md) | R6, R10 | P3 | **P5 DONE** (OpenCode plugin #424 `f5dbaef`, doc fix #425); **P6 DONE** (Codex enforcement plugin `plugins/codex/`, MEDIUM-honest `pre_tool_use` tier; S0-S5, #431 `3b91f9b`); **P7 DONE** (Pi Agent in-process `tool_call` extension `plugins/pi-agent/`, MEDIUM-honest `pre_tool_use`; S0-S6 + conformance gauntlet; `session_start`/`stop` deferred #434; #437) |
 | **P8** | [P8-cursor-windsurf.md](P8-cursor-windsurf.md) | R6, R10 | P3 | queued |
 | **P9** | [P9-recall-strategies.md](P9-recall-strategies.md) | R7 | — | **DEFERRED** — own RFC |
 

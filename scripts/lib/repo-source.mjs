@@ -1,9 +1,12 @@
 /**
  * repo-source.mjs — Node mirror of plugins/claude-code/hooks/lib/repo-source.sh.
  * Rule 14 single source: carve-out dirs from patterns/repo-source-carveouts.json,
- * read with the same resolution order as the bash script (NEW-R3-1):
- *   1. $HOME/.episodic-memory/patterns/repo-source-carveouts.json (deployed canonical)
- *   2. <this-script>/../../../patterns/repo-source-carveouts.json (in-repo dev/test)
+ * read with the same resolution order as the bash script (NEW-R3-1; RFC-008 P7
+ * increment-review BLOCKER 2 — self-relative FIRST so a per-project deployed
+ * closure trusts its own co-deployed carveouts over an ambient global file, which
+ * a divergent/poison global would otherwise shadow, defeating Principle 12):
+ *   1. <this-script>/../../patterns/repo-source-carveouts.json (self-relative deployed / in-repo canonical)
+ *   2. $HOME/.episodic-memory/patterns/repo-source-carveouts.json (legacy global fallback)
  *   3. Inline 5-dir fallback literals (deploy-lag safety; never fail-open)
  *
  * Exact-segment matching: <root>/<dir> or <root>/<dir>/* only.
@@ -31,8 +34,8 @@ const INLINE_CARVEOUT_DIRS = [".episodic-memory", ".checkpoints", ".review-store
 
 function loadCarveouts() {
   const candidates = [
-    path.join(os.homedir(), ".episodic-memory", "patterns", "repo-source-carveouts.json"),
     path.join(__dirname, "..", "..", "patterns", "repo-source-carveouts.json"),
+    path.join(os.homedir(), ".episodic-memory", "patterns", "repo-source-carveouts.json"),
   ];
   for (const jsonPath of candidates) {
     try {

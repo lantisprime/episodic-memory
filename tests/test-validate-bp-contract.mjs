@@ -413,6 +413,7 @@ classifierCase("7c: typo'd emit-site label literal (GAP-2)", () => {
     path.join("plugins", "claude-code", "manifest.json"),
     path.join("plugins", "opencode", "manifest.json"),
     path.join("plugins", "codex", "manifest.json"),
+    path.join("plugins", "pi-agent", "manifest.json"),
   ]) {
     const man = readJsonAt(root, manRel);
     man.taxonomy_version = newTaxVer;

@@ -33,7 +33,7 @@
       "additionalProperties": false,
       "required": ["shape"],
       "properties": {
-        "shape": { "type": "string", "enum": ["ndjson-per-line", "json-object", "exit-code-only", "codex-native"] },
+        "shape": { "type": "string", "enum": ["ndjson-per-line", "json-object", "exit-code-only", "codex-native", "in-process-decision"] },
         "schema_ref": { "type": "string", "description": "optional pointer at one of the runtime contract schemas" }
       }
     },
