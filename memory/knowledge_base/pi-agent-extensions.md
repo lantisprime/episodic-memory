@@ -25,6 +25,16 @@ Ran `pi -e /tmp/em-pi-probe/probe-run.mjs --provider deepseek --model deepseek-v
 - Deployed adapter file extension: default `.js` (packages.md guarantees the loader
   discovers `.ts`+`.js`; `.mjs` is loaded by `-e` but project-local glob discovery is not
   separately confirmed for `.mjs`, so use `.js`).
+- **Nested-package auto-discovery WORKS (P7 S5-prep probe, 2026-07-01).** Ran `pi --approve
+  --no-session --no-tools --provider deepseek --model deepseek-v4-flash -p "reply ok"` in a
+  trusted project holding BOTH `.pi/extensions/toplevel-probe.js` (top-level file) AND
+  `.pi/extensions/nested-probe/index.js` (nested `<name>/index.js` package); each factory
+  wrote a sentinel on load. Result: `exit 0`, BOTH sentinels present => Pi auto-discovers a
+  nested `.pi/extensions/<name>/index.js` package, not only top-level `*.js` files. => the P7
+  S5 deploy tree `<proj>/.pi/extensions/episodic-memory/index.js` loads with NO
+  `settings.json`/`package.json` `extensions` registration and NO top-level re-export shim.
+  `--approve` (or interactive project trust) is the activation gate. The docs' `*.ts` glob
+  wording understates this; nested index-package discovery is real.
 
 # Pi coding-agent ExtensionAPI (RFC-008 P7 source)
 
