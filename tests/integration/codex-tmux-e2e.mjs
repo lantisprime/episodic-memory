@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const STRIP = /\x1b\[[0-9;?]*[A-Za-z]/g; // drop ANSI/CSI so regex matches plain text
 const CODEX = process.env.CODEX_BIN || 'codex';
@@ -205,12 +206,75 @@ function testTrustGate() {
     `trustGate: an UNTRUSTED session wrote the files but must NOT fire the hook (no PreToolUse capture lines).\nlog:\n${log}`);
 }
 
+// enforcementProof (RFC-008 P6 S4, REQ-15) — UNGUARDED-IN-CI (real codex + tmux). Drives the
+// DEPLOYED per-project adapter (post REAL install), a discriminating pair. Uses the harness's
+// actual helpers (have/tmuxFactory/capture/startCodex/waitFor/waitIdle/pastePrompt/sleepMs/assert).
+
+// A capture-hook-free mock: enforcement comes from the REAL install below, not makeMock's
+// logging hook. Mirrors makeMock's git seed but writes NO .codex/hooks.json.
+function bareMock() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-enforce-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 'probe@example.com']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 'probe']);
+  fs.writeFileSync(path.join(dir, 'README.md'), '# mock codex project\n');
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-qm', 'seed']);
+  return dir;
+}
+
+// Two SEQUENTIAL single-file apply_patch calls: a MIXED patch touching a repo-source path is
+// denied WHOLESALE, so the ALLOW half is only observable via a SEPARATE docs-only patch.
+const ENFORCE_PROMPT =
+  'Make two SEPARATE apply_patch calls, in this order, and run no shell commands:\n' +
+  '1) First call: one apply_patch that adds ONLY docs/plans/note.md whose single line is: # note\n' +
+  '2) Second call: one apply_patch that adds ONLY src/probe.mjs whose single line is: export const probe = 42;\n' +
+  'Proceed without asking for confirmation. If a call is blocked, continue to the next.';
+
+function testEnforcementProof() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const REPO = path.resolve(here, '..', '..');
+  const INSTALL = path.join(REPO, 'install.mjs');
+  const dir = bareMock();
+  // Install the REAL per-project enforcement (writes .codex/hooks.json + closure).
+  const ins = execFileSync(process.execPath,
+    [INSTALL, '--tool', 'codex', '--project', dir, '--install-enforcement'], { encoding: 'utf8' });
+  assert(/\/hooks/.test(ins), `enforcementProof: install must print the /hooks trust instruction.\n${ins}`);
+  const sock = `codex-enforce-${process.pid}`;
+  const win = 'codex:0';
+  const t = tmuxFactory(sock);
+  try {
+    try { execFileSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server yet */ }
+    startCodex(t, win, dir);
+    waitFor(t, win, /trust the contents of this directory/i, 30000, 'dir-trust');
+    t('send-keys', '-t', win, 'Enter');                       // option 1: Yes, continue
+    waitFor(t, win, /Hooks need review|hook is new or changed/i, 30000, 'hook-trust');
+    t('send-keys', '-t', win, '2', 'Enter');                  // Trust all and continue
+    waitFor(t, win, /gpt-5\.5\s+(high|medium|low|default|minimal)/i, 45000, 'model-ready');
+    sleepMs(3000);
+    pastePrompt(t, win, ENFORCE_PROMPT);
+    sleepMs(2000);
+    waitIdle(t, win, 240000);
+    sleepMs(2500);                                            // let the deny FULLY render
+    const pane = capture(t, win, 400);                        // capture AFTER the settle
+    const deniedSrc = /src\/probe\.mjs/.test(pane) && /deny|denied|blocked|not permitted|permission/i.test(pane);
+    const allowedDocs = fs.existsSync(path.join(dir, 'docs', 'plans', 'note.md'));
+    const blockedSrc = !fs.existsSync(path.join(dir, 'src', 'probe.mjs'));
+    fs.writeFileSync(path.join(os.tmpdir(), `enforcementProof-${process.pid}.pane`), pane);
+    assert(deniedSrc && allowedDocs && blockedSrc,
+      `enforcementProof: expected repo-source src/probe.mjs DENIED and docs/plans/note.md ALLOWED.\n` +
+      `deniedSrc=${deniedSrc} allowedDocs=${allowedDocs} blockedSrc=${blockedSrc}\n--- pane ---\n${pane}`);
+  } finally {
+    try { t('kill-server'); } catch { /* already gone */ }
+  }
+}
+
 function main() {
   if (!have(CODEX, '--version') || !have('tmux', '-V')) {
     console.log('SKIP - codex and/or tmux not available; this is a manual live-codex proof.');
     process.exit(0);
   }
-  const tests = [['firingProof', testFiringProof], ['trustGate', testTrustGate]];
+  const tests = [['firingProof', testFiringProof], ['trustGate', testTrustGate], ['enforcementProof', testEnforcementProof]];
   let pass = 0;
   for (const [name, fn] of tests) {
     try { fn(); console.log(`ok - ${name}`); pass++; }

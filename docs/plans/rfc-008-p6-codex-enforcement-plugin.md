@@ -525,7 +525,7 @@ Runners: `node tests/test-codex-adapter-conformance.mjs`, `node tests/test-insta
 | Bash target extraction (neg controls) | conformance `testBash*` rows | `sed -i`/`echo>src`/`&>src`/multi-redirect/`cp a src` deny; `/dev/null`+`2>&1`+`/tmp`+`cp a /tmp`+`cat`+`git commit`+unlexable-`eval` allow (extract-only — `cp` src deny via DEST extraction, not label) |
 | Fail-closed + import-fail-closed (neg) | conformance `testFailClosed`/`testImportFailClosed` | exit 2 deny (incl. missing waist → 2, not 1) |
 | apply_patch + Bash safety | conformance `testApplyPatch*` + `testBash*` | multi/unparseable/bash-write block; docs/marker/read allow |
-| Install merges (mock E2E) | `node tests/test-install-codex-enforcement.mjs` | `6/6 pass`; user hook intact; skill untouched; trust printed |
+| Install merges (mock E2E) | `node tests/test-install-codex-enforcement.mjs` | `45 passed, 0 failed` (9 scenarios); user hook intact; skill untouched; trust printed; user files survive uninstall; spaced-project command shell-quoted + runs under a shell |
 | Gauntlet | `node scripts/test-plugin.mjs --project . --harness codex` | **S3 observed:** `7 pass, 2 deferred-P3, 0 fail — status:ok`; step 9 `codex-native deny exit 2 + permissionDecision:deny; allow exit 0; no marker leak (N1)` |
 | #17532 firing (real codex/tmux) | `manual: node tests/integration/codex-tmux-e2e.mjs --firing` | `PreToolUse fired` |
 | Enforcement (real codex/tmux) | `manual: … --enforcement` | `repo-source apply_patch DENIED; docs/plans ALLOWED; PreToolUse fired` + pane |
@@ -597,6 +597,12 @@ binary via tmux; green = `status:ok` (fail==0), not a pass-count.
 | 5 | codex (r6 STRONG version; user-directed provider) | codex | 2 BLOCKER + 2 MAJOR | HOLD | `…d033` |
 | 6 | codex (r6.1 — F1-F4 re-review + fresh pass) | codex | 2 BLOCKER + 1 MAJOR | HOLD | `…8bad` |
 | 7 | codex (r7 — MEDIUM-honest revert consistency review, interactive tmux) | codex | 1 BLOCKER (#6 tier/cap) + 1 BLOCKER-class (#1 label short-circuit) + 4 consistency | **ACCEPT** (after the 6 fixes; diff re-checked) | tmux session 2026-06-28 |
+| S4/S5-1 | codex (S4/S5 step-table + listings review, interactive cmux) | codex | 5 findings, all ACCEPTED (uninstall ownership; S4-L3 harness-API + discriminating logic; active:false false-green; raw projectDir; weak apply_patch assert) | HOLD | `…a656` |
+| S4/S5-2 | codex (re-review of applied fixes + r2 refinements, interactive cmux) | codex | 0 blocker (F1-F5 confirmed resolved) | **ACCEPT** | `…534a` |
+
+### 19.5 S4/S5 table review (interactive cmux, HOLD → ACCEPT)
+
+Round 1 HOLD, 5 findings (all valid, verified against real code; codex ran 2 shell probes building the deploy layout in tmp dirs). An interactive pressure-test exchange confirmed F3/F4, caught a real pane-capture-order bug in the F2 rewrite, and pushed F1 to file-level removal + a user-file-survival test. All fixes + r2 refinements applied to the S4/S5 listings (S4-L2 grew 6 → 8 scenarios). Round 2 re-review of the APPLIED listings → codex **ACCEPT**, all five resolved with file:line. Reply episodes `…a656` (r1) / `…534a` (r2 consensus).
 
 ### 19.4 Round-7 codex disposition (MEDIUM-honest revert — interactive tmux, ACCEPT)
 
@@ -769,9 +775,11 @@ command per row.
 
 ## A.7 Per-slice step tables
 
-> Fully specified for **S0, S1, S2, S3**. **S4** (install + enforcement-proof) and **S5** (CI/docs)
-> filled after S3 acceptance (§11 staging; §10 fixes each). Executor: do not start S4/S5 until their
-> tables are filled.
+> Fully specified for **S0-S5**. S4/S5 step tables authored 2026-06-28 (post-S3), grounded in the
+> shipped P5 opencode install/CI precedent (§7 anchors, §14 test names, REQ-13/14/15/17, §16 R-F3).
+> Token estimate (Rule 12): S4 ~16k (install.mjs ~200-line read + 4 fns + the 6-test E2E + tmux
+> enforcementProof), S5 ~9k (4 CI steps + runbook verify + RFC/index DONE edits) — one session each,
+> S4 then S5 (S5 needs S4's `test-install-codex-enforcement.mjs` green in CI).
 
 ### `P6-S0` — RFC + doc correction (REQ-1, REQ-4)
 
@@ -874,11 +882,692 @@ the `bridgeDispatch`/`sandboxDispatch` precedents, the S1 fixture.
 | 3.8 | — | — | **BP-1 step 6 — code review** the `test-plugin.mjs` + runbook + schema + RFC diff (interactive codex per session constraint, or `negative-scenario-reviewer`). Disposition findings via inline-FU heuristic; file deferred per step 9. Record reply-episode id in §15. | review reply-episode id in §15; every finding dispositioned (inline / issue / DEFER) |
 | 3.9 | — | — | Commit `P6-S3: gauntlet codex-native step-9 modality + runbook/schema/RFC registration + dispatch-helper leak-snapshot fix (R6)` + trailer. | `git log -1 --oneline` → `P6-S3` |
 
+### `P6-S4` — per-project install + enforcement-proof (REQ-13, REQ-15)
+
+**Files (one concern per step):** `install.mjs` (4.1 const; 4.2-4.4 = 3 new fns; 4.5 = dispatch
+wiring), `tests/test-install-codex-enforcement.mjs` (CREATE), `tests/integration/codex-tmux-e2e.mjs`
+(EDIT — add `enforcementProof`). **Read-only:** the opencode precedent `install.mjs:68` +
+`opencodeEnforcementPaths`:1481-1506 + `installOpenCodeEnforcement`:1508-1592 +
+`uninstallOpenCodeEnforcement`:1594-1628 + dispatch :1639-1655; `codex-adapter.mjs:36-48`
+(`resolveScriptPath` — fixes the deploy layout); `test-install-opencode-enforcement.mjs` (E2E shape).
+
+> **Deploy layout (fixes the one S4 design point).** The shipped adapter resolves its waist via
+> `resolveScriptPath("../../scripts/…")` from its own `capabilities/` dir (`codex-adapter.mjs:36-48`),
+> so the deployed closure MUST sit at `<.codex root>/scripts/` — exactly mirroring opencode's
+> `.opencode/plugins/scripts/`. Deploy root = `<project>/.codex`; adapter →
+> `.codex/episodic-memory/capabilities/codex-adapter.mjs`; waist closure → `.codex/scripts/` +
+> `.codex/scripts/lib/`; patterns → `.codex/patterns/` + `.codex/scripts/patterns/`; registration →
+> `.codex/hooks.json` (merge, never `config.toml` — §5; never `~/.codex/` — Principle 12). Per-project
+> only (REQ-13); cwd-divergence is the headline risk (§16 R-F3): every artifact lands under the
+> resolved `project_root`, never caller cwd or `$HOME`.
+
+| Step | File | Kind | Exact action (anchor + literal change) | Verify (falsifiable) |
+|---|---|---|---|---|
+| 4.0 | — | — | Pre-flight §A.4 incl. `codex --version` + `tmux -V`. | passes |
+| 4.1 | `install.mjs` | EDIT | ANCHOR `const REPO_PLUGIN_OPENCODE = path.join(REPO_DIR, 'plugins', 'opencode')` → append the next line `const REPO_PLUGIN_CODEX = path.join(REPO_DIR, 'plugins', 'codex')` (§A.6 L705). | `grep -c "REPO_PLUGIN_CODEX" install.mjs` → ≥2 (decl + use in 4.3) |
+| 4.2 | `install.mjs` | Add fn | Add `function codexEnforcementPaths(projectDir)` immediately AFTER the line matching ANCHOR `const REPO_PLUGIN_CODEX = path.join(REPO_DIR, 'plugins', 'codex')` (added in 4.1). **Exact body = Listing S4-L1 §A (verbatim).** Returns `{codexDir, pluginDir, capabilitiesDir, runbooksDir, scriptsDir, scriptsLibDir, carveoutPatternsDir, contractPatternsDir, contractIndexPath, adapterAbs, hooksJsonPath}`, all under `<projectDir>/.codex`. | `node --check install.mjs` → exit 0; `grep -c "function codexEnforcementPaths" install.mjs` → 1 |
+| 4.3 | `install.mjs` | Add fn | Add `function codexHookCommand(adapterAbs)` + `function installCodexEnforcement(projectDir)` after `codexEnforcementPaths`. **Exact body = Listing S4-L1 §B (verbatim)** — parse-or-skeleton `.codex/hooks.json` with `JSON.parse` (malformed → `report.warnings.push('.codex/hooks.json is not valid JSON …'); return report` BEFORE any file is written, MAJOR-1 parity); copy adapter + `manifest.json` + `runbooks/`; copy `enforce-contract.mjs` + every `scripts/lib/*.mjs`; copy `repo-source-carveouts.json`; copy `bp-001.json`/`events.json`/`enforce-config.schema.json` + `_index.json`; MERGE the `{matcher:'.*', hooks:[{type:'command', command: codexHookCommand(adapterAbs) (= `node '<shell-quoted adapterAbs>'`, S4-review shell-quote fix), statusMessage:'episodic-memory enforcement', timeout:30}]}` block into `config.hooks.PreToolUse[]` via `writeJSONAtomic`, idempotent on the `command` string; `console.log` the `/hooks` trust line. | `node --check install.mjs` → exit 0; `grep -c "function installCodexEnforcement" install.mjs` → 1 |
+| 4.4 | `install.mjs` | Add fn | Add `function uninstallCodexEnforcement(projectDir)` after `installCodexEnforcement`. **Exact body = Listing S4-L1 §C (verbatim)** — parse-or-abort `.codex/hooks.json`; remove ONLY hooks whose `command === \`node ${adapterAbs}\``, drop emptied matcher blocks, `delete` an emptied `PreToolUse`/`hooks`; recursive-rm ONLY the fully-owned `pluginDir` (`.codex/episodic-memory`); for the GENERIC shared dirs remove only the EXACT copied files (`enforce-contract.mjs`, each `scripts/lib/*.mjs`, the 3 `scripts/patterns/*` contract files, `scripts/plugins/_index.json`, `patterns/repo-source-carveouts.json`), then prune each dir bottom-up only if empty (review F1 r2); prune an empty `.codex`. `assertContained(_, P.codexDir)` guards every removal. | `node --check install.mjs` → exit 0; `grep -c "function uninstallCodexEnforcement" install.mjs` → 1 |
+| 4.5 | `install.mjs` | EDIT | Wire dispatch WITHOUT touching the `case 'codex'` **skill** (:937). **Exact ANCHOR → REPLACE = Listing S4-L1 §D (verbatim).** (a) install: ANCHOR `if (installEnforcement && tool === 'opencode') {` (:1649) — insert the `} else if (installEnforcement && tool === 'codex') {` branch BEFORE the claude-code `} else if (installHooks || installEnforcement) {`. (b) uninstall: ANCHOR the `uninstallEnforcement` ternary (:1640-1642) → extend with the `tool === 'codex' ? uninstallCodexEnforcement(projectDir) :` arm. | `grep -c "installCodexEnforcement(projectDir)" install.mjs` → 1 dispatch site; `grep -c "\.agents/skills/episodic-memory" install.mjs` → unchanged from pre-4.5 count (skill path intact) |
+| 4.6 | `tests/test-install-codex-enforcement.mjs` | CREATE | Whole-file. **Exact verbatim contents = Listing S4-L2** (the 9 §14 Group-2 scenarios, each asserting the DEPLOYED adapter's captured exit/stdout or the on-disk hooks.json `command` strings — never a constant; the `USER_CMD` sentinel flows through merge + uninstall; the carve-out ALLOW row + the `active:false` control are the negative controls proving the repo-source DENY is non-vacuous per §A.9; plus the relative-`--project` absolute-command and user-file-survival controls from review r2; plus the spaced-project shell-quoted-command control from S4 code review, which runs the stored command through a shell). | `node tests/test-install-codex-enforcement.mjs` → `… passed, 0 failed`; stdout includes all 9 scenario names |
+| 4.6b | `tests/test-install-codex-enforcement.mjs` | — (verify) | **Red-then-green negative control (§A.9):** the deny assertion must go RED if the deployed adapter is allow-stubbed. Run with the env break `CODEX_FORCE_ALLOW=1` honored by the test (Listing S4-L2 reads it and points the deployed-adapter spawn at a 1-line allow stub). | `CODEX_FORCE_ALLOW=1 node tests/test-install-codex-enforcement.mjs` → exits NON-zero (the `repo-src write -> exit 2` assertion fails) |
+| 4.7 | `tests/integration/codex-tmux-e2e.mjs` | APPEND | Add `import { fileURLToPath } from 'node:url'` + `function bareMock()` + `const ENFORCE_PROMPT` + `function testEnforcementProof()` and register `['enforcementProof', testEnforcementProof]` in `main()`'s tests array. **Exact verbatim body = Listing S4-L3** (real `install.mjs --tool codex --install-enforcement` into a capture-hook-free `bareMock` project, drive real codex per `…18aa`, dir-trust + `/hooks` trust, `pastePrompt` TWO sequential single-file apply_patch calls — `docs/plans/note.md` (ALLOW) then `src/probe.mjs` (DENY, a mixed patch is denied wholesale); `waitIdle` + settle then `capture(t,win,400)`; assert the pane shows the deny on `src/probe.mjs`, `docs/plans/note.md` written on disk, and `src/probe.mjs` absent — firing is proven by the DENY itself, not a separate capture hook). Tag UNGUARDED-IN-CI. | `node tests/integration/codex-tmux-e2e.mjs` (real codex) → `enforcementProof` pass (discriminating pair); pane → §15 |
+| 4.8 | — | — | Run `node tests/test-install-codex-enforcement.mjs` (9 scenarios) + the manual `enforcementProof`; paste both captures into §15. | `45 passed, 0 failed` (9 scenarios); enforcementProof discriminating-pair pass |
+| 4.9 | — | — | **BP-1 step 6 code review** (interactive codex via cmux, or `negative-scenario-reviewer`) of the `install.mjs` + test diff. Disposition via inline-FU; file deferred per step 9; reply-episode in §15. | reply-episode id in §15; every finding dispositioned |
+| 4.10 | — | — | Commit `P6-S4: per-project codex enforcement install (merge .codex/hooks.json + closure + trust-print + uninstall) + install E2E + tmux enforcement-proof (R6, R10)` + trailer. | `git log -1 --oneline` → `P6-S4` |
+
+#### Listing S4-L1 — `install.mjs` additions (verbatim; mirrors `installOpenCodeEnforcement` :1508-1592)
+
+**§A — `codexEnforcementPaths` (step 4.2).** Deploy root `<project>/.codex`; the adapter's
+`resolveScriptPath('../../scripts/…')` (codex-adapter.mjs:36-48) lands the waist at `.codex/scripts`.
+
+```js
+function codexEnforcementPaths(projectDir) {
+  // R-F3 (review F4): normalize the project root ONCE so a relative or symlinked
+  // --project still yields an ABSOLUTE root. This matters because adapterAbs below is
+  // embedded verbatim in the hooks.json `command` string (`node <adapterAbs>`); codex
+  // runs that command from its own cwd, so a relative adapterAbs would break the hook.
+  // realpath when the dir exists (install operates on an existing project); path.resolve
+  // as the fallback so a not-yet-existing --project still absolutizes. Scoped to codex
+  // (NOT install.mjs:46) to keep the claude-code/opencode install paths unchanged.
+  let root
+  try { root = fs.realpathSync(projectDir) } catch { root = path.resolve(projectDir) }
+  const codexDir = path.join(root, '.codex')
+  const pluginDir = path.join(codexDir, 'episodic-memory')
+  const scriptsDir = path.join(codexDir, 'scripts')
+  return {
+    codexDir,
+    pluginDir,
+    capabilitiesDir: path.join(pluginDir, 'capabilities'),
+    runbooksDir: path.join(pluginDir, 'runbooks'),
+    scriptsDir,
+    scriptsLibDir: path.join(scriptsDir, 'lib'),
+    // repo-source.mjs candidate-2 carve-out JSON = <.codex>/patterns (its own ../../patterns).
+    carveoutPatternsDir: path.join(codexDir, 'patterns'),
+    // resolveContractRoot candidate-0 (bp-001.json) + events.json + enforce-config.schema.json,
+    // BESIDE the deployed engine at <.codex>/scripts/patterns.
+    contractPatternsDir: path.join(scriptsDir, 'patterns'),
+    contractIndexPath: path.join(scriptsDir, 'plugins', '_index.json'),
+    // ABSOLUTE host path embedded in the hooks.json command STRING (a real exec path — NOT the
+    // forward-slash-normalized opencode adapterSpec; codex hooks.json `command` is `node <path>`).
+    adapterAbs: path.join(pluginDir, 'capabilities', 'codex-adapter.mjs'),
+    hooksJsonPath: path.join(codexDir, 'hooks.json'),
+  }
+}
+```
+
+**§B — `codexHookCommand` + `installCodexEnforcement` (step 4.3).**
+
+```js
+function codexHookCommand(adapterAbs) {
+  // S4 code-review fix: codex runs the hooks.json `command` via a SHELL (empirically confirmed
+  // on 0.142.3 — a `>` redirect inside a hook command evaluates), so an unquoted path with a
+  // space would split the argv and the hook would silently fail OPEN. POSIX single-quote escape.
+  const quoted = "'" + String(adapterAbs).replaceAll("'", "'\\''") + "'"
+  return `node ${quoted}`
+}
+
+function installCodexEnforcement(projectDir) {
+  const report = { deployedFiles: [], registration: null, warnings: [] }
+  const P = codexEnforcementPaths(projectDir)
+
+  // 0. PARSE .codex/hooks.json FIRST — abort the WHOLE deploy on malformed JSON
+  //    (MAJOR-1 parity: never leave unregistered files the agent then can't enforce with).
+  let config
+  if (fs.existsSync(P.hooksJsonPath)) {
+    try { config = JSON.parse(fs.readFileSync(P.hooksJsonPath, 'utf8')) }
+    catch (e) {
+      report.warnings.push(`.codex/hooks.json is not valid JSON (${e.message}); aborted — nothing deployed`)
+      return report
+    }
+  } else {
+    config = {}
+  }
+
+  // 1. adapter + manifest + runbooks.
+  fs.mkdirSync(P.capabilitiesDir, { recursive: true })
+  const adDst = path.join(P.capabilitiesDir, 'codex-adapter.mjs')
+  fs.copyFileSync(path.join(REPO_PLUGIN_CODEX, 'capabilities', 'codex-adapter.mjs'), adDst)
+  report.deployedFiles.push(adDst)
+  const manDst = path.join(P.pluginDir, 'manifest.json')
+  fs.copyFileSync(path.join(REPO_PLUGIN_CODEX, 'manifest.json'), manDst)
+  report.deployedFiles.push(manDst)
+  const rbSrc = path.join(REPO_PLUGIN_CODEX, 'runbooks')
+  if (fs.existsSync(rbSrc)) { copyDirRecursive(rbSrc, P.runbooksDir); report.deployedFiles.push(P.runbooksDir) }
+
+  // 2. thin-waist closure: enforce-contract.mjs + ALL scripts/lib/*.mjs.
+  fs.mkdirSync(P.scriptsLibDir, { recursive: true })
+  const ecDst = path.join(P.scriptsDir, 'enforce-contract.mjs')
+  fs.copyFileSync(path.join(REPO_SCRIPTS, 'enforce-contract.mjs'), ecDst)
+  report.deployedFiles.push(ecDst)
+  const repoLib = path.join(REPO_SCRIPTS, 'lib')
+  for (const f of fs.readdirSync(repoLib).filter((f) => f.endsWith('.mjs')).sort()) {
+    const dst = path.join(P.scriptsLibDir, f)
+    fs.copyFileSync(path.join(repoLib, f), dst)
+    report.deployedFiles.push(dst)
+  }
+
+  // 3. carve-out JSON (repo-source.mjs candidate-2).
+  const coSrc = path.join(REPO_DIR, 'patterns', 'repo-source-carveouts.json')
+  if (fs.existsSync(coSrc)) {
+    fs.mkdirSync(P.carveoutPatternsDir, { recursive: true })
+    const coDst = path.join(P.carveoutPatternsDir, 'repo-source-carveouts.json')
+    fs.copyFileSync(coSrc, coDst)
+    report.deployedFiles.push(coDst)
+  }
+
+  // 4. project-local contract set beside the engine (resolveContractRoot candidate-0).
+  fs.mkdirSync(P.contractPatternsDir, { recursive: true })
+  for (const f of ['bp-001.json', 'events.json', 'enforce-config.schema.json']) {
+    const src = path.join(REPO_DIR, 'patterns', f)
+    if (fs.existsSync(src)) {
+      const dst = path.join(P.contractPatternsDir, f)
+      fs.copyFileSync(src, dst)
+      report.deployedFiles.push(dst)
+    }
+  }
+  const idxSrc = path.join(REPO_DIR, 'plugins', '_index.json')
+  if (fs.existsSync(idxSrc)) {
+    fs.mkdirSync(path.dirname(P.contractIndexPath), { recursive: true })
+    fs.copyFileSync(idxSrc, P.contractIndexPath)
+    report.deployedFiles.push(P.contractIndexPath)
+  }
+
+  // 5. register a PreToolUse command hook in .codex/hooks.json — MERGE, idempotent,
+  //    NEVER clobber a user hook (codex shape: hooks.PreToolUse[].hooks[].command string).
+  const cmd = codexHookCommand(P.adapterAbs)
+  if (!config.hooks || typeof config.hooks !== 'object') config.hooks = {}
+  if (!Array.isArray(config.hooks.PreToolUse)) config.hooks.PreToolUse = []
+  const already = config.hooks.PreToolUse.some(
+    (b) => Array.isArray(b.hooks) && b.hooks.some((h) => h && h.command === cmd))
+  if (!already) {
+    config.hooks.PreToolUse.push({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: cmd, statusMessage: 'episodic-memory enforcement', timeout: 30 }],
+    })
+    writeJSONAtomic(P.hooksJsonPath, config)
+    report.deployedFiles.push(P.hooksJsonPath)
+    report.registration = cmd
+  } else {
+    report.registration = `${cmd} (already present)`
+  }
+
+  // 6. trust is inactive until the operator runs /hooks (R3) — print the instruction.
+  console.log(`[codex enforcement] deployed under ${P.codexDir}. Run "/hooks" inside codex (cwd ${projectDir}) and TRUST the PreToolUse hook to activate enforcement.`)
+  return report
+}
+```
+
+**§C — `uninstallCodexEnforcement` (step 4.4).**
+
+```js
+function uninstallCodexEnforcement(projectDir) {
+  const report = { removedFiles: [], removedRegistration: null, warnings: [] }
+  const P = codexEnforcementPaths(projectDir)
+  const cmd = codexHookCommand(P.adapterAbs)
+
+  // (a) hooks.json FIRST — parse-or-abort; remove ONLY our command, keep user hooks.
+  if (fs.existsSync(P.hooksJsonPath)) {
+    let config
+    try { config = JSON.parse(fs.readFileSync(P.hooksJsonPath, 'utf8')) }
+    catch (e) { report.warnings.push(`.codex/hooks.json not valid JSON (${e.message}); aborted — nothing changed`); return report }
+    if (config.hooks && Array.isArray(config.hooks.PreToolUse)) {
+      let changed = false
+      config.hooks.PreToolUse = config.hooks.PreToolUse
+        .map((b) => {
+          if (!Array.isArray(b.hooks)) return b
+          const kept = b.hooks.filter((h) => !(h && h.command === cmd))
+          if (kept.length !== b.hooks.length) changed = true
+          return { ...b, hooks: kept }
+        })
+        .filter((b) => Array.isArray(b.hooks) && b.hooks.length > 0)
+      if (changed) {
+        if (config.hooks.PreToolUse.length === 0) delete config.hooks.PreToolUse
+        if (Object.keys(config.hooks).length === 0) delete config.hooks
+        writeJSONAtomic(P.hooksJsonPath, config)
+        report.removedRegistration = cmd
+      }
+    }
+  }
+
+  // (b) remove ONLY what we deployed (review F1). pluginDir (.codex/episodic-memory) is
+  //     a namespace WE create and fully own -> recursive rm is safe. But scriptsDir
+  //     (.codex/scripts) and carveoutPatternsDir (.codex/patterns) sit DIRECTLY under
+  //     codex's own config dir and may hold unrelated user files; unlike opencode (whose
+  //     closure is namespaced under .opencode/plugins/), the codex adapter's ../../scripts
+  //     waist forces these bare paths. So remove only our KNOWN members there, then prune
+  //     the parent dir only if it is left empty. Never blanket-rm a shared codex dir.
+  if (fs.existsSync(P.pluginDir)) {
+    assertContained(P.pluginDir, P.codexDir)
+    fs.rmSync(P.pluginDir, { recursive: true, force: true })
+    report.removedFiles.push(P.pluginDir)
+  }
+  // Review F1 (round 2): even .codex/scripts/{lib,patterns,plugins} are GENERIC dir names —
+  // remove only the EXACT files we copied, then prune each dir bottom-up ONLY if empty. Never
+  // recursive-rm a subdir a user might share. The deployed lib set == the repo's scripts/lib/*.mjs
+  // that install §B copied; recompute it from the repo (fall back to the deployed *.mjs names if
+  // the repo lib is unreachable).
+  const removeFile = (p) => { if (fs.existsSync(p)) { assertContained(p, P.codexDir); fs.rmSync(p, { force: true }); report.removedFiles.push(p) } }
+  const pruneIfEmpty = (d) => { try { if (fs.existsSync(d) && fs.readdirSync(d).length === 0) { fs.rmdirSync(d); report.removedFiles.push(d) } } catch {} }
+
+  removeFile(path.join(P.scriptsDir, 'enforce-contract.mjs'))
+  let libFiles = []
+  try { libFiles = fs.readdirSync(path.join(REPO_SCRIPTS, 'lib')).filter((f) => f.endsWith('.mjs')) }
+  catch { libFiles = fs.existsSync(P.scriptsLibDir) ? fs.readdirSync(P.scriptsLibDir).filter((f) => f.endsWith('.mjs')) : [] }
+  for (const f of libFiles) removeFile(path.join(P.scriptsLibDir, f))
+  for (const f of ['bp-001.json', 'events.json', 'enforce-config.schema.json']) removeFile(path.join(P.contractPatternsDir, f))
+  removeFile(P.contractIndexPath) // .codex/scripts/plugins/_index.json
+  removeFile(path.join(P.carveoutPatternsDir, 'repo-source-carveouts.json'))
+  // prune bottom-up: leaf dirs first, then their parents, each only when now empty.
+  for (const d of [P.scriptsLibDir, P.contractPatternsDir, path.dirname(P.contractIndexPath), P.scriptsDir, P.carveoutPatternsDir]) pruneIfEmpty(d)
+
+  // (c) prune an empty .codex (leave it if a user hooks.json or other files remain).
+  try { if (fs.existsSync(P.codexDir) && fs.readdirSync(P.codexDir).length === 0) { fs.rmdirSync(P.codexDir); report.removedFiles.push(P.codexDir) } } catch {}
+  return report
+}
+```
+
+**§D — dispatch wiring (step 4.5).** install dispatch `ANCHOR → REPLACE`:
+
+```js
+// ANCHOR (verbatim, :1649):
+//   if (installEnforcement && tool === 'opencode') {
+//     const rep = installOpenCodeEnforcement(projectDir)
+//     console.log(JSON.stringify(rep, null, 2))
+//   } else if (installHooks || installEnforcement) {
+// REPLACE with (inserts the codex arm; claude-code arm unchanged):
+  if (installEnforcement && tool === 'opencode') {
+    const rep = installOpenCodeEnforcement(projectDir)
+    console.log(JSON.stringify(rep, null, 2))
+  } else if (installEnforcement && tool === 'codex') {
+    const rep = installCodexEnforcement(projectDir)
+    console.log(JSON.stringify(rep, null, 2))
+  } else if (installHooks || installEnforcement) {
+```
+
+uninstall dispatch `ANCHOR → REPLACE` (:1640-1642):
+
+```js
+// ANCHOR (verbatim):
+//   const rep = tool === 'opencode'
+//     ? uninstallOpenCodeEnforcement(projectDir)
+//     : runUninstallEnforcement(projectDir, { purgeConfig })
+// REPLACE with:
+  const rep = tool === 'opencode'
+    ? uninstallOpenCodeEnforcement(projectDir)
+    : tool === 'codex'
+      ? uninstallCodexEnforcement(projectDir)
+      : runUninstallEnforcement(projectDir, { purgeConfig })
+```
+
+#### Listing S4-L2 — `tests/test-install-codex-enforcement.mjs` (verbatim, CREATE — step 4.6)
+
+```js
+/**
+ * test-install-codex-enforcement.mjs — mock-project E2E for the Codex enforcement
+ * install/uninstall (RFC-008 P6 S4, REQ-13). Runs the REAL install.mjs under an
+ * isolated HOME + throwaway project, drives the DEPLOYED adapter (M4 — not the
+ * in-repo copy), and proves per-project deploy + hooks.json MERGE + cwd-safety +
+ * skill-no-collision + trust-print + uninstall.  Run: node tests/test-install-codex-enforcement.mjs
+ */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync, spawnSync } from "node:child_process";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO = fs.realpathSync(path.join(__dirname, ".."));
+const INSTALL = path.join(REPO, "install.mjs");
+const FORCE_ALLOW = process.env.CODEX_FORCE_ALLOW === "1"; // §A.9 red-then-green break
+
+let pass = 0, fail = 0;
+const failures = [];
+function assert(cond, name, detail = "") {
+  if (cond) { pass++; } else { fail++; failures.push(`${name}${detail ? " — " + detail : ""}`); }
+}
+
+// Mirror codexEnforcementPaths in install.mjs.
+function deployed(projectDir) {
+  const codexDir = path.join(projectDir, ".codex");
+  const pluginDir = path.join(codexDir, "episodic-memory");
+  const scriptsDir = path.join(codexDir, "scripts");
+  return {
+    codexDir, pluginDir, scriptsDir,
+    adapter: path.join(pluginDir, "capabilities", "codex-adapter.mjs"),
+    enforceContract: path.join(scriptsDir, "enforce-contract.mjs"),
+    repoSource: path.join(scriptsDir, "lib", "repo-source.mjs"),
+    carveouts: path.join(codexDir, "patterns", "repo-source-carveouts.json"),
+    index: path.join(scriptsDir, "plugins", "_index.json"),
+    // review F3: the contract-pattern closure S4-L1 copies (resolveContractRoot candidate-0
+    // + schema). If any is missing, config/registry resolution fails and the gate fail-closes
+    // to deny — so a passing DENY assertion could be masking an incomplete deploy.
+    bp001: path.join(scriptsDir, "patterns", "bp-001.json"),
+    events: path.join(scriptsDir, "patterns", "events.json"),
+    schema: path.join(scriptsDir, "patterns", "enforce-config.schema.json"),
+    // R5 operator kill switch lives at <markerRoot>/.episodic-memory/enforce-config.json;
+    // markerRoot resolves to the project root (enforce-contract.mjs loadEnforceConfig).
+    enforceConfig: path.join(projectDir, ".episodic-memory", "enforce-config.json"),
+    hooksJson: path.join(codexDir, "hooks.json"),
+  };
+}
+
+// §A.9 break: a 1-line always-allow stub the deny test points at when CODEX_FORCE_ALLOW=1.
+function allowStub() {
+  const p = path.join(os.tmpdir(), `cx-allow-stub-${process.pid}.mjs`);
+  fs.writeFileSync(p, "process.exit(0)\n");
+  return p;
+}
+
+// Drive the DEPLOYED adapter with a RAW codex PreToolUse stdin envelope.
+function runDeployedAdapter(adapterPath, stdin, procCwd) {
+  const target = FORCE_ALLOW ? allowStub() : adapterPath;
+  const r = spawnSync(process.execPath, [target], {
+    input: JSON.stringify(stdin), cwd: procCwd, encoding: "utf8", timeout: 15000,
+  });
+  let parsed = null;
+  try { if (r.stdout && r.stdout.trim()) parsed = JSON.parse(r.stdout.trim()); } catch {}
+  return { exit: r.status, parsed, stdout: r.stdout || "", stderr: r.stderr || "" };
+}
+
+function preToolUseStdin(target, cwd) {
+  return { hook_event_name: "PreToolUse", tool_name: "Write",
+    tool_input: { filePath: target, content: "x" }, cwd, session_id: "s4-test" };
+}
+
+function freshSandbox() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cx-install-home-"));
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "cx-install-proj-"));
+  execFileSync("git", ["init", "-q"], { cwd: proj });
+  const projReal = fs.realpathSync(proj);
+  return {
+    home, proj, projReal, D: deployed(projReal),
+    install: (extra, opts = {}) => spawnSync(process.execPath,
+      [INSTALL, "--tool", "codex", "--project", projReal, ...extra],
+      { encoding: "utf8", timeout: 120000, env: { ...process.env, HOME: home }, cwd: opts.cwd || projReal }),
+    cleanup: () => { try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+                     try { fs.rmSync(proj, { recursive: true, force: true }); } catch {} },
+  };
+}
+
+const USER_CMD = "node /tmp/user-precheck.js"; // sentinel: a pre-existing user hook that MUST survive
+const hookCmds = (cfg) => (cfg && cfg.hooks && Array.isArray(cfg.hooks.PreToolUse))
+  ? cfg.hooks.PreToolUse.flatMap((b) => (b.hooks || []).map((h) => h.command)) : [];
+const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+
+// testInstallMergesHooksJson — pre-seed a user PreToolUse hook; install KEEPS it + ADDS ours.
+{
+  const S = freshSandbox();
+  try {
+    fs.mkdirSync(S.D.codexDir, { recursive: true });
+    fs.writeFileSync(S.D.hooksJson, JSON.stringify(
+      { hooks: { PreToolUse: [{ matcher: ".*", hooks: [{ type: "command", command: USER_CMD }] }] } }));
+    const r = S.install(["--install-enforcement"]);
+    assert(r.status === 0, "testInstallMergesHooksJson: install exit 0", `${r.status}: ${(r.stderr || "").slice(0, 300)}`);
+    const cmds = hookCmds(readJson(S.D.hooksJson));
+    assert(cmds.includes(USER_CMD), "testInstallMergesHooksJson: user hook SURVIVES", JSON.stringify(cmds));
+    assert(cmds.includes(`node ${S.D.adapter}`), "testInstallMergesHooksJson: our adapter command ADDED", JSON.stringify(cmds));
+  } finally { S.cleanup(); }
+}
+
+// testInstallDeploysClosure — closure on disk + DEPLOYED adapter DENIES repo-src, ALLOWS carve-out.
+{
+  const S = freshSandbox();
+  try {
+    const r = S.install(["--install-enforcement"]);
+    assert(r.status === 0, "testInstallDeploysClosure: install exit 0", `${r.status}: ${(r.stderr || "").slice(0, 300)}`);
+    for (const [k, p] of Object.entries({ adapter: S.D.adapter, enforceContract: S.D.enforceContract,
+      repoSource: S.D.repoSource, carveouts: S.D.carveouts, index: S.D.index,
+      bp001: S.D.bp001, events: S.D.events, schema: S.D.schema })) {
+      assert(fs.existsSync(p), `testInstallDeploysClosure: deploys ${k}`, p);
+    }
+    fs.mkdirSync(path.join(S.projReal, "src"), { recursive: true });
+    const denyTarget = path.join(S.projReal, "src", "app.mjs");
+    fs.writeFileSync(denyTarget, "// x\n");
+    const deny = runDeployedAdapter(S.D.adapter, preToolUseStdin(denyTarget, S.projReal), S.projReal);
+    assert(deny.exit === 2, "testInstallDeploysClosure: repo-src write -> exit 2", `${deny.exit}: ${deny.stderr.slice(0, 300)}`);
+    assert(deny.parsed && deny.parsed.hookSpecificOutput && deny.parsed.hookSpecificOutput.permissionDecision === "deny",
+      "testInstallDeploysClosure: repo-src write -> permissionDecision deny", deny.stdout.slice(0, 300));
+    // ALLOW = the §A.9 negative control: proves the DENY above is not a constant-2 stub.
+    fs.mkdirSync(path.join(S.projReal, "docs", "plans"), { recursive: true });
+    const allowTarget = path.join(S.projReal, "docs", "plans", "note.md");
+    const allow = runDeployedAdapter(S.D.adapter, preToolUseStdin(allowTarget, S.projReal), S.projReal);
+    assert(allow.exit === 0, "testInstallDeploysClosure: carve-out write -> exit 0 (neg control)", `${allow.exit}: ${allow.stderr.slice(0, 300)}`);
+    assert(allow.stdout.trim() === "", "testInstallDeploysClosure: carve-out write -> no output", allow.stdout.slice(0, 300));
+    // active:false control (review F3, R5): with the FULL closure present, the operator
+    // kill switch MUST be honored — the SAME repo-source write flips DENY -> ALLOW (exit 0).
+    // This proves the DENY above is a genuine repo-source decision, not a fail-closed deny
+    // caused by an incomplete closure (config/registry resolution miss defaults to active:true).
+    fs.mkdirSync(path.join(S.projReal, ".episodic-memory"), { recursive: true });
+    fs.writeFileSync(S.D.enforceConfig, JSON.stringify({ active: false }));
+    const silenced = runDeployedAdapter(S.D.adapter, preToolUseStdin(denyTarget, S.projReal), S.projReal);
+    assert(silenced.exit === 0, "testInstallDeploysClosure: repo-src write under active:false -> exit 0 (R5 silence honored, closure resolves)", `${silenced.exit}: ${silenced.stderr.slice(0, 300)}`);
+    fs.rmSync(S.D.enforceConfig, { force: true }); // restore enforcing default for any later use
+  } finally { S.cleanup(); }
+}
+
+// testInstallCallerCwdSafe — caller cwd != --project: artifacts under project_root ONLY (codex F3).
+{
+  const S = freshSandbox();
+  const callerCwd = fs.mkdtempSync(path.join(os.tmpdir(), "cx-caller-"));
+  try {
+    const r = S.install(["--install-enforcement"], { cwd: callerCwd });
+    assert(r.status === 0, "testInstallCallerCwdSafe: install exit 0", `${r.status}: ${(r.stderr || "").slice(0, 300)}`);
+    assert(fs.existsSync(S.D.adapter), "testInstallCallerCwdSafe: adapter under project_root", S.D.adapter);
+    assert(!fs.existsSync(path.join(callerCwd, ".codex")), "testInstallCallerCwdSafe: NO .codex under caller cwd", callerCwd);
+    assert(!fs.existsSync(path.join(S.home, ".codex")), "testInstallCallerCwdSafe: NO .codex under HOME", S.home);
+  } finally { S.cleanup(); try { fs.rmSync(callerCwd, { recursive: true, force: true }); } catch {} }
+}
+
+// testInstallRelativeProjectAbsoluteCommand — review F4 (R-F3): a RELATIVE --project must
+// still yield an ABSOLUTE hooks.json command (`node <abs adapter>`). codex runs the hook from
+// its OWN cwd, so a relative adapter path would break enforcement. Install cwd=projReal,
+// --project=".". Without the realpath/resolve in codexEnforcementPaths this goes RED.
+{
+  const S = freshSandbox();
+  try {
+    const r = spawnSync(process.execPath,
+      [INSTALL, "--tool", "codex", "--project", ".", "--install-enforcement"],
+      { encoding: "utf8", timeout: 120000, env: { ...process.env, HOME: S.home }, cwd: S.projReal });
+    assert(r.status === 0, "testInstallRelativeProjectAbsoluteCommand: install exit 0", `${r.status}: ${(r.stderr || "").slice(0, 300)}`);
+    const cmds = hookCmds(readJson(S.D.hooksJson));
+    const ours = cmds.find((c) => c && c.startsWith("node ") && c.includes(".codex"));
+    assert(!!ours, "testInstallRelativeProjectAbsoluteCommand: our adapter command present", JSON.stringify(cmds));
+    assert(ours && path.isAbsolute(ours.slice("node ".length)),
+      "testInstallRelativeProjectAbsoluteCommand: hooks.json command path is ABSOLUTE", String(ours));
+  } finally { S.cleanup(); }
+}
+
+// testInstallNoSkillCollision — a prior `--tool codex` skill install is byte-unchanged by enforcement install.
+{
+  const S = freshSandbox();
+  try {
+    const skill = S.install([]); // bare `--tool codex` == skill install (install.mjs:937)
+    assert(skill.status === 0, "testInstallNoSkillCollision: skill install exit 0", `${skill.status}`);
+    const skillPath = path.join(S.projReal, ".agents", "skills", "episodic-memory", "SKILL.md");
+    const before = fs.existsSync(skillPath) ? fs.readFileSync(skillPath, "utf8") : null;
+    assert(before !== null, "testInstallNoSkillCollision: skill file present after skill install", skillPath);
+    S.install(["--install-enforcement"]);
+    const after = fs.existsSync(skillPath) ? fs.readFileSync(skillPath, "utf8") : null;
+    assert(after === before, "testInstallNoSkillCollision: SKILL.md byte-unchanged by enforcement install");
+  } finally { S.cleanup(); }
+}
+
+// testInstallPrintsTrust — install stdout instructs the operator to run /hooks (R3).
+{
+  const S = freshSandbox();
+  try {
+    const r = S.install(["--install-enforcement"]);
+    assert(/\/hooks/.test(r.stdout || ""), "testInstallPrintsTrust: stdout names the /hooks trust step", (r.stdout || "").slice(0, 300));
+  } finally { S.cleanup(); }
+}
+
+// testUninstallRemovesOnlyOurEntry — uninstall drops our hook + files, keeps the user hook.
+{
+  const S = freshSandbox();
+  try {
+    fs.mkdirSync(S.D.codexDir, { recursive: true });
+    fs.writeFileSync(S.D.hooksJson, JSON.stringify(
+      { hooks: { PreToolUse: [{ matcher: ".*", hooks: [{ type: "command", command: USER_CMD }] }] } }));
+    S.install(["--install-enforcement"]);
+    const u = S.install(["--uninstall-enforcement"]);
+    assert(u.status === 0, "testUninstallRemovesOnlyOurEntry: uninstall exit 0", `${u.status}: ${(u.stderr || "").slice(0, 300)}`);
+    const cmds = hookCmds(readJson(S.D.hooksJson));
+    assert(!cmds.includes(`node ${S.D.adapter}`), "testUninstallRemovesOnlyOurEntry: our hook removed", JSON.stringify(cmds));
+    assert(cmds.includes(USER_CMD), "testUninstallRemovesOnlyOurEntry: user hook PRESERVED", JSON.stringify(cmds));
+    assert(!fs.existsSync(S.D.pluginDir), "testUninstallRemovesOnlyOurEntry: pluginDir removed", S.D.pluginDir);
+    assert(!fs.existsSync(S.D.scriptsDir), "testUninstallRemovesOnlyOurEntry: scriptsDir removed (empty case)", S.D.scriptsDir);
+  } finally { S.cleanup(); }
+}
+
+// testUninstallPreservesUserFilesInSharedDirs — review F1 (r2): unrelated user files pre-seeded
+// inside the GENERIC dirs our closure shares (.codex/scripts/{lib,patterns,plugins}, .codex/patterns)
+// MUST survive uninstall; our own closure files must be gone; the shared dir is kept (not pruned)
+// because it still holds the user's file. Complements the empty-dir case above.
+{
+  const S = freshSandbox();
+  try {
+    S.install(["--install-enforcement"]);
+    const userFiles = [
+      path.join(S.D.scriptsDir, "lib", "user-helper.mjs"),
+      path.join(S.D.scriptsDir, "patterns", "user-notes.json"),
+      path.join(S.D.scriptsDir, "plugins", "user-plugin.json"),
+      path.join(S.D.codexDir, "patterns", "user-carveout.json"),
+    ];
+    for (const p of userFiles) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, "// user\n"); }
+    const u = S.install(["--uninstall-enforcement"]);
+    assert(u.status === 0, "testUninstallPreservesUserFilesInSharedDirs: uninstall exit 0", `${u.status}: ${(u.stderr || "").slice(0, 300)}`);
+    for (const p of userFiles) assert(fs.existsSync(p), "testUninstallPreservesUserFilesInSharedDirs: user file SURVIVES uninstall", p);
+    assert(!fs.existsSync(S.D.enforceContract), "testUninstallPreservesUserFilesInSharedDirs: our enforce-contract.mjs removed", S.D.enforceContract);
+    assert(!fs.existsSync(S.D.repoSource), "testUninstallPreservesUserFilesInSharedDirs: our lib/repo-source.mjs removed", S.D.repoSource);
+    assert(fs.existsSync(S.D.scriptsDir), "testUninstallPreservesUserFilesInSharedDirs: scriptsDir KEPT (holds user files)", S.D.scriptsDir);
+  } finally { S.cleanup(); }
+}
+
+console.log(`\ntest-install-codex-enforcement: ${pass} passed, ${fail} failed`);
+if (fail > 0) {
+  console.error("\nFAILURES:");
+  for (const f of failures) console.error(`  ✗ ${f}`);
+  process.exit(1);
+}
+console.log("✓ all codex install/uninstall E2E tests passed");
+```
+
+#### Listing S4-L3 — `enforcementProof` appended to `tests/integration/codex-tmux-e2e.mjs` (step 4.7)
+
+```js
+// Append after testTrustGate; register it in main() as ['enforcementProof', testEnforcementProof].
+// UNGUARDED-IN-CI (real codex + tmux). Drives the DEPLOYED per-project adapter (post REAL
+// install), discriminating pair. Review F2: this uses the harness's ACTUAL helpers
+// (have/tmuxFactory/startCodex/waitFor/waitIdle/pastePrompt/sleepMs/assert, execFileSync) —
+// there is NO hasBin/buildMockProject/trust/INSTALL/spawnSync in this file. Add
+// `import { fileURLToPath } from 'node:url'` to the import block at the top of the file.
+
+// A capture-hook-free mock: enforcement comes from the REAL install below, not makeMock's
+// logging hook. Mirrors makeMock's git seed but writes NO .codex/hooks.json.
+function bareMock() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-enforce-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 'probe@example.com']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 'probe']);
+  fs.writeFileSync(path.join(dir, 'README.md'), '# mock codex project\n');
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-qm', 'seed']);
+  return dir;
+}
+
+// Two SEQUENTIAL single-file apply_patch calls (review F2 — the discriminating-logic fix):
+// a single MIXED patch that touches a repo-source path is denied WHOLESALE, so the ALLOW
+// half is never observable from the same call. Split them: docs/plans first (ALLOWED ->
+// file written), src second (DENIED -> pane shows deny, file absent).
+const ENFORCE_PROMPT =
+  'Make two SEPARATE apply_patch calls, in this order, and run no shell commands:\n' +
+  '1) First call: one apply_patch that adds ONLY docs/plans/note.md whose single line is: # note\n' +
+  '2) Second call: one apply_patch that adds ONLY src/probe.mjs whose single line is: export const probe = 42;\n' +
+  'Proceed without asking for confirmation. If a call is blocked, continue to the next.';
+
+function testEnforcementProof() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const REPO = path.resolve(here, '..', '..');
+  const INSTALL = path.join(REPO, 'install.mjs');
+  const dir = bareMock();
+  // Install the REAL per-project enforcement (writes .codex/hooks.json + closure).
+  const ins = execFileSync(process.execPath,
+    [INSTALL, '--tool', 'codex', '--project', dir, '--install-enforcement'], { encoding: 'utf8' });
+  assert(/\/hooks/.test(ins), `enforcementProof: install must print the /hooks trust instruction.\n${ins}`);
+  const sock = `codex-enforce-${process.pid}`;
+  const win = 'codex:0';
+  const t = tmuxFactory(sock);
+  try {
+    try { execFileSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server yet */ }
+    startCodex(t, win, dir);
+    waitFor(t, win, /trust the contents of this directory/i, 30000, 'dir-trust');
+    t('send-keys', '-t', win, 'Enter');                            // option 1: Yes, continue
+    waitFor(t, win, /Hooks need review|hook is new or changed/i, 30000, 'hook-trust');
+    t('send-keys', '-t', win, '2', 'Enter');                       // Trust all and continue
+    waitFor(t, win, /gpt-5\.5\s+(high|medium|low|default|minimal)/i, 45000, 'model-ready');
+    sleepMs(3000);
+    pastePrompt(t, win, ENFORCE_PROMPT);
+    sleepMs(2000);
+    waitIdle(t, win, 240000);
+    sleepMs(2500);                                                 // let the deny FULLY render
+    const pane = capture(t, win, 400);                             // capture AFTER the settle (review F2 r2)
+    const deniedSrc = /src\/probe\.mjs/.test(pane) && /deny|denied|blocked|not permitted|permission/i.test(pane);
+    const allowedDocs = fs.existsSync(path.join(dir, 'docs', 'plans', 'note.md'));
+    const blockedSrc = !fs.existsSync(path.join(dir, 'src', 'probe.mjs'));
+    fs.writeFileSync(path.join(os.tmpdir(), `enforcementProof-${process.pid}.pane`), pane);
+    assert(deniedSrc && allowedDocs && blockedSrc,
+      `enforcementProof: expected repo-source src/probe.mjs DENIED and docs/plans/note.md ALLOWED.\n` +
+      `deniedSrc=${deniedSrc} allowedDocs=${allowedDocs} blockedSrc=${blockedSrc}\n--- pane ---\n${pane}`);
+  } finally {
+    try { t('kill-server'); } catch { /* already gone */ }
+  }
+}
+```
+
+### `P6-S5` — CI wiring + runbook finalize + docs DONE (REQ-17, Rule 10)
+
+**Files (one concern per step):** `.github/workflows/plugin-validate.yml` (5.1-5.4),
+`tests/test-codex-fixture-smoke.mjs` (CREATE, 5.4), `plugins/codex/runbooks/*.md` (5.5 verify/finalize),
+`docs/rfcs/RFC-008/P5-P7-tool-plugins.md` (5.6), `_repo-context.md` + any present index (5.7).
+**Read-only:** `plugin-validate.yml:41` (Node 24) + opencode step block :61-83; P5 DONE precedent
+(`f5dbaef`).
+
+| Step | File | Kind | Exact action (anchor + literal change) | Verify (falsifiable) |
+|---|---|---|---|---|
+| 5.0 | — | — | Pre-flight §A.4. | passes |
+| 5.1 | `.github/workflows/plugin-validate.yml` | EDIT | After the opencode gauntlet step (ANCHOR `node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness opencode`, ~:61-62) ADD a step `Run codex plugin gauntlet` → `node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness codex`. (Step is parametric — no script change.) | `grep -c "harness codex" .github/workflows/plugin-validate.yml` → ≥1 |
+| 5.2 | `plugin-validate.yml` | EDIT | After the opencode adapter-conformance step (ANCHOR `node tests/test-opencode-adapter-conformance.mjs`, ~:79-80) ADD `Run codex adapter conformance` → `node tests/test-codex-adapter-conformance.mjs`. | `grep -c "test-codex-adapter-conformance" .github/workflows/plugin-validate.yml` → 1 |
+| 5.3 | `plugin-validate.yml` | EDIT | After the opencode install E2E step (ANCHOR `node tests/test-install-opencode-enforcement.mjs`, ~:82-83) ADD `Run codex install/uninstall E2E` → `node tests/test-install-codex-enforcement.mjs`. | `grep -c "test-install-codex-enforcement" .github/workflows/plugin-validate.yml` → 1 |
+| 5.4 | `tests/test-codex-fixture-smoke.mjs` | CREATE | Whole-file. **Exact verbatim contents = Listing S5-L1** (CI-guardable, no codex binary): asserts the fixture parses + has an integer `turn_index`, exact `hook_event_name === "PreToolUse"` and `tool_name === "apply_patch"` (not a substring), and both Add File directives in `tool_input.command`; and the runbook §9 agent-manifest block has `expected_outputs.shape === "codex-native"`, a `node` `command_shapes[0]` argv, and a `return_codes` map containing `"2"` — every operand is the parsed file/runbook value, never a constant. | `node tests/test-codex-fixture-smoke.mjs` → `… passed, 0 failed` |
+| 5.4b | `.github/workflows/plugin-validate.yml` | EDIT | After 5.3's codex install-E2E step ADD the verbatim yaml step `      - name: Run codex fixture + runbook §9 smoke (REQ-17)` / `        run: node tests/test-codex-fixture-smoke.mjs`. | `grep -c "test-codex-fixture-smoke" .github/workflows/plugin-validate.yml` → 1 |
+| 5.4c | `tests/test-codex-fixture-smoke.mjs` | — (verify) | **Red-then-green (§A.9):** the smoke must go RED if the runbook §9 shape regresses. Point it at a broken runbook via env (Listing S5-L1 honors `SMOKE_RUNBOOK=<path>`); feed a copy whose `shape` is reverted to `json-object`. | `SMOKE_RUNBOOK=/tmp/bad-runbook.md node tests/test-codex-fixture-smoke.mjs` → exits NON-zero (shape assertion fails) |
+| 5.5 | `plugins/codex/runbooks/enforcement.md` (+`.quickref.md`) | VERIFY/EDIT | Confirm the 10-section runbook is complete + M7e-valid; finalize §10 `install_time_config` now that S4 fixed the layout — name `.codex/hooks.json` + `.codex/episodic-memory/`. | `node scripts/validate-plugin-registry.mjs --project .` → exit 0; `grep -c "\.codex/hooks.json" plugins/codex/runbooks/enforcement.md` → ≥1 |
+| 5.6 | `docs/rfcs/RFC-008/P5-P7-tool-plugins.md` | EDIT | Set the P6 status cell (ANCHOR the P6 status line) → `P6 DONE`; confirm the P6 plugin row (`plugins/codex/`, `pre_tool_use: MEDIUM`) + the MEDIUM honesty note are present. (`plugins/_index.json` codex entry already `status:"active"` from S2 — NO edit.) | `grep -c "P6 DONE" docs/rfcs/RFC-008/P5-P7-tool-plugins.md` → 1 |
+| 5.7 | `_repo-context.md` (+ `rfc-validate.yml` stale-grep) | EDIT | Rule 10 index sync: update the RFC-008 phase line for P6 in `_repo-context.md`; update the `rfc-validate.yml` stale-phase grep (~:189-194) if it gates phase status. **CONFIRM via `ls` that `docs/README.md` + `docs/_index.json` do NOT exist at repo root (explorer 2026-06-28) — SKIP if absent.** | `grep -n "P6" _repo-context.md` → updated; `node -e "JSON.parse(require('fs').readFileSync('<any touched .json>','utf8'))"` exits 0 |
+| 5.8 | — | — | Confirm the stop-STRONG + schema/binding follow-up issue is filed (OD-4 = #429, S0) and tick the §18 done-criteria boxes. | `gh issue view 429 --json state` → open; §18 boxes checked |
+| 5.9 | — | — | **PR-level whole-branch review** of the full S0-S5 diff (`…697c`) BEFORE opening the PR — interactive codex via cmux. Disposition all findings; file deferred per step 9; reply-episode in §19. | whole-branch review reply-episode in §19; 0 blockers remaining |
+| 5.10 | — | — | Commit `P6-S5: codex CI wiring (gauntlet + conformance + install E2E + fixture smoke) + runbook finalize + RFC/index P6 DONE (R6, R10)` + trailer; mark P6 DONE in indexes; open PR (Rule 17, bot `--comment` review, user approves). | `git log -1 --oneline` → `P6-S5`; `grep "P6 DONE"` in indexes |
+
+#### Listing S5-L1 — `tests/test-codex-fixture-smoke.mjs` (verbatim, CREATE — step 5.4)
+
+```js
+/**
+ * test-codex-fixture-smoke.mjs — CI-guardable smoke (RFC-008 P6 S5, REQ-17): no
+ * codex binary required. Validates the recorded fixture shape + the runbook §9
+ * agent-invocation manifest (codex-native shape, node command_shapes, return_codes).
+ * Run: node tests/test-codex-fixture-smoke.mjs
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO = fs.realpathSync(path.join(__dirname, ".."));
+let pass = 0, fail = 0; const failures = [];
+function assert(c, n, d = "") { if (c) pass++; else { fail++; failures.push(`${n}${d ? " — " + d : ""}`); } }
+
+// (a) fixture: parses, integer turn_index, apply_patch present.
+const fxPath = path.join(REPO, "tests", "fixtures", "harness-events", "codex", "pre-tool-use.json");
+let fx = null;
+try { fx = JSON.parse(fs.readFileSync(fxPath, "utf8")); } catch (e) { fail++; failures.push(`fixture parse: ${e.message}`); }
+assert(fx && Number.isInteger(fx.turn_index), "fixture: turn_index is an integer", fx ? String(fx.turn_index) : "no fixture");
+// Strong, non-self-satisfying assertions (review F5): a bare /apply_patch/ substring
+// match is met by the fixture's own _note text, so it survives a tool_name regression.
+// Assert the structural fields + both Add File directives in the patch body instead.
+assert(fx && fx.hook_event_name === "PreToolUse", "fixture: hook_event_name === PreToolUse", fx ? String(fx.hook_event_name) : "no fixture");
+assert(fx && fx.tool_name === "apply_patch", "fixture: tool_name === apply_patch (exact, not substring)", fx ? String(fx.tool_name) : "no fixture");
+assert(fx && fx.tool_input && typeof fx.tool_input.command === "string"
+  && /^\*\*\* Add File: src\/probe\.mjs$/m.test(fx.tool_input.command)
+  && /^\*\*\* Add File: docs\/plans\/note\.md$/m.test(fx.tool_input.command),
+  "fixture: apply_patch command carries BOTH Add File directives",
+  fx && fx.tool_input ? String(fx.tool_input.command).slice(0, 200) : "no tool_input");
+
+// (b) runbook §9 agent-invocation manifest block (SMOKE_RUNBOOK override = §A.9 red-then-green break).
+const rbPath = process.env.SMOKE_RUNBOOK || path.join(REPO, "plugins", "codex", "runbooks", "enforcement.md");
+const rb = fs.readFileSync(rbPath, "utf8");
+const m = rb.match(/##\s*🤖 Agent invocation manifest\s*\n+```json\n([\s\S]*?)\n```/);
+assert(!!m, "runbook: sentinel-anchored agent-manifest json block present");
+let am = null;
+if (m) { try { am = JSON.parse(m[1]); } catch (e) { fail++; failures.push(`runbook §9 parse: ${e.message}`); } }
+assert(am && am.expected_outputs && am.expected_outputs.shape === "codex-native",
+  "runbook: expected_outputs.shape === codex-native", am ? JSON.stringify(am.expected_outputs) : "no block");
+assert(am && Array.isArray(am.command_shapes) && am.command_shapes.length >= 1
+  && Array.isArray(am.command_shapes[0]) && am.command_shapes[0][0] === "node",
+  "runbook: command_shapes[0] is a node argv", am ? JSON.stringify(am.command_shapes) : "no block");
+assert(am && am.return_codes && Object.prototype.hasOwnProperty.call(am.return_codes, "2"),
+  "runbook: return_codes closed map includes \"2\"", am ? JSON.stringify(am.return_codes) : "no block");
+
+console.log(`\ntest-codex-fixture-smoke: ${pass} passed, ${fail} failed`);
+if (fail > 0) { console.error("\nFAILURES:"); for (const f of failures) console.error(`  ✗ ${f}`); process.exit(1); }
+console.log("✓ codex fixture + runbook §9 smoke passed");
+```
+
 ## A.8 Definition of done (mechanical)
 
 ```bash
 node tests/test-codex-adapter-conformance.mjs                  # → 37/37 pass
-node tests/test-install-codex-enforcement.mjs                 # → 6/6 pass (S4)
+node tests/test-install-codex-enforcement.mjs                 # → 45 passed, 0 failed (9 scenarios, S4)
 node scripts/test-plugin.mjs --project . --harness codex      # → 7 pass, 2 deferred-P3, 0 fail — OK
 node scripts/test-plugin.mjs --project . --harness opencode   # → 7 pass, 2 deferred-P3, 0 fail — OK (regression)
 node scripts/test-plugin.mjs --project . --harness claude-code # → OK (step-9 exit-code-only branch intact)
