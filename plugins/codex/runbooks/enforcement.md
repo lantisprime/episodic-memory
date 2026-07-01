@@ -203,6 +203,12 @@ Auto-derived from `manifest.json` + the per-project `enforce-config.json` schema
 derived source-of-truth. NOTE: the single Codex `pre_tool_use` hook honors the
 `bp-001.pre_checkpoint` clamp only (§5 cross-harness note).
 
+S4 deploy layout (concrete, per-project): `install.mjs --install-enforcement --tool
+codex` copies the adapter + engine under `<project>/.codex/episodic-memory/` and
+registers the `PreToolUse` command hook in `<project>/.codex/hooks.json` — NEVER
+`~/.codex/` (Principle 12). The generic `install_time_config` line below states the
+substrate rule; for Codex the `.claude/` slot is `.codex/`.
+
 <!-- CONFIG:BEGIN -->
 **10a — Configuration.**
 

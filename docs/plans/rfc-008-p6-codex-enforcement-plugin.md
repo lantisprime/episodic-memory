@@ -574,13 +574,13 @@ binary via tmux; green = `status:ok` (fail==0), not a pass-count.
 
 ## §18 Done Criteria
 
-- [ ] All MUST (REQ-1..17) tests green.
-- [ ] `test-plugin.mjs --harness codex` → `7 pass, 2 deferred-P3, 0 fail — OK`.
-- [ ] REQ-14 firing + REQ-15 enforcement run against real `codex 0.141.0`; pane captures in §15.
-- [ ] Install E2E green; isolated HOME proves per-project-only; user hooks intact.
-- [ ] RFC + indexes corrected (Rule 10); stop-STRONG follow-up issue filed; P6 → DONE.
-- [ ] PR-level whole-branch review before opening the PR (`…697c`).
-- [ ] Every deferred finding has an issue/comment/violation (Rule 18 step 9).
+- [x] All MUST (REQ-1..17) tests green (A.8 suite: conformance 67/0, install E2E 45/0, all 3 gauntlets 7/2/0, deploy-audit CLEAN).
+- [x] `test-plugin.mjs --harness codex` → `7 pass, 2 deferred-P3, 0 fail — OK`.
+- [x] REQ-14 firing + REQ-15 enforcement run against real `codex 0.142.3`; pane captures in §15 (S4 harness commit `59ccae3`, live suite 3/3).
+- [x] Install E2E green; isolated HOME proves per-project-only; user hooks intact (S4 `test-install-codex-enforcement.mjs`, 45 passed).
+- [x] RFC + indexes corrected (Rule 10); stop-STRONG follow-up issue filed (#429); P6 → DONE.
+- [x] PR-level whole-branch review before opening the PR (interactive codex cmux gpt-5.5, ACCEPT; reply-episode `…55d2`).
+- [x] Every deferred finding has an issue/comment/violation (Rule 18 step 9): --tool all enforcement gap -> issue #430.
 
 ## §19 Review Consensus (Rule 18)
 
@@ -599,6 +599,7 @@ binary via tmux; green = `status:ok` (fail==0), not a pass-count.
 | 7 | codex (r7 — MEDIUM-honest revert consistency review, interactive tmux) | codex | 1 BLOCKER (#6 tier/cap) + 1 BLOCKER-class (#1 label short-circuit) + 4 consistency | **ACCEPT** (after the 6 fixes; diff re-checked) | tmux session 2026-06-28 |
 | S4/S5-1 | codex (S4/S5 step-table + listings review, interactive cmux) | codex | 5 findings, all ACCEPTED (uninstall ownership; S4-L3 harness-API + discriminating logic; active:false false-green; raw projectDir; weak apply_patch assert) | HOLD | `…a656` |
 | S4/S5-2 | codex (re-review of applied fixes + r2 refinements, interactive cmux) | codex | 0 blocker (F1-F5 confirmed resolved) | **ACCEPT** | `…534a` |
+| PR-WB | codex (PR-level whole-branch S0-S5, interactive cmux gpt-5.5, 5 live negative probes) | codex | 1 MAJOR (--tool all enforcement gap, PRE-EXISTING/P5-inherited, DEFER->#430); 0 other | **ACCEPT** | `…55d2` |
 
 ### 19.5 S4/S5 table review (interactive cmux, HOLD → ACCEPT)
 
