@@ -422,6 +422,11 @@ function buildLiveProject() {
     "plugins/codex/manifest.json",
     "plugins/codex/runbooks/enforcement.md",
     "plugins/codex/runbooks/enforcement.quickref.md",
+    // RFC-008 P7 S1/S4: pi-agent is now a live _index.json entry — its manifest +
+    // runbooks must be on disk too, else M2/M8 fire (entry dir/manifest missing).
+    "plugins/pi-agent/manifest.json",
+    "plugins/pi-agent/runbooks/enforcement.md",
+    "plugins/pi-agent/runbooks/enforcement.quickref.md",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {
