@@ -62,6 +62,12 @@
       "no_known_bypass_evidence": true,
       "last_audited_iso8601": "2026-06-23T00:00:00Z",
       "auditor": "rfc008-p5-opencode-capability-audit"
+    },
+    {
+      "harness": "pi-agent",
+      "event": "pre_tool_use",
+      "ceiling": "MEDIUM",
+      "citation": "Bash-write lexing residual: Pi bash input.command writes use the same bounded MUST-CATCH extractor as codex; statically-unlexable forms (eval, sh -c, bash -c, command-substitution, $VAR-expanded paths, here-docs, awk/python -c/node -e-internal writes) escape the frozen extractor → MEDIUM ceiling"
     }
   ]
 }

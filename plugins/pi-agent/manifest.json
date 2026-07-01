@@ -1,0 +1,34 @@
+{
+  "type": "enforcement",
+  "schema_version": "1.0.0",
+  "id": "pi-agent",
+  "harness": "pi-agent",
+  "version": "1.0.0",
+  "invocation_modality": "agent",
+  "capabilities": { "pre_tool_use": "MEDIUM" },
+  "classifier": {
+    "mode": "override",
+    "emits_labels": ["read_only", "shared_write", "push_or_pr_create", "marker_write", "unsafe_complex"],
+    "override_path": "plugins/pi-agent/capabilities/enforcement.js"
+  },
+  "taxonomy_ref": "patterns/taxonomy.json",
+  "taxonomy_version": "sha256:7ea41ed82edef968baee6880f040008080afd962fec9120336ee336796013cc4",
+  "events_version": "sha256:13f01e5a599272b349eabd66694b7898e68438e8aad6497e80a9b780bea34ab0",
+  "event_translations": {
+    "pre_tool_use": {
+      "source_format": "pi-tool-call",
+      "field_bindings": {
+        "tool": "$.toolName",
+        "tool_args": "$.input",
+        "cwd": "$.cwd",
+        "session_id": "$.sessionId",
+        "turn_index": "$.turnIndex",
+        "timestamp_iso8601": "$$now"
+      }
+    }
+  },
+  "runbook": {
+    "full": "plugins/pi-agent/runbooks/enforcement.md",
+    "quickref": "plugins/pi-agent/runbooks/enforcement.quickref.md"
+  }
+}

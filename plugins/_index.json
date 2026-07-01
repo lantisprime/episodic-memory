@@ -42,6 +42,16 @@
       "classifier": "override",
       "manifest": "plugins/codex/manifest.json",
       "status": "active"
+    },
+    {
+      "type": "enforcement",
+      "id": "pi-agent",
+      "harness": "pi-agent",
+      "directory": "plugins/pi-agent",
+      "capabilities": { "pre_tool_use": "MEDIUM" },
+      "classifier": "override",
+      "manifest": "plugins/pi-agent/manifest.json",
+      "status": "active"
     }
   ]
 }
