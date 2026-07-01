@@ -61,6 +61,9 @@ jobs:
       - name: Run opencode plugin gauntlet (RFC-008 P5, REQ-1/REQ-12)
         run: node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness opencode
 
+      - name: Run codex plugin gauntlet (RFC-008 P6, REQ-1/REQ-6)
+        run: node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness codex
+
       - name: Run opencode translation tests (RFC-008 P5 S2, R3/R4)
         run: node tests/test-opencode-translations.mjs
 
@@ -79,8 +82,17 @@ jobs:
       - name: Run opencode adapter conformance tests (PR-level BLOCKER-1/2 — loads enforcement.ts, asserts flat-key Hooks shape + STRONG block)
         run: node tests/test-opencode-adapter-conformance.mjs
 
+      - name: Run codex adapter conformance tests (RFC-008 P6 S2)
+        run: node tests/test-codex-adapter-conformance.mjs
+
       - name: Run opencode install/uninstall E2E (RFC-008 P5 S6, REQ-11)
         run: node tests/test-install-opencode-enforcement.mjs
+
+      - name: Run codex install/uninstall E2E (RFC-008 P6 S4, REQ-11)
+        run: node tests/test-install-codex-enforcement.mjs
+
+      - name: Run codex fixture + runbook §9 smoke (REQ-17)
+        run: node tests/test-codex-fixture-smoke.mjs
 
       - name: Run effective-tier algebra tests (RFC-008 P3b-2, R3 — shared min() fold)
         run: node tests/test-effective-tier.mjs

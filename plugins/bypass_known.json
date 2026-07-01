@@ -4,7 +4,7 @@
       "harness": "codex",
       "event": "pre_tool_use",
       "ceiling": "MEDIUM",
-      "citation": "multi-edit bypass per RFC-008 §Per-harness capability declarations"
+      "citation": "Bash-write lexing residual: statically-unlexable forms outside the §12.1 MUST-CATCH table (eval, sh -c, bash -c, command-substitution, $VAR-expanded paths, here-docs, awk/python -c/node -e-internal writes; repo-source.mjs/§16 R8) escape the frozen extractor"
     },
     {
       "harness": "claude-code",

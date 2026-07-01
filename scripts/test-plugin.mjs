@@ -218,8 +218,8 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
   // N1 — exercise the documented §9 invocation in an ISOLATED git-init sandbox and
   // prove (non-vacuously) that the gate's root-source is the INPUT cwd, not the
   // process cwd. The proof SHAPE depends on the harness enforcement modality the
-  // runbook declares in expected_outputs.shape (S1 parameterization — the two
-  // enforcement models differ and a single assertion cannot fit both):
+  // runbook declares in expected_outputs.shape (S1 parameterization — the three
+  // enforcement models differ and a single assertion cannot fit all):
   //   "exit-code-only" — a marker-arming gate (claude-code checkpoint-gate.sh):
   //       a push self-arms a `.checkpoints/.*` marker under the gate's resolved
   //       REPO_ROOT; assert it lands in the sandbox (stdin .cwd) and NONE leaks to
@@ -230,6 +230,11 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
   //       pre_tool_use repo-source WRITE) actually resolves to action:block with an
   //       exit in return_codes, and that NO `.checkpoints/.*` marker is mutated
   //       under the live --project or the divergent process cwd.
+  //   "codex-native"  — a Codex PreToolUse command hook (codex codex-adapter.mjs):
+  //       dispatched TWICE (deny + allow). Assert exit 2 + permissionDecision:"deny"
+  //       on a repo-source Write, exit 0 + no output on a carve-out Write, and that
+  //       NO `.checkpoints/.*` marker is mutated under the live --project or the
+  //       divergent process cwd (N1 isolation + root-source proof).
   const modality = (am.expected_outputs && am.expected_outputs.shape) || "";
   let passDetail = "";
   if (modality === "exit-code-only") {
@@ -267,6 +272,32 @@ function stepInvocationParity(root, readText, manifest, read_trace) {
       if (!iso.cwdHeld) problems.push(`N1 root-source breach: a .checkpoints/.* marker appeared under the divergent process cwd (${iso.procLeak})`);
     }
     passDetail = `§9 surface-truth ok; stdout-decision bridge emitted action:${iso.decision && iso.decision.action} (exit ${iso.exit}); stateless (no marker mutated anywhere); root-from-input-cwd proven by test-enforce-bridge cwd-divergence`;
+  } else if (modality === "codex-native") {
+    const iso = codexDispatch(root, manifest, am);
+    read_trace.push(...iso.read_trace);
+    if (iso.error) {
+      problems.push(`N1 codex-native: ${iso.error}`);
+    } else {
+      if (iso.denyExit !== 2)
+        problems.push(`N1 codex-native: deny exit ${iso.denyExit} !== 2`);
+      if (!iso.denyDecision || !iso.denyDecision.hookSpecificOutput || iso.denyDecision.hookSpecificOutput.permissionDecision !== "deny")
+        problems.push(`N1 codex-native: deny stdout missing permissionDecision:"deny" (got ${JSON.stringify(iso.denyDecision)})`);
+      if (!iso.denyStdout || iso.denyStdout.trim() === "")
+        problems.push(`N1 codex-native: deny stdout was empty`);
+      if (!(String(iso.denyExit) in am.return_codes))
+        problems.push(`N1 codex-native: deny exit ${iso.denyExit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+      if (!(String(iso.allowExit) in am.return_codes))
+        problems.push(`N1 codex-native: allow exit ${iso.allowExit} not in §9 return_codes ${JSON.stringify(Object.keys(am.return_codes))}`);
+      if (iso.allowExit !== 0)
+        problems.push(`N1 codex-native: allow exit ${iso.allowExit} !== 0`);
+      if (iso.allowStdout && iso.allowStdout.trim() !== "")
+        problems.push(`N1 codex-native: allow stdout was non-empty (got ${JSON.stringify(iso.allowStdout.slice(0, 100))})`);
+      if (!iso.isolationHeld)
+        problems.push(`N1 codex-native isolation breach: marker appeared under live --project (${iso.liveLeak})`);
+      if (!iso.cwdHeld)
+        problems.push(`N1 codex-native root-source breach: marker appeared under divergent process cwd (${iso.procLeak}) — adapter used process cwd, not stdin cwd`);
+    }
+    passDetail = `§9 surface-truth ok; codex-native deny exit ${iso.denyExit} + permissionDecision:${iso.denyDecision && iso.denyDecision.hookSpecificOutput && iso.denyDecision.hookSpecificOutput.permissionDecision}; allow exit ${iso.allowExit}; no marker leak (N1)`;
   } else {
     problems.push(`unsupported expected_outputs.shape ${JSON.stringify(modality)} — step 9 cannot prove invocation parity`);
   }
@@ -308,6 +339,7 @@ function sandboxDispatch(root, manifest, am) {
   const procBefore = snapshot(procCwd);
 
   let exit = null, err = null, sandboxMarkers = [];
+  let liveLeak = [], procLeak = [];
   try {
     execFileSync("git", ["init", "-q"], { cwd: sandbox });
     const sandboxBefore = snapshot(sandbox); // fresh git-init → no .checkpoints yet
@@ -330,12 +362,14 @@ function sandboxDispatch(root, manifest, am) {
     sandboxMarkers = newMarkers(sandbox, sandboxBefore); // snapshot BEFORE the finally rm
   } catch (e) { err = `sandbox setup failed: ${e.message}`; }
   finally {
+    // IMPORTANT (codex P1a): compute leak snapshots BEFORE rmSync deletes procCwd;
+    // a deleted dir snapshots empty, making cwdHeld vacuously true.
+    liveLeak = newMarkers(root, liveBefore);
+    procLeak = newMarkers(procCwd, procBefore);
     try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
     try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
   }
 
-  const liveLeak = newMarkers(root, liveBefore);
-  const procLeak = newMarkers(procCwd, procBefore);
   return {
     exit, error: err, read_trace,
     markerArmedInSandbox: sandboxMarkers.length > 0,
@@ -376,6 +410,7 @@ function bridgeDispatch(root, manifest, am) {
   const procBefore = snapshot(procCwd);
 
   let exit = null, err = null, decision = null;
+  let liveLeak = [], procLeak = [];
   try {
     execFileSync("git", ["init", "-q"], { cwd: sandbox });
     const sandboxRoot = fs.realpathSync(sandbox); // ABSOLUTE input cwd — bridge's authoritative root
@@ -406,18 +441,107 @@ function bridgeDispatch(root, manifest, am) {
     if (exit == null && r.error) err = r.error.message;
   } catch (e) { err = `bridge setup failed: ${e.message}`; }
   finally {
+    // IMPORTANT (codex P1a): compute leak snapshots BEFORE rmSync deletes procCwd;
+    // a deleted dir snapshots empty, making cwdHeld vacuously true.
+    liveLeak = newMarkers(root, liveBefore);
+    procLeak = newMarkers(procCwd, procBefore);
     try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
     try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
   }
 
-  const liveLeak = newMarkers(root, liveBefore);
-  const procLeak = newMarkers(procCwd, procBefore);
   return {
     exit, error: err, read_trace, decision,
     isolationHeld: liveLeak.length === 0, // N1: no marker under the live --project
     liveLeak: liveLeak.join(","),
     cwdHeld: procLeak.length === 0, //       bridge used input cwd, not divergent process cwd
     procLeak: procLeak.join(","),
+  };
+}
+
+// Dispatch the codex-native PreToolUse command hook (first command_shape) TWICE
+// in a throwaway git-init sandbox and prove the Codex hook protocol is correct.
+//   DENY run: repo-source Write target (<sandbox>/src/SENTINEL.mjs) — adapter
+//     must exit 2 + emit {hookSpecificOutput:{permissionDecision:"deny",...}}.
+//   ALLOW run: carve-out Write target (<sandbox>/docs/plans/note.md) — adapter
+//     must exit 0 + emit nothing.
+// The process cwd is a separate DIVERGENT dir so a gate resolving root from
+// process.cwd() would misclassify (N1 root-source proof via cwdHeld).
+function codexDispatch(root, manifest, am) {
+  const read_trace = [];
+  const shape = (am.command_shapes || [])[0];
+  if (!Array.isArray(shape) || shape.length === 0) return { error: "no command_shape to dispatch", read_trace };
+  const pluginDir = path.join(root, "plugins", manifest.harness);
+  const argv = shape.map((tok) => (typeof tok === "string" ? tok.replace("{plugin_dir}", pluginDir) : tok));
+
+  const SID = "00000000-0000-4000-8000-000000000000";
+  const snapshot = (base) => { try { return new Set(fs.readdirSync(path.join(base, ".checkpoints"))); } catch { return new Set(); } };
+  const newMarkers = (base, before) => [...snapshot(base)].filter((f) => !before.has(f));
+
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tp-codex-sbx-"));
+  const procCwd = fs.mkdtempSync(path.join(os.tmpdir(), "tp-codex-cwd-")); // DIVERGENT process cwd
+  const liveBefore = snapshot(root);
+  const procBefore = snapshot(procCwd);
+
+  let denyExit = null, denyDecision = null, denyStdout = "", allowExit = null, allowStdout = "";
+  let err = null;
+  let liveLeak = [], procLeak = [];
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: sandbox });
+    const sandboxRoot = fs.realpathSync(sandbox);
+
+    // (a) DENY case: repo-source Write — adapter must exit 2 + deny JSON.
+    fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
+    const denyTarget = path.join(sandboxRoot, "src", "SENTINEL.mjs");
+    fs.writeFileSync(denyTarget, "// sentinel\n");
+    const denyInput = JSON.stringify({
+      hook_event_name: "PreToolUse",
+      tool_name: "Write",
+      tool_input: { filePath: denyTarget, content: "x" },
+      cwd: sandboxRoot,
+      session_id: SID,
+    });
+    const denyResult = spawnSync(argv[0], argv.slice(1), {
+      cwd: procCwd,
+      input: denyInput,
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    denyExit = typeof denyResult.status === "number" ? denyResult.status : null;
+    denyStdout = denyResult.stdout || "";
+    try { if (denyStdout.trim()) denyDecision = JSON.parse(denyStdout.trim()); } catch { denyDecision = null; }
+
+    // (b) ALLOW case: carve-out Write (docs/plans/) — adapter must exit 0 + no output.
+    fs.mkdirSync(path.join(sandboxRoot, "docs", "plans"), { recursive: true });
+    const allowTarget = path.join(sandboxRoot, "docs", "plans", "note.md");
+    const allowInput = JSON.stringify({
+      hook_event_name: "PreToolUse",
+      tool_name: "Write",
+      tool_input: { filePath: allowTarget, content: "x" },
+      cwd: sandboxRoot,
+      session_id: SID,
+    });
+    const allowResult = spawnSync(argv[0], argv.slice(1), {
+      cwd: procCwd,
+      input: allowInput,
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    allowExit = typeof allowResult.status === "number" ? allowResult.status : null;
+    allowStdout = allowResult.stdout || "";
+  } catch (e) { err = `codex dispatch setup failed: ${e.message}`; }
+  finally {
+    // IMPORTANT (codex P1a): compute leak snapshots BEFORE rmSync deletes procCwd;
+    // a deleted dir snapshots empty, making cwdHeld vacuously true.
+    liveLeak = newMarkers(root, liveBefore);
+    procLeak = newMarkers(procCwd, procBefore);
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(procCwd, { recursive: true, force: true }); } catch {}
+  }
+  return {
+    denyExit, denyDecision, denyStdout, allowExit, allowStdout,
+    isolationHeld: liveLeak.length === 0,
+    cwdHeld: procLeak.length === 0,
+    liveLeak, procLeak, read_trace, error: err,
   };
 }
 

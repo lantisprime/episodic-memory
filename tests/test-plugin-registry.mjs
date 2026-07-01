@@ -417,6 +417,11 @@ function buildLiveProject() {
     "plugins/opencode/manifest.json",
     "plugins/opencode/runbooks/enforcement.md",
     "plugins/opencode/runbooks/enforcement.quickref.md",
+    // RFC-008 P6 S2/S3: codex is now a live _index.json entry — its manifest +
+    // runbooks must be on disk too, else M2/M8 fire (entry dir/manifest missing).
+    "plugins/codex/manifest.json",
+    "plugins/codex/runbooks/enforcement.md",
+    "plugins/codex/runbooks/enforcement.quickref.md",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {

@@ -66,6 +66,8 @@ const REPO_HOOKS = path.join(REPO_DIR, 'plugins', 'claude-code', 'hooks')
 const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
 // RFC-008 P5 S6: OpenCode enforcement plugin source (adapter + bridge + runbooks).
 const REPO_PLUGIN_OPENCODE = path.join(REPO_DIR, 'plugins', 'opencode')
+// RFC-008 P6 S4: Codex enforcement plugin source (adapter + manifest + runbooks).
+const REPO_PLUGIN_CODEX = path.join(REPO_DIR, 'plugins', 'codex')
 
 // I-NEW-C: --install-second-opinion is atomic w.r.t. its own validation.
 // installFailed is tracked across all sub-steps so the final "Done!" banner
@@ -1627,6 +1629,200 @@ function uninstallOpenCodeEnforcement(projectDir) {
   return report
 }
 
+// RFC-008 P6 S4: per-project Codex enforcement install/uninstall. Mirrors the OpenCode
+// layer (installOpenCodeEnforcement above) but deploys under <project>/.codex and registers
+// a PreToolUse command hook in .codex/hooks.json (NEVER ~/.codex — Principle 12; NEVER
+// config.toml — the interactive hooks.json path is what fires, RFC-008 P6 S1).
+function codexEnforcementPaths(projectDir) {
+  // R-F3 (review F4): normalize the project root ONCE so a relative or symlinked --project
+  // still yields an ABSOLUTE root. adapterAbs below is embedded verbatim in the hooks.json
+  // `command` string (`node <adapterAbs>`); codex runs it from its own cwd, so a relative
+  // adapterAbs would break the hook. realpath when the dir exists (install operates on an
+  // existing project); path.resolve as the fallback. Scoped to codex (NOT install.mjs L46).
+  let root
+  try { root = fs.realpathSync(projectDir) } catch { root = path.resolve(projectDir) }
+  const codexDir = path.join(root, '.codex')
+  const pluginDir = path.join(codexDir, 'episodic-memory')
+  const scriptsDir = path.join(codexDir, 'scripts')
+  return {
+    codexDir,
+    pluginDir,
+    capabilitiesDir: path.join(pluginDir, 'capabilities'),
+    runbooksDir: path.join(pluginDir, 'runbooks'),
+    scriptsDir,
+    scriptsLibDir: path.join(scriptsDir, 'lib'),
+    // repo-source.mjs candidate-2 carve-out JSON = <.codex>/patterns (its own ../../patterns).
+    carveoutPatternsDir: path.join(codexDir, 'patterns'),
+    // resolveContractRoot candidate-0 (bp-001.json) + events.json + enforce-config.schema.json,
+    // BESIDE the deployed engine at <.codex>/scripts/patterns.
+    contractPatternsDir: path.join(scriptsDir, 'patterns'),
+    contractIndexPath: path.join(scriptsDir, 'plugins', '_index.json'),
+    // ABSOLUTE host path embedded in the hooks.json command STRING (`node <path>`).
+    adapterAbs: path.join(pluginDir, 'capabilities', 'codex-adapter.mjs'),
+    hooksJsonPath: path.join(codexDir, 'hooks.json'),
+  }
+}
+
+function codexHookCommand(adapterAbs) {
+  // Shell-quote the path: codex runs the hooks.json `command` via a SHELL (empirically
+  // confirmed on 0.142.3 — a `>` redirect inside a hook command evaluates), so an unquoted
+  // path containing a space would split the argv and the hook would silently fail OPEN
+  // (enforcement not applied). POSIX single-quote escaping neutralizes spaces + $, backticks,
+  // globs, ';' etc. in the resolved project path. Uninstall recomputes via this same fn, so
+  // its `h.command === cmd` match still holds.
+  const quoted = "'" + String(adapterAbs).replaceAll("'", "'\\''") + "'"
+  return `node ${quoted}`
+}
+
+function installCodexEnforcement(projectDir) {
+  const report = { deployedFiles: [], registration: null, warnings: [] }
+  const P = codexEnforcementPaths(projectDir)
+
+  // 0. PARSE .codex/hooks.json FIRST — abort the WHOLE deploy on malformed JSON
+  //    (MAJOR-1 parity: never leave unregistered files the agent then can't enforce with).
+  let config
+  if (fs.existsSync(P.hooksJsonPath)) {
+    try { config = JSON.parse(fs.readFileSync(P.hooksJsonPath, 'utf8')) }
+    catch (e) {
+      report.warnings.push(`.codex/hooks.json is not valid JSON (${e.message}); aborted — nothing deployed`)
+      return report
+    }
+  } else {
+    config = {}
+  }
+
+  // 1. adapter + manifest + runbooks.
+  fs.mkdirSync(P.capabilitiesDir, { recursive: true })
+  const adDst = path.join(P.capabilitiesDir, 'codex-adapter.mjs')
+  fs.copyFileSync(path.join(REPO_PLUGIN_CODEX, 'capabilities', 'codex-adapter.mjs'), adDst)
+  report.deployedFiles.push(adDst)
+  const manDst = path.join(P.pluginDir, 'manifest.json')
+  fs.copyFileSync(path.join(REPO_PLUGIN_CODEX, 'manifest.json'), manDst)
+  report.deployedFiles.push(manDst)
+  const rbSrc = path.join(REPO_PLUGIN_CODEX, 'runbooks')
+  if (fs.existsSync(rbSrc)) { copyDirRecursive(rbSrc, P.runbooksDir); report.deployedFiles.push(P.runbooksDir) }
+
+  // 2. thin-waist closure: enforce-contract.mjs + ALL scripts/lib/*.mjs.
+  fs.mkdirSync(P.scriptsLibDir, { recursive: true })
+  const ecDst = path.join(P.scriptsDir, 'enforce-contract.mjs')
+  fs.copyFileSync(path.join(REPO_SCRIPTS, 'enforce-contract.mjs'), ecDst)
+  report.deployedFiles.push(ecDst)
+  const repoLib = path.join(REPO_SCRIPTS, 'lib')
+  for (const f of fs.readdirSync(repoLib).filter((f) => f.endsWith('.mjs')).sort()) {
+    const dst = path.join(P.scriptsLibDir, f)
+    fs.copyFileSync(path.join(repoLib, f), dst)
+    report.deployedFiles.push(dst)
+  }
+
+  // 3. carve-out JSON (repo-source.mjs candidate-2).
+  const coSrc = path.join(REPO_DIR, 'patterns', 'repo-source-carveouts.json')
+  if (fs.existsSync(coSrc)) {
+    fs.mkdirSync(P.carveoutPatternsDir, { recursive: true })
+    const coDst = path.join(P.carveoutPatternsDir, 'repo-source-carveouts.json')
+    fs.copyFileSync(coSrc, coDst)
+    report.deployedFiles.push(coDst)
+  }
+
+  // 4. project-local contract set beside the engine (resolveContractRoot candidate-0).
+  fs.mkdirSync(P.contractPatternsDir, { recursive: true })
+  for (const f of ['bp-001.json', 'events.json', 'enforce-config.schema.json']) {
+    const src = path.join(REPO_DIR, 'patterns', f)
+    if (fs.existsSync(src)) {
+      const dst = path.join(P.contractPatternsDir, f)
+      fs.copyFileSync(src, dst)
+      report.deployedFiles.push(dst)
+    }
+  }
+  const idxSrc = path.join(REPO_DIR, 'plugins', '_index.json')
+  if (fs.existsSync(idxSrc)) {
+    fs.mkdirSync(path.dirname(P.contractIndexPath), { recursive: true })
+    fs.copyFileSync(idxSrc, P.contractIndexPath)
+    report.deployedFiles.push(P.contractIndexPath)
+  }
+
+  // 5. register a PreToolUse command hook in .codex/hooks.json — MERGE, idempotent,
+  //    NEVER clobber a user hook (codex shape: hooks.PreToolUse[].hooks[].command string).
+  const cmd = codexHookCommand(P.adapterAbs)
+  if (!config.hooks || typeof config.hooks !== 'object') config.hooks = {}
+  if (!Array.isArray(config.hooks.PreToolUse)) config.hooks.PreToolUse = []
+  const already = config.hooks.PreToolUse.some(
+    (b) => Array.isArray(b.hooks) && b.hooks.some((h) => h && h.command === cmd))
+  if (!already) {
+    config.hooks.PreToolUse.push({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: cmd, statusMessage: 'episodic-memory enforcement', timeout: 30 }],
+    })
+    writeJSONAtomic(P.hooksJsonPath, config)
+    report.deployedFiles.push(P.hooksJsonPath)
+    report.registration = cmd
+  } else {
+    report.registration = `${cmd} (already present)`
+  }
+
+  // 6. trust is inactive until the operator runs /hooks (R3) — print the instruction.
+  console.log(`[codex enforcement] deployed under ${P.codexDir}. Run "/hooks" inside codex (cwd ${projectDir}) and TRUST the PreToolUse hook to activate enforcement.`)
+  return report
+}
+
+function uninstallCodexEnforcement(projectDir) {
+  const report = { removedFiles: [], removedRegistration: null, warnings: [] }
+  const P = codexEnforcementPaths(projectDir)
+  const cmd = codexHookCommand(P.adapterAbs)
+
+  // (a) hooks.json FIRST — parse-or-abort; remove ONLY our command, keep user hooks.
+  if (fs.existsSync(P.hooksJsonPath)) {
+    let config
+    try { config = JSON.parse(fs.readFileSync(P.hooksJsonPath, 'utf8')) }
+    catch (e) { report.warnings.push(`.codex/hooks.json not valid JSON (${e.message}); aborted — nothing changed`); return report }
+    if (config.hooks && Array.isArray(config.hooks.PreToolUse)) {
+      let changed = false
+      config.hooks.PreToolUse = config.hooks.PreToolUse
+        .map((b) => {
+          if (!Array.isArray(b.hooks)) return b
+          const kept = b.hooks.filter((h) => !(h && h.command === cmd))
+          if (kept.length !== b.hooks.length) changed = true
+          return { ...b, hooks: kept }
+        })
+        .filter((b) => Array.isArray(b.hooks) && b.hooks.length > 0)
+      if (changed) {
+        if (config.hooks.PreToolUse.length === 0) delete config.hooks.PreToolUse
+        if (Object.keys(config.hooks).length === 0) delete config.hooks
+        writeJSONAtomic(P.hooksJsonPath, config)
+        report.removedRegistration = cmd
+      }
+    }
+  }
+
+  // (b) remove ONLY what we deployed (review F1 r2). pluginDir (.codex/episodic-memory) is a
+  //     namespace WE create and fully own -> recursive rm is safe. But .codex/scripts and
+  //     .codex/patterns sit directly under codex's own config dir and may hold user files;
+  //     the adapter's ../../scripts waist forces those bare paths (unlike opencode's namespaced
+  //     .opencode/plugins/). So remove only the EXACT files we copied — even inside the generic
+  //     lib/patterns/plugins subdirs — then prune each dir bottom-up ONLY if empty.
+  if (fs.existsSync(P.pluginDir)) {
+    assertContained(P.pluginDir, P.codexDir)
+    fs.rmSync(P.pluginDir, { recursive: true, force: true })
+    report.removedFiles.push(P.pluginDir)
+  }
+  const removeFile = (p) => { if (fs.existsSync(p)) { assertContained(p, P.codexDir); fs.rmSync(p, { force: true }); report.removedFiles.push(p) } }
+  const pruneIfEmpty = (d) => { try { if (fs.existsSync(d) && fs.readdirSync(d).length === 0) { fs.rmdirSync(d); report.removedFiles.push(d) } } catch {} }
+
+  removeFile(path.join(P.scriptsDir, 'enforce-contract.mjs'))
+  let libFiles = []
+  try { libFiles = fs.readdirSync(path.join(REPO_SCRIPTS, 'lib')).filter((f) => f.endsWith('.mjs')) }
+  catch { libFiles = fs.existsSync(P.scriptsLibDir) ? fs.readdirSync(P.scriptsLibDir).filter((f) => f.endsWith('.mjs')) : [] }
+  for (const f of libFiles) removeFile(path.join(P.scriptsLibDir, f))
+  for (const f of ['bp-001.json', 'events.json', 'enforce-config.schema.json']) removeFile(path.join(P.contractPatternsDir, f))
+  removeFile(P.contractIndexPath) // .codex/scripts/plugins/_index.json
+  removeFile(path.join(P.carveoutPatternsDir, 'repo-source-carveouts.json'))
+  // prune bottom-up: leaf dirs first, then parents, each only when now empty.
+  for (const d of [P.scriptsLibDir, P.contractPatternsDir, path.dirname(P.contractIndexPath), P.scriptsDir, P.carveoutPatternsDir]) pruneIfEmpty(d)
+
+  // (c) prune an empty .codex (leave it if a user hooks.json or other files remain).
+  try { if (fs.existsSync(P.codexDir) && fs.readdirSync(P.codexDir).length === 0) { fs.rmdirSync(P.codexDir); report.removedFiles.push(P.codexDir) } } catch {}
+  return report
+}
+
 if (installHooks && !installEnforcement) {
   // P12 (RFC-008 P4d) transitional honesty (review F2): post-S2 ALL enforcement
   // (gates, libs, taxonomy/contract config, registrations) installs PER-PROJECT
@@ -1642,7 +1838,9 @@ if (uninstallEnforcement) {
   // OpenCode layer (S6) lives under .opencode/ + opencode.json, not .claude/.
   const rep = tool === 'opencode'
     ? uninstallOpenCodeEnforcement(projectDir)
-    : runUninstallEnforcement(projectDir, { purgeConfig })
+    : tool === 'codex'
+      ? uninstallCodexEnforcement(projectDir)
+      : runUninstallEnforcement(projectDir, { purgeConfig })
   console.log(JSON.stringify(rep, null, 2))
 }
 
@@ -1651,6 +1849,12 @@ if (installEnforcement && tool === 'opencode') {
   // opencode.json (NOT the claude-code .claude/hooks model) — handled wholly by
   // installOpenCodeEnforcement, so it pre-empts the claude-code block below.
   const rep = installOpenCodeEnforcement(projectDir)
+  console.log(JSON.stringify(rep, null, 2))
+} else if (installEnforcement && tool === 'codex') {
+  // RFC-008 P6 S4: the Codex enforcement layer deploys under .codex/ + .codex/hooks.json
+  // (NOT the claude-code .claude/hooks model) — handled wholly by installCodexEnforcement,
+  // so it pre-empts the claude-code block below. Does NOT touch the `case 'codex'` skill.
+  const rep = installCodexEnforcement(projectDir)
   console.log(JSON.stringify(rep, null, 2))
 } else if (installHooks || installEnforcement) {
   // P12 (RFC-008 P4d): enforcement artifacts (hook files, libs, taxonomy/contract
