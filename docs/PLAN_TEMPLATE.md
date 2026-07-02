@@ -26,13 +26,15 @@ every verify fail on a stub.
 
 The plan's required detail depends on **who implements it**. Decide this first.
 
-| Executor | Who | Required sections | Appendix B (mechanical spec)? |
+| Executor | Who | Required sections | Appendix A (mechanical spec)? |
 |---|---|---|---|
-| **High-capability** | Opus/Sonnet-class model that shares this context, or you | §1–§14 | Optional — may delete |
-| **Low-capability** | Cheaper/low-effort sub-agent, fresh context, weak reasoning | §1–§14 **and** Appendix B | **Mandatory** — it is the build path |
-| **Human contributor** | New maintainer unfamiliar with the code | §1–§14 + §11 Existing Hook Points | Recommended |
+| **High-capability** | Opus/Fable-class model, explicitly named by the user as the implementer, sharing this context | §1–§20 | Optional — may delete |
+| **Low-capability** | Sonnet/Haiku-class or cheaper sub-agent, fresh context, limited reasoning | §1–§20 **and** Appendix A | **Mandatory** — it is the build path |
+| **Human contributor** | New maintainer unfamiliar with the code | §1–§20 + §9 Existing Hook Points | Recommended |
 
-When in doubt, **write Appendix B**. The cost of an over-specified plan is tokens; the cost
+**Default = low.** Unless the user explicitly names an Opus/Fable-class implementer, write the
+full appendix (A.0–A.9) with falsifiable verifies. When in doubt, **write Appendix A**. The cost
+of an over-specified plan is tokens; the cost
 of an under-specified plan handed to a weak executor is silent wrong implementation.
 
 ### 0.2 The ambiguity tripwire (applies to every section)
@@ -87,7 +89,7 @@ Key active memories:
 - ...
 
 If a recalled memory names a file/function/flag, **verify it still exists** before relying on
-it (memories are point-in-time). Use the `em_*` scripts for all episode operations (search /
+it (memories are point-in-time). Use the `em-*` scripts for all episode operations (search /
 read / store / revise); for any non-trivial body pass `--body-file` (lessons `…04a7`, `…07e1`).
 
 ## §3 Objective
@@ -363,16 +365,18 @@ All MUST requirements passing = done. List any completion conditions beyond the 
 
 ## §19 Review Consensus (Rule 18)
 
-Second-opinion review via the harness (provider = `claude-subagent`, **not** codex):
+Second-opinion review via the harness. Default provider = `codex` (standing directive 2026-06-28:
+a genuinely different model catches blind spots same-model review shares); fall back to
+`claude-subagent` only when codex flakes in-session (backgrounds, hangs, null replies):
 
 ```bash
-node scripts/second-opinion.mjs request --provider claude-subagent --project . \
+node scripts/second-opinion.mjs request --provider codex --project <absolute-repo-root> \
   --storage episodic --body-file <plan.md> --summary "<plan title> review" --dispatch
 ```
 
 | Pass | Reviewer | Provider/Model | Blocker count | Verdict (ACCEPT/HOLD/REJECT) | Reply episode |
 |---|---|---|---|---|---|
-| 1 | <agent> | claude-subagent | <N> | <verdict> | `<episode-id>` |
+| 1 | <agent> | codex | <N> | <verdict> | `<episode-id>` |
 | 2 | ... | ... | ... | ... | ... |
 
 ### 19.1 Resolved blockers
@@ -410,7 +414,7 @@ section is documentation that rots; a section is the durable form.
 | `…937a` lstat before realpath | `lstat` the argv path before `realpath` so a symlink can't redirect authority | §7 |
 | `…7c11` empty-identity diff | empty identity compares equal to itself → reject / degrade to unverifiable | §13 EC5 |
 | `…a2aa` mirror lexing not spellings | accept + document residual class boundary; stop iterating narrower regexes | §19 |
-| `…04a7`/`…07e1` em-scripts + body-file | use `em_*` for episode ops; `--body-file` for non-trivial bodies | §2 |
+| `…04a7`/`…07e1` em-scripts + body-file | use `em-*` for episode ops; `--body-file` for non-trivial bodies | §2 |
 | verify-before-conclude | artifact-producing tool call precedes the conclusion (order rule) | §15 |
 | canonical-agent dispatch | dispatch `negative-scenario-planner` before self-walking | §7 |
 | bp1 step-9 5-field DEFER | every DEFER carries all 5 fields + an issue/comment/violation | §17, §18 |
@@ -437,6 +441,36 @@ exact edit anchors, exact literal changes, and a verify command per step. If the
 ever be implemented by a high-capability model that shares this context, you MAY delete this
 appendix — but prefer keeping it.
 
+## A.0 Target-toolchain instantiation (fill once per plan)
+
+The rest of this appendix is language-agnostic procedure. Every language- or platform-specific
+detail lives in this table; §A.4, §A.5, §A.6, §A.6b, §A.8, and §A.9 reference it. Fill every row
+with a concrete value for the repo this plan targets; a step that hardcodes a toolchain other than
+the repo's is a planning bug. Example commands elsewhere in this template (§14 test runner, §15
+ledger rows, §A.8 deploy-audit) are THIS repo's Node instantiation of these rows; replace them per
+this table when the template is copied into a repo with a different toolchain.
+
+| Key | Value for this plan | Example (this repo: Node zero-dep ESM) |
+|---|---|---|
+| Language / runtime | <fill> | Node.js 20+, `.mjs` ESM, zero deps |
+| Runtime check (§A.4 row) | <command → expected> | `node --version` → `v20` or higher |
+| Test-runner shape | <command shape> | `node tests/test-<feature>.mjs` |
+| New-function phrasing (§A.6) | <how a function is declared and made public> | `export function fnName(args)` |
+| Portable break-input override (§A.6b, §A.9) | <how a negative control reaches the code> | `BREAK_X=1 node tests/…` (POSIX only) or `node tests/… --break-x` (portable) |
+| Search tool for verifies | <tool> | `grep -c` / `grep -n` from the repo root |
+| Repo-specific done-commands (§A.8) | <audit/smoke commands, or `n/a`> | `node tools/deploy-audit.mjs` |
+
+The `VAR=x cmd` env-prefix spelling is POSIX-shell-only; it does not run under Windows `cmd`.
+When the repo targets Windows, the break-input override MUST be an argv flag or a language-native
+env mechanism, never a shell prefix.
+
+> **Pseudocode is NOT sufficient in §A.7.** Pseudocode may appear only in §8 Design (control
+> flow, at design altitude). Every §A.7 "Exact action" cell contains **verbatim target-language
+> code**: identifiers, strings, error messages, regexes, copy-pasteable into the named file.
+> Translating pseudocode into the target language is a design decision, and §A.2 item 3 forbids
+> the executor from making any. The *procedure* around the code (anchors, STOP protocol, verify
+> discipline) is language-agnostic; the *payload* never is.
+
 ## A.1 Forbidden-phrase lint (run before marking the plan ready)
 
 The plan is **not** executor-ready if any step contains: `decide`, `choose`, `figure out`,
@@ -447,7 +481,10 @@ probably`, `something like`, `or similar`. Resolve each into a concrete action.
 grep -niE "decide|choose|figure out|as appropriate|if needed|handle accordingly|\betc\.|and so on|TBD|should probably|something like|or similar" <this-plan>.md
 ```
 
-Expected result for a ready plan: **no matches inside Appendix A step tables.**
+Expected result for a ready plan: the grep WILL match template prose (§0.2 and this section quote
+the phrases). Acceptance rule, mechanically dischargeable: list every match's line number; the
+plan is ready iff no match falls inside a §A.5 block or a §A.7 step-table row. Record the match
+list and per-match dispositions beside the lint run.
 
 > **Caveat (lesson `…2f5d`):** line-based `grep -n` structurally **misses line-wrapped
 > occurrences** in prose/markdown — "as\nappropriate" split across two lines won't match.
@@ -504,12 +541,12 @@ Before the first edit, confirm the executor is in the right state. All must pass
 | On the right branch | `git branch --show-current` | `<feature/branch>` |
 | Clean tree | `git status --porcelain` | empty |
 | Tests green at baseline | `<slice test command>` | `<N>/<N> pass` |
-| Node available | `node --version` | `v<x>` or higher |
+| Runtime available | `<runtime check from §A.0>` | `<expected value from §A.0>` |
 
-## A.5 Shared constants / types (add once, before per-slice steps)
+## A.5 Shared constants / types, in the §A.0 target language (add once, before per-slice steps)
 
 ```js
-// Exact constants/types the steps below reference, with real values — no placeholders.
+// Written in the repo's language (§A.0). Exact constants/types the steps below reference, with real values — no placeholders. JS example:
 // Example:
 //   export const ENFORCE_CONFIG_NAME = 'enforce-config.json';
 //   export const SEED_FLAG = 'wx'; // create-if-absent, never overwrite
@@ -517,7 +554,7 @@ Before the first edit, confirm the executor is in the right state. All must pass
 
 ## A.6 Anchor format (how to read the "Exact action" column)
 
-- **Add fn** — `Add exported fnName(args): RetType to <file> after the line matching ANCHOR.`
+- **Add fn** — `Add a function with this exact signature (per the §A.0 new-function phrasing) to <file> after the line matching ANCHOR.` The name, signature, and visibility are spelled verbatim in the repo's language.
 - **ANCHOR:** a verbatim, unique substring already present in the file. If it is not unique or
   not present, STOP (§A.3). Never anchor on a line number alone — line numbers drift.
 - **Literal change** — spell out exact error strings, field names, numeric bounds, and regex.
@@ -554,12 +591,12 @@ falsifiable-test bar) is an instance of this one rule. Satisfy the parent, not j
 **Positive obligation:** every Verify names (a) the **observed value** it inspects — captured
 stdout / exit code / written-file contents / imported-function return — and (b) the **expected
 concrete value** it compares against. "Exits 0" / "script runs" names no value and fails the gate.
-This is greppable: a lint over the plan's Verify cells that finds no capture-and-compare flags the
+Author obligation, discharged by hand until a lint exists: scan every Verify cell; any cell missing either the observed value or the expected value marks the
 row as not-executor-ready.
 
 > **Compound-bash caveat (this repo):** a Verify is **one command** — no `;`/`&&`/`||`/pipes/subshells
 > (`compound-bash-gate` hard-blocks them). Express a negative control as a single command the broken
-> input drives to non-zero (e.g. `BREAK_REPO_SOURCE=1 node tests/test-x.mjs`), run as its **own row**
+> input drives to non-zero (the §A.0 portable break-input override; `BREAK_REPO_SOURCE=1 node tests/test-x.mjs` on POSIX, an argv flag where Windows matters), run as its **own row**
 > immediately before the green run — never chained with `;`.
 
 ## A.7 Per-slice step tables
@@ -594,7 +631,8 @@ split, re-anchor, or strengthen it.
 | n.0 | — | — | Pre-flight §A.4. | every row passes |
 | n.1 | `scripts/<file>.mjs` | **APPEND** | Add exported `fnName(args): RetType` at end of file. Body: `<exact behavior incl. exact error strings + return shape>`. (Adds only; changes nothing existing.) | `grep -n 'export function fnName' scripts/<file>.mjs` → 1 match |
 | n.2 | `scripts/<other>.mjs` | **EDIT** | `ANCHOR:` `<verbatim current line>` → `REPLACE:` `<exact new line(s)>`. Smallest diff; touch nothing else. | `<grep/test naming the observed + expected value>` |
-| n.3 | `tests/test-<feature>.mjs` | **CREATE** | Full verbatim contents. `testName`: arrange `<exact input, with a unique sentinel where a value must flow through>`, act `<call the REAL entry>`, assert the captured return/stdout/exit **carries that sentinel** (never "non-empty"); include the §A.9 negative control. Register in `main()`. | `node tests/test-<feature>.mjs` → `<N>/<N> pass`; **and** the broken-input row exits non-zero |
+| n.3 | `tests/test-<feature>.mjs` | **CREATE** | Full verbatim contents. `testName`: arrange `<exact input, with a unique sentinel where a value must flow through>`, act `<call the REAL entry>`, assert the captured return/stdout/exit **carries that sentinel** (never "non-empty"); include the §A.9 negative control. Register in `main()`. | `node tests/test-<feature>.mjs` → `<N>/<N> pass` |
+| n.3b | — | — | Negative control (§A.9): run the §A.0 break-input override against the new test. | `BREAK_<X>=1 node tests/test-<feature>.mjs` (or the §A.0 portable form) → non-zero exit |
 | n.4 | — | — | Commit: `<ID>-n: <title>` + `Co-Authored-By` trailer. | `git log -1 --oneline` → shows `<ID>-n` |
 
 ## A.8 Definition of done (whole plan, mechanical)
@@ -605,7 +643,7 @@ The slice/plan is done **only** when all of these print the expected result:
 <exact test command>        # → all <N> tests passing
 <load/smoke command>        # → succeeds, exit 0
 <invariant grep>            # → proves the security/contract boundary holds
-node tools/deploy-audit.mjs # → clean (only if hooks/scripts/patterns were touched)
+node tools/deploy-audit.mjs # → clean (this repo, per the §A.0 repo-specific done-commands row; only if hooks/scripts/patterns were touched)
 ```
 
 No step is "done by inspection". Each line above produces an artifact pasted into §15.
@@ -617,7 +655,7 @@ Keep the diff small and the existing suite green — these are hard-won from rea
 - **Red-then-green guard (negative control).** A step that adds a guard/regression for behavior X
   MUST prove the guard goes **RED** when X is broken — *a guard never observed failing guards
   nothing.* Discharge it as a Verify row whose broken input is reachable from the command (env/arg),
-  e.g. `BREAK_REPO_SOURCE=1 node tests/test-x.mjs` → exits non-zero, run immediately before the
+  e.g. the §A.0 break-input override (`BREAK_REPO_SOURCE=1 node tests/test-x.mjs` on POSIX) → exits non-zero, run immediately before the
   normal green run. The break is inline (env/arg), never a fixture file you add then remove (that
   fights one-file / one-commit). One command per row — never `;`-chained (§A.6b caveat).
 - **Pure-extraction slice first.** When new wiring needs a function carved out of a gate / security
