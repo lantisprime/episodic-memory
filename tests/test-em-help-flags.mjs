@@ -12,13 +12,26 @@
  * Fix: each script short-circuits on --help / -h with a single JSON object
  * ({ status: 'help', script, usage }) on stdout, exit 0, BEFORE any filesystem,
  * store, or subprocess side effect. This test pins:
- *   1. --help returns exit 0, JSON, status 'help', non-empty usage string.
+ *   1. --help returns exit 0, EXACTLY one JSON object on stdout with EXACTLY
+ *      the keys {script, status, usage}, script matching the invoked basename,
+ *      status 'help', non-empty usage string, and empty stderr (codex PR #449
+ *      round-1 B1/B2: em-restore shipped without the script key and the loose
+ *      assertions let it pass).
  *   2. No .episodic-memory store gets created under the sandbox HOME or cwd
  *      (proves the short-circuit fires before store creation).
  *   3. em-list also honors the -h alias.
  *   4. Negative control: em-store WITHOUT --help DOES create the store, so the
  *      step-2 assertion actually discriminates.
  *   5. Belt-and-braces: prune/seed/rebuild --help emit no work-result keys.
+ *   6. Pinned token semantics (codex round-1 B3, invariant narrowed by design):
+ *      a STANDALONE --help/-h argv token triggers help wherever it appears,
+ *      INCLUDING in value position of another flag (em-store --summary --help
+ *      prints help and stores nothing). Detecting value-position help tokens
+ *      would require mirroring each script's parser; the pre-existing flag()
+ *      parsers share the same token-collision class, and a literal '--help'
+ *      value is the same argv token even when quoted. em-lock is the one
+ *      deliberate exception: tokens after its -- separator belong to the
+ *      wrapped command and never trigger help.
  *
  * Usage: node tests/test-em-help-flags.mjs
  * Zero deps - Node stdlib only.
@@ -74,6 +87,30 @@ function parseJSON(stdout) {
   return JSON.parse(stdout.trim())
 }
 
+// Exact help-contract assertion (codex PR #449 round-1 B1/B2): exactly one
+// JSON object on stdout, exactly the keys {script, status, usage}, script
+// matching the invoked basename, empty stderr.
+function assertHelpContract(r, script, label) {
+  assert.strictEqual(r.code, 0, `${label}: exit code ${r.code} (stderr: ${r.stderr})`)
+  assert.strictEqual(r.stderr, '', `${label}: stderr not empty: ${r.stderr}`)
+  // Exactly ONE JSON value on stdout: JSON.parse of the whole trimmed stream
+  // throws on trailing content, so concatenated objects or extra prose fail.
+  // (em-restore pretty-prints its object over multiple lines; that is fine.)
+  let json
+  try {
+    json = JSON.parse(r.stdout.trim())
+  } catch (e) {
+    throw new Error(`${label}: stdout is not exactly one JSON value: ${e.message}\n${r.stdout}`)
+  }
+  assert.deepStrictEqual(
+    Object.keys(json).sort(), ['script', 'status', 'usage'],
+    `${label}: keys were ${JSON.stringify(Object.keys(json).sort())}`)
+  assert.strictEqual(json.status, 'help', `${label}: status was ${JSON.stringify(json.status)}`)
+  assert.strictEqual(json.script, script, `${label}: script was ${JSON.stringify(json.script)}`)
+  assert.ok(typeof json.usage === 'string' && json.usage.length > 0, `${label}: usage missing/empty`)
+  return json
+}
+
 // Recursively test whether any file named `name` exists anywhere under `dir`.
 function existsAnywhere(dir, name) {
   let found = false
@@ -118,15 +155,11 @@ const SUBSTRATE = [
 console.log('--help contract (every substrate script):')
 
 for (const script of SUBSTRATE) {
-  test(`${script} --help -> status help, exit 0, no store`, () => {
+  test(`${script} --help -> exact help contract, exit 0, no store`, () => {
     const s = makeSandbox()
     try {
       const r = run(script, ['--help'], s)
-      assert.strictEqual(r.code, 0, `exit code ${r.code} (stderr: ${r.stderr})`)
-      const json = parseJSON(r.stdout)
-      assert.strictEqual(json.status, 'help', `status was ${JSON.stringify(json.status)}`)
-      assert.strictEqual(typeof json.usage, 'string', 'usage is not a string')
-      assert.ok(json.usage.length > 0, 'usage is empty')
+      assertHelpContract(r, script, `${script} --help`)
       assertNoStore(s, `${script} --help`)
     } finally { s.cleanup() }
   })
@@ -137,15 +170,41 @@ for (const script of SUBSTRATE) {
 // ---------------------------------------------------------------------------
 console.log('-h short alias:')
 
-test('em-list.mjs -h -> status help, exit 0, no store', () => {
+test('em-list.mjs -h -> exact help contract, exit 0, no store', () => {
   const s = makeSandbox()
   try {
     const r = run('em-list.mjs', ['-h'], s)
-    assert.strictEqual(r.code, 0, `exit code ${r.code} (stderr: ${r.stderr})`)
-    const json = parseJSON(r.stdout)
-    assert.strictEqual(json.status, 'help', `status was ${JSON.stringify(json.status)}`)
-    assert.ok(typeof json.usage === 'string' && json.usage.length > 0, 'usage missing/empty')
+    assertHelpContract(r, 'em-list.mjs', 'em-list.mjs -h')
     assertNoStore(s, 'em-list.mjs -h')
+  } finally { s.cleanup() }
+})
+
+// ---------------------------------------------------------------------------
+// Pinned token semantics (codex round-1 B3, narrowed invariant): a standalone
+// --help token triggers help even in value position of another flag. Chosen by
+// design over parser-mirroring; see header comment item 6.
+// ---------------------------------------------------------------------------
+console.log('pinned token semantics (value-position --help):')
+
+test('em-store.mjs --summary --help -> help output, nothing stored', () => {
+  const s = makeSandbox()
+  try {
+    const r = run('em-store.mjs', [
+      '--project', 't', '--category', 'decision',
+      '--summary', '--help', '--body', 'b', '--scope', 'global',
+    ], s)
+    assertHelpContract(r, 'em-store.mjs', 'em-store.mjs --summary --help')
+    assertNoStore(s, 'em-store.mjs --summary --help')
+  } finally { s.cleanup() }
+})
+
+test('em-lock.mjs wrapped command owns --help after the -- separator', () => {
+  const s = makeSandbox()
+  try {
+    const lockFile = path.join(s.root, 'lockfile')
+    const r = run('em-lock.mjs', ['--file', lockFile, '--timeout', '2', '--', process.execPath, '-e', 'console.log("wrapped-ran")', '--help'], s)
+    assert.strictEqual(r.code, 0, `exit code ${r.code} (stderr: ${r.stderr})`)
+    assert.ok(!r.stdout.includes('"status":"help"'), `em-lock intercepted the wrapped command's --help: ${r.stdout}`)
   } finally { s.cleanup() }
 })
 
