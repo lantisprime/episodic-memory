@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-05-16.1
+# episodic-memory-hook-version: 2026-07-04.1
 # preflight-gate.sh — Layer D narrow PreToolUse gate.
 #
 # Closes the bp-010 cluster: codex/Agent/em-store review handoffs (and
@@ -66,8 +66,33 @@ PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
 PREFLIGHT_MARKER_LEGACY="$PRIMARY_DIR/.preflight-done"
 PREFLIGHT_MARKER_SID=""   # set after SESSION_ID validation if present
 LAST_PROMPT_MARKER="$PRIMARY_DIR/.last-user-prompt.json"
-HELPER_PATH="$REPO_ROOT/scripts/preflight-marker-write.mjs"
-CANON_LIB="$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs"
+# #441: resolve the canon lib + marker-write helper CO-LOCATED first (enforcement
+# installs together per-project — Principle 12), then in-repo scripts/ (development),
+# then the legacy global install. Mirrors preflight-prompt-helper.sh:113-126. The gate
+# stays FAIL-CLOSED: if no candidate resolves, CANON_LIB stays empty and
+# _canonicalize_one returns 99 → deny. Before this fix both constants were
+# $REPO_ROOT/scripts/... ONLY, which resolves solely inside the episodic-memory repo,
+# so in any foreign project the missing canon lib hard-denied EVERY Write/Edit
+# (before any target/active check), with no in-session self-recovery.
+CANON_LIB=""
+for cand in \
+  "$LIB_DIR/canonicalize-path-tolerant.mjs" \
+  "$REPO_ROOT/scripts/lib/canonicalize-path-tolerant.mjs" \
+  "${HOME:-/}/.episodic-memory/scripts/lib/canonicalize-path-tolerant.mjs"
+do
+  if [ -f "$cand" ]; then CANON_LIB="$cand"; break; fi
+done
+HELPER_PATH=""
+for cand in \
+  "$HOOK_DIR/preflight-marker-write.mjs" \
+  "$REPO_ROOT/scripts/preflight-marker-write.mjs" \
+  "${HOME:-/}/.episodic-memory/scripts/preflight-marker-write.mjs"
+do
+  if [ -f "$cand" ]; then HELPER_PATH="$cand"; break; fi
+done
+# HELPER_PATH is used only in actionable deny hints (never existence-checked); default
+# to the co-located path so the hint is well-formed even in the unresolved case.
+[ -z "$HELPER_PATH" ] && HELPER_PATH="$HOOK_DIR/preflight-marker-write.mjs"
 BUNDLE_PATH="$REPO_ROOT/bundles/codex-review-channel-current.md"
 
 # ---------------------------------------------------------------------------
@@ -123,7 +148,13 @@ _canonicalize_one() {
   fi
   # Use top-level await via async IIFE so import-rejection propagates as
   # a non-zero exit deterministically.
-  node -e "(async () => { try { const m = await import('$CANON_LIB'); process.stdout.write(m.canonicalizePathTolerant(process.argv[1], process.argv[2])) } catch (e) { process.stderr.write(e.message || String(e)); process.exit(2) } })()" "$input" "$hookcwd" 2>&1
+  # #441 code-review (codex 2026-07-04): pass CANON_LIB as an argv value
+  # (process.argv[3]) and import it via pathToFileURL — NEVER interpolate it into
+  # the JS source. A resolved path containing a single quote / space / shell-
+  # special char (e.g. a project dir named "proj-with-'quote", which the co-located
+  # CANON_LIB now inherits) would otherwise break the import string and hard-deny
+  # every write — the exact #441 symptom via a quoting vector.
+  node -e "(async () => { try { const { pathToFileURL } = await import('url'); const m = await import(pathToFileURL(process.argv[3]).href); process.stdout.write(m.canonicalizePathTolerant(process.argv[1], process.argv[2])) } catch (e) { process.stderr.write(e.message || String(e)); process.exit(2) } })()" "$input" "$hookcwd" "$CANON_LIB" 2>&1
   return $?
 }
 

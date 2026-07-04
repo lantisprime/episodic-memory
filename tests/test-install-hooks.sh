@@ -629,6 +629,14 @@ assert_eq "T17c UserPromptSubmit entry has no matcher" "absent" "$ups_matcher"
 ups_timeout=$(jq -r '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command|test("preflight-prompt-helper")) | .timeout' "$TEST_PROJECT/.claude/settings.json" 2>/dev/null)
 assert_eq "T17d UserPromptSubmit entry timeout=5s" "5" "$ups_timeout"
 
+# T17e (#442): preflight-prompt-helper.sh dynamically imports preflight-prompt-canon.mjs
+# from $HOOK_DIR/lib via `node -e import(...)`. That shell-only load is invisible to the
+# JS import-closure, so the lib must be deployed co-located via SHELL_LOADED_HOOK_LIBS
+# in install-manifest.mjs — otherwise the helper falls back to $REPO_ROOT/scripts (absent
+# in foreign projects). Regression guard for that manifest entry.
+[ -f "$TEST_PROJECT/.claude/hooks/lib/preflight-prompt-canon.mjs" ] && r=true || r=false
+assert_eq "T17e preflight-prompt-canon.mjs deployed co-located (shell-loaded hook lib)" "true" "$r"
+
 # ---------------------------------------------------------------------------
 # T18: #238 plan-v2 C6 — --bootstrap-last-prompt sentinel write
 # ---------------------------------------------------------------------------
