@@ -46,6 +46,11 @@ Semantic embeddings fold into **RFC-001 — Intelligent Memory** (`accepted`); g
 folds into **RFC-007 — Graph Projection** (`draft`). See the RFC
 [Related RFCs](../RFC-008-decouple-enforcement-from-substrate.md#related-rfcs) section.
 
+The recall-ACTIVATION half of this slot (wiring em-recall to session start, trigger-bearing
+lessons, bounded advisory injection) is carved to **RFC-009 — Lesson Activation** (`draft`,
+2026-07-04). The pluggable strategy REGISTRY sketched above remains deferred to
+RFC-001/RFC-007.
+
 ## Maps to
 
 R7. Principle anchors: P6, P1.
