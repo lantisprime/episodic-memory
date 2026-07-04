@@ -17,6 +17,7 @@ Persistent, self-correcting memory across coding sessions. Markdown files with Y
 
 **Scripts:** `~/.episodic-memory/scripts/`
 **Data:** global `~/.episodic-memory/episodes/` (default) | local `.episodic-memory/episodes/`
+**Full per-script reference:** `~/.episodic-memory/EM_SCRIPTS_GUIDE.md`. Read it before first script use.
 
 ## Store (0-3 per session)
 

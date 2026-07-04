@@ -5,6 +5,7 @@ You have access to a persistent episodic memory system for storing and recalling
 **Scripts:** `~/.episodic-memory/scripts/`
 **Local data:** `.episodic-memory/` (this project)
 **Global data:** `~/.episodic-memory/` (cross-project)
+**Full per-script reference:** `~/.episodic-memory/EM_SCRIPTS_GUIDE.md`. Read it before first script use.
 
 ## When to Use
 

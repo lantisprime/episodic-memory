@@ -1,0 +1,436 @@
+# EM Scripts Guide (agent-facing)
+
+This is the per-script reference for the episodic-memory substrate an agent uses at
+runtime. After `install.mjs` runs, every script below lives at
+`~/.episodic-memory/scripts/` and is invoked with `node` and an absolute path:
+
+```
+node ~/.episodic-memory/scripts/<script>.mjs [flags]
+```
+
+Every script prints a single JSON object to stdout. Parse that JSON. Do not scrape
+prose, and do not read the episode `.md` files or the `index.jsonl` directly to get
+data that a script will return for you.
+
+This guide is deployed to `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` on every install.
+Human-facing walkthroughs live in `docs/USER_MANUAL.md`. Installation per harness is
+in `docs/install/`.
+
+All outputs shown below are trimmed from real runs (Node v26, isolated sandbox).
+
+---
+
+## Intent routing (pick the right command)
+
+Match your intent to the command. The third column is the wrong habit it replaces.
+
+| Your intent | Right command | Wrong habit it replaces |
+|---|---|---|
+| "What happened recently?" / "did X happen?" | `em-list --project <name> --limit <n>` or `em-search --since <date> --tag <t> --no-track` | Guessing `--query` keywords and hoping for a hit |
+| Session-start context before working | `em-recall --project <name> [--task-type implementation]` | Reading random episode files, or skipping recall entirely |
+| Save a decision / discovery / milestone | `em-store --project <name> --category <cat> --summary ... --body ...` (use `--body-file` for long bodies; `--scope local` for repo-tied episodes) | Hand-writing an episode `.md` file |
+| Correct a wrong past decision | `em-revise --original <id> --summary ... --body ...` | Editing the original episode file in place |
+| Investigative / exploratory search | `em-search --query ... --no-track --no-score` | A plain `em-search` that reorders results and bumps access counts |
+| Index looks wrong / out of sync | `em-rebuild-index --scope all` | Hand-editing `index.jsonl` |
+| Find a topic across all projects | `em-search --query <topic> --scope all` | Grepping episode files |
+| Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
+
+Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
+current repo's `.episodic-memory/`. Searches read local and global together by
+default.
+
+---
+
+## Hard rules
+
+1. NEVER hand-write an episode `.md` file, and NEVER append a row to `index.jsonl`
+   by hand. On 2026-07-04 a Pi Agent session hand-authored an episode file plus a
+   raw `index.jsonl` row with frontmatter `created:` instead of `date:`/`time:`.
+   Every later session that ran `em-list` then crashed with
+   `TypeError: (b.date + b.time).localeCompare is not a function` (the sort at
+   `em-list.mjs:64` reads `date` and `time`, which the hand-written row lacked).
+   Read-side hardening is PR #447; writer-side validation is tracked in issue #448.
+   Use `em-store` / `em-revise` so the frontmatter and the index row are always
+   written together and correctly.
+2. Episode IDs are immutable. A decision is never edited. It is corrected by a
+   revision chain: `em-revise --original <id>` writes a new episode that supersedes
+   the old one, and default searches then return only the latest active version.
+3. Every script prints JSON to stdout. Parse it. Do not scrape prose or log lines.
+4. After install the scripts live at `~/.episodic-memory/scripts/`. Always invoke
+   them with `node` and the absolute path shown above, from any working directory.
+5. Every installed script supports `--help` / `-h` (PR #449): a standalone help
+   token anywhere in the arguments prints one JSON object
+   `{"status":"help","script":"<name>.mjs","usage":"..."}` and exits 0 with zero
+   side effects. Exception: for `em-lock`, tokens after its `--` separator belong
+   to the wrapped command and never trigger help. On OLDER deployed copies
+   (before PR #449) `--help` was not universal and probing could RUN a script's
+   default behavior, including a real `em-prune` pass; if `--help` returns
+   anything other than `status: "help"`, refresh the install before probing
+   further, and read the flag lists in this guide instead.
+
+---
+
+## Full entries
+
+### em-store
+
+Create a new episode.
+
+- WHEN TO USE: a significant decision, a bug root cause or non-obvious discovery, a
+  milestone, a critical constraint, or an explicit "remember this". Store 0 to 3 per
+  session.
+- WHEN NOT TO USE: routine edits, credentials, or anything already captured. Never
+  as a substitute for `em-revise` when correcting an existing episode.
+
+```
+node ~/.episodic-memory/scripts/em-store.mjs \
+  --project <name> \
+  --category <decision|discovery|milestone|context|research|lesson|violation|workflow.lifecycle> \
+  --tags "<t1,t2>" \
+  --summary "<one line>" \
+  --body "<detail>" \
+  [--body-file <path>] [--scope local|global] [--url <source-url>]
+```
+
+Output on success:
+
+```json
+{"status":"ok","id":"20260704-133309-chose-jwt-over-sessions-7cd4","file":".../episodes/20260704-133309-chose-jwt-over-sessions-7cd4.md","scope":"global"}
+```
+
+Output when required args are missing:
+
+```json
+{"status":"error","message":"Missing required args. Usage: --project <name> --category <decision|discovery|milestone|context|research|lesson|violation|workflow.lifecycle> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope local|global]"}
+```
+
+Flags that matter:
+- `--scope` defaults to `global`. Pass `--scope local` for episodes that should stay
+  inside this repo.
+- `--body-file <path>` reads the body from a file. Use it for long bodies (plan
+  documents) so a huge inline `--body "$(cat ...)"` does not trip a shell or a
+  permission gate. Mutually exclusive with `--body`.
+- Tags accept `--tags a,b`, repeated `--tag a --tag b`, or a mix. They are merged,
+  deduplicated, lowercased, and sorted.
+
+Common mistakes: forgetting `--category`; passing `--scope local` when you meant the
+default global; hand-writing the file instead of calling this script.
+
+### em-revise
+
+Supersede an existing episode with a corrected one.
+
+- WHEN TO USE: a stored decision proved wrong or changed. The original is marked
+  `superseded` and the new episode becomes the active one.
+- WHEN NOT TO USE: to fix a typo (that is still a revision, but consider whether it
+  is worth a chain entry); never edit the original file directly.
+
+```
+node ~/.episodic-memory/scripts/em-revise.mjs \
+  --original <episode-id> \
+  --summary "<what changed>" \
+  --body "<why / the correction>" \
+  [--tags "<t1,t2>"] [--body-file <path>] [--scope inherit|local|global]
+```
+
+Output:
+
+```json
+{"status":"ok","id":"20260704-133309-switched-to-session-cookies-285f","file":".../episodes/20260704-133309-switched-to-session-cookies-285f.md","supersedes":"20260704-133309-chose-jwt-over-sessions-7cd4","scope":"global"}
+```
+
+Flags that matter:
+- `--scope` defaults to `inherit` (the revision lands in the same store as the
+  original). Only pass `local` or `global` to force a cross-store move.
+- Tags are inherited from the original and merged with any you pass.
+
+Common mistakes: inventing a new episode with `em-store` instead of revising, which
+leaves both versions active and searchable.
+
+### em-search
+
+Search episodes with local plus global fallback.
+
+- WHEN TO USE: "what did we decide about X", finding an episode id to revise, or any
+  topic lookup.
+- WHEN NOT TO USE: to list the newest N episodes with no query (use `em-list`), or at
+  session start (use `em-recall`).
+
+```
+node ~/.episodic-memory/scripts/em-search.mjs \
+  [--project <name>] [--query <text>] [--tag <t>] [--category <cat>] \
+  [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] \
+  [--full] [--include-superseded] [--history <id>] [--no-score] [--no-track]
+```
+
+Output:
+
+```json
+{"status":"ok","count":1,"episodes":[{"id":"20260704-133309-chose-jwt-over-sessions-7cd4","date":"2026-07-04","time":"13:33","project":"demo","category":"decision","status":"active","supersedes":null,"tags":["api","auth"],"summary":"Chose JWT over sessions","source":"global"}]}
+```
+
+Flags that matter (from the script's own `Usage:` header):
+- By default `em-search` scores results by relevance and tracks access (each hit
+  bumps the episode's `access_count` and reorders future relevance).
+- `--no-score` skips relevance scoring so results come back in a stable
+  recency order.
+- `--no-track` skips access tracking. Use it (with `--no-score`) for investigative
+  or repeated searches so you do not pollute the usage signals that recall relies on.
+  History queries and `--include-superseded` already skip tracking.
+- `--full` includes episode bodies. `--history <id>` returns the whole supersedes
+  chain.
+
+`--history` output (chain, oldest first):
+
+```json
+{"status":"ok","count":2,"chain":[{"id":"...-chose-jwt-over-sessions-7cd4","status":"superseded",...},{"id":"...-switched-to-session-cookies-285f","status":"active","supersedes":"...-chose-jwt-over-sessions-7cd4",...}]}
+```
+
+Common mistakes: guessing `--query` words when you actually want a time or tag
+filter (use `--since` / `--tag` / `--category`); running plain `em-search` in a loop
+and skewing relevance instead of adding `--no-track --no-score`.
+
+### em-list
+
+List the most recent episodes, newest first. No relevance scoring.
+
+- WHEN TO USE: "what happened recently", a quick catch-up, confirming a store landed.
+- WHEN NOT TO USE: topic search (use `em-search`), or context assembly at session
+  start (use `em-recall`).
+
+```
+node ~/.episodic-memory/scripts/em-list.mjs [--project <name>] [--limit <n>] [--scope local|global|all] [--include-superseded]
+```
+
+Output:
+
+```json
+{"status":"ok","count":1,"episodes":[{"id":"20260704-133309-chose-jwt-over-sessions-7cd4","date":"2026-07-04","time":"13:33","project":"demo","category":"decision","status":"active","supersedes":null,"tags":["api","auth"],"summary":"Chose JWT over sessions","source":"global"}]}
+```
+
+Common mistakes: expecting a `--query` flag (there is none); this is a pure recency
+list.
+
+### em-recall
+
+Proactive session-start recall via a three-pass retrieval (project match, tag match,
+recent cross-project) plus behavioral-pattern pre-flight warnings.
+
+- WHEN TO USE: the first thing you do when starting work on a project. Pass
+  `--task-type implementation` before code work to surface recent bp-001 / bp-006
+  violations from the last 30 days.
+- WHEN NOT TO USE: for a specific topic lookup (use `em-search`).
+
+```
+node ~/.episodic-memory/scripts/em-recall.mjs [--project <name>] [--task-type <implementation|push|rule|general>] [--scope local|global|all] [--limit <n>] [--days <n>] [--no-track]
+```
+
+Output shape:
+
+```json
+{"status":"ok","context":{"project":"demo","branch_tokens":["..."],"effective_tokens":["..."],"task_type":null},"count":3,"episodes":[{"id":"...","summary":"Chose JWT over sessions","source":"global","score":0.998}],"preflight_warnings":[],"prune_suggestion":null}
+```
+
+Flags that matter: `--task-type implementation` adds the violation pre-flight;
+`--no-track` avoids bumping access counts if you are recalling repeatedly.
+
+Common mistakes: skipping recall and re-deriving context that a past session already
+recorded.
+
+### em-check-stale
+
+Report research episodes whose source URL may be out of date.
+
+- WHEN TO USE: at session start, or when you encounter a URL you have research for,
+  to decide whether to re-fetch and `em-revise`.
+- WHEN NOT TO USE: as a general search.
+
+```
+node ~/.episodic-memory/scripts/em-check-stale.mjs [--days 30] [--project <name>]
+```
+
+Output:
+
+```json
+{"status":"ok","count":1,"stale":[{"id":"...","category":"research","summary":"...","url":"https://...","fetched":"2026-05-26","daysOld":39}]}
+```
+
+### em-rebuild-index
+
+Regenerate `index.jsonl` (and `tags.json`) from the episode `.md` files on disk.
+Atomic (temp plus rename). Idempotent: safe to run repeatedly.
+
+- WHEN TO USE: the index looks out of sync, after you manually removed an episode
+  file, or to recover from a corrupted index.
+- WHEN NOT TO USE: as a routine step. Never hand-edit `index.jsonl`; rebuild it.
+
+```
+node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
+```
+
+Output:
+
+```json
+{"status":"ok","rebuilt":[{"scope":"local","count":1},{"scope":"global","count":1}]}
+```
+
+Note: `--help` short-circuits safely (PR #449), but any OTHER unknown argument is
+ignored and a rebuild runs. `--scope all` rebuilds both local and global.
+
+### em-prune
+
+Archive episodes that score below a relevance threshold.
+
+- WHEN TO USE: when the store has grown large and you want to archive low-value
+  episodes. Always start with `--dry-run`.
+- WHEN NOT TO USE: casually. Running it with no flag performs a real prune pass.
+
+```
+node ~/.episodic-memory/scripts/em-prune.mjs --dry-run
+node ~/.episodic-memory/scripts/em-prune.mjs --scope global --threshold 0.15
+node ~/.episodic-memory/scripts/em-prune.mjs --check
+```
+
+Output:
+
+```json
+{"status":"ok","results":[{"scope":"local","pruned":0,"remaining":1779,"freed_bytes":0},{"scope":"global","pruned":0,"remaining":474,"freed_bytes":0}]}
+```
+
+`--check` exits 1 when prunable episodes exist (CI gate). `--dry-run` previews with
+no writes.
+
+### em-pattern-health
+
+Aggregate violation episodes per behavioral pattern within a rolling window and flag
+which patterns need enforcement.
+
+- WHEN TO USE: to see which behavioral patterns are being violated repeatedly and
+  whether a hook exists to stop them.
+- WHEN NOT TO USE: for ordinary recall.
+
+```
+node ~/.episodic-memory/scripts/em-pattern-health.mjs            # full report
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --summary  # one line
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --check    # exit 1 if attention needed
+```
+
+`needs-enforcement` means violated repeatedly with no hook found. `needs-attention`
+means a hook exists but violations continue (escalate to a human).
+
+### em-violation
+
+Record a behavioral-pattern violation as a structured episode.
+
+- WHEN TO USE: when you (or the user) catch a workflow rule being broken, so the
+  system can track repeat offenses.
+- WHEN NOT TO USE: for ordinary decisions or discoveries (use `em-store`).
+
+```
+node ~/.episodic-memory/scripts/em-violation.mjs \
+  --pattern <pattern-id> \
+  --summary "<what happened>" \
+  --body "<detail>" \
+  [--sequence "<actual actions>"] [--correct "<correct actions>"] [--scope global|local]
+```
+
+Missing-args output:
+
+```json
+{"status":"error","message":"Missing required args. Usage: --pattern <pattern_id> --summary \"<text>\" (--body \"<text>\" | --body-file <path>) [--sequence \"<actions>\"] [--correct \"<actions>\"] [--project <name>] [--tags \"<extra>\"] [--scope global|local]"}
+```
+
+### em-seed-patterns
+
+Seed the shipped behavioral patterns into the global store. Idempotent: already
+seeded patterns are skipped.
+
+- WHEN TO USE: once after install, or after adding a new pattern file, so patterns
+  surface in normal search and recall.
+- WHEN NOT TO USE: repeatedly in a session (it is a no-op after the first seed).
+
+```
+node ~/.episodic-memory/scripts/em-seed-patterns.mjs
+```
+
+Output:
+
+```json
+{"status":"ok","seeded":0,"skipped":11,"total":11}
+```
+
+---
+
+## Operator-only / heavyweight scripts
+
+These are for operators and specific workflows, not routine agent recall or storage.
+As an agent you should NOT invoke them unless the user explicitly asks. Deep docs are
+linked per entry.
+
+### em-backup
+
+Mirror the memory directories to a private GitHub repo with PII / secret redaction on
+the staging copy (source files are never modified). Do NOT run `--init` / `--sync`
+without a config; it refuses rather than ship raw personal memory. Deep docs:
+`docs/em-backup.md` and README.md "Backup" section. Agent rule: do not touch unless
+the user asks to back up.
+
+### em-restore
+
+Selectively restore from a cloned backup repo (filter by tag / date / category /
+source). Dry-run by default; restore cannot undo redaction. Deep docs: README.md
+"Restore" section and `docs/USER_MANUAL.md`. Agent rule: do not touch unless the user
+asks to restore.
+
+### em-audit-compliance
+
+Heuristic measurement of rule-skip rates from Claude Code session transcripts (false
+positives expected; for trend tracking). Deep docs: README.md "Compliance Audit &
+Transcript Mining". Agent rule: operator reporting tool, not for recall.
+
+### em-mine-transcripts
+
+Surface decisions / lessons / violations buried in transcripts that were never
+captured as episodes. Writes a staging file under `.claude/scratch/`; never calls
+`em-store` directly (cold-storage discipline). Deep docs: README.md "Compliance Audit
+& Transcript Mining". Agent rule: driven by the scheduled daily-mining routine; do
+not invoke ad hoc.
+
+### em-rfc-validate
+
+CI-only validator that diffs prose-tier RFC content against the machine-readable
+source of truth. Deep docs: README.md "RFC Validation". Agent rule: CI runs it
+repo-relative; not part of the deployed recall flow.
+
+### em-workflow-validate
+
+Pure validator for the `workflow.lifecycle` episode chain at a given gate. Called by
+enforcement hooks. Deep docs: README.md "Workflow Validation". Agent rule: hooks
+shell out to it; do not call it by hand.
+
+### em-review-request
+
+Records that a review event happened in the workflow audit trail (refs to
+plan / approval / checkpoints / tests). Orthogonal to `second-opinion`, which runs the
+review. Deep docs: README.md "Review Request". Agent rule: lifecycle plumbing, not for
+recall.
+
+### em-lock
+
+Zero-dependency atomic file lock (a `flock` replacement for macOS) used by the
+auto-promote and backup-sync paths. Deep docs: header comment in the script. Agent
+rule: infrastructure primitive; do not invoke directly.
+
+### em-watch-codex
+
+Polls the store for new Codex-authored reply episodes; the cursor mechanism behind
+the second-opinion `episodic` storage backend. Deep docs: README.md "Codex Watcher".
+Agent rule: prefer the `second-opinion` harness; do not poll by hand.
+
+### second-opinion
+
+The pluggable cross-tool review harness (request, provider dispatch, preamble
+composition, consensus loop). This is a capability, not a memory command. Deep docs:
+README.md "Second-Opinion Review Harness" and `docs/USER_MANUAL.md` Scenario 8b.
+Agent rule: use it only when the user asks for a second-opinion / cross-tool review,
+and route through the harness rather than invoking a provider CLI directly.
