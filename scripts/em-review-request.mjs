@@ -55,6 +55,12 @@ const LOCAL_DIR = resolveLocalDir()
 // CLI
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-review-request.mjs', usage: 'node em-review-request.mjs --task <id> --plan-ref <ref> --approval-ref <ep> --pre-checkpoint-ref <ep> --post-checkpoint-ref <ep> --tests-ref <ref> --code-review-ref <ep> [--bug-log-ref <url>]... [--no-new-bugs] [--command-inventory-ref <ref>] [--triggered-by <ep>] [--head <sha>] [--branch <name>] [--worktree <path>] [--project <name>] [--tags <t1,t2>] [--scope inherit|local|global] [--verifications-file <path>] [--pattern-id <id>] [--dry-run]' }))
+  process.exit(0)
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1 || i + 1 >= argv.length) return undefined

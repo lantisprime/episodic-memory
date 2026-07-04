@@ -39,6 +39,12 @@ const LOCAL_DIR = resolveLocalDir()
 // CLI args
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-workflow-validate.mjs', usage: 'node em-workflow-validate.mjs --task <task> --gate <pre-checkpoint|post-checkpoint|push-allowed> [--pattern-id <id>] [--worktree <path>] [--branch <branch>] [--head <sha>] [--scope local|global|all] [--strict]' }))
+  process.exit(0)
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1 || i + 1 >= argv.length) return undefined

@@ -30,6 +30,11 @@ const REPO_ROOT = resolveRepoRoot()
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-recall.mjs', usage: 'node em-recall.mjs [--project <name>] [--scope local|global|all] [--limit <n>] [--days <n>] [--no-track] [--task-type implementation|push|rule|general] [--warn-time-ms <n>] [--warn-count <n>]' }))
+  process.exit(0)
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1 || i + 1 >= argv.length) return undefined

@@ -52,6 +52,12 @@ const TRIGGERS = [
 // ---------------------------------------------------------------------------
 
 const argv = process.argv.slice(2)
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-mine-transcripts.mjs', usage: 'node em-mine-transcripts.mjs [--since <ISO>] [--slug <substring>] [--exclude-worktrees] [--output <path>] [--dry-run]' }))
+  process.exit(0)
+}
+
 function flag(name, def = undefined) {
   const i = argv.indexOf(name)
   if (i === -1) return def

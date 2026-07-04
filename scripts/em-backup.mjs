@@ -1675,6 +1675,11 @@ function selfTest() {
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-backup.mjs', usage: 'node em-backup.mjs (--audit | --init | --sync | --self-test | --show-config) [--sample <n>]' }))
+  process.exit(0)
+}
+
 // Codex PR-#137 round-5: every CLI JSON output (success OR error) must pass
 // through artifact redaction at the output boundary. Patching individual
 // return objects + error strings was whack-a-mole. This is the LAST line of

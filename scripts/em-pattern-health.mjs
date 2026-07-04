@@ -31,6 +31,11 @@ const LOCAL_DIR = resolveLocalDir(CWD)
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-pattern-health.mjs', usage: 'node em-pattern-health.mjs [--pattern <id>] [--scope local|global|all] [--window-days <N>] [--min-violations <N>] [--has-enforcement <id>] [--check] [--json] [--summary]' }))
+  process.exit(0)
+}
+
 // Reject `--something` as a value for another flag — protects against
 // `--has-enforcement --check` silently registering "--check" as a pattern.
 function isFlagToken(s) {
