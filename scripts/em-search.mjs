@@ -293,8 +293,10 @@ if (!noScore) {
   }
   results.sort((a, b) => b._score - a._score)
 } else {
-  // No scoring — keep date-based sort
-  results.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time))
+  // No scoring — keep date-based sort. Keys coerced: foreign-harness writers
+  // have appended index rows without date/time (undefined + undefined = NaN,
+  // which has no .localeCompare); malformed rows sort last instead of crashing.
+  results.sort((a, b) => `${b.date ?? ''}${b.time ?? ''}`.localeCompare(`${a.date ?? ''}${a.time ?? ''}`))
 }
 
 // Apply limit AFTER scoring/sorting

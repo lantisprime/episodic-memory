@@ -61,7 +61,10 @@ if (project) {
   results = results.filter(e => e.project === project)
 }
 
-results.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time))
+// Coerce sort keys: foreign-harness writers have appended index rows without
+// date/time (undefined + undefined = NaN, and NaN has no .localeCompare).
+// Malformed rows sort last in the descending order instead of crashing.
+results.sort((a, b) => `${b.date ?? ''}${b.time ?? ''}`.localeCompare(`${a.date ?? ''}${a.time ?? ''}`))
 results = results.slice(0, limit)
 
 const output = results.map(({ _source, ...rest }) => ({ ...rest, source: _source }))
