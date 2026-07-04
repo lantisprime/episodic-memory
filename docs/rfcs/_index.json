@@ -65,6 +65,14 @@
       "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-008-decouple-enforcement-from-substrate.md"
+    },
+    {
+      "id": "RFC-009",
+      "slug": "lesson-activation",
+      "title": "Lesson Activation: Trigger-Bearing Lessons, Derived Trigger Index, and Bounded Advisory Recall",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-009-lesson-activation.md"
     }
   ]
 }
