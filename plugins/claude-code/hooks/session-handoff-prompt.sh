@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# episodic-memory-hook-version: 2026-05-12.rank10-slice
+# episodic-memory-hook-version: 2026-07-04.foreign-project-440
 # session-handoff-prompt.sh — SessionStart hook: two-phase blocking directive
 # with always-tier discipline load (rank-10 slice, codex consensus r1-r5).
 #
@@ -30,6 +30,13 @@
 # 6-file always-tier list (2026-05-16 demotions) + condensed Q1/Q2 directive —
 # which had drifted ahead of this source; file is now tracked in HOOK_SPECS /
 # the freshness manifest so future drift is reported at SessionStart.
+#
+# 2026-07-04 (#440): generalized for foreign projects. em-search.mjs resolves
+# in-repo dev copy first, then ~/.episodic-memory/scripts/ (global substrate);
+# always-tier list emits only files that exist at MEM_ROOT; directive degrades
+# to Q1-only / Q2-only / no emission when parts are absent. Previously the
+# emitted command hard-referenced <repo>/scripts/em-search.mjs (MODULE_NOT_FOUND
+# outside this repo) and 5 feedback files foreign memory dirs never have.
 #
 # Composes with:
 #   - hooks/lib/repo-root.sh (sourced for resolve_repo_root canonical helper)
@@ -72,6 +79,12 @@ fi
 
 if [ ! -d "$STDIN_CWD" ]; then
   _log_and_exit_safe "stdin.cwd '$STDIN_CWD' does not exist on disk"
+fi
+
+# Fail-safe under set -u: HOME feeds memory-root candidates and the substrate
+# em-search probe; unset HOME must degrade cleanly, not crash mid-script.
+if [ -z "${HOME:-}" ]; then
+  _log_and_exit_safe "HOME unset; cannot resolve memory root or substrate scripts"
 fi
 
 # ---------------------------------------------------------------------------
@@ -166,10 +179,17 @@ ALWAYS_TIER=(
   "feedback_canonical_agent_dispatch_trigger.md"
 )
 
-# Emit explicit absolute paths (codex F11).
+# Emit explicit absolute paths (codex F11), filtered to files that exist at
+# hook runtime (#440): foreign projects typically have MEMORY.md but none of
+# the feedback files; emitting absent paths made the agent issue 5 failing
+# Reads every session. Skip missing entries silently.
 _paths=""
+_n_files=0
 for f in "${ALWAYS_TIER[@]}"; do
-  _paths="${_paths}     - ${MEM_ROOT}/${f}"$'\n'
+  if [ -f "${MEM_ROOT}/${f}" ]; then
+    _paths="${_paths}     - ${MEM_ROOT}/${f}"$'\n'
+    _n_files=$((_n_files+1))
+  fi
 done
 
 # Shell-quote a path for safe inclusion in a command string. Mirrors
@@ -190,18 +210,51 @@ _shell_quote() {
   esac
 }
 
-# Mechanical em-search command (cd-bound; codex F11). Both REPO_ROOT uses
-# are shell-quoted for path-with-spaces / shell-metachar safety.
-_quoted_root="$(_shell_quote "${REPO_ROOT}")"
-_quoted_emsearch="$(_shell_quote "${REPO_ROOT}/scripts/em-search.mjs")"
-EM_SEARCH_CMD="cd ${_quoted_root} && node ${_quoted_emsearch} --category lesson --scope all --limit 10 --no-track --no-score"
+# Mechanical em-search command (cd-bound; codex F11). Both paths are
+# shell-quoted for path-with-spaces / shell-metachar safety.
+#
+# em-search.mjs resolution (#440): probe the in-repo dev copy first (resolves
+# only inside the episodic-memory repo itself), then the global substrate —
+# mirrors the gates' engine resolution pattern (#441). REPO_ROOT stays as the
+# cd target so --scope all picks up the project-local episode store. If no
+# candidate resolves, EM_SEARCH_CMD stays empty and the directive omits the
+# em-search step instead of emitting a MODULE_NOT_FOUND command.
+EM_SEARCH_SCRIPT=""
+for cand in \
+  "${REPO_ROOT}/scripts/em-search.mjs" \
+  "${HOME}/.episodic-memory/scripts/em-search.mjs"
+do
+  if [ -f "$cand" ]; then EM_SEARCH_SCRIPT="$cand"; break; fi
+done
+EM_SEARCH_CMD=""
+if [ -n "$EM_SEARCH_SCRIPT" ]; then
+  _quoted_root="$(_shell_quote "${REPO_ROOT}")"
+  _quoted_emsearch="$(_shell_quote "${EM_SEARCH_SCRIPT}")"
+  EM_SEARCH_CMD="cd ${_quoted_root} && node ${_quoted_emsearch} --category lesson --scope all --limit 10 --no-track --no-score"
+fi
+
+# Q2 payload (#440): compose from whichever parts resolved. Empty when there
+# is nothing to load — the directive then degrades to Q1-only or no emission.
+Q2_BODY=""
+_pathword="paths"
+[ "$_n_files" -eq 1 ] && _pathword="path"
+if [ "$_n_files" -gt 0 ] && [ -n "$EM_SEARCH_CMD" ]; then
+  Q2_BODY="batch-Read these ${_n_files} absolute ${_pathword}, then run the em-search command:
+${_paths}     ${EM_SEARCH_CMD}"
+elif [ "$_n_files" -gt 0 ]; then
+  Q2_BODY="batch-Read these ${_n_files} absolute ${_pathword}:
+${_paths%$'\n'}"
+elif [ -n "$EM_SEARCH_CMD" ]; then
+  Q2_BODY="run the em-search command:
+     ${EM_SEARCH_CMD}"
+fi
 
 # ---------------------------------------------------------------------------
 # Handoff (phase 1) — only if session_handoff.md exists at resolved memory_root.
 # ---------------------------------------------------------------------------
 HANDOFF="${MEM_ROOT}/session_handoff.md"
 
-if [ -f "${HANDOFF}" ]; then
+if [ -f "${HANDOFF}" ] && [ -n "$Q2_BODY" ]; then
   MTIME="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "${HANDOFF}" 2>/dev/null \
          || stat -c '%y' "${HANDOFF}" 2>/dev/null | cut -c1-16 \
          || echo unknown)"
@@ -218,16 +271,28 @@ Remember Q1's answer across Q2; do NOT drop it.
 
 After both answers, process in order:
   1. If Q1=y: Read ${HANDOFF}
-  2. If Q2=y: batch-Read these 6 absolute paths, then run the em-search command:
-${_paths}     ${EM_SEARCH_CMD}
+  2. If Q2=y: ${Q2_BODY}
   3. Then address the user's prompt."
-else
+elif [ -f "${HANDOFF}" ]; then
+  MTIME="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "${HANDOFF}" 2>/dev/null \
+         || stat -c '%y' "${HANDOFF}" 2>/dev/null | cut -c1-16 \
+         || echo unknown)"
+
+  DIRECTIVE="BLOCKING: Ask this y/n question (verbatim) before responding, no preamble or tool calls:
+  Load session_handoff.md from ${MTIME}? (y/n)
+
+If y: Read ${HANDOFF}
+Then address the user's prompt."
+elif [ -n "$Q2_BODY" ]; then
   DIRECTIVE="BLOCKING: Ask this y/n question (verbatim) before responding, no preamble or tool calls:
   Load discipline + toolkit + recent lessons? (y/n)
 
-If y: batch-Read these 6 absolute paths, then run the em-search command:
-${_paths}     ${EM_SEARCH_CMD}
+If y: ${Q2_BODY}
 Then address the user's prompt."
+else
+  # Nothing to load at this project (#440): no handoff, no memory files, no
+  # resolvable em-search. Emit no directive rather than a no-op Q2.
+  _log_and_exit_safe "no handoff, no always-tier files, no em-search candidate at MEM_ROOT=${MEM_ROOT}; skipping directive"
 fi
 
 jq -n --arg ctx "${DIRECTIVE}" '{
