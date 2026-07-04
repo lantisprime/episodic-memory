@@ -35,6 +35,11 @@ const VALID_SCOPES = ['local', 'global', 'all']
 
 const argv = process.argv.slice(2)
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-watch-codex.mjs', usage: 'node em-watch-codex.mjs [--scope local|global|all] [--since <id>] [--no-update] [--project-root <path>] [--limit <n>]' }))
+  process.exit(0)
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1) return undefined

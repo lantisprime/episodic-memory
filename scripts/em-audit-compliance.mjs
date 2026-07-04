@@ -44,6 +44,12 @@ import { walkTranscripts, groupBySession } from './lib/transcript-walker.mjs'
 // ---------------------------------------------------------------------------
 
 const argv = process.argv.slice(2)
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-audit-compliance.mjs', usage: 'node em-audit-compliance.mjs [--since <ISO>] [--slug <substring>] [--exclude-worktrees] [--format json|markdown] [--prior-since <ISO>]' }))
+  process.exit(0)
+}
+
 function flag(name, def = undefined) {
   const i = argv.indexOf(name)
   if (i === -1) return def

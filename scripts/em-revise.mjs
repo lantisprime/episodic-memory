@@ -37,6 +37,11 @@ const LOCAL_DIR = resolveLocalDir()
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global]' }))
+  process.exit(0)
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1 || i + 1 >= argv.length) return undefined

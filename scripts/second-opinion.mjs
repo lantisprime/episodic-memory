@@ -47,6 +47,11 @@ const PROVIDERS_REGISTRY = path.join(HARNESS_ROOT, 'scripts', 'second-opinion', 
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'second-opinion.mjs', usage: 'node second-opinion.mjs <request|list-replies|rebuild-index> [options]. request: --provider <p> --project <path> --storage <files|episodic> --body <text> --summary <text> [--dispatch] [--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>]' }))
+  process.exit(0)
+}
+
 function flag(name) {
   const i = argv.indexOf(name)
   if (i === -1 || i + 1 >= argv.length) return undefined

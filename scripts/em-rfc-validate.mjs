@@ -30,6 +30,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const argv = process.argv.slice(2)
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-rfc-validate.mjs', usage: 'node em-rfc-validate.mjs [--json] [--rfcs-dir <path>]' }))
+  process.exit(0)
+}
+
 const jsonMode = argv.includes('--json')
 const dirIdx = argv.indexOf('--rfcs-dir')
 const __dirname = path.dirname(fileURLToPath(import.meta.url))

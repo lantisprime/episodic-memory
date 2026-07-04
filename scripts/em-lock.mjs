@@ -27,6 +27,16 @@ import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 
 const args = process.argv.slice(2)
+
+// Scan only the flags before the `--` separator so a wrapped command's own
+// --help/-h is not intercepted here.
+const helpSep = args.indexOf('--')
+const helpScan = helpSep === -1 ? args : args.slice(0, helpSep)
+if (helpScan.includes('--help') || helpScan.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-lock.mjs', usage: 'node em-lock.mjs --file <lockpath> --timeout <seconds> -- <cmd> [args...]' }))
+  process.exit(0)
+}
+
 const dashDash = args.indexOf('--')
 if (dashDash === -1 || dashDash === args.length - 1) {
   console.error(JSON.stringify({ status: 'error', code: 'usage', message: 'Usage: em-lock.mjs --file <path> --timeout <seconds> -- <cmd> [args...]' }))

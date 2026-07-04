@@ -2394,7 +2394,7 @@ try {
     out({ status: r.fail === 0 ? 'ok' : 'fail', ...r })
     process.exit(r.fail === 0 ? 0 : 1)
   } else if (bool('--help') || bool('-h')) {
-    out({ status: 'ok', usage: usage() })
+    out({ status: 'help', usage: usage() })
   } else {
     const backupDir = expandHome(flag('--from'))
     if (!backupDir) {
