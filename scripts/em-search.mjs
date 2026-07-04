@@ -293,8 +293,14 @@ if (!noScore) {
   }
   results.sort((a, b) => b._score - a._score)
 } else {
-  // No scoring — keep date-based sort
-  results.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time))
+  // No scoring — keep date-based sort, tolerant of foreign-harness index rows
+  // (hand-appended without em-store): only string-typed fields participate. A
+  // non-string date would either crash (NaN.localeCompare) or, stringified,
+  // out-sort ISO keys ("20260703" > "2026-07-04..."); time joins only when
+  // date is a string so a time-only key cannot beat ISO date keys. Rows
+  // without a string date get key '' and sort last in descending order.
+  const dtKey = e => typeof e.date === 'string' ? e.date + (typeof e.time === 'string' ? e.time : '') : ''
+  results.sort((a, b) => dtKey(b).localeCompare(dtKey(a)))
 }
 
 // Apply limit AFTER scoring/sorting
