@@ -61,10 +61,14 @@ if (project) {
   results = results.filter(e => e.project === project)
 }
 
-// Coerce sort keys: foreign-harness writers have appended index rows without
-// date/time (undefined + undefined = NaN, and NaN has no .localeCompare).
-// Malformed rows sort last in the descending order instead of crashing.
-results.sort((a, b) => `${b.date ?? ''}${b.time ?? ''}`.localeCompare(`${a.date ?? ''}${a.time ?? ''}`))
+// Sort key tolerant of foreign-harness index rows (hand-appended without
+// em-store): only string-typed fields participate. A non-string date (absent,
+// null, numeric) would either crash (NaN.localeCompare) or, stringified,
+// out-sort ISO keys ("20260703" > "2026-07-04..."); time joins only when date
+// is a string so a time-only key like "23:59" cannot beat ISO date keys.
+// Rows without a string date get key '' and sort last in descending order.
+const dtKey = e => typeof e.date === 'string' ? e.date + (typeof e.time === 'string' ? e.time : '') : ''
+results.sort((a, b) => dtKey(b).localeCompare(dtKey(a)))
 results = results.slice(0, limit)
 
 const output = results.map(({ _source, ...rest }) => ({ ...rest, source: _source }))
