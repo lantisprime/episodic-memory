@@ -60,6 +60,12 @@ jobs:
       - name: Run preflight-marker reapers (F4 SessionEnd reap + SessionStart 7d orphan sweep)
         run: node tests/test-preflight-marker-reapers.mjs
 
+      - name: Run preflight-gate foreign-project regression (#441 — real install, no scripts/ tree, edits allowed)
+        run: bash tests/test-preflight-gate-foreign-project.sh
+
+      - name: Run hook-body repo-relative-scripts class-check (#441 — no fail-closed sole $REPO_ROOT/scripts dep)
+        run: node tests/test-hook-bodies-no-repo-relative-scripts.mjs
+
       - name: Run no-legacy-plan-marker-writes detector (Rule 13)
         run: node tests/test-no-legacy-plan-marker-writes.mjs
 
