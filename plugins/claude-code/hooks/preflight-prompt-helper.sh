@@ -133,8 +133,13 @@ done
 # We hand the lib the entire stdin so it does the JSON.parse + .prompt
 # extract + utf-8 byte encode itself — keeping the binding logic in one
 # place. The lib exits non-zero on bad input; treat that as fail-safe.
+# #442: pass CANON_LIB as process.argv[1] + pathToFileURL — NEVER interpolate it into
+# the JS source. A resolved path with a single quote / space / shell-special char (the
+# co-located path inherits the project dir's name) would otherwise SyntaxError the
+# import string. Here that only fail-SAFES (skip), but the shape matches the #441 gate
+# bug so it gets the same treatment.
 PROMPT_SHA="$(printf '%s' "$INPUT" | node -e \
-  "import('$CANON_LIB').then(m => { let s=''; process.stdin.setEncoding('utf8'); process.stdin.on('data', d => s+=d); process.stdin.on('end', () => { try { process.stdout.write(m.canonicalPromptSha256(s)) } catch (e) { process.stderr.write(e.message); process.exit(2) } }) })" \
+  "(async () => { const { pathToFileURL } = await import('url'); const m = await import(pathToFileURL(process.argv[1]).href); let s=''; process.stdin.setEncoding('utf8'); process.stdin.on('data', d => s+=d); process.stdin.on('end', () => { try { process.stdout.write(m.canonicalPromptSha256(s)) } catch (e) { process.stderr.write(e.message); process.exit(2) } }) })()" "$CANON_LIB" \
   2>/dev/null)"
 if [ -z "$PROMPT_SHA" ] || [ "${#PROMPT_SHA}" -ne 64 ]; then
   _log_and_exit_safe "canonical sha computation returned empty or wrong length; skipping"

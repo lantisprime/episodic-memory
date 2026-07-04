@@ -277,12 +277,32 @@ export function globalScriptLibs(repoDir) {
   return computeLibClosure(repoDir, globalEntryScripts(repoDir))
 }
 
+// Shell-loaded hook-runtime libs (#442): scripts/lib/*.mjs that a hook SHELL script
+// imports DYNAMICALLY at runtime (node -e "import(<path>)"), NOT via a JS import in
+// any .mjs entry script. computeLibClosure only follows JS imports, so it cannot see
+// these — they must be listed explicitly or they never deploy co-located into
+// <project>/.claude/hooks/lib/, and the hook falls back to $REPO_ROOT/scripts (absent
+// in foreign projects). preflight-prompt-helper.sh loads preflight-prompt-canon.mjs
+// this way.
+export const SHELL_LOADED_HOOK_LIBS = ['preflight-prompt-canon.mjs']
+
 // Lib closure that travels INTO the per-project enforcement bundle — every
 // scripts/lib/*.mjs the enforcement entries (incl. the SessionEnd hook script)
-// import. Includes shared substrate libs (local-dir.mjs, …) so the relocated
-// scripts resolve all imports co-located, never reaching into global.
+// import, PLUS the shell-loaded hook libs and their own transitive closure.
+// Includes shared substrate libs (local-dir.mjs, …) so the relocated scripts resolve
+// all imports co-located, never reaching into global.
 export function enforcementBundleLibs(repoDir) {
-  return computeLibClosure(repoDir, [...enforcementEntryScripts(repoDir), SESSION_END_SCRIPT])
+  const closure = computeLibClosure(repoDir, [...enforcementEntryScripts(repoDir), SESSION_END_SCRIPT])
+  const libDir = path.join(repoDir, 'scripts', 'lib')
+  for (const f of SHELL_LOADED_HOOK_LIBS) {
+    if (fs.existsSync(path.join(libDir, f))) closure.add(f)
+  }
+  // Their own transitive relative-import closure (empty today; defensive for future
+  // shell-loaded libs that import sibling libs).
+  for (const f of computeLibClosure(repoDir, SHELL_LOADED_HOOK_LIBS.map((f) => path.join('lib', f)))) {
+    closure.add(f)
+  }
+  return closure
 }
 
 // Libs that move OUT of global (enforcement-only): in the enforcement bundle and
