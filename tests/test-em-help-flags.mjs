@@ -202,8 +202,17 @@ test('em-lock.mjs wrapped command owns --help after the -- separator', () => {
   const s = makeSandbox()
   try {
     const lockFile = path.join(s.root, 'lockfile')
-    const r = run('em-lock.mjs', ['--file', lockFile, '--timeout', '2', '--', process.execPath, '-e', 'console.log("wrapped-ran")', '--help'], s)
+    // node's own `--` ends node's option parsing, so the trailing --help lands
+    // in the wrapped script's process.argv instead of triggering node's help
+    // (codex PR #449 round-2 P2: the previous spelling made node print its own
+    // help and the assertion passed vacuously).
+    const r = run('em-lock.mjs', [
+      '--file', lockFile, '--timeout', '2', '--',
+      process.execPath, '-e', 'console.log("wrapped-ran " + process.argv.slice(1).join(" "))', '--', '--help',
+    ], s)
     assert.strictEqual(r.code, 0, `exit code ${r.code} (stderr: ${r.stderr})`)
+    assert.ok(r.stdout.includes('wrapped-ran'), `wrapped command did not run: ${r.stdout}`)
+    assert.ok(r.stdout.includes('wrapped-ran --help'), `wrapped command did not receive its --help arg: ${r.stdout}`)
     assert.ok(!r.stdout.includes('"status":"help"'), `em-lock intercepted the wrapped command's --help: ${r.stdout}`)
   } finally { s.cleanup() }
 })
