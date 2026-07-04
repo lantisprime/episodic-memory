@@ -395,6 +395,15 @@ if (fs.existsSync(repoPatternsIndex)) {
   console.log(`Installed patterns/_index.json to ${globalPatternsDir}`)
 }
 
+// 1c. Copy the agent-facing per-script reference to the global root so any tool
+// can read it before first script use (deployed on every install, all tools).
+const repoScriptsGuide = path.join(REPO_DIR, 'docs', 'EM_SCRIPTS_GUIDE.md')
+if (fs.existsSync(repoScriptsGuide)) {
+  fs.mkdirSync(GLOBAL_DIR, { recursive: true })
+  fs.copyFileSync(repoScriptsGuide, path.join(GLOBAL_DIR, 'EM_SCRIPTS_GUIDE.md'))
+  console.log(`Installed EM_SCRIPTS_GUIDE.md to ${GLOBAL_DIR}`)
+}
+
 // NOTE (RFC-008 P4d / Principle 12): patterns/taxonomy.json is a RUNTIME
 // dependency of the relocated command-classifier — it is an ENFORCEMENT contract
 // artifact, NOT a global-validation artifact like _index.json. Post-S2 it is
