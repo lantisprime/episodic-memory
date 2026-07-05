@@ -24,6 +24,7 @@ Cross-tool episodic memory system for AI coding assistants (Claude Code, Cursor,
 - Episode IDs are immutable; decisions are corrected via revision chains, not edits
 - Use atomic write (temp + rename) for index rebuilds
 - No mental tracing — use the actual files/data, and read them for code review
+- Behavior simulation before design/review claims: any analysis of how the substrate behaves (store, list, search, recall, revise, prune, backup, restore) runs the real scripts against an isolated fixture store (a non-git scratch dir resolves its own local store; spawn with explicit `cwd`, always pass `--scope local` on writes) and cites the observed JSON. Static source-reading forms hypotheses; runtime output is the evidence. Dispatched reviewer/planner/codex bodies must require runtime probes with captured output.
 
 ## Second-opinion review harness
 Pluggable cross-tool review at `scripts/second-opinion.mjs` — replaces the manual 5-step `em-store + codex exec + episode-reply` recipe with one callable harness (preamble composition, provider dispatch, consensus loop).
