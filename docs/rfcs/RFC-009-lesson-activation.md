@@ -444,6 +444,11 @@ R9b lands BEFORE R8: the bulk import runs against a store that already has colli
 **AI-slop check:** fixed in revision — uncited counts got repro method + measured date; the MEMORY.md truncation claim now quotes the SessionStart warning verbatim; review provenance cites the milestone episode id.
 **Decision:** proceed
 
+**Reviewer (expansion review):** codex (gpt-5.5 high), interactive cmux session, 5 rounds
+**Date:** 2026-07-05 (the activation-refinements expansion: earned criticality, two-plane lock, R9 clerk detail, R6, R4 two-tier, R10 taxonomy, data-artifact contracts)
+**Findings:** r1 HOLD: 3 blockers + 2 majors — R4's em-recall wiring wrote access tracking from the event plane (reviewer runtime-probed it), T6 retired `violated:bp-*` without a typed pattern-id replacement (runtime-probed), `tool:` triggers had no concrete tool-event contract, the trigger-index shape lacked a kind discriminator, and the `activation` plugin type was unreconciled with the RFC-008 closed registry. r2 HOLD: the event-plane read boundary ("derived indexes only") contradicted em-recall's actual read set. r3 HOLD: R4's "rows only" payload claim contradicted em-recall stdout and context inputs. r4 HOLD: the input enumeration missed package.json `keywords` and the git remote basename. r5 ACCEPT after the enumeration was completed and pinned in the contract-mirror. All dispositions in-RFC (no deferrals); the locked pillars (two-plane contract, earned criticality, P12, R10 taxonomy invariants, human-confirmed clerk writes) were held as inadmissible-to-relitigate across all rounds, and every fix chose the option preserving the operator's design intent. Fix commits: 7ba1b41, 502804d, 10fea26, 1db469d.
+**Decision:** proceed
+
 ---
 
 ## Open questions
