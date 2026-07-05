@@ -300,6 +300,17 @@ Output:
 `--check` exits 1 when prunable episodes exist (CI gate). `--dry-run` previews with
 no writes.
 
+**Protection set (RFC-009 R6).** Prune never archives, in any mode: violations
+evidence-linked to a valid lesson (either direction: the lesson's `evidence` array
+or the violation's `lessons` array); valid lessons carrying `triggers`; episodes
+named in a valid episode's `consolidates` array; supersession-chain members of any
+of those; and the latest `record_type: clerk-run` episode per store. "Valid" means
+not superseded and `review_by` absent or unexpired — protection lapses when the
+referencing episode is superseded or expires. Retained entries are counted in the
+`protected` output field; `--dry-run` lists them in `protected_episodes` as
+`{id, score, reason, via}` where `via` names the protecting episode. `remaining`
+includes protected entries; the `--check` exit code ignores them.
+
 ### em-pattern-health
 
 Aggregate violation episodes per behavioral pattern within a rolling window and flag
@@ -317,6 +328,18 @@ node ~/.episodic-memory/scripts/em-pattern-health.mjs --check    # exit 1 if att
 
 `needs-enforcement` means violated repeatedly with no hook found. `needs-attention`
 means a hook exists but violations continue (escalate to a human).
+
+**`--hermetic` (RFC-009 R5a).** Reads ONLY project surfaces: violations from the
+project-local store, the patterns registry from `<project>/.episodic-memory/patterns/`
+falling back to `<project>/patterns/_index.json`, and enforcement detection over
+`<project>/.claude/hooks`, `<project>/.git/hooks`, `<project>/.github/workflows` —
+zero `$HOME` reads, so output is identical under any HOME. Scope is forced to
+`local`; combining with an explicit `--scope global|all` errors. Output shape and
+the `--check` exit contract are unchanged.
+
+```
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --hermetic --check   # project-only CI gate (R5b wires this in Phase 3)
+```
 
 ### em-violation
 

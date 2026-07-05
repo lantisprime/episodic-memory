@@ -175,6 +175,12 @@ t('testProtectedCountInOutput', () => {
   // partition invariant, all three modes: 4 = remaining + prunable/pruned
 })
 
+t('testDocsGrepGate', () => {
+  const guide = fs.readFileSync(path.join(REPO, 'docs', 'EM_SCRIPTS_GUIDE.md'), 'utf8')
+  assert(guide.includes('--hermetic'), 'EM_SCRIPTS_GUIDE.md missing --hermetic (RFC-009 P0 docs gate)')
+  assert(guide.includes('protected_episodes'), 'EM_SCRIPTS_GUIDE.md missing protected_episodes (RFC-009 P0 docs gate)')
+})
+
 let pass = 0
 for (const [name, fn] of tests) {
   try { fn(); console.log(`ok ${name}`); pass++ } catch (e) { console.log(`FAIL ${name}: ${e.message}`) }
