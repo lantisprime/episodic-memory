@@ -175,6 +175,45 @@ t('testProtectedCountInOutput', () => {
   // partition invariant, all three modes: 4 = remaining + prunable/pruned
 })
 
+t('testIdlessReferencerProtectsBothClasses', () => {
+  // reviewer F1/F2: an idless valid referencer protects via evidence AND consolidates
+  // symmetrically; via renders as null, never dropped from the JSON
+  const noIdA = row('x', { category: 'lesson', date: RECENT, evidence: ['va'] })
+  delete noIdA.id
+  const noIdC = row('y', { category: 'lesson', date: RECENT, consolidates: ['ma'] })
+  delete noIdC.id
+  const w = mkWorld([row('va'), row('ma', { category: 'lesson', status: 'superseded' }), noIdA, noIdC])
+  const dry = prune(w, ['--dry-run']).out
+  const va = dry.protected_episodes.find(p => p.id === 'va')
+  const ma = dry.protected_episodes.find(p => p.id === 'ma')
+  assert(va && va.reason === 'evidence-linked-violation' && va.via === null, `va: ${JSON.stringify(dry.protected_episodes)}`)
+  assert(ma && ma.reason === 'consolidates-member' && ma.via === null, `ma: ${JSON.stringify(dry.protected_episodes)}`)
+  prune(w, [])
+  assert(survives(w, 'va') && survives(w, 'ma'), 'idless-referencer protection asymmetric across classes')
+})
+
+t('testNumericIdRowProtected', () => {
+  // reviewer F3: a numeric-id row named by a valid lesson's evidence is protected
+  // (string-keyed map, String() lookup)
+  const w = mkWorld([row(20250101), row('ln', { category: 'lesson', date: RECENT, evidence: ['20250101'] })])
+  const r = prune(w, [])
+  assert(r.out.protected === 1, `numeric-id row not protected: ${JSON.stringify(r.out)}`)
+  const idx = fs.readFileSync(path.join(w.proj, '.episodic-memory', 'index.jsonl'), 'utf8')
+  assert(idx.includes('20250101'), 'numeric-id row archived — String() lookup missing')
+})
+
+t('testJunkRunRecordIdDoesNotShadow', () => {
+  // reviewer F4: a hand-written non-canonical clerk-run id must not shadow the
+  // canonical latest run record
+  const w = mkWorld([
+    row('zzz-handwritten', { category: 'workflow.lifecycle', record_type: 'clerk-run' }),
+    row('20250502-000001-run-new', { category: 'workflow.lifecycle', record_type: 'clerk-run' }),
+  ])
+  prune(w, [])
+  assert(survives(w, '20250502-000001-run-new'), 'canonical latest run record archived — junk id shadowed it')
+  assert(!survives(w, 'zzz-handwritten'), 'junk clerk-run row survived — should age out under normal score')
+})
+
 t('testDocsGrepGate', () => {
   const guide = fs.readFileSync(path.join(REPO, 'docs', 'EM_SCRIPTS_GUIDE.md'), 'utf8')
   assert(guide.includes('--hermetic'), 'EM_SCRIPTS_GUIDE.md missing --hermetic (RFC-009 P0 docs gate)')

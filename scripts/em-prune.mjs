@@ -99,7 +99,9 @@ function isValidReferencer(row, todayStr) {
 // latest-run-record, chain-member.
 function computeProtectedIds(rows, todayStr) {
   const map = new Map()
-  const set = (id, reason, via) => { if (typeof id === 'string' && !map.has(id)) map.set(id, { reason, via }) }
+  // via normalizes to null when the protecting referencer row has no string id
+  // (the tolerated hand-written class) so the output contract field never vanishes.
+  const set = (id, reason, via) => { if (typeof id === 'string' && !map.has(id)) map.set(id, { reason, via: typeof via === 'string' ? via : null }) }
   const lessonRowsById = new Map()
   for (const r of rows) {
     if (r.category === 'lesson' && typeof r.id === 'string') {
@@ -129,19 +131,26 @@ function computeProtectedIds(rows, todayStr) {
     if (!isValidReferencer(r, todayStr)) continue
     if (stringItems(r.triggers).length > 0) set(r.id, 'trigger-bearing-lesson', r.id)
   }
-  // class c: consolidates members of valid referencers
+  // class c: consolidates members of valid referencers (no id requirement on the
+  // referencer — symmetric with class a; an idless valid row still protects)
   for (const r of rows) {
-    if (typeof r.id !== 'string' || !isValidReferencer(r, todayStr)) continue
+    if (!isValidReferencer(r, todayStr)) continue
     for (const mid of stringItems(r.consolidates)) set(mid, 'consolidates-member', r.id)
   }
-  // class d: latest clerk run record per store (max id; ids sort chronologically)
+  // class d: latest clerk run record per store. Canonical ids (YYYYMMDD-HHMMSS-…)
+  // sort chronologically and are preferred; a hand-written non-canonical id must
+  // not shadow the real latest (it competes only against other non-canonical ids).
   const latestByStore = new Map()
+  const CANONICAL_ID = /^\d{8}-\d{6}-/
   for (const r of rows) {
     if (r.record_type !== 'clerk-run' || typeof r.id !== 'string') continue
+    const canonical = CANONICAL_ID.test(r.id)
     const cur = latestByStore.get(r._store)
-    if (!cur || r.id > cur) latestByStore.set(r._store, r.id)
+    if (!cur || (canonical === cur.canonical ? r.id > cur.id : canonical)) {
+      latestByStore.set(r._store, { id: r.id, canonical })
+    }
   }
-  for (const id of latestByStore.values()) set(id, 'latest-run-record', id)
+  for (const v of latestByStore.values()) set(v.id, 'latest-run-record', v.id)
   // chain closure over class a/b/c anchors (NOT class d): backward via each row's
   // `supersedes`, forward via INVERTED supersedes edges (superseded_by has no
   // substrate writer today) plus `superseded_by` strings when present. An archived
@@ -218,7 +227,7 @@ function pruneDir(dataDir, label, protectedIds) {
   for (const entry of entries) {
     const score = computePruneScore(entry)
     if (score < threshold) {
-      const p = protectedIds.get(entry.id)
+      const p = protectedIds.get(String(entry.id))
       if (p) {
         toKeep.push(entry)
         protectedEntries.push({ id: entry.id, score: Math.round(score * 1000) / 1000, reason: p.reason, via: p.via })
