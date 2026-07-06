@@ -487,6 +487,7 @@ Each phase's merge is gated by the R-groups below plus its phase-specific gates;
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
+| P0 (P0-S1..S3, PR #454) | `scripts/em-pattern-health.mjs` (`--hermetic`, R5a), `scripts/em-prune.mjs` (R6 protection set), docs guide + README + CI wiring | `tests/test-pattern-health-hermetic.mjs` (8), `tests/test-prune-protection.mjs` (17) | R6 blend half lands with R2 in P1; R5b CI gate is P3 |
 | _pending_ | _pending_ | _pending_ | _pending_ |
 
 ---

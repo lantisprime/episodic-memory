@@ -162,6 +162,12 @@ jobs:
       - name: Run preflight-prompt-helper regression tests
         run: bash tests/test-preflight-prompt-helper.sh
 
+      - name: Run RFC-009 P0 hermetic pattern-health tests
+        run: node tests/test-pattern-health-hermetic.mjs
+
+      - name: Run RFC-009 P0 prune-protection tests
+        run: node tests/test-prune-protection.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

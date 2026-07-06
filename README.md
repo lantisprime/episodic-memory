@@ -344,6 +344,9 @@ node ~/.episodic-memory/scripts/em-recall.mjs --days 14 --no-track
 node ~/.episodic-memory/scripts/em-prune.mjs --dry-run
 node ~/.episodic-memory/scripts/em-prune.mjs --scope global --threshold 0.15
 node ~/.episodic-memory/scripts/em-prune.mjs --check  # exit 1 if prunable episodes exist
+# RFC-009 R6: evidence-linked violations, trigger-bearing lessons, consolidates
+# members, and the latest clerk run record are never archived — see the
+# protected / protected_episodes output fields in --dry-run.
 ```
 
 ### Backup (Mirror to Private Repo with Redaction)
@@ -442,6 +445,9 @@ node ~/.episodic-memory/scripts/em-pattern-health.mjs --window-days 7 --min-viol
 
 # Manual override when enforcement detection misses a hook
 node ~/.episodic-memory/scripts/em-pattern-health.mjs --has-enforcement bp-006-push-after-verify
+
+# Hermetic mode (RFC-009 R5a) — project-only reads, zero $HOME dependence
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --hermetic --check
 ```
 
 Searches `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/`, and `<project>/.github/workflows/` for `pattern_id` references to detect mechanical enforcement. Patterns flagged `needs-enforcement` are violated repeatedly with no hook to stop them; `needs-attention` means an enforcement file exists but violations still occur (escalate to a human).

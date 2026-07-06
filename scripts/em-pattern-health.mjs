@@ -25,6 +25,7 @@ const HOME = os.homedir()
 const CWD = process.cwd()
 const GLOBAL_DIR = path.join(HOME, '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir(CWD)
+const PROJECT_ROOT = path.dirname(LOCAL_DIR)
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -32,7 +33,7 @@ const LOCAL_DIR = resolveLocalDir(CWD)
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-pattern-health.mjs', usage: 'node em-pattern-health.mjs [--pattern <id>] [--scope local|global|all] [--window-days <N>] [--min-violations <N>] [--has-enforcement <id>] [--check] [--json] [--summary]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-pattern-health.mjs', usage: 'node em-pattern-health.mjs [--pattern <id>] [--scope local|global|all] [--window-days <N>] [--min-violations <N>] [--has-enforcement <id>] [--hermetic] [--check] [--json] [--summary]' }))
   process.exit(0)
 }
 
@@ -69,12 +70,21 @@ const hasEnforcementOverrides = new Set(multiFlag('--has-enforcement'))
 const checkMode = argv.includes('--check')
 const summaryMode = argv.includes('--summary')
 const jsonMode = argv.includes('--json')
+const hermeticMode = argv.includes('--hermetic')
+const scopeExplicit = argv.includes('--scope')
 
 const VALID_SCOPES = ['local', 'global', 'all']
 if (!VALID_SCOPES.includes(scope)) {
   console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be one of: ${VALID_SCOPES.join(', ')}` }))
   process.exit(1)
 }
+if (hermeticMode && scopeExplicit && scope !== 'local') {
+  console.log(JSON.stringify({ status: 'error', message: '--hermetic is project-local only; omit --scope or pass --scope local' }))
+  process.exit(1)
+}
+// R5a: hermetic mode is project-local by definition; all path sets below key off
+// effectiveScope / hermeticMode so the flag-off path stays byte-identical.
+const effectiveScope = hermeticMode ? 'local' : scope
 if (summaryMode && jsonMode) {
   console.log(JSON.stringify({ status: 'error', message: '--summary and --json are mutually exclusive' }))
   process.exit(1)
@@ -92,10 +102,17 @@ if (Number.isNaN(minViolations) || minViolations <= 0) {
 // Load patterns registry (project-local first, then global install)
 // ---------------------------------------------------------------------------
 function loadPatternsIndex() {
-  const candidates = [
-    path.join(CWD, 'patterns', '_index.json'),
-    path.join(HOME, '.episodic-memory', 'patterns', '_index.json'),
-  ]
+  // R5a: under --hermetic the registry candidates are the project-local store's
+  // registry then the repo's own patterns/_index.json — never $HOME.
+  const candidates = hermeticMode
+    ? [
+        path.join(LOCAL_DIR, 'patterns', '_index.json'),
+        path.join(PROJECT_ROOT, 'patterns', '_index.json'),
+      ]
+    : [
+        path.join(CWD, 'patterns', '_index.json'),
+        path.join(HOME, '.episodic-memory', 'patterns', '_index.json'),
+      ]
   for (const p of candidates) {
     try {
       const data = JSON.parse(fs.readFileSync(p, 'utf8'))
@@ -107,7 +124,10 @@ function loadPatternsIndex() {
 
 const patterns = loadPatternsIndex()
 if (!patterns) {
-  console.log(JSON.stringify({ status: 'error', message: 'patterns/_index.json not found in project or ~/.episodic-memory/patterns/' }))
+  const msg = hermeticMode
+    ? `patterns/_index.json not found in ${path.join(LOCAL_DIR, 'patterns')} or ${path.join(PROJECT_ROOT, 'patterns')} (--hermetic never reads $HOME)`
+    : 'patterns/_index.json not found in project or ~/.episodic-memory/patterns/'
+  console.log(JSON.stringify({ status: 'error', message: msg }))
   process.exit(1)
 }
 
@@ -120,8 +140,8 @@ if (!patterns) {
 //     em-store appends will simply not appear until the next invocation.
 // ---------------------------------------------------------------------------
 const SCOPE_DIRS = []
-if (scope === 'local' || scope === 'all') SCOPE_DIRS.push({ dir: LOCAL_DIR, source: 'local' })
-if (scope === 'global' || scope === 'all') SCOPE_DIRS.push({ dir: GLOBAL_DIR, source: 'global' })
+if (effectiveScope === 'local' || effectiveScope === 'all') SCOPE_DIRS.push({ dir: LOCAL_DIR, source: 'local' })
+if (effectiveScope === 'global' || effectiveScope === 'all') SCOPE_DIRS.push({ dir: GLOBAL_DIR, source: 'global' })
 
 // Concurrent em-store appends are NOT atomic: a partial last line can appear
 // if em-pattern-health reads while em-store is mid-write. Malformed lines are
@@ -260,12 +280,18 @@ function countViolationsForPattern(patternId) {
 //   false-positives (bp-001 inside bp-001-v2). Limitations are accepted per
 //   RFC-002 §Phase 2; --has-enforcement is the documented escape hatch.
 // ---------------------------------------------------------------------------
-const ENFORCEMENT_PATHS = [
-  { dir: path.join(HOME, '.claude', 'hooks'), include: f => /\.sh$/.test(f) },
-  { dir: path.join(CWD, '.claude', 'hooks'), include: f => /\.sh$/.test(f) },
-  { dir: path.join(CWD, '.git', 'hooks'), include: f => !/\.sample$/.test(f) },
-  { dir: path.join(CWD, '.github', 'workflows'), include: f => /\.ya?ml$/.test(f) },
-]
+const ENFORCEMENT_PATHS = hermeticMode
+  ? [
+      { dir: path.join(PROJECT_ROOT, '.claude', 'hooks'), include: f => /\.sh$/.test(f) },
+      { dir: path.join(PROJECT_ROOT, '.git', 'hooks'), include: f => !/\.sample$/.test(f) },
+      { dir: path.join(PROJECT_ROOT, '.github', 'workflows'), include: f => /\.ya?ml$/.test(f) },
+    ]
+  : [
+      { dir: path.join(HOME, '.claude', 'hooks'), include: f => /\.sh$/.test(f) },
+      { dir: path.join(CWD, '.claude', 'hooks'), include: f => /\.sh$/.test(f) },
+      { dir: path.join(CWD, '.git', 'hooks'), include: f => !/\.sample$/.test(f) },
+      { dir: path.join(CWD, '.github', 'workflows'), include: f => /\.ya?ml$/.test(f) },
+    ]
 
 function listEnforcementFiles() {
   const files = []
