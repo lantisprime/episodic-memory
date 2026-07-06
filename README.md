@@ -181,6 +181,13 @@ Three additional SKILLs are invoked from `launchd` rather than the agent's sessi
 | `research` | Web research distilled for future reference |
 | `lesson` | Consolidated lessons from multiple episodes |
 | `violation` | Behavioral pattern violations with structured sequences |
+| `workflow.lifecycle` | Event-plane records emitted by the behavior-pattern workflow layer |
+| `workplan` | Active prioritized work queue, superseded via revision chains |
+| `temporary` | Transient working episodes (review threads, scratch); `aggregate-then-prune` lifecycle |
+
+The vocabulary is a closed set defined once in `categories.json` (RFC-009 R10b) and read by every
+script through `scripts/lib/categories.mjs`. Filter by category with `em-search --category`
+(index-backed via `category-index.json`); `em-rebuild-index --check` reports category drift.
 
 ## Data Locations
 
@@ -189,13 +196,16 @@ Three additional SKILLs are invoked from `launchd` rather than the agent's sessi
 ├── scripts/                  # Installed scripts
 ├── episodes/                 # Global episode .md files
 ├── patterns/                 # Pattern registry (_index.json)
+├── categories.json           # Category vocabulary (RFC-009 R10b)
 ├── index.jsonl               # Global index
-└── tags.json                 # Inverted tag index
+├── tags.json                 # Inverted tag index
+└── category-index.json       # Category -> episode-ids index
 
 <project>/.episodic-memory/   # Per-project (local)
 ├── episodes/                 # Project-local episode .md files
 ├── index.jsonl               # Project-local index
-└── tags.json                 # Inverted tag index
+├── tags.json                 # Inverted tag index
+└── category-index.json       # Category -> episode-ids index
 
 patterns/                     # Behavioral patterns (shipped with repo)
 ├── _index.json               # Machine-readable pattern registry

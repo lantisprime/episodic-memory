@@ -70,6 +70,30 @@ default.
 
 ---
 
+## Category vocabulary (RFC-009 R10)
+
+The set of valid episode categories is a closed vocabulary defined once in
+`categories.json` (repo root; deployed to `~/.episodic-memory/categories.json`), read by
+every script through `scripts/lib/categories.mjs`. Do not hardcode category names anywhere.
+
+- Members: `decision`, `discovery`, `milestone`, `context`, `research`, `lesson`,
+  `violation`, `workflow.lifecycle`, `workplan`, `temporary`.
+- A **category** is a single load-bearing typed field (exactly one per episode, drawn from
+  this vocabulary). **Tags** are a free-form, additive label set and are never load-bearing
+  in control flow. Filter by category with `em-search --category`, by tag with `--tag`.
+- **Write surfaces are strict**: `em-store` and `em-revise` reject an unknown or deprecated
+  category (a deprecated one names its successor). `em-restore --apply` skips-and-surfaces an
+  unknown-category episode instead of writing it through.
+- **Read/index/prune surfaces are tolerant**: an episode with an unknown category never breaks
+  listing, search, ranking, or index build; `em-rebuild-index --check` reports it as drift.
+- **Lifecycle**: most categories are `standard`. `temporary` is `aggregate-then-prune` — once a
+  temporary episode is consolidated (carries `superseded_by`), `em-prune` may archive it
+  aggressively even if it is referenced by a successor's `consolidates` array.
+- **Deprecation** is by mapping, never deletion: a member gains `deprecated_for: <successor>`
+  and readers map it at read/index time; stored episode bytes are never rewritten.
+
+---
+
 ## Full entries
 
 ### em-store
@@ -177,8 +201,12 @@ Flags that matter (from the script's own `Usage:` header):
 - `--no-track` skips access tracking. Use it (with `--no-score`) for investigative
   or repeated searches so you do not pollute the usage signals that recall relies on.
   History queries and `--include-superseded` already skip tracking.
-- `--full` includes episode bodies. `--history <id>` returns the whole supersedes
-  chain.
+- `--full` includes episode bodies. `--history <id>` returns the whole revision
+  chain. The walk follows `supersedes`, `superseded_by`, and `consolidates` edges
+  (cycle-safe); a single-`supersedes` chain is unchanged.
+- `--category <cat>` is index-backed via `category-index.json` (same degrade-to-linear-scan
+  fallback as `--tag`). A deprecated category name canonicalizes to its successor; an unknown
+  category still filters (tolerant read).
 
 `--history` output (chain, oldest first):
 
@@ -257,8 +285,8 @@ Output:
 
 ### em-rebuild-index
 
-Regenerate `index.jsonl` (and `tags.json`) from the episode `.md` files on disk.
-Atomic (temp plus rename). Idempotent: safe to run repeatedly.
+Regenerate `index.jsonl` (and `tags.json` plus `category-index.json`) from the episode
+`.md` files on disk. Atomic (temp plus rename). Idempotent: safe to run repeatedly.
 
 - WHEN TO USE: the index looks out of sync, after you manually removed an episode
   file, or to recover from a corrupted index.
@@ -271,7 +299,19 @@ node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
 Output:
 
 ```json
-{"status":"ok","rebuilt":[{"scope":"local","count":1},{"scope":"global","count":1}]}
+{"status":"ok","rebuilt":[{"scope":"local","count":1,"category_drift":{"unknown":{},"deprecated":{}}}]}
+```
+
+`category-index.json` maps each canonical category to its episode ids (deprecated members
+map to the successor key; unknown categories are indexed under their literal key AND counted
+as drift). It backs `em-search --category` the same way `tags.json` backs `--tag`.
+
+`--check` (RFC-009 R10f) is a read-only drift report: it lists every episode whose stored
+category is unknown or deprecated and exits 1 if any exist, 0 otherwise. It writes nothing.
+Use it in CI/hooks to catch taxonomy drift without correcting it (correction is a later phase).
+
+```
+node ~/.episodic-memory/scripts/em-rebuild-index.mjs --check --scope all
 ```
 
 Note: `--help` short-circuits safely (PR #449), but any OTHER unknown argument is
