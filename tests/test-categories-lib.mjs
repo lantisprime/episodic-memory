@@ -172,5 +172,25 @@ t('testCanonicalCategory', () => {
   }
 });
 
+t('testNoHardcodedCategoryList', () => {
+  // No scripts/*.mjs may carry a category-name ARRAY literal — the vocabulary lives only in
+  // categories.json, read through this lib (REQ-3). The single-value `workflow.lifecycle`
+  // constant emitted by the event-writer family (I2b) is NOT an array and is allowed.
+  const VOCAB = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation', 'workflow.lifecycle', 'workplan', 'temporary'];
+  const dir = path.join(REPO, 'scripts');
+  const offenders = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith('.mjs')) continue;
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    // single-line array literals; flag any that quote >=2 distinct vocab names
+    for (const m of src.matchAll(/\[[^\]\n]*\]/g)) {
+      const span = m[0];
+      const hits = VOCAB.filter((n) => span.includes(`'${n}'`) || span.includes(`"${n}"`));
+      if (hits.length >= 2) offenders.push(`${f}: ${span.slice(0, 60)}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `hardcoded category-name array literal(s) survive: ${offenders.join(' | ')}`);
+});
+
 console.log(`\n${pass}/${pass + fail} pass`);
 process.exit(fail ? 1 : 0);

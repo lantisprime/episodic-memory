@@ -54,8 +54,11 @@ function run(script, args, { cwd, env } = {}) {
   const r = spawnSync('node', [script, ...args], {
     cwd, encoding: 'utf8', env: { ...process.env, ...env },
   });
+  // em-store/em-revise emit single-line JSON; em-restore pretty-prints multi-line.
+  // Parse the whole stdout first, fall back to the last line.
   let json = null;
-  try { json = JSON.parse(r.stdout.trim().split('\n').pop()); } catch {}
+  try { json = JSON.parse(r.stdout.trim()); }
+  catch { try { json = JSON.parse(r.stdout.trim().split('\n').pop()); } catch {} }
   return { code: r.status, stdout: r.stdout, json };
 }
 
@@ -151,7 +154,100 @@ t('testStoreFailsClosedOnMissingVocab', () => {
   assert.equal(episodeFiles(cwd).length, 0, 'nothing written');
 });
 
-// --- S3 restore-matrix tests are registered here (added in step 3.6) ---
+// --- S3 restore-matrix tests (REQ-5,6,11) ---
+
+const EM_RESTORE = path.join(REPO, 'scripts/em-restore.mjs');
+
+// Build a git backup dir with one episode of the given category under label `local`.
+function mkBackup(category, { id = '20260706-000000-fixture-0001' } = {}) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'catrestore-')));
+  const backupDir = path.join(root, 'backup');
+  const epDir = path.join(backupDir, 'local', 'episodes');
+  fs.mkdirSync(epDir, { recursive: true });
+  const fm = [
+    '---',
+    `id: ${id}`,
+    'date: 2026-07-06',
+    'time: "00:00"',
+    'project: fx',
+    `category: ${category}`,
+    'status: active',
+    'tags: []',
+    'summary: fixture',
+    '---',
+    '', '# fixture', '', 'body', '',
+  ].join('\n');
+  fs.writeFileSync(path.join(epDir, `${id}.md`), fm);
+  spawnSync('git', ['init', '-b', 'main'], { cwd: backupDir });
+  spawnSync('git', ['config', 'user.email', 't@t'], { cwd: backupDir });
+  spawnSync('git', ['config', 'user.name', 't'], { cwd: backupDir });
+  spawnSync('git', ['add', '-A'], { cwd: backupDir });
+  spawnSync('git', ['commit', '-q', '-m', 'fixture', '--allow-empty'], { cwd: backupDir });
+  const target = path.join(root, 'target');
+  fs.mkdirSync(target, { recursive: true });
+  return { backupDir, target, id };
+}
+function targetEpisodes(target) {
+  try { return fs.readdirSync(path.join(target, 'episodes')).filter((f) => f.endsWith('.md')); }
+  catch { return []; }
+}
+function targetCatIndex(target) {
+  try { return JSON.parse(fs.readFileSync(path.join(target, 'category-index.json'), 'utf8')); }
+  catch { return {}; }
+}
+// planted vocab with 'old' deprecated_for 'lesson'
+function depVocabFile() {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'catvocab-')), 'categories.json');
+  fs.writeFileSync(p, JSON.stringify({
+    version: '1.0.0',
+    categories: [
+      { name: 'lesson', description: 'd', lifecycle: 'standard' },
+      { name: 'old', description: 'd', lifecycle: 'standard', deprecated_for: 'lesson' },
+    ],
+  }));
+  return p;
+}
+
+t('testRestoreFilterAcceptsDeprecated', () => {
+  const { backupDir, target } = mkBackup('lesson');
+  const vocab = depVocabFile();
+  // --category old (deprecated) as a FILTER must be accepted (strict incl deprecated), not error.
+  const r = run(EM_RESTORE, ['--from', backupDir, '--source-map', `local=${target}`, '--category', 'old', '--dry-run'], { env: { EM_CATEGORIES_PATH: vocab } });
+  assert.notEqual(r.stdout, undefined);
+  assert.ok(!/Invalid --category/.test(r.stdout), `deprecated filter name must be accepted; got: ${r.stdout}`);
+});
+
+t('testRestoreFilterRejectsUnknown', () => {
+  const { backupDir, target } = mkBackup('lesson');
+  const r = run(EM_RESTORE, ['--from', backupDir, '--source-map', `local=${target}`, '--category', 'bogus', '--dry-run']);
+  assert.ok(r.json && r.json.status === 'error', 'unknown filter category errors');
+  assert.match(r.json.message, /Invalid --category "bogus"/);
+});
+
+t('testRestoreApplySkipsUnknownCategory', () => {
+  const { backupDir, target } = mkBackup('bogus');
+  const r = run(EM_RESTORE, ['--from', backupDir, '--source-map', `local=${target}`, '--apply']);
+  assert.equal(targetEpisodes(target).length, 0, 'unknown-category episode not written (skip+surface)');
+  assert.ok(r.json && r.json.summary && Array.isArray(r.json.summary.category_skips), 'category_skips present in summary');
+  assert.equal(r.json.summary.category_skips.length, 1, 'the unknown-category episode is surfaced');
+  assert.equal(r.json.written.episodes, 0, 'zero episodes written (the EC6 no-write control)');
+});
+
+t('testRestoreApplyWritesDeprecated', () => {
+  const { backupDir, target, id } = mkBackup('old');
+  const vocab = depVocabFile();
+  const r = run(EM_RESTORE, ['--from', backupDir, '--source-map', `local=${target}`, '--apply'], { env: { EM_CATEGORIES_PATH: vocab } });
+  assert.equal(targetEpisodes(target).length, 1, 'deprecated-category episode restores verbatim');
+  const md = fs.readFileSync(path.join(target, 'episodes', `${id}.md`), 'utf8');
+  assert.match(md, /^category: old$/m, 'stored bytes unchanged (deprecated name kept)');
+});
+
+t('testRestoreMergesCategoryIndex', () => {
+  const { backupDir, target, id } = mkBackup('lesson');
+  run(EM_RESTORE, ['--from', backupDir, '--source-map', `local=${target}`, '--apply']);
+  const idx = targetCatIndex(target);
+  assert.ok((idx.lesson || []).includes(id), 'restored id merged under canonical key lesson');
+});
 
 console.log(`\n${pass}/${pass + fail} pass`);
 process.exit(fail ? 1 : 0);

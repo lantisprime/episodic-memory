@@ -29,16 +29,14 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { execFileSync } from 'child_process'
+import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-// Mirror em-store.mjs:41 VALID_CATEGORIES exactly. Drift detected by
-// selfTest test_valid_categories_match_em_store: any future em-store change
-// surfaces here as a failing test, not a silent rejection of valid input.
-const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation', 'workflow.lifecycle']
-
+// The category vocabulary is read from categories.json via lib/categories.mjs
+// (RFC-009 R10b) — no local array to keep in sync with em-store any longer.
 const VALID_CONFLICT_MODES = ['skip', 'sidecar', 'force']
 
 // Reserved doc filename: when --include-docs encounters this, gate behind
@@ -173,8 +171,8 @@ function parseSourceMap(values) {
 // a slightly wider grammar to tolerate hand-edited episodes from older
 // versions, but draw the line at any path separator, any control char,
 // any space, and any id longer than 200 chars. Full em-store grammar
-// drift test deferred to a follow-up issue (mirrors the VALID_CATEGORIES
-// drift discipline at T1).
+// drift test deferred to a follow-up issue (mirrors the shared-lib
+// cross-script consistency discipline at T1).
 function isSafeId(id) {
   if (typeof id !== 'string' || id.length === 0 || id.length > 200) return false
   if (id.includes('/') || id.includes('\\') || id.includes('\0')) return false
@@ -663,6 +661,10 @@ function buildWritePlan({
   // not a symlink rejection. Dedicated field makes the report self-
   // documenting.
   const duplicateSkips = []
+  // RFC-009 R10c row 2 (apply path): an episode whose canonical category is unknown-to-any-version
+  // is skipped and surfaced here (inverting the old silent write-through). Deprecated members
+  // restore verbatim (canonicalCategory maps them to an active successor, so cv.ok stays true).
+  const categorySkips = []
   const targetByPath = new Map() // collision detection within plan
 
   // Codex round-1 F2: iterate the expanded selection AND any cross-label
@@ -680,6 +682,14 @@ function buildWritePlan({
     const conflict = classifyConflict(entry.sourcePath, targetPath)
 
     let action = decideAction(conflict, conflictMode)
+    // Category validation precedes any write (EC6): an unknown category is skipped + surfaced,
+    // never written through. canonicalCategory resolves a deprecated member to its active
+    // successor first, so only genuinely-unknown categories fail here.
+    const cv = validateCategory(canonicalCategory(entry.fm.category), { allowDeprecated: true })
+    if (!cv.ok) {
+      categorySkips.push({ targetPath, id: entry.fm.id, category: entry.fm.category, reason: 'unknown category not in vocabulary' })
+      action = 'skip'
+    }
     // Reviewer M1: previously set action='overwrite-symlink' but the apply
     // path only switched on skip/noop/sidecar/<default>, making the label
     // cosmetic. Now: when --allow-symlink-overwrite is set, the symlink
@@ -774,7 +784,7 @@ function buildWritePlan({
     }
   }
 
-  return { episodeWrites, docWrites, refusedClaudeMd, sidecarConflicts, symlinkSkips, duplicateSkips }
+  return { episodeWrites, docWrites, refusedClaudeMd, sidecarConflicts, symlinkSkips, duplicateSkips, categorySkips }
 }
 
 // Pre-creates every unique parent dir referenced by the plan's writes
@@ -976,8 +986,11 @@ function run(opts) {
   // already have passed. Same shape as proof-rigor v4 #1 (validation
   // timing): pure-input checks are the cheapest layer; do them first.
   for (const c of categories) {
-    if (!VALID_CATEGORIES.includes(c)) {
-      throw new Error(`Invalid --category "${c}". Must be one of: ${VALID_CATEGORIES.join(', ')}`)
+    // Filter flag: strict INCLUDING deprecated names, so older-vocab backups filter
+    // correctly (R10c row 2). Unknown → the existing invalid-category error.
+    const fv = validateCategory(c, { allowDeprecated: true })
+    if (!fv.ok) {
+      throw new Error(`Invalid --category "${c}". Must be in the vocabulary.`)
     }
   }
 
@@ -1087,6 +1100,7 @@ function run(opts) {
     sidecar_collisions: plan.sidecarConflicts,
     symlink_rejects: { source: [...epSymlinkRejects, ...docSymlinkRejects], target: plan.symlinkSkips },
     duplicate_skips: plan.duplicateSkips,
+    category_skips: plan.categorySkips,
     ref_integrity: refReports,
     chain_breaks: chainBreaks, // reviewer n1: actually surface dangling supersedes refs
     skipped_in_backup: skipManifest
@@ -1127,6 +1141,19 @@ function run(opts) {
         last_accessed: null
       }))
       mergeIndexes(targetDir, restoredEntries, force ? 'force' : conflictMode)
+      // RFC-009 R10d: merge the restored ids into category-index.json under their canonical
+      // category key (temp+rename), mirroring the store/revise incremental maintenance.
+      const catFile = path.join(targetDir, 'category-index.json')
+      let catIndex = {}
+      try { catIndex = JSON.parse(fs.readFileSync(catFile, 'utf8')) } catch {}
+      for (const fm of fms) {
+        const key = canonicalCategory(fm.category)
+        if (!catIndex[key]) catIndex[key] = []
+        if (!catIndex[key].includes(fm.id)) catIndex[key].push(fm.id)
+      }
+      const catTmp = catFile + '.tmp'
+      fs.writeFileSync(catTmp, JSON.stringify(catIndex, null, 2), 'utf8')
+      fs.renameSync(catTmp, catFile)
       indexResults.push({ targetDir, merged: restoredEntries.length })
     }
   }
@@ -1239,25 +1266,24 @@ function selfTest() {
     execFileSync('git', ['commit', '-m', 'test', '--allow-empty'], { cwd: backupDir, stdio: ['ignore', 'pipe', 'pipe'] })
   }
 
-  // T1: VALID_CATEGORIES drift test
+  // T1: both scripts read the vocabulary from the shared lib (RFC-009 R10b, REQ-17).
+  // Replaces the old valid_categories_match_em_store grep-for-array drift test — with a single
+  // lib source there is no duplicated array to drift; the guard is now "both import the lib".
   try {
-    const emStorePath = path.join(path.dirname(new URL(import.meta.url).pathname), 'em-store.mjs')
-    if (fs.existsSync(emStorePath)) {
-      const src = fs.readFileSync(emStorePath, 'utf8')
-      const m = src.match(/VALID_CATEGORIES\s*=\s*\[([^\]]*)\]/)
-      if (m) {
-        const fromStore = m[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
-        const same = fromStore.length === VALID_CATEGORIES.length && fromStore.every((c, i) => c === VALID_CATEGORIES[i])
-        assert('valid_categories_match_em_store', same, `restore=${VALID_CATEGORIES.join(',')} store=${fromStore.join(',')}`)
-      } else {
-        bad('valid_categories_match_em_store', 'could not extract VALID_CATEGORIES from em-store.mjs')
-      }
+    const scriptsDir = path.dirname(new URL(import.meta.url).pathname)
+    const storePath = path.join(scriptsDir, 'em-store.mjs')
+    const restorePath = path.join(scriptsDir, 'em-restore.mjs')
+    if (fs.existsSync(storePath) && fs.existsSync(restorePath)) {
+      const storeSrc = fs.readFileSync(storePath, 'utf8')
+      const restoreSrc = fs.readFileSync(restorePath, 'utf8')
+      const bothImport = storeSrc.includes("from './lib/categories.mjs'") && restoreSrc.includes("from './lib/categories.mjs'")
+      const vocabOk = loadCategories().categories.length === 10
+      assert('test_categories_from_shared_lib', bothImport && vocabOk, `bothImport=${bothImport} vocabLen=${loadCategories().categories.length}`)
     } else {
-      // Running from installed location; em-store.mjs is alongside.
-      skip('valid_categories_match_em_store', 'em-store.mjs not present alongside (likely installed copy); drift check skipped')
+      skip('test_categories_from_shared_lib', 'em-store.mjs/em-restore.mjs not present alongside (installed copy); lib-import check skipped')
     }
   } catch (e) {
-    bad('valid_categories_match_em_store', e.message)
+    bad('test_categories_from_shared_lib', e.message)
   }
 
   // T2: pre-flight refuses non-git backup
