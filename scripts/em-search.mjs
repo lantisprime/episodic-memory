@@ -19,6 +19,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { canonicalCategory } from './lib/categories.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -74,6 +75,15 @@ function loadTagsIndex(dataDir) {
   const tagsFile = path.join(dataDir, 'tags.json')
   try {
     return JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function loadCategoryIndex(dataDir) {
+  const catFile = path.join(dataDir, 'category-index.json')
+  try {
+    return JSON.parse(fs.readFileSync(catFile, 'utf8'))
   } catch {
     return null
   }
@@ -189,17 +199,33 @@ if (historyId) {
     root = parent
   }
 
-  // Walk forward from root
+  // Walk forward from root along the many-to-one edges R9 (P4) will write (REQ-14):
+  //   1. inverted supersedes (existing behavior — kept first so single-supersedes chains are
+  //      byte-identical; a supersedes FORK stays last-writer-wins, characterized not fixed, §17-E),
+  //   2. the scalar superseded_by edge,
+  //   3. a consolidates successor (an active episode whose consolidates array names current).
+  // A visited Set makes a cyclic consolidates/superseded_by fixture terminate (EC7).
   if (root) {
     chain.push(root)
     const bySupersedes = new Map()
+    const byConsolidates = new Map()
     for (const e of allEntries) {
       if (e.supersedes) bySupersedes.set(e.supersedes, e)
+      if (Array.isArray(e.consolidates)) {
+        for (const cid of e.consolidates) byConsolidates.set(cid, e)
+      }
     }
+    const visited = new Set([root.id])
     let current = root
-    while (bySupersedes.has(current.id)) {
-      current = bySupersedes.get(current.id)
-      chain.push(current)
+    while (true) {
+      let next = null
+      if (bySupersedes.has(current.id)) next = bySupersedes.get(current.id)
+      else if (current.superseded_by && byId.has(current.superseded_by)) next = byId.get(current.superseded_by)
+      else if (byConsolidates.has(current.id)) next = byConsolidates.get(current.id)
+      if (!next || visited.has(next.id)) break
+      visited.add(next.id)
+      chain.push(next)
+      current = next
     }
   }
 
@@ -260,7 +286,30 @@ if (tag) {
   }
 }
 if (category) {
-  results = results.filter(e => e.category === category)
+  // Index-backed (R10d), symmetric with --tag: canonicalize the query, read category-index.json
+  // from each active scope, intersect ids. Missing/corrupt index → linear-scan fallback + a
+  // rebuild warning. An active-name query returns the same set as the old exact-match filter.
+  const canonical = canonicalCategory(category)
+  let catIds = null
+  const dirs = []
+  if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
+  if (scope === 'global' || scope === 'all') dirs.push(GLOBAL_DIR)
+  for (const dir of dirs) {
+    const idx = loadCategoryIndex(dir)
+    if (idx && Object.prototype.hasOwnProperty.call(idx, canonical)) {
+      if (!catIds) catIds = new Set()
+      for (const id of idx[canonical]) catIds.add(id)
+    } else if (!idx) {
+      if (!searchWarning) searchWarning = 'category-index.json missing or corrupt. Falling back to linear scan. Run em-rebuild-index.mjs to regenerate.'
+    }
+  }
+  if (catIds) {
+    results = results.filter(e => catIds.has(e.id))
+  } else {
+    // Fallback: linear scan. Canonicalize stored categories too so a deprecated-alias query
+    // still matches; for an active name with no aliases this is exactly the old e.category === c.
+    results = results.filter(e => e.category === category || canonicalCategory(e.category) === canonical)
+  }
 }
 if (since) {
   results = results.filter(e => e.date >= since)
