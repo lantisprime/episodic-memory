@@ -48,7 +48,7 @@ import { UsageError } from "./lib/path-contain.mjs";
 
 const SCAN_ROOTS = ["patterns", "plugins", "schemas"];
 const CORPUS_REL = "tests/fixtures/schema-negative-corpus.json";
-const MIN_SCHEMA_DOCS = 17; // the P0 contract floor (17 schema docs shipped in P0)
+const MIN_SCHEMA_DOCS = 19; // P0 floor 17 + one post-P0 doc (18 pre-existing) + categories.schema.json (P1a) = 19
 const MIN_CORPUS_ENTRIES = 14; // #368 non-vacuity floor (the 14 P0 negatives)
 
 function isSchemaDocName(name) {
