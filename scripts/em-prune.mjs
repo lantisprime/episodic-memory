@@ -25,6 +25,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { categoryLifecycle, canonicalCategory } from './lib/categories.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -225,6 +226,18 @@ function pruneDir(dataDir, label, protectedIds) {
   // (check / dry-run / real prune) — the mode branches below only format the
   // already-decided sets. Partition: entries = toKeep (incl. protected) + toPrune.
   for (const entry of entries) {
+    // R10e override (checked BEFORE the score AND the R6 protection lookup): a consumed
+    // aggregate-then-prune (temporary) member — one carrying superseded_by, i.e. an R9 apply
+    // folded it into a consolidated successor — is aggressively prunable even if it sits in that
+    // successor's `consolidates` array (R6 class-c would otherwise protect it). The member's own
+    // lifecycle wins (RFC R10e "the consumed members are not [protected]"). A temporary WITHOUT
+    // superseded_by falls through to the standard score below; the R6 protection set CODE (P0) is
+    // untouched. categoryLifecycle degrades to null on an unloadable vocab, so the override no-ops
+    // and prune behaves exactly as pre-R10 (B1).
+    if (categoryLifecycle(canonicalCategory(entry.category)) === 'aggregate-then-prune' && typeof entry.superseded_by === 'string') {
+      toPrune.push({ ...entry, _pruneScore: 0 })
+      continue
+    }
     const score = computePruneScore(entry)
     if (score < threshold) {
       const p = protectedIds.get(String(entry.id))
