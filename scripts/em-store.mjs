@@ -28,6 +28,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
+import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -78,9 +79,13 @@ const bodyFile = flag('--body-file')
 const url = flag('--url')
 const scope = flag('--scope') || 'global'
 
-const VALID_CATEGORIES = ['decision', 'discovery', 'milestone', 'context', 'research', 'lesson', 'violation', 'workflow.lifecycle']
+// Category vocabulary comes from categories.json via lib/categories.mjs (RFC-009 R10b).
+// USAGE derives the member list fail-safely so --help never crashes when the vocab is
+// unloadable; the write path still fails CLOSED below via validateCategory.
+let catNames
+try { catNames = loadCategories().categories.map(c => c.name).join('|') } catch { catNames = 'see categories.json' }
 
-const USAGE = `--project <name> --category <${VALID_CATEGORIES.join('|')}> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope local|global]`
+const USAGE = `--project <name> --category <${catNames}> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope local|global]`
 
 if (bodyArg !== undefined && bodyFile !== undefined) {
   console.log(JSON.stringify({
@@ -102,11 +107,19 @@ if (!project || !category || !summary || !body) {
   }))
   process.exit(1)
 }
-if (!VALID_CATEGORIES.includes(category)) {
-  console.log(JSON.stringify({
-    status: 'error',
-    message: `Invalid category "${category}". Must be one of: ${VALID_CATEGORIES.join(', ')}`
-  }))
+let catV
+try {
+  catV = validateCategory(category)
+} catch (e) {
+  // vocab unloadable at a WRITE surface → fail CLOSED (§12 state E)
+  console.log(JSON.stringify({ status: 'error', message: e.message }))
+  process.exit(1)
+}
+if (!catV.ok) {
+  const message = catV.reason === 'deprecated'
+    ? `Category "${category}" is deprecated; use "${catV.successor}"`
+    : `Invalid category "${category}". Must be one of: ${(() => { try { return loadCategories().categories.map(c => c.name).join(', ') } catch { return 'see categories.json' } })()}`
+  console.log(JSON.stringify({ status: 'error', message }))
   process.exit(1)
 }
 
@@ -189,5 +202,23 @@ const indexEntry = JSON.stringify({
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
 updateTagsIndex(dataDir, id, tags)
+updateCategoryIndex(dataDir, id, category)
 
 console.log(JSON.stringify({ status: 'ok', id, file: filePath, scope }))
+
+// Incrementally maintain category-index.json under the episode's canonical category key,
+// structurally mirroring updateTagsIndex (RFC-009 R10d). Deprecated names map to the successor
+// key; unknown names index under their literal key (canonicalCategory degrades, never throws).
+export function updateCategoryIndex(dataDir, episodeId, category) {
+  const catFile = path.join(dataDir, 'category-index.json')
+  let index = {}
+  try {
+    index = JSON.parse(fs.readFileSync(catFile, 'utf8'))
+  } catch {}
+  const key = canonicalCategory(category)
+  if (!index[key]) index[key] = []
+  if (!index[key].includes(episodeId)) index[key].push(episodeId)
+  const tmpFile = catFile + '.tmp'
+  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
+  fs.renameSync(tmpFile, catFile)
+}

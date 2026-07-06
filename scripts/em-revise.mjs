@@ -28,6 +28,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
+import { validateCategory, canonicalCategory } from './lib/categories.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -118,6 +119,38 @@ if (!original) {
     message: `Original episode "${originalId}" not found in local or global stores.`
   }))
   process.exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// Validate the inherited category BEFORE any write (I4 / EC6 — a rejected revise
+// must leave the store byte-unchanged; the original is marked superseded just below,
+// so validation has to precede that mutation, not follow the later metadata parse).
+// ---------------------------------------------------------------------------
+{
+  const origRaw = fs.readFileSync(original.filePath, 'utf8')
+  const fm = origRaw.match(/^---\n([\s\S]*?)\n---/)
+  let cat = 'decision'
+  if (fm) {
+    for (const line of fm[1].split('\n')) {
+      const m = line.match(/^(\w+):\s*(.*)$/)
+      if (m && m[1] === 'category') cat = m[2]
+    }
+  }
+  let rv
+  try {
+    rv = validateCategory(cat)
+  } catch (e) {
+    // vocab unloadable at a WRITE surface → fail CLOSED (§12 state E)
+    console.log(JSON.stringify({ status: 'error', message: e.message }))
+    process.exit(1)
+  }
+  if (!rv.ok) {
+    const message = rv.reason === 'deprecated'
+      ? `Inherited category "${cat}" is deprecated; use "${rv.successor}"`
+      : `Inherited category "${cat}" is not in the vocabulary`
+    console.log(JSON.stringify({ status: 'error', message }))
+    process.exit(1)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +245,22 @@ function updateTagsIndex(dataDir, episodeId, tags) {
   fs.renameSync(tmpFile, tagsFile)
 }
 
+// Mirror em-store's category-index maintenance (RFC-009 R10d); duplicated locally the same
+// way updateTagsIndex is, rather than imported from em-store (which runs top-level on import).
+function updateCategoryIndex(dataDir, episodeId, category) {
+  const catFile = path.join(dataDir, 'category-index.json')
+  let index = {}
+  try {
+    index = JSON.parse(fs.readFileSync(catFile, 'utf8'))
+  } catch {}
+  const key = canonicalCategory(category)
+  if (!index[key]) index[key] = []
+  if (!index[key].includes(episodeId)) index[key].push(episodeId)
+  const tmpFile = catFile + '.tmp'
+  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
+  fs.renameSync(tmpFile, catFile)
+}
+
 const tags = normalizeTags(tagsRaw, tagRepeats)
 const resolvedProject = origProject || path.basename(process.cwd())
 
@@ -248,9 +297,11 @@ fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
 // Update tags.json
 updateTagsIndex(dataDir, id, mergedTags)
-// If revision crosses scopes, also update original scope's tags.json
+updateCategoryIndex(dataDir, id, origCategory)
+// If revision crosses scopes, also update original scope's tags.json + category-index.json
 if (original.dir !== dataDir) {
   updateTagsIndex(original.dir, id, mergedTags)
+  updateCategoryIndex(original.dir, id, origCategory)
 }
 
 console.log(JSON.stringify({
