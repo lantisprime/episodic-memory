@@ -14,6 +14,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -21,7 +22,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-rebuild-index.mjs', usage: 'node em-rebuild-index.mjs [--scope local|global|all]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-rebuild-index.mjs', usage: 'node em-rebuild-index.mjs [--scope local|global|all] [--check]' }))
   process.exit(0)
 }
 
@@ -32,6 +33,7 @@ function flag(name) {
 }
 
 const scope = flag('--scope') || 'all'
+const checkMode = argv.includes('--check')
 
 function normalizeTags(raw) {
   if (!raw) return []
@@ -39,6 +41,36 @@ function normalizeTags(raw) {
     .map(t => t.trim().toLowerCase())
     .filter(Boolean)
   return [...new Set(arr)].sort()
+}
+
+// --check: drift DETECTION only (R10f). Lists every episode whose stored category is unknown or
+// deprecated; exits 1 iff any drift, 0 otherwise. Writes NOTHING. Correction is the R9 clerk (P4).
+if (checkMode) {
+  let vocabLoaded = true
+  try { loadCategories() } catch { vocabLoaded = false }
+  const drift = []
+  if (vocabLoaded) {
+    const dirs = []
+    if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
+    if (scope === 'global' || scope === 'all') dirs.push(GLOBAL_DIR)
+    for (const dataDir of dirs) {
+      const episodesDir = path.join(dataDir, 'episodes')
+      let files = []
+      try { files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort() } catch { continue }
+      for (const file of files) {
+        const fm = parseFrontmatter(fs.readFileSync(path.join(episodesDir, file), 'utf8'))
+        if (!fm || !fm.id) continue
+        const v = validateCategory(fm.category, { allowDeprecated: true })
+        if (!v.ok) drift.push({ id: fm.id, category: fm.category ?? null, kind: 'unknown' })
+        else if (v.successor) drift.push({ id: fm.id, category: fm.category, kind: 'deprecated', successor: v.successor })
+      }
+    }
+  } else {
+    // reader surface must never be fatal (B1): degrade to an empty, clean report + a stderr warn
+    process.stderr.write('em-rebuild-index --check: categories.json unloadable; drift not classified\n')
+  }
+  console.log(JSON.stringify({ status: 'ok', drift }))
+  process.exit(drift.length ? 1 : 0)
 }
 
 /**
@@ -103,6 +135,13 @@ function rebuildDir(dataDir, label) {
   const entries = []
 
   const tagsIndex = {}
+  // category-index + drift counts (R10d/R10f). Reader/index surface: if the vocab cannot load,
+  // DEGRADE — build index.jsonl + tags.json as before and skip category-index (B1, I3).
+  const categoryIndex = {}
+  const driftUnknown = {}
+  const driftDeprecated = {}
+  let vocabLoaded = true
+  try { loadCategories() } catch { vocabLoaded = false }
 
   for (const file of files) {
     const content = fs.readFileSync(path.join(episodesDir, file), 'utf8')
@@ -123,6 +162,8 @@ function rebuildDir(dataDir, label) {
       category: fm.category,
       status: fm.status || 'active',
       supersedes: fm.supersedes || null,
+      ...(Array.isArray(fm.consolidates) ? { consolidates: fm.consolidates } : {}),
+      ...(typeof fm.superseded_by === 'string' ? { superseded_by: fm.superseded_by } : {}),
       tags: normalizedTags,
       summary: fm.summary,
       access_count: accessCount,
@@ -132,6 +173,17 @@ function rebuildDir(dataDir, label) {
     for (const tag of normalizedTags) {
       if (!tagsIndex[tag]) tagsIndex[tag] = []
       tagsIndex[tag].push(fm.id)
+    }
+    if (vocabLoaded) {
+      // canonical key: deprecated → successor; unknown → its literal key (and counted).
+      const catKey = canonicalCategory(fm.category)
+      ;(categoryIndex[catKey] ||= []).push(fm.id)
+      const rawV = validateCategory(fm.category, { allowDeprecated: true })
+      if (!rawV.ok) driftUnknown[catKey] = (driftUnknown[catKey] || 0) + 1
+      else if (rawV.successor) {
+        const name = String(fm.category)
+        driftDeprecated[name] = (driftDeprecated[name] || 0) + 1
+      }
     }
   }
 
@@ -144,7 +196,16 @@ function rebuildDir(dataDir, label) {
   fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
   fs.renameSync(tagsTmp, tagsFile)
 
-  return { scope: label, count: entries.length }
+  if (vocabLoaded) {
+    const catFile = path.join(dataDir, 'category-index.json')
+    const catTmp = catFile + '.tmp'
+    fs.writeFileSync(catTmp, JSON.stringify(categoryIndex, null, 2), 'utf8')
+    fs.renameSync(catTmp, catFile)
+  } else {
+    process.stderr.write(`em-rebuild-index: categories.json unloadable; ${label} category-index.json skipped (index.jsonl + tags.json built normally)\n`)
+  }
+
+  return { scope: label, count: entries.length, category_drift: { unknown: driftUnknown, deprecated: driftDeprecated } }
 }
 
 const rebuilt = []

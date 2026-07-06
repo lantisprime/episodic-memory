@@ -84,6 +84,13 @@ function installBp1ScriptsToHome(homeDir) {
       fs.copyFileSync(path.join(repoLib, file), path.join(dstLib, file))
     }
   }
+  // categories.json is substrate the deployed em-store resolves via ../../categories.json
+  // (RFC-009 P1a; install.mjs deploys it globally). The sweep shells out to em-store, which now
+  // fails CLOSED without the vocab — mirror the real deploy so the sweep-tick write succeeds.
+  const repoCategories = path.join(REPO, 'categories.json')
+  if (fs.existsSync(repoCategories)) {
+    fs.copyFileSync(repoCategories, path.join(homeDir, '.episodic-memory', 'categories.json'))
+  }
 }
 
 function projectSha(projectRoot) {

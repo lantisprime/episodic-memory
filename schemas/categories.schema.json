@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/categories.schema.json",
+  "title": "Episode category vocabulary (RFC-009 R10b)",
+  "description": "Meta-schema for categories.json — the single source of truth for the closed episode-category vocabulary, each member's lifecycle, and deprecation mapping.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "categories"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Editorial semver of the vocabulary document."
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/category" }
+    }
+  },
+  "$defs": {
+    "categoryName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9.]*$"
+    },
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "lifecycle"],
+      "properties": {
+        "name": { "$ref": "#/$defs/categoryName" },
+        "description": { "type": "string", "minLength": 1 },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["standard", "aggregate-then-prune"]
+        },
+        "deprecated_for": { "$ref": "#/$defs/categoryName" }
+      }
+    }
+  }
+}

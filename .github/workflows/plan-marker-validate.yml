@@ -168,6 +168,30 @@ jobs:
       - name: Run RFC-009 P0 prune-protection tests
         run: node tests/test-prune-protection.mjs
 
+      - name: Validate schemas (RFC-009 P1a — categories.schema.json discovered + MIN_SCHEMA_DOCS floor)
+        run: node scripts/validate-schemas.mjs --project "$PWD"
+
+      - name: Run RFC-009 P1a categories lib + schema tests
+        run: node tests/test-categories-lib.mjs
+
+      - name: Run RFC-009 P1a strict write-surface tests (store/revise/restore matrix)
+        run: node tests/test-category-write.mjs
+
+      - name: Run RFC-009 P1a category-index + --check drift tests
+        run: node tests/test-category-index.mjs
+
+      - name: Run RFC-009 P1a read-surface tolerance + index-backed --category tests
+        run: node tests/test-category-search.mjs
+
+      - name: Run RFC-009 P1a --history multi-parent walk tests
+        run: node tests/test-history-walk.mjs
+
+      - name: Run RFC-009 P1a per-category prune lifecycle tests
+        run: node tests/test-prune-lifecycle.mjs
+
+      - name: Run RFC-009 P1a categories.json global-deploy mock E2E
+        run: node tests/test-install-categories.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

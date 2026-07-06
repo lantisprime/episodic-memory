@@ -395,6 +395,16 @@ if (fs.existsSync(repoPatternsIndex)) {
   console.log(`Installed patterns/_index.json to ${globalPatternsDir}`)
 }
 
+// 1b'. Copy categories.json — the episode-category vocabulary substrate (RFC-009 R10b).
+// It is DATA the deployed em-* scripts read via `../../categories.json` from scripts/lib/, so it
+// must land at the global root (NOT under ~/.claude/, which is enforcement-artifact territory).
+const repoCategories = path.join(REPO_DIR, 'categories.json')
+if (fs.existsSync(repoCategories)) {
+  fs.mkdirSync(GLOBAL_DIR, { recursive: true })
+  fs.copyFileSync(repoCategories, path.join(GLOBAL_DIR, 'categories.json'))
+  console.log(`Installed categories.json to ${GLOBAL_DIR}`)
+}
+
 // 1c. Copy the agent-facing per-script reference to the global root so any tool
 // can read it before first script use (deployed on every install, all tools).
 const repoScriptsGuide = path.join(REPO_DIR, 'docs', 'EM_SCRIPTS_GUIDE.md')

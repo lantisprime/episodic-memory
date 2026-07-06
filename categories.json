@@ -1,0 +1,55 @@
+{
+  "version": "1.0.0",
+  "categories": [
+    {
+      "name": "decision",
+      "description": "an architectural or process decision, its rationale, and alternatives weighed",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "discovery",
+      "description": "a non-obvious fact learned about the codebase, a tool, or an external system",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "milestone",
+      "description": "a completed unit of work worth recording (a merged PR, a shipped feature, a deploy)",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "context",
+      "description": "durable background about a project, goal, or constraint not derivable from the code",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "research",
+      "description": "distilled findings from external research (docs, articles, specs) worth caching",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "lesson",
+      "description": "a reusable rule or pattern learned from experience, applicable to future work",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "violation",
+      "description": "a recorded instance of a behavioral pattern being broken, for strike counting and recall",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "workflow.lifecycle",
+      "description": "an event-plane record emitted by the behavior-pattern workflow layer (review threads, gate state)",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "workplan",
+      "description": "an active work queue with prioritized items, superseded via revision chains as priorities change",
+      "lifecycle": "standard"
+    },
+    {
+      "name": "temporary",
+      "description": "transient working episodes: review threads, scratch context",
+      "lifecycle": "aggregate-then-prune"
+    }
+  ]
+}
