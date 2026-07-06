@@ -352,9 +352,11 @@ function installRuntimeIntoProj(proj) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
       path.join(proj, 'scripts', 'lib', lib))
   }
-  // em-search transitively imports lib/local-dir.mjs
+  // em-search transitively imports lib/local-dir.mjs and (RFC-009 P1a) lib/categories.mjs
   fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'local-dir.mjs'),
     path.join(proj, 'scripts', 'lib', 'local-dir.mjs'))
+  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'categories.mjs'),
+    path.join(proj, 'scripts', 'lib', 'categories.mjs'))
   fs.copyFileSync(path.join(REPO, 'scripts', 'em-search.mjs'),
     path.join(proj, 'scripts', 'em-search.mjs'))
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
