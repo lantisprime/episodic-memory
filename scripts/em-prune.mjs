@@ -96,13 +96,19 @@ function isValidReferencer(row, todayStr) {
 // RFC-009 R6 protection set. rows = UNION of both stores' index rows (deliberately
 // NO id-dedupe: a stale superseded copy in one store must not shadow an active
 // referencer in the other). Returns Map<id, {reason, via}>; first-set reason wins in
-// the order: evidence-linked-violation, trigger-bearing-lesson, consolidates-member,
-// latest-run-record, chain-member.
+// the order: pinned, evidence-linked-violation, trigger-bearing-lesson,
+// consolidates-member, latest-run-record, chain-member.
 function computeProtectedIds(rows, todayStr) {
   const map = new Map()
   // via normalizes to null when the protecting referencer row has no string id
   // (the tolerated hand-written class) so the output contract field never vanishes.
   const set = (id, reason, via) => { if (typeof id === 'string' && !map.has(id)) map.set(id, { reason, via: typeof via === 'string' ? via : null }) }
+  // class 0: pinned episodes protect themselves unconditionally (Recall v2).
+  // Pinning is the explicit operator/agent signal "never archive this"; it
+  // outranks every derived protection reason.
+  for (const r of rows) {
+    if (r.pinned === true) set(r.id, 'pinned', typeof r.id === 'string' ? r.id : null)
+  }
   const lessonRowsById = new Map()
   for (const r of rows) {
     if (r.category === 'lesson' && typeof r.id === 'string') {

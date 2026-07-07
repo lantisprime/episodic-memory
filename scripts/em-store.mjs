@@ -29,6 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
+import { episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -39,7 +40,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope local|global]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope local|global] [--pin]' }))
   process.exit(0)
 }
 
@@ -78,6 +79,9 @@ const bodyArg = flag('--body')
 const bodyFile = flag('--body-file')
 const url = flag('--url')
 const scope = flag('--scope') || 'global'
+// --pin: exempt from time decay (recall floor 0.6 instead of 0.1) and from
+// em-prune archival. For foundational decisions that must not fade.
+const pinned = argv.includes('--pin')
 
 // Category vocabulary comes from categories.json via lib/categories.mjs (RFC-009 R10b).
 // USAGE derives the member list fail-safely so --help never crashes when the vocab is
@@ -177,6 +181,7 @@ const fmLines = [
   `tags: [${tags.join(', ')}]`,
   `summary: ${summary}`,
 ]
+if (pinned) fmLines.push('pinned: true')
 if (url) {
   fmLines.push(`url: ${url}`)
   fmLines.push(`fetched: ${dateStr}`)
@@ -197,12 +202,16 @@ fs.writeFileSync(filePath, episodeContent, 'utf8')
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project, category,
   status: 'active', supersedes: null, tags, summary,
+  ...(pinned ? { pinned: true } : {}),
   ...(url ? { url, fetched: dateStr } : {})
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
 updateTagsIndex(dataDir, id, tags)
 updateCategoryIndex(dataDir, id, category)
+// Token source is the FULL FILE content (frontmatter + body): the search
+// body tier greps the whole file, so pruning must see the same text.
+updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeContent }))
 
 console.log(JSON.stringify({ status: 'ok', id, file: filePath, scope }))
 

@@ -15,6 +15,7 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
+import { episodeTokens } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -135,6 +136,7 @@ function rebuildDir(dataDir, label) {
   const entries = []
 
   const tagsIndex = {}
+  const tokensIndex = {}
   // category-index + drift counts (R10d/R10f). Reader/index surface: if the vocab cannot load,
   // DEGRADE — build index.jsonl + tags.json as before and skip category-index (B1, I3).
   const categoryIndex = {}
@@ -149,10 +151,13 @@ function rebuildDir(dataDir, label) {
     if (!fm || !fm.id) continue
     const normalizedTags = normalizeTags(Array.isArray(fm.tags) ? fm.tags : [])
 
-    // Carry forward access metadata from old index, default to 0/null for new entries
+    // Carry forward access metadata from old index, default to 0/null for new
+    // entries. `feedback` (em-feedback usefulness counter) is index-only
+    // metadata like access_count and survives rebuilds the same way.
     const old = oldIndex.get(fm.id)
     const accessCount = old ? (old.access_count || 0) : 0
     const lastAccessed = old ? (old.last_accessed || null) : null
+    const feedback = old && typeof old.feedback === 'number' ? old.feedback : 0
 
     // #448 write/repair side: a hand-authored episode (foreign harness,
     // `created:` instead of `date:`/`time:`) used to round-trip its malformed
@@ -182,13 +187,20 @@ function rebuildDir(dataDir, label) {
       ...(typeof fm.superseded_by === 'string' ? { superseded_by: fm.superseded_by } : {}),
       tags: normalizedTags,
       summary: fm.summary,
+      ...(fm.pinned === true || fm.pinned === 'true' ? { pinned: true } : {}),
       access_count: accessCount,
       last_accessed: lastAccessed,
+      ...(feedback !== 0 ? { feedback } : {}),
       ...(fm.url ? { url: fm.url, fetched: fm.fetched || date } : {})
     }))
     for (const tag of normalizedTags) {
       if (!tagsIndex[tag]) tagsIndex[tag] = []
       tagsIndex[tag].push(fm.id)
+    }
+    // Token inverted index over the FULL file content (what the search body
+    // tier greps), same source as em-store's incremental writer.
+    for (const tok of episodeTokens({ summary: fm.summary, tags: normalizedTags, body: content })) {
+      ;(tokensIndex[tok] ||= []).push(fm.id)
     }
     if (vocabLoaded) {
       // canonical key: deprecated → successor; unknown → its literal key (and counted).
@@ -211,6 +223,13 @@ function rebuildDir(dataDir, label) {
   const tagsTmp = tagsFile + '.tmp'
   fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
   fs.renameSync(tagsTmp, tagsFile)
+
+  // tokens.json — compact (no pretty-print: the vocabulary is large and this
+  // file is machine-read only).
+  const tokensFile = path.join(dataDir, 'tokens.json')
+  const tokensTmp = tokensFile + '.tmp'
+  fs.writeFileSync(tokensTmp, JSON.stringify(tokensIndex), 'utf8')
+  fs.renameSync(tokensTmp, tokensFile)
 
   if (vocabLoaded) {
     const catFile = path.join(dataDir, 'category-index.json')

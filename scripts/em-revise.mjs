@@ -29,6 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { validateCategory, canonicalCategory } from './lib/categories.mjs'
+import { episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -39,7 +40,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global] [--pin]' }))
   process.exit(0)
 }
 
@@ -165,6 +166,7 @@ fs.renameSync(origTmpFile, original.filePath)
 // Update the index entry for the original + capture origTags in one pass
 const originalIndexFile = path.join(original.dir, 'index.jsonl')
 let origTagsFromIndex = []
+let origPinned = false
 if (fs.existsSync(originalIndexFile)) {
   const lines = fs.readFileSync(originalIndexFile, 'utf8').trim().split('\n').filter(Boolean)
   const updated = lines.map(line => {
@@ -172,6 +174,7 @@ if (fs.existsSync(originalIndexFile)) {
       const entry = JSON.parse(line)
       if (entry.id === originalId) {
         if (Array.isArray(entry.tags)) origTagsFromIndex = entry.tags
+        if (entry.pinned === true) origPinned = true
         entry.status = 'superseded'
         return JSON.stringify(entry)
       }
@@ -267,6 +270,10 @@ const resolvedProject = origProject || path.basename(process.cwd())
 // Inherit original episode's tags (captured during first index pass above)
 const mergedTags = normalizeTags([...origTagsFromIndex, ...tags])
 
+// Pinning survives revision: a corrected pinned decision is still a pinned
+// decision. --pin additionally pins an unpinned chain at revision time.
+const pinned = origPinned || argv.includes('--pin')
+
 const frontmatter = [
   '---',
   `id: ${id}`,
@@ -278,6 +285,7 @@ const frontmatter = [
   `supersedes: ${originalId}`,
   `tags: [${mergedTags.join(', ')}]`,
   `summary: ${summary}`,
+  ...(pinned ? ['pinned: true'] : []),
   '---',
 ].join('\n')
 
@@ -291,17 +299,22 @@ fs.writeFileSync(filePath, episodeContent, 'utf8')
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project: resolvedProject,
   category: origCategory, status: 'active', supersedes: originalId,
-  tags: mergedTags, summary
+  tags: mergedTags, summary,
+  ...(pinned ? { pinned: true } : {})
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
 // Update tags.json
 updateTagsIndex(dataDir, id, mergedTags)
 updateCategoryIndex(dataDir, id, origCategory)
+// Token source is the FULL FILE content (frontmatter + body): the search
+// body tier greps the whole file, so pruning must see the same text.
+updateTokensIndex(dataDir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
 // If revision crosses scopes, also update original scope's tags.json + category-index.json
 if (original.dir !== dataDir) {
   updateTagsIndex(original.dir, id, mergedTags)
   updateCategoryIndex(original.dir, id, origCategory)
+  updateTokensIndex(original.dir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
 }
 
 console.log(JSON.stringify({
