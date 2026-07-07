@@ -2,10 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://episodic-memory/schemas/categories.schema.json",
   "title": "Episode category vocabulary (RFC-009 R10b)",
-  "description": "Meta-schema for categories.json — the single source of truth for the closed episode-category vocabulary, each member's lifecycle, and deprecation mapping.",
+  "description": "Meta-schema for categories.json \u2014 the single source of truth for the closed episode-category vocabulary, each member's lifecycle, and deprecation mapping.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "categories"],
+  "required": [
+    "version",
+    "categories"
+  ],
   "properties": {
     "version": {
       "type": "string",
@@ -15,7 +18,9 @@
     "categories": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/category" }
+      "items": {
+        "$ref": "#/$defs/category"
+      }
     }
   },
   "$defs": {
@@ -26,15 +31,33 @@
     "category": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "description", "lifecycle"],
+      "required": [
+        "name",
+        "description",
+        "lifecycle"
+      ],
       "properties": {
-        "name": { "$ref": "#/$defs/categoryName" },
-        "description": { "type": "string", "minLength": 1 },
+        "name": {
+          "$ref": "#/$defs/categoryName"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
         "lifecycle": {
           "type": "string",
-          "enum": ["standard", "aggregate-then-prune"]
+          "enum": [
+            "standard",
+            "aggregate-then-prune"
+          ]
         },
-        "deprecated_for": { "$ref": "#/$defs/categoryName" }
+        "deprecated_for": {
+          "$ref": "#/$defs/categoryName"
+        },
+        "machine_consumed": {
+          "type": "boolean",
+          "description": "True when the category's episodes are consumed by machinery (strike counting, gates, queues) rather than free-form recall; consolidation and similar folding operations must skip them."
+        }
       }
     }
   }

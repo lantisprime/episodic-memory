@@ -37,8 +37,8 @@
     {
       "id": "RFC-005",
       "slug": "em-move",
-      "title": "em-move — atomic episode relocation between scopes",
-      "status": "draft",
+      "title": "em-move \u2014 atomic episode relocation between scopes",
+      "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-005-em-move.md"
     },
@@ -53,7 +53,7 @@
     {
       "id": "RFC-007",
       "slug": "graph-projection",
-      "title": "Graph Projection — first-class traversal over latent episode/rule edges",
+      "title": "Graph Projection \u2014 first-class traversal over latent episode/rule edges",
       "status": "draft",
       "champion": "Charlton Ho",
       "file": "RFC-007-graph-projection.md"

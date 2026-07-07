@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "categories": [
     {
       "name": "decision",
@@ -34,17 +34,20 @@
     {
       "name": "violation",
       "description": "a recorded instance of a behavioral pattern being broken, for strike counting and recall",
-      "lifecycle": "standard"
+      "lifecycle": "standard",
+      "machine_consumed": true
     },
     {
       "name": "workflow.lifecycle",
       "description": "an event-plane record emitted by the behavior-pattern workflow layer (review threads, gate state)",
-      "lifecycle": "standard"
+      "lifecycle": "standard",
+      "machine_consumed": true
     },
     {
       "name": "workplan",
       "description": "an active work queue with prioritized items, superseded via revision chains as priorities change",
-      "lifecycle": "standard"
+      "lifecycle": "standard",
+      "machine_consumed": true
     },
     {
       "name": "temporary",

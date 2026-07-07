@@ -107,3 +107,22 @@ export function categoryLifecycle(name) {
   const member = map.get(canonical);
   return member ? member.lifecycle : null;
 }
+
+/**
+ * CONSOLIDATE path — the machine-consumed category set (strike counters,
+ * gates, queues consume these; folding operations must skip them). Derived
+ * from the vocabulary's per-member `machine_consumed` flag — the set lives in
+ * categories.json, never as a code literal (REQ-3). DEGRADES to an empty set
+ * (never throws): an unloadable vocab means the caller cannot distinguish
+ * machine categories, and skipping none is the read-surface convention —
+ * write surfaces that need fail-closed behavior use validateCategory.
+ * @returns {Set<string>} canonical names with machine_consumed: true
+ */
+export function machineConsumedCategories() {
+  try {
+    const { categories } = loadCategories();
+    return new Set(categories.filter((c) => c.machine_consumed === true).map((c) => c.name));
+  } catch {
+    return new Set();
+  }
+}

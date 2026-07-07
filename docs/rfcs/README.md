@@ -12,7 +12,7 @@ RFCs document proposed changes to the episodic-memory system. Every non-trivial 
 | RFC-002 | Learning Loop: Violation Tracking, Pattern Refinement, and Actionable Recall | accepted | Charlton Ho |
 | RFC-003 | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | accepted | Charlton Ho |
 | RFC-004 | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | accepted | Charlton Ho |
-| RFC-005 | em-move — atomic episode relocation between scopes | draft | Charlton Ho |
+| RFC-005 | em-move — atomic episode relocation between scopes | accepted | Charlton Ho |
 | RFC-006 | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | withdrawn | Charlton Ho |
 | RFC-007 | Graph Projection — first-class traversal over latent episode/rule edges | draft | Charlton Ho |
 | RFC-008 | Decoupling the Enforcement Layer from the Memory Substrate | accepted | Charlton Ho |
