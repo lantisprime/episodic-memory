@@ -38,6 +38,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Investigative / exploratory search | `em-search --query ... --no-track --no-score` | A plain `em-search` that reorders results and bumps access counts |
 | Index looks wrong / out of sync | `em-rebuild-index --scope all` | Hand-editing `index.jsonl` |
 | Anything feels broken / slow / inconsistent | `em-doctor` (then `em-doctor --fix`) | Guessing at which index to rebuild, or ignoring warnings |
+| Maintenance should run itself (doctor/embed/backup/hygiene) | `em-routines sync`, then `em-routines list` | Hand-written crontabs, or the legacy machine-specific launchd script |
 | A recalled episode actually helped / kept being irrelevant | `em-feedback --id <id> --useful` / `--noise` | Letting access counts alone decide future ranking |
 | A decision must never fade or be pruned | `em-pin --id <id>` (or `em-store --pin`) | Re-storing the same decision periodically to keep it fresh |
 | Episode stored in the wrong scope (global vs local) | `em-move --id <id> --to local\|global` | `mv` + manual rebuild (loses counters, leaves stale rows) or re-storing (new id, broken chains) |
@@ -457,6 +458,39 @@ your existing Claude Code login (no API key; Anthropic has no embeddings API,
 so Claude re-ranks rather than embeds). Reranker failure falls back to vector
 order with a `warning`; `--no-rerank` bypasses a configured reranker. Output
 gains `"reranked":true` when applied.
+
+### em-routines
+
+Scheduled-maintenance manager: definitions live in
+`~/.episodic-memory/routines.json` (data, not code), applied to whatever
+scheduler the machine actually has — launchd (macOS), systemd user timers
+(Linux), or a managed crontab block (fallback; foreign entries preserved
+byte-for-byte).
+
+- WHEN TO USE: `sync` once after install (or via the wizard /
+  `install.mjs --install-routines`); `list` to check health; `run <r>` to
+  trigger one now; `add` for your own scheduled commands.
+- WHEN NOT TO USE: one-off maintenance (call em-doctor etc. directly).
+
+```
+node ~/.episodic-memory/scripts/em-routines.mjs sync            # seed + schedule defaults
+node ~/.episodic-memory/scripts/em-routines.mjs list            # config + platform + last-run + staleness
+node ~/.episodic-memory/scripts/em-routines.mjs run doctor
+node ~/.episodic-memory/scripts/em-routines.mjs enable|disable <r>
+node ~/.episodic-memory/scripts/em-routines.mjs add --name <n> --cron "0 4 * * *" --cmd "<command>"
+node ~/.episodic-memory/scripts/em-routines.mjs logs <r> [--lines <n>]
+node ~/.episodic-memory/scripts/em-routines.mjs uninstall       # de-schedule; config + logs kept
+```
+
+Built-ins (all zero-LLM, safe unattended, no-op when their feature is
+unconfigured): `doctor` daily 08:15 (auto-repair), `embed` daily 03:30
+(sidecar refresh), `backup-sync` daily 23:00, `hygiene-report` Sunday 09:00
+(read-only consolidate/prune/stats report). Every run — scheduled or manual —
+records state (`logs/routines/state.json`); `list` flags a routine **stale**
+when an enabled, scheduled routine hasn't run within 2× its interval (a
+silently-dead scheduler) and exits 1 so you can cron-check the checker.
+Cron expressions: 5 fields, each `*` or an integer (dom/month must be `*`) —
+anything launchd/systemd can't express is rejected, never mistranslated.
 
 ### em-check-stale
 

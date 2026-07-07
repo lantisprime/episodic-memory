@@ -202,6 +202,7 @@ async function flowInstall() {
 
   await maybeAddPathShim()
   await maybeConfigureSemantic(projectDir)
+  await maybeConfigureRoutines()
   return verifyWithDoctor(projectDir)
 }
 
@@ -323,6 +324,28 @@ async function maybeConfigureSemantic(projectDir) {
     }
   } else {
     console.log('    Build the sidecar once your embedding service is reachable:  em embed --scope all')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled maintenance: sync routines.json to the platform scheduler
+// (launchd / systemd user timers / cron) via the installed em-routines.mjs.
+// EOF/enter → skip, so scripted installs are unaffected unless they opt in.
+// ---------------------------------------------------------------------------
+async function maybeConfigureRoutines() {
+  console.log('\nScheduled maintenance (optional): daily doctor auto-repair, semantic sidecar refresh,')
+  console.log('backup sync, and a weekly hygiene report — adapted to this machine (launchd/systemd/cron).')
+  if (!(await askYesNo('Schedule the maintenance routines?', false))) {
+    console.log('    Skipped. Later: em routines sync   (manage: em routines list|enable|disable|run)')
+    return
+  }
+  const routinesScript = path.join(GLOBAL_DIR, 'scripts', 'em-routines.mjs')
+  const r = runJson([fs.existsSync(routinesScript) ? routinesScript : path.join(SCRIPT_DIR, 'em-routines.mjs'), 'sync'], { cwd: HOME })
+  if (r.json && r.json.status === 'ok') {
+    console.log(`${OK} Scheduled via ${r.json.scheduler}: ${r.json.applied.map(a => a.routine).join(', ')}`)
+    console.log(`    Logs: ${r.json.log_dir} — manage with: em routines list|enable|disable|run`)
+  } else {
+    console.log(`${BAD} Scheduling failed (${r.json ? r.json.message : `exit ${r.code}`}). Try later: em routines sync`)
   }
 }
 

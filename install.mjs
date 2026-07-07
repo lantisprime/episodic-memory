@@ -61,6 +61,9 @@ const installEnforcement = argv.includes('--install-enforcement')
 const uninstallEnforcement = argv.includes('--uninstall-enforcement')
 const purgeConfig = argv.includes('--purge-config')
 const installSecondOpinion = argv.includes('--install-second-opinion')
+// Scheduled maintenance routines (em-routines.mjs): sync routines.json to the
+// platform scheduler (launchd/systemd/cron) right after the substrate deploys.
+const installRoutines = argv.includes('--install-routines')
 const bootstrapLastPrompt = argv.includes('--bootstrap-last-prompt')
 const REPO_HOOKS = path.join(REPO_DIR, 'plugins', 'claude-code', 'hooks')
 const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
@@ -138,7 +141,7 @@ if (argv.includes('--wizard')) {
 
 if (!tool) {
   console.log(`Usage: node install.mjs --wizard   (interactive guided setup — recommended)
-       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
@@ -360,6 +363,27 @@ fs.chmodSync(emShim, 0o755)
 console.log(`Installed unified CLI shim at ${emShim}`)
 if (!(process.env.PATH || '').split(path.delimiter).includes(BIN_DIR)) {
   console.log(`  → add it to your PATH:  export PATH="$HOME/.episodic-memory/bin:$PATH"`)
+}
+
+// ---------------------------------------------------------------------------
+// --install-routines: schedule the maintenance routines on the platform
+// scheduler, using the JUST-DEPLOYED em-routines.mjs so entries point at the
+// installed substrate (not the clone). Failure is non-fatal: the substrate
+// install stands on its own; routines can be synced later.
+// ---------------------------------------------------------------------------
+if (installRoutines) {
+  const routinesScript = path.join(SCRIPTS_DIR, 'em-routines.mjs')
+  const r = (() => {
+    try { return execFileSync(process.execPath, [routinesScript, 'sync'], { encoding: 'utf8' }) } catch (e) { return e.stdout || e.message }
+  })()
+  let parsed = null
+  try { parsed = JSON.parse(String(r).trim().split('\n').pop()) } catch {}
+  if (parsed && parsed.status === 'ok') {
+    console.log(`Scheduled maintenance routines (${parsed.scheduler}): ${parsed.applied.map(a => a.routine).join(', ')}`)
+    console.log(`  → manage with: em routines list|enable|disable|run  (logs: ${parsed.log_dir})`)
+  } else {
+    console.log(`WARNING: routine scheduling failed (${parsed ? parsed.message : String(r).slice(0, 200)}); run later: node ${routinesScript} sync`)
+  }
 }
 
 // ---------------------------------------------------------------------------

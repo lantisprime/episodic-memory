@@ -427,6 +427,23 @@ node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local            # pr
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local --apply    # fold
 ```
 
+### Scheduled maintenance (`em routines`)
+```bash
+# Adapted to the machine: launchd (macOS), systemd user timers (Linux), or a
+# managed crontab block (fallback). Definitions live in ~/.episodic-memory/routines.json.
+node ~/.episodic-memory/scripts/em-routines.mjs sync    # seed + schedule the defaults
+node ~/.episodic-memory/scripts/em-routines.mjs list    # health: platform + last run + staleness
+node ~/.episodic-memory/scripts/em-routines.mjs add --name my-job --cron "0 4 * * *" --cmd "..."
+```
+
+Defaults (all no-op when their feature isn't configured): daily `doctor`
+auto-repair, daily `embed` sidecar refresh, daily `backup-sync`, weekly
+read-only `hygiene-report`. Every run records state; `list` flags **stale**
+routines (scheduled but silently not running) and exits 1. Wired into
+installation via the wizard's routines step or `install.mjs
+--install-routines`. (The old `install-launchd-routines.sh` is legacy —
+maintainer-machine-specific claude-skill jobs only.)
+
 ### Search
 ```bash
 node ~/.episodic-memory/scripts/em-search.mjs --project my-project
