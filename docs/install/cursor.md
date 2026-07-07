@@ -33,7 +33,7 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool cursor --project <ABSOLUTE_PATH
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
 ```
-Installed 31 scripts to <HOME>/.episodic-memory/scripts
+Installed 32 scripts to <HOME>/.episodic-memory/scripts
 Seeded default LLM classifier config at <HOME>/.episodic-memory/classifier-config.json
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
@@ -55,7 +55,7 @@ they are created once and skipped on later installs.
 
 | Path | What |
 |---|---|
-| `~/.episodic-memory/scripts/` | 31 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
+| `~/.episodic-memory/scripts/` | 32 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
 | `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` | agent-facing per-script reference |
 | `~/.episodic-memory/patterns/_index.json` | pattern registry |
 | `<project>/.cursor/rules/episodic-memory.mdc` | the Cursor rule (points at the guide) |
