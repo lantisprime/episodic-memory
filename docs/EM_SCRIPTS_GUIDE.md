@@ -418,6 +418,18 @@ Both are python3-stdlib only:
 node em-embed.mjs --scope all --cmd "sh <clone>/examples/embedders/ollama-embed.sh" --model ollama-nomic
 ```
 
+Persistent configuration — no flags needed per call: the installer wizard's
+semantic-search step (or your editor) writes
+`~/.episodic-memory/embed-config.json`:
+
+```json
+{ "provider": "cmd", "cmd": "sh <clone>/examples/embedders/ollama-embed.sh", "model": "ollama-nomic" }
+```
+
+Both em-embed and em-semantic read it through the same resolver. Precedence:
+explicit `--provider`/`--cmd`/`--model` flags > `$EM_EMBED_CMD` >
+embed-config.json > built-in hash. A malformed config degrades to hash.
+
 ### em-semantic
 
 Similarity search over the embeddings sidecar. Ranks by cosine similarity ×

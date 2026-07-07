@@ -49,8 +49,9 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool <harness> --project <ABSOLUTE_P
 
 Interactive alternative — `node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --wizard`
 walks prerequisite checks, tool + project selection, optional Claude Code
-hooks, optional backup config, the `em` PATH shim, and verifies the result
-with `em-doctor`. The wizard also has a **migrate** flow (restore stores from
+hooks, optional backup config, the `em` PATH shim, optional semantic-search
+setup (writes `~/.episodic-memory/embed-config.json`; built-in / Ollama /
+OpenAI / custom command), and verifies the result with `em-doctor`. The wizard also has a **migrate** flow (restore stores from
 an em-backup repository, dry-run first) and a **doctor** flow. Answers are
 plain stdin lines, so agents can script it:
 `printf '1\n2\n/abs/project\nn\nn\n' | node install.mjs --wizard`.

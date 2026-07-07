@@ -398,6 +398,11 @@ node ~/.episodic-memory/scripts/em-semantic.mjs --query "..." \
   --cmd "sh <clone>/examples/embedders/ollama-embed.sh" --model ollama-nomic
 ```
 
+No flags needed once configured: the installer wizard's semantic-search step
+(`node install.mjs --wizard` → built-in / ollama / openai / custom) writes
+`~/.episodic-memory/embed-config.json`, which `em embed` and `em semantic`
+read automatically. Flags and `$EM_EMBED_CMD` still override it.
+
 ### Consolidate (store hygiene)
 ```bash
 # Fold near-duplicate episodes into one digest episode per cluster.

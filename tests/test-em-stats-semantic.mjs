@@ -218,6 +218,30 @@ t('semantic: model mismatch refused; missing sidecar refused; project filter wor
   fs.rmSync(empty, { recursive: true, force: true });
 });
 
+t('embed-config.json: zero-flag resolution for BOTH scripts; flags override it', () => {
+  // persist the cmd provider in config; em-embed and em-semantic must both
+  // pick it up with no flags (mismatched resolution would trip the model
+  // refusal on every query)
+  fs.mkdirSync(path.join(home, '.episodic-memory'), { recursive: true });
+  const cfgPath = path.join(home, '.episodic-memory', 'embed-config.json');
+  fs.writeFileSync(cfgPath, JSON.stringify({ provider: 'cmd', cmd: `python3 ${embedder}`, model: 'cfg-model' }));
+  const e = run('em-embed.mjs', ['--scope', 'local', '--rebuild'], cwd, env);
+  assert.equal(e.code, 0, e.stdout);
+  assert.equal(e.json.scopes[0].model, 'cfg-model');
+  const q = run('em-semantic.mjs', ['--query', 'jwt token expiry', '--scope', 'local', '--no-track', '--min-sim', '0'], cwd, env);
+  assert.equal(q.code, 0, q.stdout);
+  assert.equal(q.json.model, 'cfg-model', 'em-semantic must resolve the same config');
+  // explicit flags beat the config
+  const f = run('em-embed.mjs', ['--scope', 'local', '--provider', 'hash', '--model', 'hash-v1-256', '--rebuild'], cwd, env);
+  assert.equal(f.json.scopes[0].model, 'hash-v1-256');
+  // malformed config degrades to hash, never crashes
+  fs.writeFileSync(cfgPath, 'NOT-JSON');
+  const m = run('em-embed.mjs', ['--scope', 'local', '--rebuild'], cwd, env);
+  assert.equal(m.code, 0);
+  assert.equal(m.json.scopes[0].model, 'hash-v1-256');
+  fs.rmSync(cfgPath);
+});
+
 t('semantic: hash provider end-to-end with tracking side-effect contract', () => {
   run('em-embed.mjs', ['--scope', 'local', '--rebuild'], cwd, env); // back to hash model
   const before = fs.readFileSync(path.join(store, 'index.jsonl'), 'utf8');

@@ -30,7 +30,10 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTokensIndex, computeScore, writeBackAccessTracking } from './lib/relevance.mjs'
-import { HASH_MODEL, hashEmbed, buildIdf, cmdEmbed, cosine, loadEmbeddings, contentHash } from './lib/embeddings.mjs'
+import {
+  HASH_MODEL, hashEmbed, buildIdf, cmdEmbed, cosine, loadEmbeddings, contentHash,
+  loadEmbedConfig, resolveEmbedSettings
+} from './lib/embeddings.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -53,8 +56,15 @@ const scope = flag('--scope') || 'all'
 const limit = parseInt(flag('--limit') || '10', 10)
 const minSim = parseFloat(flag('--min-sim') || '0.25')
 const project = flag('--project')
-const provider = flag('--provider') || (flag('--cmd') || process.env.EM_EMBED_CMD ? 'cmd' : 'hash')
-const cmd = flag('--cmd') || process.env.EM_EMBED_CMD
+// Same precedence as em-embed (flags > env > embed-config.json > hash), from
+// the shared resolver — the two scripts must agree or every configured setup
+// would trip the model-mismatch refusal.
+const embedConfig = loadEmbedConfig()
+const { provider, cmd } = resolveEmbedSettings({
+  providerFlag: flag('--provider'),
+  cmdFlag: flag('--cmd'),
+  config: embedConfig,
+})
 const full = argv.includes('--full')
 const noTrack = argv.includes('--no-track')
 
@@ -75,7 +85,7 @@ if (scope === 'global' || scope === 'all') dirs.push([GLOBAL_DIR, 'global'])
 // ---------------------------------------------------------------------------
 // Load sidecars; refuse model mismatches instead of comparing across spaces.
 // ---------------------------------------------------------------------------
-const queryModel = flag('--model') || (provider === 'hash' ? HASH_MODEL : `cmd:${contentHash(cmd || '')}`)
+const queryModel = flag('--model') || embedConfig.model || (provider === 'hash' ? HASH_MODEL : `cmd:${contentHash(cmd || '')}`)
 const vectorsById = new Map()
 let sidecarsSeen = 0
 for (const [dir] of dirs) {
