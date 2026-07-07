@@ -8,6 +8,11 @@ runtime. After `install.mjs` runs, every script below lives at
 node ~/.episodic-memory/scripts/<script>.mjs [flags]
 ```
 
+There is also a unified dispatcher: `em <command>` ≡ `node
+~/.episodic-memory/scripts/em-<command>.mjs` (shim at
+`~/.episodic-memory/bin/em`; `em help --json` lists every command). Both forms
+are equivalent — use whichever the harness makes easier.
+
 Every script prints a single JSON object to stdout. Parse that JSON. Do not scrape
 prose, and do not read the episode `.md` files or the `index.jsonl` directly to get
 data that a script will return for you.
@@ -32,6 +37,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Correct a wrong past decision | `em-revise --original <id> --summary ... --body ...` | Editing the original episode file in place |
 | Investigative / exploratory search | `em-search --query ... --no-track --no-score` | A plain `em-search` that reorders results and bumps access counts |
 | Index looks wrong / out of sync | `em-rebuild-index --scope all` | Hand-editing `index.jsonl` |
+| Anything feels broken / slow / inconsistent | `em-doctor` (then `em-doctor --fix`) | Guessing at which index to rebuild, or ignoring warnings |
 | Find a topic across all projects | `em-search --query <topic> --scope all` | Grepping episode files |
 | Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
 
@@ -194,6 +200,11 @@ Output:
 ```
 
 Flags that matter (from the script's own `Usage:` header):
+- `--query` is tiered: exact summary match (1.0) > contiguous summary substring
+  (0.7) > all-tokens-match across summary/tags/body (field-weighted, < 0.7) >
+  contiguous body substring (0.4). Multi-word queries no longer need to be an
+  exact substring — every token just has to land somewhere. Token order does
+  not matter; a token missing everywhere means no match.
 - By default `em-search` scores results by relevance and tracks access (each hit
   bumps the episode's `access_count` and reorders future relevance).
 - `--no-score` skips relevance scoring so results come back in a stable
@@ -316,6 +327,38 @@ node ~/.episodic-memory/scripts/em-rebuild-index.mjs --check --scope all
 
 Note: `--help` short-circuits safely (PR #449), but any OTHER unknown argument is
 ignored and a rebuild runs. `--scope all` rebuilds both local and global.
+
+### em-doctor
+
+Health check + repair for the stores and the installation. One command answers
+"is memory healthy, and if not, what exactly is wrong and how do I fix it".
+
+- WHEN TO USE: something feels off (searches slow, warnings about missing
+  indexes, results missing), after a crash/interrupted write, after moving
+  machines, or as a periodic maintenance check.
+- WHEN NOT TO USE: as a data query (use search/list/recall).
+
+```
+node ~/.episodic-memory/scripts/em-doctor.mjs [--scope local|global|all] [--fix] [--strict] [--verbose]
+```
+
+Checks: Node version, index.jsonl parse, index↔episode-file drift (both
+directions), tags.json + category-index.json consistency, dangling
+`supersedes` pointers, stale `.tmp` files from interrupted atomic writes,
+dead-pid `.lock` files, installed-script presence/drift, backup config.
+
+Output (trimmed):
+
+```json
+{"status":"issues","summary":{"ok":6,"warn":2,"error":1},"checks":[{"id":"index-parse","scope":"local","level":"error","message":"1 malformed line(s) in index.jsonl","fix":"em-rebuild-index"}]}
+```
+
+- Exit 0 when no `error`-level findings; 1 otherwise. `--strict` makes `warn`
+  findings also exit 1 (CI mode).
+- `--fix` rebuilds indexes (delegating to `em-rebuild-index`) and removes stale
+  `.tmp`/`.lock` litter, then re-runs the store checks and reports the post-fix
+  state. Everything else stays report-only.
+- Every non-ok finding carries a `fix` hint when a safe automated repair exists.
 
 ### em-prune
 
