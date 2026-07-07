@@ -20,6 +20,10 @@ import path from 'path'
 import os from 'os'
 import { execSync } from 'child_process'
 import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
+import {
+  normalizeTags, loadTagsIndex, loadIndex,
+  computeScore, writeBackAccessTracking
+} from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -85,80 +89,9 @@ const STOPWORDS = new Set([
   'enforce', 'pattern'
 ])
 
-// ---------------------------------------------------------------------------
-// SYNC: em-search.mjs:normalizeTags — update both on change
-// ---------------------------------------------------------------------------
-function normalizeTags(raw) {
-  if (!raw) return []
-  const arr = (Array.isArray(raw) ? raw : raw.split(','))
-    .map(t => t.trim().toLowerCase())
-    .filter(Boolean)
-  return [...new Set(arr)].sort()
-}
-
-// ---------------------------------------------------------------------------
-// SYNC: em-search.mjs:loadTagsIndex — update both on change
-// ---------------------------------------------------------------------------
-function loadTagsIndex(dataDir) {
-  const tagsFile = path.join(dataDir, 'tags.json')
-  try {
-    return JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-// ---------------------------------------------------------------------------
-// SYNC: em-search.mjs:computeScore — update both on change
-// ---------------------------------------------------------------------------
-function computeScore(entry, textMatchScore) {
-  const accessCount = entry.access_count || 0
-  // Use new Date(entry.date) for decay — sub-day precision unnecessary
-  const created = new Date(entry.date)
-  const daysSince = Math.max(0, (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24))
-  const timeFactor = Math.max(0.1, 1 - (daysSince / 365))
-  const accessFactor = 1 + Math.log1p(accessCount) * 0.1
-  return textMatchScore * timeFactor * accessFactor
-}
-
-// ---------------------------------------------------------------------------
-// SYNC: em-search.mjs:writeBackAccessTracking — update both on change
-// ---------------------------------------------------------------------------
-function writeBackAccessTracking(results) {
-  // Group results by source data directory
-  const byDir = new Map()
-  for (const e of results) {
-    if (!e._dataDir) continue
-    if (!byDir.has(e._dataDir)) byDir.set(e._dataDir, new Set())
-    byDir.get(e._dataDir).add(e.id)
-  }
-
-  const now = new Date().toISOString().slice(0, 19) + 'Z'
-
-  for (const [dataDir, ids] of byDir) {
-    const indexFile = path.join(dataDir, 'index.jsonl')
-    try {
-      // Re-read just before writing to narrow race window with concurrent em-store appends.
-      // This is best-effort — last-writer-wins for concurrent searches is acceptable.
-      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-      const updated = lines.map(line => {
-        try {
-          const entry = JSON.parse(line)
-          if (ids.has(entry.id)) {
-            entry.access_count = (entry.access_count || 0) + 1
-            entry.last_accessed = now
-          }
-          return JSON.stringify(entry)
-        } catch { return line }
-      })
-      const tmpFile = indexFile + '.tmp'
-      fs.writeFileSync(tmpFile, updated.join('\n') + '\n', 'utf8')
-      fs.renameSync(tmpFile, indexFile)
-    } catch {
-      // Access tracking is best-effort — skip silently on failure
-    }
-  }
-}
+// Retrieval primitives (normalizeTags, loadTagsIndex, loadIndex, computeScore,
+// writeBackAccessTracking) are shared with em-search.mjs via lib/relevance.mjs
+// — the former SYNC: blocks, now a single source.
 
 // ---------------------------------------------------------------------------
 // Task-type → relevant pattern_ids (RFC-002 Phase 3)
@@ -272,22 +205,6 @@ function resolveProjectName(projectRoot) {
   } catch {}
 
   return path.basename(projectRoot)
-}
-
-// ---------------------------------------------------------------------------
-// SYNC: em-search.mjs:loadIndex — update both on change
-// ---------------------------------------------------------------------------
-function loadIndex(dataDir, source) {
-  const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
-    try {
-      const entry = JSON.parse(line)
-      entry._source = source
-      entry._dataDir = dataDir
-      return entry
-    } catch { return null }
-  }).filter(Boolean)
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +346,19 @@ if (context.effective_tokens.length > 0) {
   for (const e of activeEntries) {
     if (matchingIds.has(e.id)) {
       const score = computeScore(e, 0.7)
+      pass2.set(e.id, { entry: e, score })
+    }
+  }
+
+  // Pass 2b: summary token match. Branch/keyword tokens rarely coincide with
+  // stored tags verbatim, so episodes whose SUMMARY mentions the topic were
+  // invisible to pass 2. Weighted 0.6 — below an exact tag hit (0.7), above
+  // recency-only (0.5). Merge keeps the higher score when both passes hit.
+  for (const e of activeEntries) {
+    if (pass2.has(e.id)) continue
+    const summaryLower = (e.summary || '').toLowerCase()
+    if (summaryLower && normalizedTokens.some(t => summaryLower.includes(t))) {
+      const score = computeScore(e, 0.6)
       pass2.set(e.id, { entry: e, score })
     }
   }
