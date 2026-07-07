@@ -116,6 +116,29 @@ function flushTagsIndex() {
   fs.renameSync(tmpFile, tagsFile)
 }
 
+// Mirror of the tags flush for category-index.json (R10d). Without this a
+// fresh install seeds patterns with NO category index, so every search on the
+// new store degrades to the linear-scan fallback until a manual rebuild.
+const pendingCategoryUpdates = []
+
+function queueCategoryUpdate(episodeId, category) {
+  pendingCategoryUpdates.push({ episodeId, category })
+}
+
+function flushCategoryIndex() {
+  if (pendingCategoryUpdates.length === 0) return
+  const catFile = path.join(GLOBAL_DIR, 'category-index.json')
+  let idx = {}
+  try { idx = JSON.parse(fs.readFileSync(catFile, 'utf8')) } catch {}
+  for (const { episodeId, category } of pendingCategoryUpdates) {
+    if (!idx[category]) idx[category] = []
+    if (!idx[category].includes(episodeId)) idx[category].push(episodeId)
+  }
+  const tmpFile = catFile + '.tmp'
+  fs.writeFileSync(tmpFile, JSON.stringify(idx, null, 2), 'utf8')
+  fs.renameSync(tmpFile, catFile)
+}
+
 // ---------------------------------------------------------------------------
 // Seed patterns
 // ---------------------------------------------------------------------------
@@ -198,14 +221,16 @@ for (const entry of index.patterns || []) {
   })
   fs.appendFileSync(globalIndexFile, indexEntry + '\n', 'utf8')
 
-  // Queue tags.json update
+  // Queue tags.json + category-index.json updates
   queueTagsUpdate(id, tags)
+  queueCategoryUpdate(id, category)
 
   seeded++
 }
 
-// Flush all tag updates in one atomic write
+// Flush all tag + category updates, one atomic write each
 flushTagsIndex()
+flushCategoryIndex()
 
 const total = (index.patterns || []).length
 console.log(JSON.stringify({
