@@ -47,6 +47,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Topic lookup where wording differs from storage | `em-semantic --query <text>` (after `em-embed`) | Guessing synonyms into `em-search --query` |
 | Find a topic across all projects | `em-search --query <topic> --scope all` | Grepping episode files |
 | Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
+| "What is connected to this episode?" (lineage, clusters, hubs) | `em-graph --from <id>` / `--orphans` / `--hubs` | Manual joins across multiple searches |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -491,6 +492,25 @@ when an enabled, scheduled routine hasn't run within 2× its interval (a
 silently-dead scheduler) and exits 1 so you can cron-check the checker.
 Cron expressions: 5 fields, each `*` or an integer (dom/month must be `*`) —
 anything launchd/systemd can't express is rejected, never mistranslated.
+
+### em-graph
+
+Typed-edge traversal over the episode graph (RFC-007 core). Projection over
+file storage, built fresh per query — no sidecar DB.
+
+```
+node ~/.episodic-memory/scripts/em-graph.mjs --from <id> [--depth <n>] [--limit <n>] \
+  [--edges supersedes,consolidates,evidence,cites,tags|all] [--scope local|global|all]
+node ~/.episodic-memory/scripts/em-graph.mjs --orphans     # no non-tag edges at all
+node ~/.episodic-memory/scripts/em-graph.mjs --hubs [--top <n>]
+```
+
+Edges: `supersedes` (chains), `consolidates` (digest→member), `evidence`
+(lesson↔violation), `cites` (episode ids in BODIES — fenced code/backticks
+skipped, frontmatter excluded), `tags` (opt-in pseudo-nodes for cluster
+queries). Undirected BFS, depth default 2, node limit 50 (closest first,
+`truncated` flagged). Lineage keeps superseded nodes, marked via `status`.
+Output: `{root, nodes:[{id,distance,summary,...}], edges:[{from,to,type}]}`.
 
 ### em-check-stale
 

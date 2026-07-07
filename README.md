@@ -427,6 +427,15 @@ node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local            # pr
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local --apply    # fold
 ```
 
+### Graph traversal (`em graph`)
+```bash
+# What is connected to this episode? Lineage across supersedes/consolidates/
+# evidence/body-citations; tags opt-in for cluster queries.
+node ~/.episodic-memory/scripts/em-graph.mjs --from <episode-id> --depth 2
+node ~/.episodic-memory/scripts/em-graph.mjs --orphans    # dead ends
+node ~/.episodic-memory/scripts/em-graph.mjs --hubs       # load-bearing episodes
+```
+
 ### Scheduled maintenance (`em routines`)
 ```bash
 # Adapted to the machine: launchd (macOS), systemd user timers (Linux), or a

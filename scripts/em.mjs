@@ -39,6 +39,7 @@ const DESCRIPTIONS = {
   revise: 'Correct a past episode via a revision chain',
   move: 'Relocate episodes between local and global scopes (RFC-005)',
   consolidate: 'Fold near-duplicate episodes into digest episodes (dry-run default)',
+  graph: 'Typed-edge traversal: lineage, clusters, orphans, hubs (RFC-007)',
   stats: 'Store analytics: totals, categories, age, tags, prunable estimate',
   embed: 'Build/update the embeddings sidecar for semantic search',
   semantic: 'Similarity search over embeddings (run em-embed first)',
