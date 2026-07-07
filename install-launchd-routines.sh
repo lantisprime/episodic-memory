@@ -1,5 +1,19 @@
 #!/bin/bash
-# install-launchd-routines.sh — single-action bootstrap for episodic-memory
+# install-launchd-routines.sh — LEGACY, maintainer-machine-specific.
+#
+# DEPRECATED for general use: paths (PROJECT_DIR) and labels (com.charltonho.*)
+# are hardcoded to the original author's machine, it is macOS-only, and it
+# depends on personal ~/.claude/scheduled-tasks skills this repo does not ship.
+# The portable, environment-adapted replacement is the scheduled-tasks MANAGER:
+#
+#   node ~/.episodic-memory/scripts/em-routines.mjs sync     # or: em routines sync
+#
+# (config-driven via ~/.episodic-memory/routines.json; launchd on macOS,
+# systemd user timers on Linux, crontab fallback; wizard step + install.mjs
+# --install-routines wire it into installation.) This script remains only for
+# the maintainer's claude-skill jobs (daily-mining/weekly-digest/hygiene).
+#
+# Single-action bootstrap for episodic-memory
 # scheduled tasks. User-run trust boundary (sidesteps Claude auto-mode classifier).
 #
 # Writes 4 LaunchAgent plists, lints with plutil, bootstraps via launchctl,

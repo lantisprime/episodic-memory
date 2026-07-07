@@ -33,7 +33,7 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool windsurf --project <ABSOLUTE_PA
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
 ```
-Installed 30 scripts to <HOME>/.episodic-memory/scripts
+Installed 31 scripts to <HOME>/.episodic-memory/scripts
 Seeded default LLM classifier config at <HOME>/.episodic-memory/classifier-config.json
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
@@ -58,7 +58,7 @@ and leaves the file unchanged.
 
 | Path | What |
 |---|---|
-| `~/.episodic-memory/scripts/` | 30 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
+| `~/.episodic-memory/scripts/` | 31 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
 | `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` | agent-facing per-script reference |
 | `~/.episodic-memory/patterns/_index.json` | pattern registry |
 | `<project>/.windsurfrules` | the Windsurf rules (created or appended; points at the guide) |

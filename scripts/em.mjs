@@ -45,6 +45,7 @@ const DESCRIPTIONS = {
   pin: 'Pin/unpin an episode (never decays, never pruned)',
   feedback: 'Mark a recalled episode as useful or noise (ranking signal)',
   doctor: 'Health-check the stores and installation (--fix repairs)',
+  routines: 'Scheduled maintenance manager (sync/list/run/enable/disable)',
   prune: 'Archive stale low-relevance episodes',
   'rebuild-index': 'Regenerate index.jsonl, tags.json, category-index.json',
   backup: 'Sync stores to a backup git repository',

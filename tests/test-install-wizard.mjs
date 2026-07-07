@@ -115,6 +115,81 @@ t('migrate flow: declining apply leaves the store untouched', () => {
   fs.rmSync(backup, { recursive: true, force: true });
 });
 
+t('semantic step: choice 1 writes embed-config.json and builds the sidecar; EOF default skips', () => {
+  const home = mkHome('wiz-sem-');
+  const proj = path.join(home, 'proj');
+  fs.mkdirSync(proj);
+  // action=install, tools=2 (cursor), project, backup=n, PATH=n, semantic=1 (built-in)
+  const r = wizard(['1', '2', proj, 'n', 'n', '1'], { HOME: home });
+  assert.equal(r.status, 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  const cfg = JSON.parse(fs.readFileSync(path.join(home, '.episodic-memory', 'embed-config.json'), 'utf8'));
+  assert.equal(cfg.provider, 'hash');
+  assert.ok(fs.existsSync(path.join(home, '.episodic-memory', 'embeddings.jsonl')), 'initial sidecar must be built for the offline provider');
+  assert.ok(r.stdout.includes('doctor: ok'), r.stdout);
+  fs.rmSync(home, { recursive: true, force: true });
+
+  // starved answers after PATH → semantic step defaults to skip, no config written
+  const home2 = mkHome('wiz-semskip-');
+  const proj2 = path.join(home2, 'proj');
+  fs.mkdirSync(proj2);
+  const r2 = wizard(['1', '2', proj2, 'n', 'n'], { HOME: home2 });
+  assert.equal(r2.status, 0, `exit ${r2.status}\n${r2.stdout}`);
+  assert.ok(!fs.existsSync(path.join(home2, '.episodic-memory', 'embed-config.json')), 'EOF default must skip semantic setup');
+  fs.rmSync(home2, { recursive: true, force: true });
+});
+
+t('semantic step: choice 2 (claude) writes hash provider + claude-rerank rerank_cmd', () => {
+  const home = mkHome('wiz-claude-');
+  const proj = path.join(home, 'proj');
+  fs.mkdirSync(proj);
+  // action=install, tools=2 (cursor), project, backup=n, PATH=n, semantic=2 (claude)
+  const r = wizard(['1', '2', proj, 'n', 'n', '2'], { HOME: home });
+  assert.equal(r.status, 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  const cfg = JSON.parse(fs.readFileSync(path.join(home, '.episodic-memory', 'embed-config.json'), 'utf8'));
+  assert.equal(cfg.provider, 'hash', 'claude option keeps offline vectors');
+  assert.ok(cfg.rerank_cmd && cfg.rerank_cmd.includes('claude-rerank.sh'), JSON.stringify(cfg));
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+t('routines step: opt-in schedules via detected backend; EOF default skips', () => {
+  const home = mkHome('wiz-routines-');
+  const proj = path.join(home, 'proj');
+  fs.mkdirSync(proj);
+  const binDir = path.join(home, 'shim-bin');
+  fs.mkdirSync(binDir);
+  const crontabShim = path.join(binDir, 'crontab');
+  fs.writeFileSync(crontabShim, `#!/bin/sh
+STORE="${home}/.fake-crontab"
+if [ "$1" = "-l" ]; then [ -f "$STORE" ] && cat "$STORE" || exit 1
+elif [ "$1" = "-" ]; then cat > "$STORE"
+else exit 2; fi
+`);
+  fs.chmodSync(crontabShim, 0o755);
+  const env = {
+    HOME: home,
+    EM_ROUTINES_CRONTAB: crontabShim,
+    EM_ROUTINES_SYSTEMCTL: '/bin/false', // force detection past systemd → cron
+    EM_ROUTINES_LAUNCHCTL: '/bin/false',
+  };
+  // action=install, tools=2 (cursor), project, backup=n, PATH=n, semantic=6 (skip), routines=y
+  const r = wizard(['1', '2', proj, 'n', 'n', '6', 'y'], env);
+  assert.equal(r.status, 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.ok(r.stdout.includes('Scheduled via cron'), r.stdout);
+  const ct = fs.readFileSync(path.join(home, '.fake-crontab'), 'utf8');
+  assert.ok(ct.includes('em-routines.mjs run doctor'), 'managed block must land in the crontab');
+  assert.ok(fs.existsSync(path.join(home, '.episodic-memory', 'routines.json')), 'routines.json seeded');
+
+  // starved answers → routines step defaults to skip
+  const home2 = mkHome('wiz-routines-skip-');
+  const proj2 = path.join(home2, 'proj');
+  fs.mkdirSync(proj2);
+  const r2 = wizard(['1', '2', proj2, 'n', 'n'], { HOME: home2, EM_ROUTINES_CRONTAB: crontabShim });
+  assert.equal(r2.status, 0, `exit ${r2.status}\n${r2.stdout}`);
+  assert.ok(!fs.existsSync(path.join(home2, '.episodic-memory', 'routines.json')), 'EOF default must skip scheduling');
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(home2, { recursive: true, force: true });
+});
+
 t('doctor flow runs against the current stores', () => {
   const home = mkHome('wiz-doctor-');
   const r = wizard(['3', 'n'], { HOME: home });

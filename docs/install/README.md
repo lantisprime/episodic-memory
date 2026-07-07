@@ -49,8 +49,11 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool <harness> --project <ABSOLUTE_P
 
 Interactive alternative — `node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --wizard`
 walks prerequisite checks, tool + project selection, optional Claude Code
-hooks, optional backup config, the `em` PATH shim, and verifies the result
-with `em-doctor`. The wizard also has a **migrate** flow (restore stores from
+hooks, optional backup config, the `em` PATH shim, optional semantic-search
+setup (writes `~/.episodic-memory/embed-config.json`; built-in / Ollama /
+OpenAI / custom command), optional scheduled maintenance (em-routines:
+launchd/systemd/cron-adapted doctor/embed/backup/hygiene jobs), and verifies
+the result with `em-doctor`. The wizard also has a **migrate** flow (restore stores from
 an em-backup repository, dry-run first) and a **doctor** flow. Answers are
 plain stdin lines, so agents can script it:
 `printf '1\n2\n/abs/project\nn\nn\n' | node install.mjs --wizard`.
@@ -58,7 +61,7 @@ plain stdin lines, so agents can script it:
 Every install (all tools) prints, among other lines:
 
 ```
-Installed 30 scripts to <HOME>/.episodic-memory/scripts
+Installed 31 scripts to <HOME>/.episodic-memory/scripts
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
 ...
@@ -106,7 +109,7 @@ Verify the shared substrate with one command and read the command reference:
 
 ```
 node <HOME>/.episodic-memory/scripts/em-doctor.mjs   # {"status":"ok",...} + exit 0 = healthy
-ls <HOME>/.episodic-memory/scripts        # 30 scripts (28 em-*.mjs + em.mjs + second-opinion.mjs) + lib/
+ls <HOME>/.episodic-memory/scripts        # 31 scripts (29 em-*.mjs + em.mjs + second-opinion.mjs) + lib/
 cat <HOME>/.episodic-memory/EM_SCRIPTS_GUIDE.md
 ```
 

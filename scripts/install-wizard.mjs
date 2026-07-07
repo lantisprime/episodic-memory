@@ -201,6 +201,8 @@ async function flowInstall() {
   }
 
   await maybeAddPathShim()
+  await maybeConfigureSemantic(projectDir)
+  await maybeConfigureRoutines()
   return verifyWithDoctor(projectDir)
 }
 
@@ -251,6 +253,99 @@ async function maybeAddPathShim() {
     }
   } else {
     console.log(`    You can add it later:  ${exportLine}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Semantic search setup: writes ~/.episodic-memory/embed-config.json so
+// em-embed/em-semantic need no flags afterwards. EOF/enter → skip, so
+// scripted installs are unaffected unless they opt in.
+// ---------------------------------------------------------------------------
+async function maybeConfigureSemantic(projectDir) {
+  const configPath = path.join(GLOBAL_DIR, 'embed-config.json')
+  if (fs.existsSync(configPath)) {
+    console.log(`${OK} Semantic search already configured (${configPath})`)
+    return
+  }
+  console.log('\nSemantic search (optional): rank recall by meaning, not just word overlap.')
+  console.log('  1. built-in    offline token-overlap similarity, zero setup')
+  console.log('  2. claude      built-in vectors + Claude re-ranking via your Claude Code login (claude CLI, no API key)')
+  console.log('  3. ollama      local embedding model via Ollama (needs `ollama pull nomic-embed-text`)')
+  console.log('  4. openai      OpenAI-compatible embeddings API (needs OPENAI_API_KEY)')
+  console.log('  5. custom      your own {id,text}→{id,vector} JSONL command')
+  console.log('  6. skip        set up later (em embed --help)')
+  const choice = await ask('Choose', '6')
+
+  let config = null
+  if (choice === '1' || choice === 'built-in' || choice === 'hash') {
+    config = { provider: 'hash' }
+  } else if (choice === '2' || choice === 'claude') {
+    config = {
+      provider: 'hash',
+      rerank_cmd: `sh ${path.join(REPO_DIR, 'examples', 'rerankers', 'claude-rerank.sh')}`,
+    }
+    console.log('    Vectors stay offline (built-in); the claude CLI re-orders top results per query.')
+    console.log('    Requires `claude` on PATH and a logged-in Claude Code session.')
+  } else if (choice === '3' || choice === 'ollama') {
+    config = {
+      provider: 'cmd',
+      cmd: `sh ${path.join(REPO_DIR, 'examples', 'embedders', 'ollama-embed.sh')}`,
+      model: await ask('Model label for the sidecar', 'ollama-nomic'),
+    }
+    console.log('    Uses $OLLAMA_URL / $OLLAMA_MODEL at run time (defaults: localhost:11434, nomic-embed-text).')
+  } else if (choice === '4' || choice === 'openai') {
+    config = {
+      provider: 'cmd',
+      cmd: `sh ${path.join(REPO_DIR, 'examples', 'embedders', 'openai-embed.sh')}`,
+      model: await ask('Model label for the sidecar', 'openai-3-small'),
+    }
+    console.log('    Requires $OPENAI_API_KEY in your shell; $OPENAI_MODEL/$OPENAI_EMBED_URL override the defaults.')
+  } else if (choice === '5' || choice === 'custom') {
+    const cmd = await ask('Embedding command (reads {id,text} JSONL on stdin, writes {id,vector} JSONL)')
+    if (!cmd) { console.log('    No command given — skipping semantic setup.'); return }
+    config = { provider: 'cmd', cmd, model: await ask('Model label for the sidecar', 'custom') }
+  } else {
+    console.log('    Skipped. Configure later: em embed --help (or re-run the wizard).')
+    return
+  }
+
+  fs.mkdirSync(GLOBAL_DIR, { recursive: true })
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  console.log(`${OK} Wrote ${configPath} — em embed / em semantic now use it automatically`)
+
+  if (config.provider === 'hash') {
+    // Offline provider: build the sidecar right now.
+    const embed = path.join(GLOBAL_DIR, 'scripts', 'em-embed.mjs')
+    const r = runJson([fs.existsSync(embed) ? embed : path.join(SCRIPT_DIR, 'em-embed.mjs'), '--scope', 'all'], { cwd: projectDir })
+    if (r.json && r.json.status === 'ok') {
+      console.log(`${OK} Built the embeddings sidecar: ${r.json.scopes.map(s => `${s.scope}=${s.total}`).join(', ')}`)
+    } else {
+      console.log(`${BAD} Initial embed failed (run manually: em embed --scope all)`)
+    }
+  } else {
+    console.log('    Build the sidecar once your embedding service is reachable:  em embed --scope all')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled maintenance: sync routines.json to the platform scheduler
+// (launchd / systemd user timers / cron) via the installed em-routines.mjs.
+// EOF/enter → skip, so scripted installs are unaffected unless they opt in.
+// ---------------------------------------------------------------------------
+async function maybeConfigureRoutines() {
+  console.log('\nScheduled maintenance (optional): daily doctor auto-repair, semantic sidecar refresh,')
+  console.log('backup sync, and a weekly hygiene report — adapted to this machine (launchd/systemd/cron).')
+  if (!(await askYesNo('Schedule the maintenance routines?', false))) {
+    console.log('    Skipped. Later: em routines sync   (manage: em routines list|enable|disable|run)')
+    return
+  }
+  const routinesScript = path.join(GLOBAL_DIR, 'scripts', 'em-routines.mjs')
+  const r = runJson([fs.existsSync(routinesScript) ? routinesScript : path.join(SCRIPT_DIR, 'em-routines.mjs'), 'sync'], { cwd: HOME })
+  if (r.json && r.json.status === 'ok') {
+    console.log(`${OK} Scheduled via ${r.json.scheduler}: ${r.json.applied.map(a => a.routine).join(', ')}`)
+    console.log(`    Logs: ${r.json.log_dir} — manage with: em routines list|enable|disable|run`)
+  } else {
+    console.log(`${BAD} Scheduling failed (${r.json ? r.json.message : `exit ${r.code}`}). Try later: em routines sync`)
   }
 }
 

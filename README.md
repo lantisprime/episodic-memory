@@ -398,6 +398,26 @@ node ~/.episodic-memory/scripts/em-semantic.mjs --query "..." \
   --cmd "sh <clone>/examples/embedders/ollama-embed.sh" --model ollama-nomic
 ```
 
+No flags needed once configured: the installer wizard's semantic-search step
+(`node install.mjs --wizard` → built-in / claude / ollama / openai / custom)
+writes `~/.episodic-memory/embed-config.json`, which `em embed` and
+`em semantic` read automatically. Flags and `$EM_EMBED_CMD` still override it.
+
+**Claude-powered semantics without an API key.** Anthropic has no embeddings
+API, so Claude cannot generate the vectors — but it can do the semantic
+judging. The wizard's `claude` option (or `rerank_cmd` in embed-config.json)
+keeps the offline built-in vectors for cheap candidate retrieval and pipes
+the top results through `claude -p` — your existing Claude Code login — to
+re-order them by true semantic relevance:
+
+```bash
+node ~/.episodic-memory/scripts/em-semantic.mjs --query "when do login sessions go stale" \
+  --rerank-cmd "sh <clone>/examples/rerankers/claude-rerank.sh"
+```
+
+A failing/unavailable reranker falls back to vector order with a warning;
+`--no-rerank` skips a configured reranker for one call.
+
 ### Consolidate (store hygiene)
 ```bash
 # Fold near-duplicate episodes into one digest episode per cluster.
@@ -406,6 +426,23 @@ node ~/.episodic-memory/scripts/em-semantic.mjs --query "..." \
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local            # preview
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local --apply    # fold
 ```
+
+### Scheduled maintenance (`em routines`)
+```bash
+# Adapted to the machine: launchd (macOS), systemd user timers (Linux), or a
+# managed crontab block (fallback). Definitions live in ~/.episodic-memory/routines.json.
+node ~/.episodic-memory/scripts/em-routines.mjs sync    # seed + schedule the defaults
+node ~/.episodic-memory/scripts/em-routines.mjs list    # health: platform + last run + staleness
+node ~/.episodic-memory/scripts/em-routines.mjs add --name my-job --cron "0 4 * * *" --cmd "..."
+```
+
+Defaults (all no-op when their feature isn't configured): daily `doctor`
+auto-repair, daily `embed` sidecar refresh, daily `backup-sync`, weekly
+read-only `hygiene-report`. Every run records state; `list` flags **stale**
+routines (scheduled but silently not running) and exits 1. Wired into
+installation via the wizard's routines step or `install.mjs
+--install-routines`. (The old `install-launchd-routines.sh` is legacy —
+maintainer-machine-specific claude-skill jobs only.)
 
 ### Search
 ```bash

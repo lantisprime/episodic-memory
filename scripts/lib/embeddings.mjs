@@ -24,12 +24,47 @@
 
 import fs from 'fs'
 import path from 'path'
+import os from 'os'
 import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { tokenizeQuery } from './relevance.mjs'
 
 export const HASH_DIM = 256
 export const HASH_MODEL = `hash-v1-${HASH_DIM}`
+
+// ---------------------------------------------------------------------------
+// Persistent provider configuration: ~/.episodic-memory/embed-config.json
+//   { "provider": "hash"|"cmd", "cmd": "<command>", "model": "<name>" }
+// Written by the installer wizard's semantic-search step (or by hand); read
+// by em-embed AND em-semantic through resolveEmbedSettings so both resolve
+// the same provider — otherwise a configured setup would trip em-semantic's
+// model-mismatch refusal on every query.
+//
+// Precedence (resolveEmbedSettings): explicit --provider/--cmd flags >
+// $EM_EMBED_CMD > embed-config.json > built-in hash.
+// ---------------------------------------------------------------------------
+export const EMBED_CONFIG_PATH = path.join(os.homedir(), '.episodic-memory', 'embed-config.json')
+
+export function loadEmbedConfig() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(EMBED_CONFIG_PATH, 'utf8'))
+    return typeof cfg === 'object' && cfg !== null ? cfg : {}
+  } catch {
+    return {}
+  }
+}
+
+export function resolveEmbedSettings({ providerFlag, cmdFlag, config = {} }) {
+  const envCmd = process.env.EM_EMBED_CMD
+  const cmd = cmdFlag || envCmd || (typeof config.cmd === 'string' ? config.cmd : undefined)
+  let provider = providerFlag
+  if (!provider) {
+    if (cmdFlag || envCmd) provider = 'cmd'
+    else if (config.provider === 'cmd' || (config.cmd && config.provider === undefined)) provider = 'cmd'
+    else provider = 'hash'
+  }
+  return { provider, cmd }
+}
 
 export function contentHash(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16)

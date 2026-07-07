@@ -29,7 +29,8 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTokensIndex } from './lib/relevance.mjs'
 import {
   HASH_DIM, HASH_MODEL, hashEmbed, buildIdf, cmdEmbed,
-  loadEmbeddings, writeEmbeddings, episodeEmbedText, contentHash
+  loadEmbeddings, writeEmbeddings, episodeEmbedText, contentHash,
+  loadEmbedConfig, resolveEmbedSettings
 } from './lib/embeddings.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -49,8 +50,15 @@ function flag(name) {
 }
 
 const scope = flag('--scope') || 'all'
-const provider = flag('--provider') || (flag('--cmd') || process.env.EM_EMBED_CMD ? 'cmd' : 'hash')
-const cmd = flag('--cmd') || process.env.EM_EMBED_CMD
+// Provider/cmd/model resolve with precedence: explicit flags > $EM_EMBED_CMD
+// > ~/.episodic-memory/embed-config.json (written by the wizard's semantic
+// step or by hand) > built-in hash. Single-sourced in lib/embeddings.mjs so
+// em-semantic resolves identically.
+const { provider, cmd } = resolveEmbedSettings({
+  providerFlag: flag('--provider'),
+  cmdFlag: flag('--cmd'),
+  config: loadEmbedConfig(),
+})
 const rebuild = argv.includes('--rebuild')
 
 const VALID_SCOPES = ['local', 'global', 'all']
@@ -67,7 +75,7 @@ if (provider === 'cmd' && !cmd) {
   process.exit(1)
 }
 
-const model = flag('--model') || (provider === 'hash' ? HASH_MODEL : `cmd:${contentHash(cmd)}`)
+const model = flag('--model') || loadEmbedConfig().model || (provider === 'hash' ? HASH_MODEL : `cmd:${contentHash(cmd)}`)
 
 function embedDir(dataDir, label) {
   const rows = loadIndex(dataDir, label).filter(r => r.status !== 'superseded' && typeof r.id === 'string')
