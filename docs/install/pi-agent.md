@@ -33,7 +33,7 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool pi-agent --project <ABSOLUTE_PA
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
 ```
-Installed 23 scripts to <HOME>/.episodic-memory/scripts
+Installed 29 scripts to <HOME>/.episodic-memory/scripts
 Seeded default LLM classifier config at <HOME>/.episodic-memory/classifier-config.json
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
@@ -52,7 +52,7 @@ Done! Episodic memory is ready.
 
 | Path | What |
 |---|---|
-| `~/.episodic-memory/scripts/` | 21 substrate scripts (em-*, second-opinion) + `lib/` |
+| `~/.episodic-memory/scripts/` | 29 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
 | `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` | agent-facing per-script reference |
 | `~/.episodic-memory/patterns/_index.json` | pattern registry |
 | `<project>/.agents/skills/episodic-memory/SKILL.md` | the Pi Agent skill (points at the guide) |
