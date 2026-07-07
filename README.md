@@ -353,6 +353,17 @@ node ~/.episodic-memory/scripts/em-revise.mjs \
 # --body-file is also supported (#196)
 ```
 
+### Pin & Feedback
+```bash
+# Pin: never decays below 0.6 in scoring, never pruned. Revisions inherit it.
+node ~/.episodic-memory/scripts/em-pin.mjs --id <episode-id>          # or --unpin
+node ~/.episodic-memory/scripts/em-store.mjs ... --pin                # pin at creation
+
+# Feedback: retrieval says an episode was SEEN; feedback says it HELPED.
+# ±5% per point in ranking (clamped −30%/+50%), survives rebuilds.
+node ~/.episodic-memory/scripts/em-feedback.mjs --id <episode-id> --useful   # or --noise
+```
+
 ### Search
 ```bash
 node ~/.episodic-memory/scripts/em-search.mjs --project my-project
@@ -368,6 +379,14 @@ token lands somewhere in the summary, tags, or body (scored by field weight —
 summary > tags > body — always below a contiguous match). `--query "index
 atomic writes"` finds *"Use atomic rename for index writes"* even though the
 words are scattered.
+
+Searches are accelerated by a **token inverted index** (`tokens.json`,
+maintained by the writers, rebuilt by `em-rebuild-index`) — results are
+identical to a full scan; the index only prunes candidates, and episodes it
+has never seen still take the full-scan path. When strict matches leave
+`--limit` unfilled, a **partial tier** returns episodes matching at least half
+the query tokens, marked `"match":"partial"` and always ranked below full
+matches at equal freshness.
 
 ### List
 ```bash

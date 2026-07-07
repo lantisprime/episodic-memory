@@ -84,15 +84,28 @@ export function loadIndex(dataDir, source) {
 
 // ---------------------------------------------------------------------------
 // computeScore(entry, textMatchScore) — relevance = text match × linear time
-// decay (floored at 0.1 after ~1 year) × mild access-count boost.
+// decay × usage boost.
+//
+//   time decay   linear over a year, floored at 0.1 — except PINNED episodes
+//                (entry.pinned === true), whose floor is 0.6: a pinned
+//                architecture decision stays competitive with fresh episodes
+//                indefinitely instead of decaying like a routine note.
+//   usage boost  1 + log1p(access_count)·0.1 + feedback·0.05 (clamped to
+//                [-0.3, +0.5]). `feedback` is the em-feedback usefulness
+//                counter — retrieval alone (access_count) says an episode was
+//                SEEN; feedback says it actually helped (+) or was noise (−).
+//                Absent/zero feedback reproduces the historical score exactly.
 // ---------------------------------------------------------------------------
 export function computeScore(entry, textMatchScore) {
   const accessCount = entry.access_count || 0
   // Use new Date(entry.date) for decay — sub-day precision unnecessary
   const created = new Date(entry.date)
   const daysSince = Math.max(0, (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24))
-  const timeFactor = Math.max(0.1, 1 - (daysSince / 365))
-  const accessFactor = 1 + Math.log1p(accessCount) * 0.1
+  const floor = entry.pinned === true ? 0.6 : 0.1
+  const timeFactor = Math.max(floor, 1 - (daysSince / 365))
+  const feedback = typeof entry.feedback === 'number' ? entry.feedback : 0
+  const feedbackBoost = Math.max(-0.3, Math.min(0.5, feedback * 0.05))
+  const accessFactor = 1 + Math.log1p(accessCount) * 0.1 + feedbackBoost
   return textMatchScore * timeFactor * accessFactor
 }
 
@@ -206,4 +219,118 @@ export function scoreTextMatch(entry, query, readBody) {
     return { matched: true, textMatch, body: body || undefined }
   }
   return { matched: false, textMatch: 0 }
+}
+
+// ---------------------------------------------------------------------------
+// Token inverted index (tokens.json): { "<token>": [episode ids...] }.
+//
+// Purpose: without it, every --query that misses the summary reads EVERY
+// episode body off disk — O(n) file reads per search. The token index prunes
+// the candidate set first; bodies are then read only for the few candidates,
+// and only when tier scoring needs them. Final scores are computed by the
+// same scoreTextMatch, so index-accelerated results are byte-identical to a
+// full scan.
+//
+// Substring equivalence: query tokens and text tokens are produced by the
+// same [^a-z0-9]+ splitter, so a query token appearing as a raw-text
+// substring necessarily lies inside one maximal alphanumeric run — i.e.
+// inside one indexed token. Scanning vocabulary KEYS for containment
+// (key.includes(qtok)) therefore reproduces `text.includes(qtok)` exactly
+// ("auth" still hits "authentication").
+// ---------------------------------------------------------------------------
+export function episodeTokens({ summary, tags, body }) {
+  const toks = new Set()
+  for (const t of tokenizeQuery(summary || '')) toks.add(t)
+  for (const tag of normalizeTags(tags)) for (const t of tokenizeQuery(tag)) toks.add(t)
+  for (const t of tokenizeQuery(body || '')) toks.add(t)
+  return toks
+}
+
+export function loadTokensIndex(dataDir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dataDir, 'tokens.json'), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+// Incremental writer, structurally mirroring em-store's updateTagsIndex.
+// Shared here (not in em-store) because em-store executes top-level on import.
+export function updateTokensIndex(dataDir, episodeId, tokens) {
+  const tokensFile = path.join(dataDir, 'tokens.json')
+  let index = {}
+  try {
+    index = JSON.parse(fs.readFileSync(tokensFile, 'utf8'))
+  } catch {}
+  for (const tok of tokens) {
+    if (!index[tok]) index[tok] = []
+    if (!index[tok].includes(episodeId)) index[tok].push(episodeId)
+  }
+  const tmpFile = tokensFile + '.tmp'
+  fs.writeFileSync(tmpFile, JSON.stringify(index), 'utf8')
+  fs.renameSync(tmpFile, tokensFile)
+}
+
+// tokenCandidates(indexes, queryTokens) — resolve query tokens against one or
+// more stores' token indexes (already-parsed objects). Returns:
+//   perToken  Map<queryToken, Set<id>> — ids whose text contains that token
+//   all       Set<id> — ids containing EVERY query token (the AND candidates)
+//   any       Set<id> — ids containing AT LEAST ONE token (the partial pool)
+//   covered   Set<id> — every id the index knows about AT ALL. An episode
+//             absent from `covered` (hand-written row, store predating
+//             tokens.json) must NOT be pruned by the index — callers fall
+//             back to full scoring for it, so index gaps degrade to the slow
+//             path instead of silently hiding episodes.
+export function tokenCandidates(indexes, queryTokens) {
+  const perToken = new Map(queryTokens.map(q => [q, new Set()]))
+  const covered = new Set()
+  for (const idx of indexes) {
+    for (const key of Object.keys(idx)) {
+      const ids = idx[key]
+      if (!Array.isArray(ids)) continue
+      for (const id of ids) covered.add(id)
+      for (const qtok of queryTokens) {
+        if (key.includes(qtok)) {
+          const set = perToken.get(qtok)
+          for (const id of ids) set.add(id)
+        }
+      }
+    }
+  }
+  let all = null
+  const any = new Set()
+  for (const ids of perToken.values()) {
+    for (const id of ids) any.add(id)
+    if (all === null) all = new Set(ids)
+    else for (const id of all) { if (!ids.has(id)) all.delete(id) }
+  }
+  return { perToken, all: all || new Set(), any, covered }
+}
+
+// ---------------------------------------------------------------------------
+// scorePartialMatch(entry, queryTokens, tokenInBody) — best-effort tier for
+// multi-term queries where the strict AND tiers found nothing (or too little):
+// at least half the tokens must land somewhere; scored 0.5 × coverage ×
+// avg(matched field weights), capping at 0.35 — always below the weakest full
+// match (0.38), so partials trail full matches at equal freshness.
+// tokenInBody(tok) reports body membership without a file read (token-index
+// backed); pass () => false to restrict to summary/tags.
+// ---------------------------------------------------------------------------
+export function scorePartialMatch(entry, queryTokens, tokenInBody) {
+  if (queryTokens.length < 2) return { matched: false, textMatch: 0 }
+  const summaryLower = (entry.summary || '').toLowerCase()
+  const tagsLower = normalizeTags(entry.tags).join(' ')
+  let sum = 0
+  let matched = 0
+  for (const tok of queryTokens) {
+    if (summaryLower.includes(tok)) { sum += FIELD_WEIGHTS.summary; matched++ }
+    else if (tagsLower.includes(tok)) { sum += FIELD_WEIGHTS.tags; matched++ }
+    else if (tokenInBody(tok)) { sum += FIELD_WEIGHTS.body; matched++ }
+  }
+  const coverage = matched / queryTokens.length
+  if (coverage < 0.5 || matched === queryTokens.length) {
+    // full matches belong to scoreTextMatch's tiers, not here
+    return { matched: false, textMatch: 0 }
+  }
+  return { matched: true, textMatch: 0.5 * coverage * (sum / matched) }
 }

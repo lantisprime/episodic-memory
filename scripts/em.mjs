@@ -37,6 +37,8 @@ const DESCRIPTIONS = {
   list: 'List episodes, newest first',
   recall: 'Proactive session-start recall for the current project',
   revise: 'Correct a past episode via a revision chain',
+  pin: 'Pin/unpin an episode (never decays, never pruned)',
+  feedback: 'Mark a recalled episode as useful or noise (ranking signal)',
   doctor: 'Health-check the stores and installation (--fix repairs)',
   prune: 'Archive stale low-relevance episodes',
   'rebuild-index': 'Regenerate index.jsonl, tags.json, category-index.json',

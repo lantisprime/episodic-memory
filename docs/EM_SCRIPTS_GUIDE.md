@@ -38,6 +38,8 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Investigative / exploratory search | `em-search --query ... --no-track --no-score` | A plain `em-search` that reorders results and bumps access counts |
 | Index looks wrong / out of sync | `em-rebuild-index --scope all` | Hand-editing `index.jsonl` |
 | Anything feels broken / slow / inconsistent | `em-doctor` (then `em-doctor --fix`) | Guessing at which index to rebuild, or ignoring warnings |
+| A recalled episode actually helped / kept being irrelevant | `em-feedback --id <id> --useful` / `--noise` | Letting access counts alone decide future ranking |
+| A decision must never fade or be pruned | `em-pin --id <id>` (or `em-store --pin`) | Re-storing the same decision periodically to keep it fresh |
 | Find a topic across all projects | `em-search --query <topic> --scope all` | Grepping episode files |
 | Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
 
@@ -204,7 +206,15 @@ Flags that matter (from the script's own `Usage:` header):
   (0.7) > all-tokens-match across summary/tags/body (field-weighted, < 0.7) >
   contiguous body substring (0.4). Multi-word queries no longer need to be an
   exact substring — every token just has to land somewhere. Token order does
-  not matter; a token missing everywhere means no match.
+  not matter.
+- Query lookups are accelerated by `tokens.json` (a token inverted index the
+  writers maintain; rebuilt by `em-rebuild-index`). Results are identical to a
+  full scan — the index only prunes candidates. Missing index → slow full
+  scan + a rebuild warning.
+- Partial tier: when strict matches leave `--limit` unfilled, multi-word
+  queries also return episodes matching at least HALF the tokens, marked
+  `"match":"partial"` and scored below every full match. `--no-score`
+  suppresses partials (stable recency contract).
 - By default `em-search` scores results by relevance and tracks access (each hit
   bumps the episode's `access_count` and reorders future relevance).
 - `--no-score` skips relevance scoring so results come back in a stable
@@ -276,6 +286,43 @@ Flags that matter: `--task-type implementation` adds the violation pre-flight;
 Common mistakes: skipping recall and re-deriving context that a past session already
 recorded.
 
+### em-pin
+
+Pin/unpin an episode. Pinned episodes never decay below a 0.6 time factor in
+search/recall scoring (unpinned floor 0.1) and are never archived by
+`em-prune`. Revisions inherit pinning.
+
+- WHEN TO USE: a foundational decision (architecture choice, hard-won
+  constraint) that must stay competitive with fresh episodes indefinitely.
+- WHEN NOT TO USE: routine notes — pinning everything defeats decay.
+
+```
+node ~/.episodic-memory/scripts/em-pin.mjs --id <episode-id> [--unpin]
+```
+
+Output: `{"status":"ok","id":"...","pinned":true,"scope":"local"}`. You can
+also pin at creation time: `em-store --pin` / `em-revise --pin`.
+
+### em-feedback
+
+Record whether a recalled episode was actually useful. `access_count` says an
+episode was SEEN; this counter says it HELPED (+1, `--useful`) or was noise
+(-1, `--noise`). The scorer folds it in at ±5% per point (clamped −30%/+50%),
+so consistently useful episodes rise and consistently irrelevant ones sink.
+
+- WHEN TO USE: after a recalled/searched episode genuinely shaped a decision
+  (`--useful`), or when the same irrelevant episode keeps surfacing
+  (`--noise`).
+- WHEN NOT TO USE: as a bookmark (that is `em-pin`) or reflexively on every
+  search hit — feedback is signal precisely because it is deliberate.
+
+```
+node ~/.episodic-memory/scripts/em-feedback.mjs --id <episode-id> (--useful | --noise)
+```
+
+Output: `{"status":"ok","id":"...","feedback":3,"scope":"global"}`. Counter
+clamps to [-10, 10] and survives index rebuilds.
+
 ### em-check-stale
 
 Report research episodes whose source URL may be out of date.
@@ -296,8 +343,11 @@ Output:
 
 ### em-rebuild-index
 
-Regenerate `index.jsonl` (and `tags.json` plus `category-index.json`) from the episode
-`.md` files on disk. Atomic (temp plus rename). Idempotent: safe to run repeatedly.
+Regenerate `index.jsonl` (plus `tags.json`, `category-index.json`, and the
+`tokens.json` full-text token index) from the episode `.md` files on disk.
+Atomic (temp plus rename). Idempotent: safe to run repeatedly. Preserves
+`access_count`/`last_accessed`/`feedback` from the old index and `pinned:`
+from frontmatter.
 
 - WHEN TO USE: the index looks out of sync, after you manually removed an episode
   file, or to recover from a corrupted index.

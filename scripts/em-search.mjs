@@ -22,7 +22,8 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import {
   normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex,
-  computeScore, writeBackAccessTracking, scoreTextMatch
+  computeScore, writeBackAccessTracking, scoreTextMatch,
+  tokenizeQuery, loadTokensIndex, tokenCandidates, scorePartialMatch
 } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -232,20 +233,75 @@ if (since) {
 // Full-text search: tiered matcher from lib/relevance.mjs. Contiguous
 // summary/body substring matches keep their pre-lib scores (1.0/0.7/0.4);
 // multi-term queries additionally match when every token lands somewhere in
-// summary/tags/body, scored by discounted field weights. Bodies load lazily,
-// at most once per episode.
+// summary/tags/body, scored by discounted field weights.
+//
+// Acceleration: tokens.json (when present in every active scope) prunes the
+// candidate set first — key-containment lookups reproduce the substring
+// semantics exactly, so only true candidates get scored and bodies are read
+// only for that handful instead of for every episode in the store. Missing
+// tokens.json degrades to the full scan with a rebuild hint.
+//
+// Partial tier: when the strict AND tiers leave the limit unfilled, episodes
+// matching at least half the query tokens fill the remainder (capped at
+// text_match 0.35 — below the weakest full match), marked "match":"partial".
 if (query) {
-  results = results.filter(e => {
+  const qtokens = tokenizeQuery(query)
+  let candidateInfo = null
+  if (qtokens.length > 0) {
+    const dirs = []
+    if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
+    if (scope === 'global' || scope === 'all') dirs.push(GLOBAL_DIR)
+    const presentDirs = dirs.filter(d => fs.existsSync(path.join(d, 'index.jsonl')))
+    const idxs = presentDirs.map(d => loadTokensIndex(d))
+    if (idxs.length > 0 && idxs.every(Boolean)) {
+      candidateInfo = tokenCandidates(idxs, qtokens)
+    } else if (results.length > 0) {
+      if (!searchWarning) searchWarning = 'tokens.json missing in one or more stores — full-scan search. Run em-rebuild-index.mjs to build the token index.'
+    }
+  }
+
+  // Episodes the token index has never seen (hand-written rows, stores
+  // predating tokens.json) bypass pruning and take the full-scoring path —
+  // index gaps degrade to a slower search, never to hidden episodes.
+  const pool = candidateInfo
+    ? results.filter(e => candidateInfo.all.has(e.id) || !candidateInfo.covered.has(e.id))
+    : results
+  const matched = pool.filter(e => {
     const readBody = () => {
       const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
       try { return fs.readFileSync(filePath, 'utf8') } catch { return null }
     }
-    const { matched, textMatch, body } = scoreTextMatch(e, query, readBody)
-    if (!matched) return false
+    const { matched: isMatch, textMatch, body } = scoreTextMatch(e, query, readBody)
+    if (!isMatch) return false
     e._textMatch = textMatch
     if (full && body) e._body = body
     return true
   })
+
+  let partials = []
+  if (!noScore && qtokens.length > 1 && matched.length < limit) {
+    const matchedIds = new Set(matched.map(e => e.id))
+    // With the token index, body membership is known without file reads and
+    // the pool narrows to episodes containing at least one token; on the
+    // fallback path, partials come from summary/tags only (no O(n) body reads).
+    const partialPool = (candidateInfo
+      ? results.filter(e => candidateInfo.any.has(e.id) || !candidateInfo.covered.has(e.id))
+      : results)
+      .filter(e => !matchedIds.has(e.id))
+    for (const e of partialPool) {
+      const inBody = candidateInfo
+        ? (tok => candidateInfo.perToken.get(tok)?.has(e.id) ?? false)
+        : (() => false)
+      const { matched: isPartial, textMatch } = scorePartialMatch(e, qtokens, inBody)
+      if (isPartial) {
+        e._textMatch = textMatch
+        e._partial = true
+        partials.push(e)
+      }
+    }
+  }
+
+  results = [...matched, ...partials]
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +339,9 @@ if (!noTrack && !includeSuperseded) {
 // Build output
 // ---------------------------------------------------------------------------
 const output = results.map(e => {
-  const { _dataDir, _source, _textMatch, _score, _body, ...rest } = e
+  const { _dataDir, _source, _textMatch, _score, _body, _partial, ...rest } = e
   const entry = { ...rest, source: _source }
+  if (_partial) entry.match = 'partial'
   if (!noScore && _score !== undefined) {
     entry.score = Math.round(_score * 1000) / 1000
   }

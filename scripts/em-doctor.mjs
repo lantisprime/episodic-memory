@@ -168,8 +168,8 @@ function checkStore(dataDir, scopeName) {
     report('index-drift', scopeName, 'ok', 'index.jsonl and episodes/ agree')
   }
 
-  // --- tags-index / category-index ----------------------------------------
-  for (const [checkId, fileName] of [['tags-index', 'tags.json'], ['category-index', 'category-index.json']]) {
+  // --- tags-index / category-index / tokens-index ---------------------------
+  for (const [checkId, fileName] of [['tags-index', 'tags.json'], ['category-index', 'category-index.json'], ['tokens-index', 'tokens.json']]) {
     const p = path.join(dataDir, fileName)
     if (!fs.existsSync(p)) {
       if (indexedIds.size > 0) {
