@@ -154,10 +154,26 @@ function rebuildDir(dataDir, label) {
     const accessCount = old ? (old.access_count || 0) : 0
     const lastAccessed = old ? (old.last_accessed || null) : null
 
+    // #448 write/repair side: a hand-authored episode (foreign harness,
+    // `created:` instead of `date:`/`time:`) used to round-trip its malformed
+    // row through every rebuild — fm.date/fm.time copied verbatim. Backfill
+    // from the id prefix (`YYYYMMDD-HHMMSS-…`, always present and
+    // total-ordered) whenever the frontmatter value is not a string, so a
+    // rebuild now REPAIRS the row instead of reproducing it. Well-formed
+    // episodes are byte-identical: string values pass through untouched.
+    let { date, time } = fm
+    if (typeof date !== 'string' || typeof time !== 'string') {
+      const m = fm.id.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}-/)
+      if (m) {
+        if (typeof date !== 'string') date = `${m[1]}-${m[2]}-${m[3]}`
+        if (typeof time !== 'string') time = `${m[4]}:${m[5]}`
+      }
+    }
+
     entries.push(JSON.stringify({
       id: fm.id,
-      date: fm.date,
-      time: fm.time,
+      date,
+      time,
       project: fm.project,
       category: fm.category,
       status: fm.status || 'active',
@@ -168,7 +184,7 @@ function rebuildDir(dataDir, label) {
       summary: fm.summary,
       access_count: accessCount,
       last_accessed: lastAccessed,
-      ...(fm.url ? { url: fm.url, fetched: fm.fetched || fm.date } : {})
+      ...(fm.url ? { url: fm.url, fetched: fm.fetched || date } : {})
     }))
     for (const tag of normalizedTags) {
       if (!tagsIndex[tag]) tagsIndex[tag] = []

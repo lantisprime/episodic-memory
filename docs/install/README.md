@@ -47,10 +47,18 @@ git clone <repo-url> <ABSOLUTE_PATH_TO_CLONE>
 node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool <harness> --project <ABSOLUTE_PATH_TO_TARGET_PROJECT>
 ```
 
+Interactive alternative — `node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --wizard`
+walks prerequisite checks, tool + project selection, optional Claude Code
+hooks, optional backup config, the `em` PATH shim, and verifies the result
+with `em-doctor`. The wizard also has a **migrate** flow (restore stores from
+an em-backup repository, dry-run first) and a **doctor** flow. Answers are
+plain stdin lines, so agents can script it:
+`printf '1\n2\n/abs/project\nn\nn\n' | node install.mjs --wizard`.
+
 Every install (all tools) prints, among other lines:
 
 ```
-Installed 21 scripts to <HOME>/.episodic-memory/scripts
+Installed 23 scripts to <HOME>/.episodic-memory/scripts
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
 ...
@@ -87,18 +95,22 @@ project path; abbreviated as `<HOME>` here.)
 8. Known error:
    `TypeError: (b.date + b.time).localeCompare is not a function`
    from `em-list` (or `em-search` without `--no-score`) means a hand-appended index
-   row is missing `date` / `time`. Fixed read-side in PR #447; writer-side validation
-   is tracked in issue #448. Repair: add `date:` and `time:` to the offending episode
-   frontmatter and its matching index row, or delete the bad episode file and run
-   `em-rebuild-index --scope all`.
+   row is missing `date` / `time`. Fixed read-side in PR #447; repair side closed in
+   issue #448: `em-doctor` reports the row (`row-shape`), and
+   `em-rebuild-index` (or `em-doctor --fix`) backfills `date`/`time` from the
+   episode id prefix.
 
 ## After install
 
-Verify the shared substrate and read the command reference:
+Verify the shared substrate with one command and read the command reference:
 
 ```
-ls <HOME>/.episodic-memory/scripts        # 21 scripts (20 em-*.mjs + second-opinion.mjs) + lib/
+node <HOME>/.episodic-memory/scripts/em-doctor.mjs   # {"status":"ok",...} + exit 0 = healthy
+ls <HOME>/.episodic-memory/scripts        # 23 scripts (21 em-*.mjs + em.mjs + second-opinion.mjs) + lib/
 cat <HOME>/.episodic-memory/EM_SCRIPTS_GUIDE.md
 ```
+
+The `em` unified CLI is at `<HOME>/.episodic-memory/bin/em` (`em help` lists
+every command; `em doctor --fix` repairs index drift and stale lock/tmp litter).
 
 Then follow your harness file for the tool-specific verify commands.

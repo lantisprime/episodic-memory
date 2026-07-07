@@ -303,27 +303,27 @@ test('19. package.json keywords fed into effective tokens', () => {
 console.log('\n--- Drift Detection ---')
 // ===========================================================================
 
-test('20. Inlined functions match em-search.mjs source', () => {
+test('20. Retrieval primitives come from the shared lib, not inlined copies', () => {
+  // The formerly SYNC-duplicated functions live in lib/relevance.mjs. Drift is
+  // structurally impossible as long as BOTH scripts import them from the lib
+  // and NEITHER redeclares a local copy.
   const recallSrc = fs.readFileSync(path.join(SCRIPTS, 'em-recall.mjs'), 'utf8')
   const searchSrc = fs.readFileSync(path.join(SCRIPTS, 'em-search.mjs'), 'utf8')
+  const libSrc = fs.readFileSync(path.join(SCRIPTS, 'lib', 'relevance.mjs'), 'utf8')
 
-  // Extract function bodies by SYNC marker
-  const syncFunctions = ['normalizeTags', 'loadTagsIndex', 'computeScore', 'writeBackAccessTracking', 'loadIndex']
+  const sharedFunctions = ['normalizeTags', 'loadTagsIndex', 'computeScore', 'writeBackAccessTracking', 'loadIndex']
 
-  for (const fnName of syncFunctions) {
-    // Extract function body: from "function name(...) {" to the closing "}" at column 0
-    const fnRegex = new RegExp(`function ${fnName}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`)
+  assert.ok(recallSrc.includes("from './lib/relevance.mjs'"), 'em-recall.mjs must import from lib/relevance.mjs')
+  assert.ok(searchSrc.includes("from './lib/relevance.mjs'"), 'em-search.mjs must import from lib/relevance.mjs')
 
-    const recallMatch = recallSrc.match(fnRegex)
-    const searchMatch = searchSrc.match(fnRegex)
-
-    assert.ok(recallMatch, `${fnName} not found in em-recall.mjs`)
-    assert.ok(searchMatch, `${fnName} not found in em-search.mjs`)
-
-    // Verify SYNC marker exists in recall
-    assert.ok(recallSrc.includes(`// SYNC: em-search.mjs:${fnName}`), `${fnName} missing SYNC marker in em-recall.mjs`)
-
-    assert.strictEqual(recallMatch[1].trim(), searchMatch[1].trim(), `${fnName} body differs between em-recall.mjs and em-search.mjs`)
+  for (const fnName of sharedFunctions) {
+    const declRegex = new RegExp(`function ${fnName}\\(`)
+    assert.ok(!declRegex.test(recallSrc), `${fnName} redeclared locally in em-recall.mjs — must come from lib/relevance.mjs`)
+    assert.ok(!declRegex.test(searchSrc), `${fnName} redeclared locally in em-search.mjs — must come from lib/relevance.mjs`)
+    assert.ok(new RegExp(`export function ${fnName}\\(`).test(libSrc), `${fnName} not exported by lib/relevance.mjs`)
+    // Both scripts must actually reference the shared name (import list / call site).
+    assert.ok(recallSrc.includes(fnName), `${fnName} unreferenced in em-recall.mjs`)
+    assert.ok(searchSrc.includes(fnName), `${fnName} unreferenced in em-search.mjs`)
   }
 })
 

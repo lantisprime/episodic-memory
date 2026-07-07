@@ -20,6 +20,10 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
+import {
+  normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex,
+  computeScore, writeBackAccessTracking, scoreTextMatch
+} from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -63,99 +67,9 @@ if (!VALID_SCOPES_SEARCH.includes(scope)) {
 
 const searchStart = Date.now()
 
-function normalizeTags(raw) {
-  if (!raw) return []
-  const arr = (Array.isArray(raw) ? raw : raw.split(','))
-    .map(t => t.trim().toLowerCase())
-    .filter(Boolean)
-  return [...new Set(arr)].sort()
-}
-
-function loadTagsIndex(dataDir) {
-  const tagsFile = path.join(dataDir, 'tags.json')
-  try {
-    return JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-function loadCategoryIndex(dataDir) {
-  const catFile = path.join(dataDir, 'category-index.json')
-  try {
-    return JSON.parse(fs.readFileSync(catFile, 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Relevance scoring
-// ---------------------------------------------------------------------------
-function computeScore(entry, textMatchScore) {
-  const accessCount = entry.access_count || 0
-  // Use new Date(entry.date) for decay — sub-day precision unnecessary
-  const created = new Date(entry.date)
-  const daysSince = Math.max(0, (Date.now() - created.getTime()) / (1000 * 60 * 60 * 24))
-  const timeFactor = Math.max(0.1, 1 - (daysSince / 365))
-  const accessFactor = 1 + Math.log1p(accessCount) * 0.1
-  return textMatchScore * timeFactor * accessFactor
-}
-
-// ---------------------------------------------------------------------------
-// Access tracking write-back
-// ---------------------------------------------------------------------------
-function writeBackAccessTracking(results) {
-  // Group results by source data directory
-  const byDir = new Map()
-  for (const e of results) {
-    if (!e._dataDir) continue
-    if (!byDir.has(e._dataDir)) byDir.set(e._dataDir, new Set())
-    byDir.get(e._dataDir).add(e.id)
-  }
-
-  const now = new Date().toISOString().slice(0, 19) + 'Z'
-
-  for (const [dataDir, ids] of byDir) {
-    const indexFile = path.join(dataDir, 'index.jsonl')
-    try {
-      // Re-read just before writing to narrow race window with concurrent em-store appends.
-      // This is best-effort — last-writer-wins for concurrent searches is acceptable.
-      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-      const updated = lines.map(line => {
-        try {
-          const entry = JSON.parse(line)
-          if (ids.has(entry.id)) {
-            entry.access_count = (entry.access_count || 0) + 1
-            entry.last_accessed = now
-          }
-          return JSON.stringify(entry)
-        } catch { return line }
-      })
-      const tmpFile = indexFile + '.tmp'
-      fs.writeFileSync(tmpFile, updated.join('\n') + '\n', 'utf8')
-      fs.renameSync(tmpFile, indexFile)
-    } catch {
-      // Access tracking is best-effort — skip silently on failure
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Load index entries from a data directory
-// ---------------------------------------------------------------------------
-function loadIndex(dataDir, source) {
-  const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
-    try {
-      const entry = JSON.parse(line)
-      entry._source = source
-      entry._dataDir = dataDir
-      return entry
-    } catch { return null }
-  }).filter(Boolean)
-}
+// Retrieval primitives (normalizeTags, loadTagsIndex, loadCategoryIndex,
+// loadIndex, computeScore, writeBackAccessTracking, scoreTextMatch) are
+// shared with em-recall.mjs via lib/relevance.mjs — the former SYNC: blocks.
 
 // ---------------------------------------------------------------------------
 // Collect entries based on scope
@@ -315,25 +229,22 @@ if (since) {
   results = results.filter(e => e.date >= since)
 }
 
-// Full-text search in episode bodies + compute text_match scores
-const queryLower = query ? query.toLowerCase() : null
+// Full-text search: tiered matcher from lib/relevance.mjs. Contiguous
+// summary/body substring matches keep their pre-lib scores (1.0/0.7/0.4);
+// multi-term queries additionally match when every token lands somewhere in
+// summary/tags/body, scored by discounted field weights. Bodies load lazily,
+// at most once per episode.
 if (query) {
   results = results.filter(e => {
-    const summaryLower = (e.summary || '').toLowerCase()
-    if (summaryLower.includes(queryLower)) {
-      e._textMatch = summaryLower === queryLower ? 1.0 : 0.7
-      return true
+    const readBody = () => {
+      const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
+      try { return fs.readFileSync(filePath, 'utf8') } catch { return null }
     }
-    const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
-    if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, 'utf8')
-      if (content.toLowerCase().includes(queryLower)) {
-        e._textMatch = 0.4
-        if (full) e._body = content
-        return true
-      }
-    }
-    return false
+    const { matched, textMatch, body } = scoreTextMatch(e, query, readBody)
+    if (!matched) return false
+    e._textMatch = textMatch
+    if (full && body) e._body = body
+    return true
   })
 }
 

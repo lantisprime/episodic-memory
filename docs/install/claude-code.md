@@ -33,7 +33,7 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool claude-code --project <ABSOLUTE
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
 ```
-Installed 21 scripts to <HOME>/.episodic-memory/scripts
+Installed 23 scripts to <HOME>/.episodic-memory/scripts
 Seeded default LLM classifier config at <HOME>/.episodic-memory/classifier-config.json
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
@@ -145,7 +145,7 @@ returns `{"status":"ok","count":N,"episodes":[...]}`.
 - `--project` defaults to `process.cwd()`. Always pass an absolute `--project`.
 - Never hand-write episode files or index rows. Known crash:
   `TypeError: (b.date + b.time).localeCompare is not a function` from `em-list` means
-  a hand-appended index row lacks `date`/`time` (PR #447 read-side fix; issue #448
-  writer-side). Repair: fix the frontmatter + index row, or delete the bad episode
-  and run `em-rebuild-index --scope all`.
+  a hand-appended index row lacks `date`/`time` (PR #447 read-side fix; #448 repair
+  side closed). Repair: `em-doctor --fix` (or `em-rebuild-index --scope all`) —
+  the rebuild backfills `date`/`time` from the episode id prefix.
 - Full per-script reference: `~/.episodic-memory/EM_SCRIPTS_GUIDE.md`.

@@ -108,11 +108,30 @@ sequenceDiagram
 git clone <repo-url> episodic-memory
 cd episodic-memory
 
-# Install for a specific tool in a target project
+# Recommended: interactive guided setup (prereq checks, tool + project
+# selection, optional hooks/backup, PATH shim, health verification)
+node install.mjs --wizard
+
+# Or non-interactive: install for a specific tool in a target project
 node install.mjs --tool cursor --project /path/to/my-project
 
 # Install for all bundled targets except OpenCode
 node install.mjs --tool all --project /path/to/my-project
+```
+
+The wizard also handles **migrating to a new machine** (restore stores from an
+em-backup repository via a dry-run-first `em-restore`) and **health-checking an
+existing install** (`em doctor`, with optional automatic repair).
+
+After install, the unified CLI is available (add `~/.episodic-memory/bin` to
+your `PATH` — the wizard offers to do this for you):
+
+```bash
+em recall              # what does memory know about this project?
+em search --query "atomic rename index"   # multi-term relevance search
+em store --project myapp --category decision --summary "..." --body "..."
+em doctor              # store + install health check; `em doctor --fix` repairs
+em help                # full command table
 ```
 
 The installer:
@@ -291,6 +310,22 @@ Episodic-memory and user-preferences are fully independent — install either or
 
 All scripts are zero-dependency `.mjs` files using Node.js stdlib only. They output JSON to stdout.
 
+### Unified CLI
+Every script below is also reachable through the `em` dispatcher (installed at `~/.episodic-memory/bin/em`): `em <command>` ≡ `node ~/.episodic-memory/scripts/em-<command>.mjs`. `em help` lists all commands; unknown commands get did-you-mean suggestions.
+```bash
+em store --project my-project --category decision --summary "..." --body "..."
+em search --query "auth token refresh"
+em doctor --fix
+```
+
+### Doctor
+Health check + repair for stores and installation: index parse/drift, tags + category inverted-index consistency, dangling supersedes pointers, stale `.tmp`/`.lock` litter, installed-script drift against the repo checkout, backup config presence.
+```bash
+node ~/.episodic-memory/scripts/em-doctor.mjs            # report (exit 1 on errors)
+node ~/.episodic-memory/scripts/em-doctor.mjs --fix      # rebuild indexes, clear litter
+node ~/.episodic-memory/scripts/em-doctor.mjs --strict   # CI mode: warns also fail
+```
+
 ### Store
 ```bash
 node ~/.episodic-memory/scripts/em-store.mjs \
@@ -326,6 +361,13 @@ node ~/.episodic-memory/scripts/em-search.mjs --tag auth --category decision --s
 node ~/.episodic-memory/scripts/em-search.mjs --history <id> --full
 node ~/.episodic-memory/scripts/em-search.mjs --include-superseded
 ```
+
+`--query` uses tiered relevance matching: an exact summary match scores 1.0, a
+contiguous summary substring 0.7, and a **multi-term query** matches when every
+token lands somewhere in the summary, tags, or body (scored by field weight —
+summary > tags > body — always below a contiguous match). `--query "index
+atomic writes"` finds *"Use atomic rename for index writes"* even though the
+words are scattered.
 
 ### List
 ```bash

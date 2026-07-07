@@ -33,7 +33,7 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool codex --project <ABSOLUTE_PATH_
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
 ```
-Installed 21 scripts to <HOME>/.episodic-memory/scripts
+Installed 23 scripts to <HOME>/.episodic-memory/scripts
 Seeded default LLM classifier config at <HOME>/.episodic-memory/classifier-config.json
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory

@@ -126,8 +126,19 @@ if (bootstrapLastPrompt) {
   if (!tool) process.exit(0)
 }
 
+// --wizard: interactive guided setup (prereq checks → tool/project selection →
+// optional hooks/backup → verify with em-doctor; also drives migrate-from-backup
+// and health-check flows). Delegates to scripts/install-wizard.mjs, which
+// re-invokes this installer non-interactively with the composed flags.
+if (argv.includes('--wizard')) {
+  const { spawnSync } = await import('child_process')
+  const r = spawnSync(process.execPath, [path.join(REPO_DIR, 'scripts', 'install-wizard.mjs')], { stdio: 'inherit' })
+  process.exit(r.status === null ? 1 : r.status)
+}
+
 if (!tool) {
-  console.log(`Usage: node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+  console.log(`Usage: node install.mjs --wizard   (interactive guided setup — recommended)
+       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
@@ -335,6 +346,21 @@ function copyDirRecursive(src, dst) {
 }
 
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
+
+// ---------------------------------------------------------------------------
+// Unified CLI shim: ~/.episodic-memory/bin/em → scripts/em.mjs, so a single
+// PATH entry gives `em store|search|recall|doctor|...` everywhere. Clobbered
+// on every install like the substrate scripts (drift-proof by overwrite).
+// ---------------------------------------------------------------------------
+const BIN_DIR = path.join(GLOBAL_DIR, 'bin')
+fs.mkdirSync(BIN_DIR, { recursive: true })
+const emShim = path.join(BIN_DIR, 'em')
+fs.writeFileSync(emShim, `#!/bin/sh\nexec node "${path.join(SCRIPTS_DIR, 'em.mjs')}" "$@"\n`, 'utf8')
+fs.chmodSync(emShim, 0o755)
+console.log(`Installed unified CLI shim at ${emShim}`)
+if (!(process.env.PATH || '').split(path.delimiter).includes(BIN_DIR)) {
+  console.log(`  → add it to your PATH:  export PATH="$HOME/.episodic-memory/bin:$PATH"`)
+}
 
 // ---------------------------------------------------------------------------
 // F45 (RFC-008 P3d): em-recall purity sentinel. em-recall.mjs is the memory

@@ -195,7 +195,9 @@ export function isEnforcementEntryScript(basename) {
 //   enforcement → per-project  (isEnforcementEntryScript + ENFORCEMENT_HOOK_SCRIPTS)
 //   repo-dev    → nowhere       (isRepoDevScript — the remainder)
 // ───────────────────────────────────────────────────────────────────────────
-const SUBSTRATE_CAPABILITY_SCRIPTS = new Set(['second-opinion.mjs'])
+// em.mjs is the unified CLI dispatcher over the em-* substrate scripts — it
+// doesn't match the em-* pattern (no dash) so it's allowlisted by name.
+const SUBSTRATE_CAPABILITY_SCRIPTS = new Set(['second-opinion.mjs', 'em.mjs'])
 export function isSubstrateScript(basename) {
   if (ENFORCEMENT_HOOK_SCRIPTS.includes(basename)) return false
   return /^em-.+\.mjs$/.test(basename) || SUBSTRATE_CAPABILITY_SCRIPTS.has(basename)
