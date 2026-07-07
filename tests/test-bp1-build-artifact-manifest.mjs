@@ -26,6 +26,7 @@ import assert from 'node:assert/strict'
 // testing the guard via buildCanonicalPrompts is preempted by Node's
 // path.join() TypeError before the helper-layer guard executes.
 import { resolveLatestEpisodeId } from '../scripts/lib/bp1-manifest.mjs'
+import { computeLibClosure } from '../scripts/lib/install-manifest.mjs'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const SCRIPT = path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs')
@@ -352,11 +353,14 @@ function installRuntimeIntoProj(proj) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
       path.join(proj, 'scripts', 'lib', lib))
   }
-  // em-search transitively imports lib/local-dir.mjs and (RFC-009 P1a) lib/categories.mjs
-  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'local-dir.mjs'),
-    path.join(proj, 'scripts', 'lib', 'local-dir.mjs'))
-  fs.copyFileSync(path.join(REPO, 'scripts', 'lib', 'categories.mjs'),
-    path.join(proj, 'scripts', 'lib', 'categories.mjs'))
+  // em-search's transitive lib closure, DERIVED (Rule 14) via computeLibClosure
+  // instead of a hand-maintained list — a new lib import inside em-search
+  // (e.g. relevance.mjs) can no longer drift past this fixture and crash the
+  // copied tree with ERR_MODULE_NOT_FOUND.
+  for (const lib of computeLibClosure(REPO, ['em-search.mjs'])) {
+    fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
+      path.join(proj, 'scripts', 'lib', lib))
+  }
   fs.copyFileSync(path.join(REPO, 'scripts', 'em-search.mjs'),
     path.join(proj, 'scripts', 'em-search.mjs'))
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
