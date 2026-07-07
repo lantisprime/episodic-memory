@@ -126,6 +126,31 @@ t('live lock is NOT flagged stale; --strict escalates warns to exit 1', () => {
   assert.equal(r.code, 0, 'warns alone must not fail without --strict');
 });
 
+// ---------------------------------------------------------------------------
+const deviant = mkFixture();
+
+t('#448: hand-appended row without date/time → row-shape warn; --fix backfills from id prefix', () => {
+  // The real incident shape: foreign-harness episode with `created:` instead
+  // of date:/time:, plus a hand-appended index row missing both fields.
+  const id = '20260702-141607-p5b-1-s2-b1bc';
+  fs.writeFileSync(path.join(deviant.store, 'episodes', `${id}.md`), [
+    '---', `id: ${id}`, 'created: 2026-07-02', 'project: pi-extensions',
+    'category: decision', 'tags: [p5b]', 'summary: hand-authored', '---', '', 'body', '',
+  ].join('\n'));
+  fs.appendFileSync(path.join(deviant.store, 'index.jsonl'),
+    JSON.stringify({ id, project: 'pi-extensions', category: 'decision', tags: ['p5b'], summary: 'hand-authored' }) + '\n');
+
+  let r = run(['--scope', 'local'], deviant.cwd, deviant.env);
+  assert.equal(check(r.json, 'row-shape').level, 'warn');
+
+  r = run(['--scope', 'local', '--fix'], deviant.cwd, deviant.env);
+  assert.equal(check(r.json, 'row-shape').level, 'ok', `row-shape must repair:\n${r.stdout}`);
+  const row = fs.readFileSync(path.join(deviant.store, 'index.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map(l => JSON.parse(l)).find(e => e.id === id);
+  assert.equal(row.date, '2026-07-02', 'date backfilled from id prefix');
+  assert.equal(row.time, '14:16', 'time backfilled from id prefix');
+});
+
 t('missing store is ok (created on first use), not an error', () => {
   const emptyCwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'doctor-empty-')));
   const r = run(['--scope', 'local'], emptyCwd, warned.env);
@@ -133,7 +158,7 @@ t('missing store is ok (created on first use), not an error', () => {
   fs.rmSync(emptyCwd, { recursive: true, force: true });
 });
 
-for (const f of [healthy, sick, warned]) {
+for (const f of [healthy, sick, warned, deviant]) {
   fs.rmSync(f.cwd, { recursive: true, force: true });
   fs.rmSync(f.home, { recursive: true, force: true });
 }

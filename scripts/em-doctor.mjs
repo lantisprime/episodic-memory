@@ -136,8 +136,27 @@ function checkStore(dataDir, scopeName) {
     report('index-parse', scopeName, 'ok', hasIndex ? `index.jsonl: ${rawLines.length} row(s), all parse` : 'index.jsonl absent')
   }
 
+  // --- row-shape: schema-deviant rows (#448 class) -------------------------
+  // Hand-appended rows missing string date/time/summary (or with non-array
+  // tags) no longer crash readers (#447) but sort last and degrade filters.
+  // em-rebuild-index backfills date/time from the id prefix, so the fix hint
+  // is a real repair, not just a report.
+  const entriesForShape = loadIndex(dataDir, scopeName)
+  const deviant = entriesForShape.filter(e =>
+    typeof e.id !== 'string' || typeof e.date !== 'string' ||
+    typeof e.time !== 'string' || typeof e.summary !== 'string' ||
+    !Array.isArray(e.tags)
+  )
+  if (deviant.length) {
+    report('row-shape', scopeName, 'warn',
+      `${deviant.length} index row(s) missing typed id/date/time/summary/tags (hand-appended?). Rebuild backfills date/time from the episode id.`,
+      { fix: 'em-rebuild-index', ...(verbose ? { rows: deviant.map(e => e.id).filter(Boolean) } : {}) })
+  } else if (entriesForShape.length) {
+    report('row-shape', scopeName, 'ok', 'all index rows carry typed id/date/time/summary/tags')
+  }
+
   // --- index-drift: index rows ↔ episode files ----------------------------
-  const entries = loadIndex(dataDir, scopeName)
+  const entries = entriesForShape
   const indexedIds = new Set(entries.map(e => e.id))
   const missingFiles = [...indexedIds].filter(id => !episodeIds.has(id))
   const unindexed = [...episodeIds].filter(id => !indexedIds.has(id))

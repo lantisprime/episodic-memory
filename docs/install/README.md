@@ -95,10 +95,10 @@ project path; abbreviated as `<HOME>` here.)
 8. Known error:
    `TypeError: (b.date + b.time).localeCompare is not a function`
    from `em-list` (or `em-search` without `--no-score`) means a hand-appended index
-   row is missing `date` / `time`. Fixed read-side in PR #447; writer-side validation
-   is tracked in issue #448. Repair: add `date:` and `time:` to the offending episode
-   frontmatter and its matching index row, or delete the bad episode file and run
-   `em-rebuild-index --scope all`.
+   row is missing `date` / `time`. Fixed read-side in PR #447; repair side closed in
+   issue #448: `em-doctor` reports the row (`row-shape`), and
+   `em-rebuild-index` (or `em-doctor --fix`) backfills `date`/`time` from the
+   episode id prefix.
 
 ## After install
 
