@@ -254,6 +254,53 @@ t('semantic: hash provider end-to-end with tracking side-effect contract', () =>
   assert.notEqual(fs.readFileSync(path.join(store, 'index.jsonl'), 'utf8'), before, 'tracked search must bump access counters');
 });
 
+// ---------------------------------------------------------------------------
+// LLM re-ranking
+// ---------------------------------------------------------------------------
+t('rerank: reranker reorders the window; failure falls back with warning; --no-rerank disables config', () => {
+  const revRanker = path.join(cwd, 'rev-rerank.py');
+  fs.writeFileSync(revRanker, 'import json,sys\np=json.load(sys.stdin)\nprint(json.dumps({"order":[c["id"] for c in reversed(p["candidates"])]}))\n');
+  const base = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01'], cwd, env).json;
+  assert.ok(base.count >= 2, 'fixture must yield multiple candidates');
+  const rr = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01', '--rerank-cmd', `python3 ${revRanker}`], cwd, env).json;
+  assert.equal(rr.reranked, true);
+  assert.deepEqual(rr.episodes.map(e => e.id), [...base.episodes.map(e => e.id)].reverse(), 'stub must reverse the vector order');
+  // failing reranker → vector order + warning, exit 0
+  const fb = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01', '--rerank-cmd', 'false'], cwd, env);
+  assert.equal(fb.code, 0);
+  assert.ok(fb.json.warning && fb.json.warning.includes('rerank skipped'), fb.stdout);
+  assert.deepEqual(fb.json.episodes.map(e => e.id), base.episodes.map(e => e.id));
+  // rerank_cmd from embed-config.json; --no-rerank disables it per call
+  const cfgPath = path.join(home, '.episodic-memory', 'embed-config.json');
+  fs.writeFileSync(cfgPath, JSON.stringify({ provider: 'hash', rerank_cmd: `python3 ${revRanker}` }));
+  const viaCfg = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01'], cwd, env).json;
+  assert.equal(viaCfg.reranked, true, 'config-supplied reranker must apply');
+  const off = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01', '--no-rerank'], cwd, env).json;
+  assert.ok(!off.reranked, '--no-rerank must bypass the configured reranker');
+  fs.rmSync(cfgPath);
+});
+
+t('claude-rerank.sh adapter: real script drives $CLAUDE_BIN and parses its JSON', () => {
+  // fake claude shim: extracts candidate ids from the prompt, returns them reversed
+  const binDir = path.join(cwd, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const shim = path.join(binDir, 'claude');
+  fs.writeFileSync(shim, `#!/bin/sh
+echo "$2" | python3 -c "
+import sys, json, re
+ids = re.findall(r'- id: (\\\\S+)', sys.stdin.read())
+print(json.dumps({'order': list(reversed(ids))}))
+"
+`);
+  fs.chmodSync(shim, 0o755);
+  const base = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01'], cwd, env).json;
+  const rr = run('em-semantic.mjs', ['--query', 'auth token expiry', '--scope', 'local', '--no-track', '--min-sim', '0.01',
+    '--rerank-cmd', `sh ${path.join(REPO, 'examples', 'rerankers', 'claude-rerank.sh')}`],
+    cwd, { ...env, CLAUDE_BIN: shim }).json;
+  assert.equal(rr.reranked, true, JSON.stringify(rr));
+  assert.deepEqual(rr.episodes.map(e => e.id), [...base.episodes.map(e => e.id)].reverse());
+});
+
 fs.rmSync(cwd, { recursive: true, force: true });
 fs.rmSync(home, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

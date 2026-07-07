@@ -399,9 +399,24 @@ node ~/.episodic-memory/scripts/em-semantic.mjs --query "..." \
 ```
 
 No flags needed once configured: the installer wizard's semantic-search step
-(`node install.mjs --wizard` → built-in / ollama / openai / custom) writes
-`~/.episodic-memory/embed-config.json`, which `em embed` and `em semantic`
-read automatically. Flags and `$EM_EMBED_CMD` still override it.
+(`node install.mjs --wizard` → built-in / claude / ollama / openai / custom)
+writes `~/.episodic-memory/embed-config.json`, which `em embed` and
+`em semantic` read automatically. Flags and `$EM_EMBED_CMD` still override it.
+
+**Claude-powered semantics without an API key.** Anthropic has no embeddings
+API, so Claude cannot generate the vectors — but it can do the semantic
+judging. The wizard's `claude` option (or `rerank_cmd` in embed-config.json)
+keeps the offline built-in vectors for cheap candidate retrieval and pipes
+the top results through `claude -p` — your existing Claude Code login — to
+re-order them by true semantic relevance:
+
+```bash
+node ~/.episodic-memory/scripts/em-semantic.mjs --query "when do login sessions go stale" \
+  --rerank-cmd "sh <clone>/examples/rerankers/claude-rerank.sh"
+```
+
+A failing/unavailable reranker falls back to vector order with a warning;
+`--no-rerank` skips a configured reranker for one call.
 
 ### Consolidate (store hygiene)
 ```bash

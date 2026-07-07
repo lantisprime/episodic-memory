@@ -268,30 +268,38 @@ async function maybeConfigureSemantic(projectDir) {
   }
   console.log('\nSemantic search (optional): rank recall by meaning, not just word overlap.')
   console.log('  1. built-in    offline token-overlap similarity, zero setup')
-  console.log('  2. ollama      local embedding model via Ollama (needs `ollama pull nomic-embed-text`)')
-  console.log('  3. openai      OpenAI-compatible embeddings API (needs OPENAI_API_KEY)')
-  console.log('  4. custom      your own {id,text}→{id,vector} JSONL command')
-  console.log('  5. skip        set up later (em embed --help)')
-  const choice = await ask('Choose', '5')
+  console.log('  2. claude      built-in vectors + Claude re-ranking via your Claude Code login (claude CLI, no API key)')
+  console.log('  3. ollama      local embedding model via Ollama (needs `ollama pull nomic-embed-text`)')
+  console.log('  4. openai      OpenAI-compatible embeddings API (needs OPENAI_API_KEY)')
+  console.log('  5. custom      your own {id,text}→{id,vector} JSONL command')
+  console.log('  6. skip        set up later (em embed --help)')
+  const choice = await ask('Choose', '6')
 
   let config = null
   if (choice === '1' || choice === 'built-in' || choice === 'hash') {
     config = { provider: 'hash' }
-  } else if (choice === '2' || choice === 'ollama') {
+  } else if (choice === '2' || choice === 'claude') {
+    config = {
+      provider: 'hash',
+      rerank_cmd: `sh ${path.join(REPO_DIR, 'examples', 'rerankers', 'claude-rerank.sh')}`,
+    }
+    console.log('    Vectors stay offline (built-in); the claude CLI re-orders top results per query.')
+    console.log('    Requires `claude` on PATH and a logged-in Claude Code session.')
+  } else if (choice === '3' || choice === 'ollama') {
     config = {
       provider: 'cmd',
       cmd: `sh ${path.join(REPO_DIR, 'examples', 'embedders', 'ollama-embed.sh')}`,
       model: await ask('Model label for the sidecar', 'ollama-nomic'),
     }
     console.log('    Uses $OLLAMA_URL / $OLLAMA_MODEL at run time (defaults: localhost:11434, nomic-embed-text).')
-  } else if (choice === '3' || choice === 'openai') {
+  } else if (choice === '4' || choice === 'openai') {
     config = {
       provider: 'cmd',
       cmd: `sh ${path.join(REPO_DIR, 'examples', 'embedders', 'openai-embed.sh')}`,
       model: await ask('Model label for the sidecar', 'openai-3-small'),
     }
     console.log('    Requires $OPENAI_API_KEY in your shell; $OPENAI_MODEL/$OPENAI_EMBED_URL override the defaults.')
-  } else if (choice === '4' || choice === 'custom') {
+  } else if (choice === '5' || choice === 'custom') {
     const cmd = await ask('Embedding command (reads {id,text} JSONL on stdin, writes {id,vector} JSONL)')
     if (!cmd) { console.log('    No command given — skipping semantic setup.'); return }
     config = { provider: 'cmd', cmd, model: await ask('Model label for the sidecar', 'custom') }

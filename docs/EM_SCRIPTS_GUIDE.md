@@ -448,6 +448,16 @@ node ~/.episodic-memory/scripts/em-semantic.mjs --query <text> [--scope local|gl
 Output adds `similarity` per episode:
 `{"status":"ok","count":2,"model":"hash-v1-256","episodes":[{"id":"...","similarity":0.71,"score":0.68,...}]}`
 
+LLM re-ranking (optional): `--rerank-cmd "<command>"` (or `rerank_cmd` in
+`~/.episodic-memory/embed-config.json`, or `$EM_RERANK_CMD`) pipes the top
+candidate window (3× limit, capped at 30) through a reranker — stdin JSON
+`{query, candidates:[{id,summary,similarity}]}` → stdout `{"order":[ids]}`.
+The shipped `examples/rerankers/claude-rerank.sh` drives `claude -p` using
+your existing Claude Code login (no API key; Anthropic has no embeddings API,
+so Claude re-ranks rather than embeds). Reranker failure falls back to vector
+order with a `warning`; `--no-rerank` bypasses a configured reranker. Output
+gains `"reranked":true` when applied.
+
 ### em-check-stale
 
 Report research episodes whose source URL may be out of date.

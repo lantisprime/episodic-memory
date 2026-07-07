@@ -138,6 +138,19 @@ t('semantic step: choice 1 writes embed-config.json and builds the sidecar; EOF 
   fs.rmSync(home2, { recursive: true, force: true });
 });
 
+t('semantic step: choice 2 (claude) writes hash provider + claude-rerank rerank_cmd', () => {
+  const home = mkHome('wiz-claude-');
+  const proj = path.join(home, 'proj');
+  fs.mkdirSync(proj);
+  // action=install, tools=2 (cursor), project, backup=n, PATH=n, semantic=2 (claude)
+  const r = wizard(['1', '2', proj, 'n', 'n', '2'], { HOME: home });
+  assert.equal(r.status, 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  const cfg = JSON.parse(fs.readFileSync(path.join(home, '.episodic-memory', 'embed-config.json'), 'utf8'));
+  assert.equal(cfg.provider, 'hash', 'claude option keeps offline vectors');
+  assert.ok(cfg.rerank_cmd && cfg.rerank_cmd.includes('claude-rerank.sh'), JSON.stringify(cfg));
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 t('doctor flow runs against the current stores', () => {
   const home = mkHome('wiz-doctor-');
   const r = wizard(['3', 'n'], { HOME: home });
