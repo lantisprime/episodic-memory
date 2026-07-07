@@ -2,7 +2,7 @@
 rfc_id: RFC-005
 slug: em-move
 title: em-move — atomic episode relocation between scopes
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-05-06
 last_modified: 2026-05-06

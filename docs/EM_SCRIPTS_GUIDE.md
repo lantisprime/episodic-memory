@@ -41,6 +41,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | A recalled episode actually helped / kept being irrelevant | `em-feedback --id <id> --useful` / `--noise` | Letting access counts alone decide future ranking |
 | A decision must never fade or be pruned | `em-pin --id <id>` (or `em-store --pin`) | Re-storing the same decision periodically to keep it fresh |
 | Episode stored in the wrong scope (global vs local) | `em-move --id <id> --to local\|global` | `mv` + manual rebuild (loses counters, leaves stale rows) or re-storing (new id, broken chains) |
+| Store cluttered with near-duplicate episodes on one topic | `em-consolidate` (dry-run), then `--apply` | Leaving duplicates to dilute search, or deleting episodes by hand |
 | "What does memory actually hold?" | `em-stats` | Counting episode files by hand |
 | Topic lookup where wording differs from storage | `em-semantic --query <text>` (after `em-embed`) | Guessing synonyms into `em-search --query` |
 | Find a topic across all projects | `em-search --query <topic> --scope all` | Grepping episode files |
@@ -351,6 +352,31 @@ interrupted move). Every refusal path writes nothing.
 
 Output: `{"status":"ok","moved":[{"id":"...","from":"global","to":"local","audit_id":"..."}],"noop":[],"errors":[]}`
 
+### em-consolidate
+
+Fold clusters of near-duplicate episodes into digest episodes (RFC-001's
+semantic-consolidation capability). Dry-run by DEFAULT — `--apply` writes.
+
+- WHEN TO USE: a topic has accumulated several overlapping episodes that
+  dilute search results; periodic store hygiene.
+- WHEN NOT TO USE: correcting one wrong episode (`em-revise`), or archival
+  (`em-prune`). Digests never re-fold; pinned members are excluded unless
+  `--include-pinned`; violation/workplan/workflow.lifecycle never cluster.
+
+```
+node ~/.episodic-memory/scripts/em-consolidate.mjs [--scope local|global] \
+  [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] \
+  [--include-pinned] [--apply] [--confirm]
+```
+
+Clustering is body-token Jaccard within (project, category) groups; the
+0.35 default separates genuine near-duplicates (~0.35–0.5) from unrelated
+episodes (~0.0). On `--apply`, each cluster gets one digest episode carrying
+`consolidates: [ids...]`, union tags, full member bodies, and inherited
+pinning; members flip to `status: superseded` + `superseded_by: <digest>` in
+file and index, so they stop surfacing but stay reachable via `--history`.
+More than 5 clusters requires `--confirm`.
+
 ### em-stats
 
 Read-only store analytics — never writes, never bumps access counters.
@@ -382,6 +408,15 @@ Providers:
 - `cmd` — pipes `{id,text}` JSONL to your command (`--cmd` or
   `$EM_EMBED_CMD`), reads `{id,vector}` JSONL back. Wire real embedding
   models here (ollama, API endpoints); the substrate stays zero-dependency.
+
+Ready-made adapters live in the repo under `examples/embedders/`:
+`ollama-embed.sh` (local Ollama, default model `nomic-embed-text`) and
+`openai-embed.sh` (OpenAI-compatible endpoints, batched into one API call).
+Both are python3-stdlib only:
+
+```
+node em-embed.mjs --scope all --cmd "sh <clone>/examples/embedders/ollama-embed.sh" --model ollama-nomic
+```
 
 ### em-semantic
 

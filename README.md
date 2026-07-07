@@ -303,7 +303,7 @@ Episodic-memory and user-preferences are fully independent — install either or
 | [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-3 + 3b shipped + runtime-deployed) |
 | [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
 | [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 + M2 shipped) |
-| [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Draft |
+| [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Accepted |
 | [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Accepted (harness shipped PR #222) |
 
 ## Scripts Reference
@@ -390,9 +390,21 @@ node ~/.episodic-memory/scripts/em-embed.mjs --scope all
 node ~/.episodic-memory/scripts/em-semantic.mjs --query "auth token expiry"
 
 # Real embedding models plug in via a command speaking {id,text} → {id,vector}
-# JSONL — the substrate itself stays zero-dependency:
-node ~/.episodic-memory/scripts/em-embed.mjs --scope all --cmd "my-embedder" --model my-model
-node ~/.episodic-memory/scripts/em-semantic.mjs --query "..." --cmd "my-embedder" --model my-model
+# JSONL — the substrate itself stays zero-dependency. Ready-made adapters ship
+# in examples/embedders/ (Ollama + OpenAI-compatible, python3-stdlib only):
+node ~/.episodic-memory/scripts/em-embed.mjs --scope all \
+  --cmd "sh <clone>/examples/embedders/ollama-embed.sh" --model ollama-nomic
+node ~/.episodic-memory/scripts/em-semantic.mjs --query "..." \
+  --cmd "sh <clone>/examples/embedders/ollama-embed.sh" --model ollama-nomic
+```
+
+### Consolidate (store hygiene)
+```bash
+# Fold near-duplicate episodes into one digest episode per cluster.
+# Dry-run by default; members become superseded_by the digest and stop
+# surfacing in search while staying reachable via --history.
+node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local            # preview
+node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local --apply    # fold
 ```
 
 ### Search
