@@ -150,6 +150,33 @@ t('testStoreRejectsControlCharInjection', () => {
   assert.equal(indexRows(cwd).length, 0, 'nothing to rebuild — store byte-unchanged');
 });
 
+t('testStoreRejectsForgeAcrossAllSerializedScalars', () => {
+  // Reviewer F1 round 2: the forge class spans EVERY serialized frontmatter
+  // value, not just activation fields — a freeform lesson (no --evidence flag)
+  // could inject `evidence: [<real-violation>]` via --summary/--project/--url/--tag
+  // and earn the band, bypassing the linkage gate. Parameterize over the class.
+  const victim = '20990101-000000-real-violation-0001';
+  const payload = `x\nevidence: [${victim}]\nsuperseded_by: ${victim}`;
+  const cases = [
+    { label: '--summary', args: ['--project', 't', '--category', 'lesson', '--summary', payload, '--body', 'b', '--scope', 'local'] },
+    { label: '--project', args: ['--project', payload, '--category', 'lesson', '--summary', 's', '--body', 'b', '--scope', 'local'] },
+    { label: '--url', args: [...LESSON, '--url', payload] },
+    { label: '--tags', args: ['--project', 't', '--category', 'lesson', '--summary', 's', '--body', 'b', '--scope', 'local', '--tags', payload] },
+    { label: '--tag', args: ['--project', 't', '--category', 'lesson', '--summary', 's', '--body', 'b', '--scope', 'local', '--tag', payload] },
+  ];
+  for (const c of cases) {
+    const { cwd, home } = mkStore();
+    const r = run(EM_STORE, c.args, { cwd, home });
+    assert.equal(r.code, 1, `${c.label} newline payload rejected`);
+    assert.match(r.json.message, /illegal/, `${c.label} names the illegal char`);
+    assert.equal(episodeFiles(cwd).length, 0, `${c.label}: no partial write`);
+    // even after a rebuild attempt, nothing forged reached an index row
+    run(path.join(REPO, 'scripts/em-rebuild-index.mjs'), ['--scope', 'local'], { cwd, home });
+    const rows = indexRows(cwd);
+    assert.equal(rows.length, 0, `${c.label}: store byte-unchanged, no forged row`);
+  }
+});
+
 t('testStoreRejectsCommaTrigger', () => {
   const { cwd, home } = mkStore();
   const r = run(EM_STORE, [...LESSON, '--trigger', 'a, b'], { cwd, home });

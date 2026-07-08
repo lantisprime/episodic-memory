@@ -29,7 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
-import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, illegalValueChar } from './lib/activation.mjs'
+import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, illegalValueChar, illegalScalarChar } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
@@ -126,6 +126,26 @@ if (!project || !category || !summary || !body) {
     message: `Missing required args. Usage: ${USAGE}`
   }))
   process.exit(1)
+}
+
+// Reviewer F1 (round 2): EVERY serialized frontmatter scalar rejects
+// line-breaking chars before any write — a raw \n in summary/project/url/a tag
+// fabricates an adjacent key (a forged `evidence:`/`superseded_by:` is the exact
+// earned-band forge the linkage gate exists to stop). One reject class across
+// the whole write surface (fractal #9); fail-closed, no partial write.
+for (const [label, value] of [['summary', summary], ['project', project], ...(url !== undefined ? [['url', url]] : [])]) {
+  const bad = illegalScalarChar(value)
+  if (bad !== null) {
+    console.log(JSON.stringify({ status: 'error', message: `--${label} contains illegal line-breaking character ${JSON.stringify(bad)}` }))
+    process.exit(1)
+  }
+}
+for (const tag of [...(tagsRaw ? tagsRaw.split(',') : []), ...tagRepeats]) {
+  const bad = illegalScalarChar(tag)
+  if (bad !== null) {
+    console.log(JSON.stringify({ status: 'error', message: `--tag/--tags value contains illegal line-breaking character ${JSON.stringify(bad)}` }))
+    process.exit(1)
+  }
 }
 let catV
 try {

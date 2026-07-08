@@ -41,7 +41,27 @@ export function illegalValueChar(s) {
   }
   for (let i = 0; i < str.length; i++) {
     const code = str.charCodeAt(i)
-    if (code < 0x20 || code === 0x7f) return `\\x${code.toString(16).padStart(2, '0')}`
+    // control chars + the Unicode line/paragraph separators (U+2028/U+2029):
+    // both break em-rebuild-index's `split('\n')` + `/^(\w+):\s*(.*)$/` — a raw
+    // \n forges an adjacent key, U+2028 drops the field on rebuild (F1/F2 r2).
+    if (code < 0x20 || code === 0x7f || code === 0x2028 || code === 0x2029) return `\\x${code.toString(16).padStart(2, '0')}`
+  }
+  return null
+}
+
+// Scalar frontmatter values (summary, project, url, each tag) legitimately carry
+// prose punctuation — , [ ] " are fine — but NEVER a line-breaking char: a raw
+// \n fabricates an adjacent frontmatter key (a forged `evidence:`/`superseded_by:`
+// is an earned-band / chain forge that bypasses the linkage gate), and \r or the
+// Unicode separators drop the field on rebuild. This is the same forge class as
+// illegalValueChar, minus the structural , [ ] " that prose may contain
+// (reviewer F1 round 2 — the class spans every serialized value, not just
+// activation fields). Returns the offending char (escaped) or null.
+export function illegalScalarChar(s) {
+  const str = String(s)
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i)
+    if (code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029) return `\\x${code.toString(16).padStart(2, '0')}`
   }
   return null
 }

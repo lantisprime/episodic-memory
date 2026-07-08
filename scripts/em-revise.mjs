@@ -29,7 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { validateCategory, canonicalCategory } from './lib/categories.mjs'
-import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, parseActivationFromFrontmatter } from './lib/activation.mjs'
+import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, parseActivationFromFrontmatter, illegalScalarChar } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
@@ -110,6 +110,25 @@ if (!originalId || !summary || !body) {
     message: 'Missing required args. Usage: --original <id> --project <name> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global]'
   }))
   process.exit(1)
+}
+
+// Reviewer F1 (round 2): user-controlled serialized scalars reject line-breaking
+// chars BEFORE the supersede mutation below (I4). Inherited project/tags come
+// from an already-written (write-validated) episode via the `^(\w+):\s*(.*)$`
+// regex, which cannot capture a newline, so only the user inputs need guarding.
+for (const [label, value] of [['summary', summary], ...(project !== undefined ? [['project', project]] : [])]) {
+  const bad = illegalScalarChar(value)
+  if (bad !== null) {
+    console.log(JSON.stringify({ status: 'error', message: `--${label} contains illegal line-breaking character ${JSON.stringify(bad)}` }))
+    process.exit(1)
+  }
+}
+for (const tag of [...(tagsRaw ? tagsRaw.split(',') : []), ...tagRepeats]) {
+  const bad = illegalScalarChar(tag)
+  if (bad !== null) {
+    console.log(JSON.stringify({ status: 'error', message: `--tag/--tags value contains illegal line-breaking character ${JSON.stringify(bad)}` }))
+    process.exit(1)
+  }
 }
 
 // ---------------------------------------------------------------------------
