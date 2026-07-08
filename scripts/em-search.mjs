@@ -177,7 +177,11 @@ if (historyId) {
   })
 
   // No access tracking for history queries (investigative, not usage signals)
-  console.log(JSON.stringify({ status: 'ok', count: output.length, chain: output }))
+  // Drain stdout BEFORE exiting: a --full chain can exceed the 64KB pipe
+  // buffer, and process.exit() discards unflushed writes — piped consumers
+  // (em-console, execFile callers) received exactly 65536 truncated bytes.
+  await new Promise((resolve) => process.stdout.write(
+    JSON.stringify({ status: 'ok', count: output.length, chain: output }) + '\n', resolve))
   process.exit(0)
 }
 

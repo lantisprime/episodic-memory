@@ -286,6 +286,80 @@ await (async () => {
       const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'history', flags: { history: seeded.id } } })
       assert.strictEqual(r.status, 200)
       assert.strictEqual(r.json.exit_code, 0)
+      // Pin the FIELD the page's drawer reads: the chain rides under result.chain
+      // with id/summary/body per member. The drawer showed "no chain found" when
+      // this drifted silently (page read .episodes) — exit-0 alone missed it.
+      assert.ok(Array.isArray(r.json.result.chain), `result.chain missing: ${JSON.stringify(Object.keys(r.json.result))}`)
+      assert.ok(r.json.result.chain.length >= 1, 'empty chain for seeded episode')
+      const m = r.json.result.chain[0]
+      assert.ok(m.id && m.summary && 'body' in m, `chain member missing id/summary/body: ${JSON.stringify(Object.keys(m))}`)
+    })
+    await test('a chain larger than the 64KB pipe buffer survives end-to-end (exit-truncation regression)', async () => {
+      // em-search's history path used console.log + process.exit(0): on a pipe,
+      // exit discards unflushed output past 64KB, so big --full chains arrived
+      // as exactly 65536 truncated bytes and failed the server-side JSON parse.
+      // Seed via DIRECT em-store/em-revise spawns (the console's own 20k body
+      // cap rightly refuses this via the API; the real-world big chains are
+      // CLI-stored workplans).
+      const bigBody = 'line of filler text for the pipe buffer regression\n'.repeat(900) // ~45KB per member
+      const bodyFile = path.join(s1.root, 'big-body.txt')
+      fs.writeFileSync(bodyFile, bigBody)
+      const stR = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'em-store.mjs'),
+        '--project', 'console-fixture', '--category', 'decision', '--scope', 'local',
+        '--summary', 'big body seed', '--body-file', bodyFile], {
+        cwd: s1.cwd, env: { ...process.env, HOME: s1.home }, encoding: 'utf8',
+      })
+      const seedBig = JSON.parse(stR.stdout.trim())
+      assert.strictEqual(seedBig.status, 'ok', stR.stdout.slice(0, 200))
+      const rvR = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'em-revise.mjs'),
+        '--original', seedBig.id, '--project', 'console-fixture',
+        '--summary', 'big body rev', '--body-file', bodyFile], {
+        cwd: s1.cwd, env: { ...process.env, HOME: s1.home }, encoding: 'utf8',
+      })
+      assert.strictEqual(JSON.parse(rvR.stdout.trim()).status, 'ok', rvR.stdout.slice(0, 200))
+      const hist = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'history', flags: { history: seedBig.id } } })
+      assert.strictEqual(hist.json.status, 'ok')
+      assert.ok(Array.isArray(hist.json.result.chain), `chain missing — parse fell back to raw: ${JSON.stringify(Object.keys(hist.json.result))}`)
+      assert.strictEqual(hist.json.result.chain.length, 2)
+      const totalBytes = JSON.stringify(hist.json.result).length
+      assert.ok(totalBytes > 65536, `chain payload only ${totalBytes} bytes — regression not exercising the pipe buffer`)
+      assert.ok(hist.json.result.chain.every((m) => (m.body || '').length > 40000), 'bodies truncated')
+    })
+    await test('client render path: drawer resolves result.chain and miniMd neutralizes a hostile stored body', async () => {
+      // Store an episode whose BODY is hostile markdown, walk its history via
+      // the API, then drive the SERVED page's own esc/miniMd/autoRender on the
+      // real payload — the drawer path the server-level test never exercised.
+      const hostileBody = '# t <script>alert(1)</script>\n[x](javascript:alert(1)) [ok](https://example.com)\n<img src=x onerror=alert(2)>\n```\n<script>fence</script>\n```'
+      const st = await req(rw.port, '/api/run', {
+        method: 'POST', token: TOKEN,
+        body: { cmd: 'store', flags: { project: 'console-fixture', category: 'lesson', summary: 'hostile md body', body: hostileBody, scope: 'local' } },
+      })
+      assert.strictEqual(st.json.exit_code, 0, JSON.stringify(st.json).slice(0, 300))
+      const hist = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'history', flags: { history: st.json.result.id } } })
+      assert.ok(Array.isArray(hist.json.result.chain) && hist.json.result.chain.length === 1, 'chain missing for hostile episode')
+
+      const page = (await req(rw.port, `/?token=${TOKEN}`)).text
+      const script = page.match(/<script>([\s\S]*?)<\/script>/)[1]
+      // The drawer must resolve result.chain first (regression pin for the
+      // "no chain found" bug: the page read .episodes, which history never emits).
+      assert.ok(script.includes('res.body.result.chain ||'), 'drawer no longer resolves result.chain first')
+      const escSrc = script.slice(script.indexOf('function esc('), script.indexOf('function el('))
+      const mdSrc = script.slice(script.indexOf('function miniMd('), script.indexOf('// --- generic JSON humanizer'))
+      const autoSrc = script.slice(script.indexOf('function autoRender('), script.indexOf('// --- typed renderers'))
+      // eslint-disable-next-line no-eval
+      const harness = eval(`(function(){ ${escSrc} ${mdSrc} ${autoSrc} return { esc, miniMd, autoRender } })()`)
+      const html = harness.miniMd(hist.json.result.chain[0].body)
+      assert.ok(!/<script>alert/.test(html), 'raw script tag survived miniMd')
+      assert.ok(!/href="javascript/.test(html), 'javascript: href survived miniMd')
+      assert.ok(!/<img/.test(html), 'raw img tag survived miniMd')
+      assert.ok(/<a href="https:\/\/example.com"/.test(html), 'legitimate https link lost')
+      assert.ok(/<pre><code>&lt;script&gt;fence/.test(html), 'fence content not escaped')
+      // autoRender cap discipline (reviewer F2): huge objects render bounded.
+      const big = {}
+      for (let i = 0; i < 10000; i++) big['k' + i] = i
+      const rendered = harness.autoRender(big)
+      assert.ok((rendered.match(/<tr>/g) || []).length <= 40, 'object-entry rows uncapped')
+      assert.ok(/more keys/.test(rendered), 'truncation note missing')
     })
     await test('write flag on wrong shape still validated (bad episode id → 400)', async () => {
       const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'pin', flags: { id: 'not-an-id' } } })
