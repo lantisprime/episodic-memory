@@ -108,6 +108,62 @@ t('errors: unknown --from exit 1; bad edge type / mode combos exit 2', () => {
   assert.equal(run('em-graph.mjs', ['--from', A, '--orphans']).code, 2);
 });
 
+// ---------------------------------------------------------------------------
+// Hardening cases learned from real-store probing (wave-6 hardening, 2026-07-08).
+// Fixture shapes below mirror episodes that exist in production stores.
+// ---------------------------------------------------------------------------
+
+// Real-store precedent: a violation episode carries the tag
+// "rule-18-step-6 code-review canonical-agent-dispatch self-review-insufficient s7 rfc-008"
+// — six space-separated words in ONE tag. Edge keys must not be corrupted by
+// embedded spaces (they are NUL-joined for exactly this reason).
+const SP = st(['--category', 'discovery', '--summary', 'space tag holder', '--body', 'carries a tag with embedded spaces', '--tags', 'multi word tag']);
+const CTOR = st(['--category', 'discovery', '--summary', 'constructor tag holder', '--body', 'tag named constructor (issue #469 class)', '--tags', 'constructor']);
+
+t('space-containing tag stays ONE pseudo-node and never leaks into non-tag degree', () => {
+  const r = run('em-graph.mjs', ['--from', SP, '--edges', 'tags', '--scope', 'local']);
+  const tagNodes = r.json.nodes.filter(n => n.type === 'tag');
+  assert.deepEqual(tagNodes.map(n => n.id), ['tag:multi word tag'], r.stdout);
+  // orphans mode with tag edges selected: the space inside the tag must not
+  // shift the edge-key parse and count a tags edge as non-tag degree.
+  const o = run('em-graph.mjs', ['--orphans', '--scope', 'local', '--edges', 'all']);
+  assert.ok(o.json.nodes.some(n => n.id === SP), 'SP has only tag edges and must stay an orphan');
+  const h = run('em-graph.mjs', ['--hubs', '--scope', 'local', '--top', '100', '--edges', 'all']);
+  assert.ok(!h.json.nodes.some(n => n.id === SP), 'SP must not appear as a hub via leaked tag-edge degree');
+});
+
+t('tag named "constructor" traverses without prototype-key corruption (#469 class)', () => {
+  const r = run('em-graph.mjs', ['--from', CTOR, '--edges', 'tags', '--scope', 'local']);
+  assert.equal(r.code, 0, r.stdout);
+  assert.ok(r.json.nodes.some(n => n.id === 'tag:constructor'), r.stdout);
+});
+
+// Depth-boundary completeness: B cites A; C cites A AND B. From A at depth 1,
+// B and C both sit at the boundary — the C→B edge must still be reported
+// (pre-fix, mid-loop emission dropped boundary-to-boundary edges).
+const T1 = st(['--category', 'decision', '--summary', 'triangle root', '--body', 'root of the triangle']);
+const T2 = st(['--category', 'decision', '--summary', 'triangle mid', '--body', `builds on ${T1}`]);
+const T3 = st(['--category', 'decision', '--summary', 'triangle leaf', '--body', `builds on ${T1} and on ${T2}`]);
+
+t('edges between two depth-boundary nodes are emitted', () => {
+  const r = run('em-graph.mjs', ['--from', T1, '--depth', '1', '--scope', 'local']);
+  const ids = r.json.nodes.map(n => n.id);
+  assert.ok(ids.includes(T2) && ids.includes(T3), r.stdout);
+  assert.ok(r.json.edges.some(e => e.type === 'cites' && e.from === T3 && e.to === T2),
+    `boundary edge T3→T2 missing: ${JSON.stringify(r.json.edges)}`);
+});
+
+t('non-numeric / out-of-range bounds are rejected with exit 2 (RFC-007 depth/cap rules)', () => {
+  assert.equal(run('em-graph.mjs', ['--from', T1, '--limit', 'abc', '--scope', 'local']).code, 2);
+  assert.equal(run('em-graph.mjs', ['--from', T1, '--depth', 'abc', '--scope', 'local']).code, 2);
+  assert.equal(run('em-graph.mjs', ['--from', T1, '--depth', '-1', '--scope', 'local']).code, 2);
+  assert.equal(run('em-graph.mjs', ['--from', T1, '--limit', '0', '--scope', 'local']).code, 2);
+  assert.equal(run('em-graph.mjs', ['--hubs', '--top', 'xyz', '--scope', 'local']).code, 2);
+  const d0 = run('em-graph.mjs', ['--from', T1, '--depth', '0', '--scope', 'local']);
+  assert.equal(d0.code, 0);
+  assert.equal(d0.json.count, 1, 'depth 0 = root only');
+});
+
 fs.rmSync(cwd, { recursive: true, force: true });
 fs.rmSync(home, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

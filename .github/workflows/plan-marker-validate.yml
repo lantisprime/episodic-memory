@@ -198,6 +198,42 @@ jobs:
       - name: Run recall-v2 token-index suite (tokens.json write/read parity)
         run: node tests/test-recall-v2.mjs
 
+      # Wave 1-6 suites (PRs #464-#468): previously local-only; registered here
+      # per docs/plans/PLAN-session-auto-capture.md convention 8 (CI runs
+      # explicitly listed test files — unlisted suites silently never run).
+      - name: Run relevance suite (wave 1)
+        run: node tests/test-relevance.mjs
+
+      - name: Run em-move suite (wave: RFC-005)
+        run: node tests/test-em-move.mjs
+
+      - name: Run em-stats + semantic recall suite
+        run: node tests/test-em-stats-semantic.mjs
+
+      - name: Run em-consolidate suite
+        run: node tests/test-em-consolidate.mjs
+
+      - name: Run embedder-presets suite
+        run: node tests/test-embedder-presets.mjs
+
+      - name: Run em-routines suite
+        run: node tests/test-em-routines.mjs
+
+      - name: Run em-graph suite (RFC-007 core + wave-6 hardening)
+        run: node tests/test-em-graph.mjs
+
+      - name: Run em-doctor suite
+        run: node tests/test-em-doctor.mjs
+
+      - name: Run em CLI dispatcher suite
+        run: node tests/test-em-cli.mjs
+
+      - name: Run install-wizard suite
+        run: node tests/test-install-wizard.mjs
+
+      - name: Guard against raw control bytes in tracked source (wave-6 hardening)
+        run: node tests/test-no-raw-control-bytes.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code
