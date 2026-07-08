@@ -99,17 +99,57 @@ fi
 # do a basic empty/non-empty check here to avoid spamming with empty values.
 MY_SID="$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")"
 
+# ---------------------------------------------------------------------------
+# Gate decision telemetry (E5) — same contract as checkpoint-gate.sh's
+# _gate_log: one JSON line per terminal decision appended to
+# <repo>/.checkpoints/gate-log.jsonl, pure-bash printf >> under `|| true`,
+# controlled tokens only, never creates .checkpoints/, never fails or alters
+# the gate decision. Repo root comes from the shared resolve_repo_root
+# (lib/repo-root.sh, worktree-aware); if the lib is absent the log line is
+# silently skipped (fail-soft — telemetry is not on the decision path).
+# The stop decision itself is made by enforce-contract.mjs; this logs the
+# OUTCOME the adapter passes through (block vs allow).
+# ---------------------------------------------------------------------------
+GATE_LOG_ROOT=""
+if [ -f "$HOOK_DIR/lib/repo-root.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$HOOK_DIR/lib/repo-root.sh" 2>/dev/null || true
+  if command -v resolve_repo_root >/dev/null 2>&1; then
+    GATE_LOG_ROOT="$(resolve_repo_root "$CWD" 2>/dev/null)" || GATE_LOG_ROOT=""
+  fi
+fi
+_gate_log_sanitize() {
+  printf '%s' "${1//[!A-Za-z0-9._:-]/}"
+}
+# _gate_log <decision> <reason-token>
+_gate_log() {
+  {
+    [ -n "$GATE_LOG_ROOT" ] || return 0
+    [ -d "$GATE_LOG_ROOT/.checkpoints" ] || return 0
+    [ ! -L "$GATE_LOG_ROOT/.checkpoints" ] || return 0
+    printf '{"ts":%s,"gate":"stop","tool":"Stop","label":"","reason":"%s","decision":"%s","sid":"%s","cmd_sha256":""}\n' \
+      "$(date +%s 2>/dev/null || printf '0')" \
+      "$(_gate_log_sanitize "${2:-}")" \
+      "$(_gate_log_sanitize "${1:-}")" \
+      "$(_gate_log_sanitize "${MY_SID:-}")" \
+      >> "$GATE_LOG_ROOT/.checkpoints/gate-log.jsonl" 2>/dev/null
+  } || true
+  return 0
+}
+
 # Invoke core decision logic. Capture stdout; fail-loud envelope on error.
 # Repo-root resolution in enforce-contract.mjs (resolveRepoRoot module-load) now
 # resolves from the cwd we just cd'd to — i.e., the project the hook input
 # named, not the hook process's inherited cwd.
 if [ -n "$MY_SID" ]; then
   DECISION="$(node "$ENFORCE" --gate stop --session-id "$MY_SID" 2>/dev/null)" || {
+    _gate_log block engine_error
     echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
     exit 0
   }
 else
   DECISION="$(node "$ENFORCE" --gate stop 2>/dev/null)" || {
+    _gate_log block engine_error
     echo '{"decision": "block", "reason": "stop-gate.sh: enforce-contract --gate stop exited non-zero. Re-run install.mjs --install-hooks."}'
     exit 0
   }
@@ -117,6 +157,12 @@ fi
 
 # Pass core's JSON through verbatim. Empty stdout = no decision = allow.
 if [ -n "$DECISION" ]; then
+  case "$DECISION" in
+    *'"decision"'*'"block"'*) _gate_log block wrap_up_incomplete ;;
+    *) _gate_log allow stop_decision_passthrough ;;
+  esac
   echo "$DECISION"
+else
+  _gate_log allow stop_clean
 fi
 exit 0

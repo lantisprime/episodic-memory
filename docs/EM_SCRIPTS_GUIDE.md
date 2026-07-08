@@ -663,7 +663,27 @@ directions), tags.json + category-index.json consistency, tokens.json bloat
 (warn when tokens.json exceeds 20x the size of index.jsonl — fix is a
 rebuild, which applies the df diet), dangling `supersedes` pointers, stale
 `.tmp` files from interrupted atomic writes, dead-pid `.lock` files,
-installed-script presence/drift, backup config.
+installed-script presence/drift, backup config, gate friction (below).
+
+**Gate friction** (`gate-friction`, `gate-false-positives`, `gate-log-size`;
+local scope). The Claude Code enforcement gates (checkpoint-gate.sh,
+plan-gate.sh, stop-gate.sh) append one JSON line per terminal decision to
+`<repo>/.checkpoints/gate-log.jsonl`:
+
+```json
+{"ts":1783487852,"gate":"checkpoint","tool":"Bash","label":"read_only","reason":"read_only","decision":"allow","sid":"<session>","cmd_sha256":"<sha256 of the whitespace-normalized command>"}
+```
+
+`em-doctor` reports counts per decision (`allow` / `silence` / `hold` /
+`block`) and the **false-positive metric**: a `hold` (novel Bash command
+parked for agent classification) whose command shape later received a
+`read_only` or `nonsrc_write` verdict in `.checkpoints/classify/` was
+friction on a harmless command — the join re-hashes each verdict marker's
+`command_normalized` with the same whitespace-collapse rules the gate hashes
+with. Warns when downgraded holds exist and when the log exceeds 5MB (the
+gates only append; rotate/truncate it yourself). Absent or partially
+malformed logs degrade gracefully (absent → ok; bad lines counted and
+skipped).
 
 Output (trimmed):
 

@@ -95,6 +95,56 @@ _any_plan_marker_exists_local() {
   any_plan_marker_exists "$REPO_ROOT"
 }
 
+# ---------------------------------------------------------------------------
+# Gate decision telemetry (E5) — same contract as checkpoint-gate.sh's
+# _gate_log: one JSON line per SUBSTANTIVE terminal decision appended to
+# <repo>/.checkpoints/gate-log.jsonl, pure-bash printf >> under `|| true`,
+# controlled tokens only (raw command NEVER embedded — sha256 of the
+# whitespace-normalized command instead), never creates .checkpoints/
+# (caller-leak class), never fails or alters the gate decision.
+#
+# Scope (deliberate): plan-gate logs its silence + block decisions only. The
+# allow paths (no plan marker / read_only / off-repo) are the no-op common
+# case for EVERY tool call; checkpoint-gate already logs the allow story, and
+# double-logging every allowed call from both PreToolUse gates would only
+# bloat the log.
+# ---------------------------------------------------------------------------
+GATE_LOG_FILE="$REPO_ROOT/$PRIMARY_MARKER_DIR/gate-log.jsonl"
+_gate_log_sanitize() {
+  printf '%s' "${1//[!A-Za-z0-9._:-]/}"
+}
+_gate_log_cmd_sha() {
+  local cmd="${COMMAND:-}" norm
+  [ -n "$cmd" ] || return 0
+  norm="$(printf '%s' "$cmd" | tr -s ' \t\n\r' ' ' 2>/dev/null)" || return 0
+  norm="${norm# }"; norm="${norm% }"
+  [ -n "$norm" ] || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$norm" | sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$norm" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  fi
+  return 0
+}
+# _gate_log <decision> <reason-token>
+_gate_log() {
+  {
+    [ -n "$REPO_ROOT" ] || return 0
+    [ -d "$REPO_ROOT/$PRIMARY_MARKER_DIR" ] || return 0
+    [ ! -L "$REPO_ROOT/$PRIMARY_MARKER_DIR" ] || return 0
+    printf '{"ts":%s,"gate":"plan","tool":"%s","label":"%s","reason":"%s","decision":"%s","sid":"%s","cmd_sha256":"%s"}\n' \
+      "$(date +%s 2>/dev/null || printf '0')" \
+      "$(_gate_log_sanitize "${TOOL_NAME:-}")" \
+      "$(_gate_log_sanitize "${LABEL:-}")" \
+      "$(_gate_log_sanitize "${2:-}")" \
+      "$(_gate_log_sanitize "${1:-}")" \
+      "$(_gate_log_sanitize "${MY_SID:-}")" \
+      "$(_gate_log_cmd_sha)" \
+      >> "$GATE_LOG_FILE" 2>/dev/null
+  } || true
+  return 0
+}
+
 # Read-only tools — always allowed (planning needs them).
 case "$TOOL_NAME" in
   Read|Glob|Grep|Agent|WebFetch|WebSearch|AskUserQuestion|EnterPlanMode|ExitPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|Skill|NotebookRead|ToolSearch|mcp__*)
@@ -122,6 +172,7 @@ ENFORCE_CONTRACT="$HOOK_DIR/enforce-contract.mjs"
 if _any_plan_marker_exists_local; then
   GATE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate plan_approval --marker-root "$REPO_ROOT" 2>/dev/null)" || GATE_DISP=""
   if [ "$GATE_DISP" = "silence" ] || [ "$GATE_DISP" = "clamp-off" ]; then
+    _gate_log silence enforce_config_plan_approval
     exit 0
   fi
 fi
@@ -133,6 +184,7 @@ fi
 # plan-marker.mjs --rm.
 if ! $SID_VALID; then
   if _any_plan_marker_exists_local; then
+    _gate_log block plan_pending_invalid_sid
     jq -nc --arg path "$PLAN_PENDING_W" \
       '{decision: "block", reason: ("Plan approval pending; session_id missing/invalid in PreToolUse stdin — failing closed. Provide a valid session_id (PreToolUse JSON .session_id field) or clear the marker at " + $path + ". Hook: plan-gate.sh.")}'
     exit 0
@@ -206,5 +258,6 @@ fi
 # invalid-session fail-closed path at plan-gate.sh above is an orthogonal
 # security block that does gate Bash em-* under a missing/forged session_id — an
 # accepted fail-closed exception; Claude Code always supplies a valid session_id.)
+_gate_log block plan_pending
 jq -nc --arg path "$PLAN_PENDING_W" \
   '{decision: "block", reason: ("Plan approval pending. Repo-source write blocked until the plan above is approved (say \"go\" or \"approved\"). Non-repo writes, episodes, plan files, and reads are NOT blocked. Marker: " + $path)}'

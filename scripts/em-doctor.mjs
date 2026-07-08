@@ -22,6 +22,12 @@
  *                     when run from a repo checkout, byte-compares installed
  *                     copies against repo sources (drift → warn)
  *   backup            backup config presence (info only)
+ *   gate-friction     parses <repo>/.checkpoints/gate-log.jsonl (E5 gate
+ *                     decision telemetry): per-decision counts, the
+ *                     false-positive metric (held command shapes later
+ *                     classified read_only/nonsrc_write in
+ *                     .checkpoints/classify/), and a >5MB size warning.
+ *                     Degrades gracefully when the log is absent/malformed.
  *
  * --fix repairs what is safely repairable: rebuilds indexes (via
  * em-rebuild-index.mjs) when index/tags/category checks fail, and removes
@@ -37,6 +43,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
@@ -373,8 +380,98 @@ function checkDrafts() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Gate-friction (E5): the enforcement gates (checkpoint-gate.sh, plan-gate.sh,
+// stop-gate.sh) append one JSON line per terminal decision to
+// <repo>/.checkpoints/gate-log.jsonl:
+//   {ts, gate, tool, label, reason, decision: allow|silence|hold|block, sid,
+//    cmd_sha256}
+// where cmd_sha256 = sha256 of the WHITESPACE-NORMALIZED Bash command (runs of
+// space/tab/CR/LF collapsed to one space, trimmed). This check reports decision
+// counts and the FALSE-POSITIVE metric: a `hold` (novel command parked for
+// agent classification) whose command shape LATER received a read_only or
+// nonsrc_write verdict in .checkpoints/classify/ was friction the classifier
+// caused on a harmless command. The join key re-hashes each classify marker's
+// informational `command_normalized` field with the same collapse rules (a
+// command with a trailing `#` comment misses the join — normalizeCommand also
+// strips comments — which only UNDERcounts false positives; acceptable).
+// Degrades gracefully: absent log → ok; unreadable → warn; malformed lines are
+// counted and skipped, never fatal. Warns when the log exceeds 5MB.
+// ---------------------------------------------------------------------------
+const GATE_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+function checkGateFriction() {
+  const repoRoot = path.dirname(LOCAL_DIR) // LOCAL_DIR = <repo>/.episodic-memory
+  const logPath = path.join(repoRoot, '.checkpoints', 'gate-log.jsonl')
+  let st
+  try { st = fs.statSync(logPath) } catch {
+    report('gate-friction', 'local', 'ok', 'no gate decision log (.checkpoints/gate-log.jsonl absent)')
+    return
+  }
+  if (st.size > GATE_LOG_MAX_BYTES) {
+    report('gate-log-size', 'local', 'warn',
+      `gate-log.jsonl is ${(st.size / (1024 * 1024)).toFixed(1)}MB (limit 5MB) — rotate or truncate it (the gates only ever append)`)
+  }
+  let raw
+  try { raw = fs.readFileSync(logPath, 'utf8') } catch (e) {
+    report('gate-friction', 'local', 'warn', `gate-log.jsonl unreadable (${e.code || e.message})`)
+    return
+  }
+  const lines = raw.split('\n').filter(Boolean)
+  const counts = { allow: 0, silence: 0, hold: 0, block: 0 }
+  let malformed = 0
+  const holdShas = new Map() // cmd_sha256 → hold-event count
+  for (const line of lines) {
+    let row
+    try { row = JSON.parse(line) } catch { malformed++; continue }
+    if (row === null || typeof row !== 'object' || typeof row.decision !== 'string') { malformed++; continue }
+    counts[row.decision] = (counts[row.decision] || 0) + 1
+    if (row.decision === 'hold' && typeof row.cmd_sha256 === 'string' && /^[0-9a-f]{64}$/.test(row.cmd_sha256)) {
+      holdShas.set(row.cmd_sha256, (holdShas.get(row.cmd_sha256) || 0) + 1)
+    }
+  }
+  const countMsg =
+    `${lines.length - malformed} gate decision(s): ${counts.allow} allow, ${counts.silence} silence, ` +
+    `${counts.hold} hold, ${counts.block} block` +
+    (malformed ? ` (${malformed} malformed line(s) skipped)` : '')
+  report('gate-friction', 'local', 'ok', countMsg,
+    verbose ? { counts, malformed } : undefined)
+
+  // False-positive metric: held shapes later downgraded by an agent verdict.
+  const classifyDir = path.join(repoRoot, '.checkpoints', 'classify')
+  let markerFiles = []
+  try {
+    markerFiles = fs.readdirSync(classifyDir).filter(f => f.endsWith('.json') && !f.startsWith('.'))
+  } catch { /* no classify store → no verdicts to join against */ }
+  const downgradedShas = new Set()
+  for (const f of markerFiles) {
+    let m
+    try { m = JSON.parse(fs.readFileSync(path.join(classifyDir, f), 'utf8')) } catch { continue }
+    if (m === null || typeof m !== 'object') continue
+    if (m.label !== 'read_only' && m.label !== 'nonsrc_write') continue
+    if (typeof m.command_normalized !== 'string') continue
+    const normed = m.command_normalized.replace(/[ \t\r\n]+/g, ' ').trim()
+    if (!normed) continue
+    const sha = crypto.createHash('sha256').update(normed).digest('hex')
+    if (holdShas.has(sha)) downgradedShas.add(sha)
+  }
+  if (downgradedShas.size > 0) {
+    let holdEvents = 0
+    for (const sha of downgradedShas) holdEvents += holdShas.get(sha)
+    report('gate-false-positives', 'local', 'warn',
+      `${downgradedShas.size} held command shape(s) (${holdEvents} hold event(s)) later classified read_only/nonsrc_write — classifier false positives; consider a pattern/override for these shapes`,
+      verbose ? { shas: [...downgradedShas] } : undefined)
+  } else if (counts.hold > 0) {
+    report('gate-false-positives', 'local', 'ok',
+      `${counts.hold} hold(s), none later downgraded to read_only/nonsrc_write`)
+  } else {
+    report('gate-false-positives', 'local', 'ok', 'no holds recorded')
+  }
+}
+
 if (scope === 'local' || scope === 'all') checkStore(LOCAL_DIR, 'local')
 if (scope === 'global' || scope === 'all') checkStore(GLOBAL_DIR, 'global')
+if (scope === 'local' || scope === 'all') checkGateFriction()
 checkInstalledScripts()
 checkBackupConfig()
 checkDrafts()
