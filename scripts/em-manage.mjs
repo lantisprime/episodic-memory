@@ -139,15 +139,29 @@ async function actionStatus() {
 // what you run.
 async function dryRunThenApply(label, script, applyArgs, dryArgs) {
   console.log(`\n  [preview] ${label} (dry-run)`)
-  const dry = runJson(script, dryArgs)
+  let dry = runJson(script, dryArgs)
   printResult(`${label} dry-run`, dry, { rawRequested: true })
   if (dry.code !== 0 || !dry.json || dry.json.status === 'error') {
     console.log('  dry-run failed — not offering apply.')
     return
   }
-  if (!(await askYesNo(`Apply ${label}?`, false))) {
-    console.log('  left untouched (dry-run only).')
-    return
+  // Consent is to the PREVIEW (P3/P10): the store can change between the
+  // dry-run and the y answer, so re-run the dry-run at apply time and require
+  // fresh confirmation whenever the preview no longer matches.
+  for (;;) {
+    if (!(await askYesNo(`Apply ${label}?`, false))) {
+      console.log('  left untouched (dry-run only).')
+      return
+    }
+    const recheck = runJson(script, dryArgs)
+    if (JSON.stringify(recheck.json) === JSON.stringify(dry.json)) break
+    console.log('  store changed since the preview — refreshed dry-run:')
+    printResult(`${label} dry-run (refreshed)`, recheck, { rawRequested: true })
+    if (recheck.code !== 0 || !recheck.json || recheck.json.status === 'error') {
+      console.log('  refreshed dry-run failed — not offering apply.')
+      return
+    }
+    dry = recheck
   }
   const applied = runJson(script, applyArgs)
   printResult(`${label} apply`, applied, { rawRequested: true })

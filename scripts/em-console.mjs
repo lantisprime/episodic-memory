@@ -185,31 +185,56 @@ function buildArgs(entry, flags) {
   return { args }
 }
 
+// Child-process concurrency bound (P6: a burst of API calls must not fan out
+// an unbounded process storm — each child carries a 32MB output buffer).
+// Beyond MAX_CHILDREN running, requests queue; beyond MAX_QUEUE waiting, 429.
+const MAX_CHILDREN = 4
+const MAX_QUEUE = 32
+let activeChildren = 0
+const childQueue = []
+function drainChildQueue() {
+  while (childQueue.length && activeChildren < MAX_CHILDREN) childQueue.shift()()
+}
+
 function runCommand(cmd, flags) {
   return new Promise((resolve) => {
     const entry = COMMANDS[cmd]
     const built = buildArgs(entry, flags)
     if (built.error) return resolve({ code: 400, body: { status: 'error', cmd, message: built.error } })
     const scriptPath = path.join(SCRIPT_DIR, entry.script)
-    execFile(process.execPath, [scriptPath, ...built.args], {
-      cwd: process.cwd(),
-      timeout: 60_000,
-      maxBuffer: 32 * 1024 * 1024,
-      env: process.env,
-    }, (err, stdout, stderr) => {
-      let result
-      try { result = JSON.parse(String(stdout).trim()) } catch { result = { raw: String(stdout) } }
-      resolve({
-        code: 200,
-        body: {
-          status: 'ok',
-          cmd,
-          exit_code: err && typeof err.code === 'number' ? err.code : (err ? 1 : 0),
-          result,
-          ...(stderr && String(stderr).trim() ? { stderr: String(stderr).slice(0, 4000) } : {}),
-        },
+    const spawnChild = () => {
+      activeChildren++
+      execFile(process.execPath, [scriptPath, ...built.args], {
+        cwd: process.cwd(),
+        timeout: 60_000,
+        maxBuffer: 32 * 1024 * 1024,
+        env: process.env,
+      }, (err, stdout, stderr) => {
+        activeChildren--
+        drainChildQueue()
+        let result
+        try { result = JSON.parse(String(stdout).trim()) } catch { result = { raw: String(stdout) } }
+        // Relay the child's own verdict: the wrapper turns error ONLY when the
+        // child self-declares status:'error'. Exit code alone doesn't decide —
+        // em-doctor exits 1 with status:'issues' on an unhealthy store, and
+        // that report must still render (the server presents, never decides).
+        const childErrored = result && typeof result === 'object' && result.status === 'error'
+        resolve({
+          code: 200,
+          body: {
+            status: childErrored ? 'error' : 'ok',
+            cmd,
+            exit_code: err && typeof err.code === 'number' ? err.code : (err ? 1 : 0),
+            ...(childErrored && result.message ? { message: String(result.message) } : {}),
+            result,
+            ...(stderr && String(stderr).trim() ? { stderr: String(stderr).slice(0, 4000) } : {}),
+          },
+        })
       })
-    })
+    }
+    if (activeChildren < MAX_CHILDREN) spawnChild()
+    else if (childQueue.length >= MAX_QUEUE) resolve({ code: 429, body: { status: 'error', cmd, message: 'server busy — too many concurrent commands, retry shortly' } })
+    else childQueue.push(spawnChild)
   })
 }
 
@@ -252,7 +277,11 @@ let lastActivity = Date.now()
 async function handle(req, res) {
   lastActivity = Date.now()
   const url = new URL(req.url, `http://${host}`)
-  const candidate = req.headers['x-em-token'] || url.searchParams.get('token') || ''
+  // Query token authorizes ONLY the bootstrap page load (GET /), where the
+  // printed URL lands; every API route requires the X-EM-Token header so the
+  // token never rides referrers/history for data requests.
+  const queryToken = req.method === 'GET' && url.pathname === '/' ? url.searchParams.get('token') : ''
+  const candidate = req.headers['x-em-token'] || queryToken || ''
 
   if (!tokenOk(candidate)) {
     return sendJson(res, 401, { status: 'error', message: 'missing or invalid token — relaunch em-console and open the printed URL' })

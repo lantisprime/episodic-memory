@@ -137,3 +137,14 @@ isolated fixture stores; verdict ACCEPT, no P1):
 | F4 | Idle shutdown checked on a fixed 30s tick regardless of `--idle-timeout` | P3 | FIXED — interval = min(30s, idleTimeoutMs). |
 | F5 | Registry `write:false` classification had no conformance test tying it to actual non-mutation | P3 | FIXED — byte-stability sweep: every read command runs against a seeded sandbox and the full tree sha256 must be identical before/after; the case list is pinned to the registry so a new read command fails the sweep until added. |
 | F6 | CSP `script-src 'unsafe-inline'` means esc() is the only XSS layer (all sinks verified escaped) | P3 | PARTIAL — added `object-src 'none'; base-uri 'none'; form-action 'none'`. Script nonce deferred: single-page inline app, all sinks audited + hostile-payload probed by the reviewer. |
+
+codex (gpt-5.5, cmux interactive) round 1 on the same diff post-F1-F6
+(runtime probes incl. 80-way concurrency and a live TOCTOU injection; verdict
+HOLD, 3xP2 + 1xP3):
+
+| # | Finding | Sev | Disposition |
+|---|---|---|---|
+| R1-1 | Child CLI failures wrapped as top-level `status:"ok"` (invalid category store probed: wrapper ok, child error buried) | P2 | FIXED WITH MODIFICATION — wrapper relays `status:'error'` + message ONLY when the child self-declares `status:'error'`; exit code alone does not flip it, because em-doctor exits 1 with `status:'issues'` on an unhealthy store and that report must stay renderable (probed both polarities; both regression-tested). |
+| R1-2 | No concurrency bound on /api/run child fan-out (80 parallel calls -> 75 simultaneous children x 32MB maxBuffer) | P2 | FIXED — in-process semaphore: 4 running children max, 32 queued max, 429 beyond; 50-way burst regression asserts only 200/429 and post-burst responsiveness. |
+| R1-3 | em-manage dry-run consent TOCTOU: store mutated between preview and `y` applies unpreviewed state | P2 | FIXED — apply re-runs the dry-run; on any JSON difference it prints the refreshed preview and re-asks (loop until stable or declined). Regression drives a live wizard, injects a second chain mid-prompt, asserts re-confirmation fires and declined apply leaves bytes untouched. |
+| R1-4 | Query-string token accepted on every route, not just the bootstrap page | P3 | FIXED — `?token=` authorizes GET / only; /api/* requires the X-EM-Token header. Regression: query token on /api/meta and /api/run -> 401, page load -> 200. |

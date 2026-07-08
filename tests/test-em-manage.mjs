@@ -19,7 +19,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import assert from 'assert'
-import { spawnSync } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const MANAGE = path.join(REPO, 'scripts', 'em-manage.mjs')
@@ -160,6 +160,74 @@ test('fold dry-run with declined apply leaves the store untouched', () => {
     assert.deepStrictEqual(episodeFiles(s), before, 'store changed on declined apply')
   } finally { s.cleanup() }
 })
+
+console.log('TOCTOU guard:')
+await (async function toctouTest() {
+  const name = 'store mutation between fold preview and apply forces re-confirmation (codex R1-3)'
+  const s = makeSandbox()
+  const wiz = spawn(process.execPath, [MANAGE], {
+    cwd: s.cwd, env: { ...process.env, HOME: s.home }, stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  try {
+    // Build a long supersedes chain so the fold dry-run has something to say.
+    const first = seedEpisodes(s, 1)[0]
+    let prev = first
+    for (let i = 0; i < 11; i++) {
+      const r = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'em-revise.mjs'),
+        '--original', prev, '--project', 'manage-fixture',
+        '--summary', `rev ${i}`, '--body', `rev body ${i}`], {
+        cwd: s.cwd, env: { ...process.env, HOME: s.home }, encoding: 'utf8',
+      })
+      prev = JSON.parse(r.stdout.trim()).id
+    }
+
+    let out = ''
+    wiz.stdout.on('data', (c) => { out += c })
+    // Occurrence-count waits: prompts can arrive in the same chunk as the
+    // message before them, so position markers race — counts don't.
+    const countOf = (re) => (out.match(re) || []).length
+    const waitForCount = (re, n) => new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`timeout waiting for ${n}x ${re}; output:\n${out}`)), 30000)
+      const check = () => {
+        if (countOf(re) >= n) { clearTimeout(t); resolve() }
+        else setTimeout(check, 100)
+      }
+      check()
+    })
+    const APPLY_RE = /Apply fold-superseded\? \[y\/N\]/g
+
+    wiz.stdin.write('2\n2\n\n') // hygiene → fold → scope local (default)
+    await waitForCount(APPLY_RE, 1)
+    // Mutate the store BETWEEN preview and consent: a second long chain.
+    const second = seedEpisodes(s, 1)[0]
+    let p2 = second
+    for (let i = 0; i < 11; i++) {
+      const r = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'em-revise.mjs'),
+        '--original', p2, '--project', 'manage-fixture',
+        '--summary', `b rev ${i}`, '--body', `b rev body ${i}`], {
+        cwd: s.cwd, env: { ...process.env, HOME: s.home }, encoding: 'utf8',
+      })
+      p2 = JSON.parse(r.stdout.trim()).id
+    }
+    const filesAfterMutation = episodeFiles(s)
+    wiz.stdin.write('y\n') // consent to the STALE preview
+    await waitForCount(/store changed since the preview/g, 1)
+    await waitForCount(APPLY_RE, 2) // the refreshed preview must re-ask
+    wiz.stdin.write('n\nq\n') // decline the refreshed preview, quit
+    const code = await new Promise((r) => wiz.on('exit', r))
+    assert.strictEqual(code, 0, `exit ${code}; output:\n${out}`)
+    assert.deepStrictEqual(episodeFiles(s), filesAfterMutation, 'stale consent applied a fold')
+    passed++
+    console.log(`  ok ${name}`)
+  } catch (e) {
+    failed++
+    failures.push({ name, error: e.message })
+    console.log(`  FAIL ${name}: ${e.message}`)
+  } finally {
+    wiz.kill()
+    s.cleanup()
+  }
+})()
 
 console.log('console launcher:')
 test('option 6 under piped stdin refuses instead of blocking (F3 regression)', () => {

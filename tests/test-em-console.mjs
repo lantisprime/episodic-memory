@@ -291,6 +291,41 @@ await (async () => {
       const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'pin', flags: { id: 'not-an-id' } } })
       assert.strictEqual(r.status, 400)
     })
+    await test('child self-declared error relays as wrapper status error (codex R1-1)', async () => {
+      const r = await req(rw.port, '/api/run', {
+        method: 'POST', token: TOKEN,
+        body: { cmd: 'store', flags: { project: 'x', category: 'not-a-category', summary: 's', body: 'b', scope: 'local' } },
+      })
+      assert.strictEqual(r.status, 200, 'transport still 200')
+      assert.strictEqual(r.json.status, 'error', `wrapper hid the child failure: ${JSON.stringify(r.json).slice(0, 200)}`)
+      assert.ok(/Invalid category/.test(r.json.message), r.json.message)
+      assert.strictEqual(r.json.result.status, 'error', 'child JSON still verbatim under result')
+    })
+    await test('doctor exit-1-with-issues does NOT relay as wrapper error (report stays renderable)', async () => {
+      // em-doctor exits 1 with status:'issues' on an unhealthy store — that is
+      // a renderable report, not an invocation failure. Wrapper must stay ok.
+      const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'doctor', flags: { scope: 'local' } } })
+      assert.strictEqual(r.json.status, 'ok', `doctor report misrelayed: ${JSON.stringify(r.json).slice(0, 200)}`)
+      assert.ok(r.json.result.summary, 'doctor summary missing')
+    })
+    await test('concurrent burst is bounded, never 5xx, server stays responsive (codex R1-2)', async () => {
+      const burst = await Promise.all(Array.from({ length: 50 }, () =>
+        req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'stats', flags: { scope: 'local' } } })))
+      for (const r of burst) assert.ok(r.status === 200 || r.status === 429, `unexpected status ${r.status}`)
+      const after = await req(rw.port, '/api/meta', { token: TOKEN })
+      assert.strictEqual(after.status, 200, 'server unresponsive after burst')
+    })
+    await test('query token authorizes ONLY the page load, never /api/* (codex R1-4)', async () => {
+      const meta = await req(rw.port, `/api/meta?token=${TOKEN}`)
+      assert.strictEqual(meta.status, 401, 'query token rode /api/meta')
+      const run = await fetch(`http://127.0.0.1:${rw.port}/api/run?token=${TOKEN}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'stats', flags: {} }),
+      })
+      assert.strictEqual(run.status, 401, 'query token rode /api/run')
+      const page = await req(rw.port, `/?token=${TOKEN}`)
+      assert.strictEqual(page.status, 200, 'page bootstrap broke')
+    })
   } finally {
     rw.proc.kill()
     s1.cleanup()
