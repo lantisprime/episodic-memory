@@ -1612,6 +1612,8 @@ if [ "$PRE_REQ_MTIME_BEFORE" = "$PRE_REQ_MTIME_AFTER" ] \
   ((passed++))
 else
   echo "  ✗ SA-disk. Off-repo Edit while armed: marker artifacts changed unexpectedly"
+  echo "     mtime_before=$PRE_REQ_MTIME_BEFORE mtime_after=$PRE_REQ_MTIME_AFTER pre_done=$([ -e "$PRE_DONE" ] && echo EXISTS || echo no) post_req=$([ -e "$POST_REQ" ] && echo EXISTS || echo no) post_done=$([ -e "$POST_DONE" ] && echo EXISTS || echo no)"
+  echo "     .checkpoints listing: $(ls -a "$TEST_DIR/.checkpoints" 2>/dev/null | tr '\n' ' ')"
   ((failed++))
 fi
 
