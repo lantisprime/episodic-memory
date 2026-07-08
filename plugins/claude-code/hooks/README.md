@@ -36,6 +36,30 @@ allowlist. See `tools/migration-cutover.mjs` and `tools/migration-sweep.mjs`
 for the install-parity check and burn-in exit gate that protect the
 fallback-removal commit.
 
+## Classifier verdict cache — canonical key (E3)
+
+`checkpoint-gate.sh` holds novel Bash commands for agent classification; the
+verdicts live in `<repo>/.checkpoints/classify/<sha>.json` and are read/written
+by `scripts/classifier-marker.mjs`. The cache key is a CONSERVATIVE canonical
+command form (`scripts/lib/command-canonical.mjs`): executable +
+subcommand/script-path token (absolute prefixes under the repo root / `$HOME`
+normalized to `<REPO>` / `<HOME>`) + the sorted SET of flag names — flag VALUES
+and positional operands dropped. So `node em-x.mjs --limit 1` and
+`node em-x.mjs --limit 2` share one verdict, while:
+
+- different flag-NAME sets never share a verdict;
+- any redirect / pipe / substitution / quoting / env-prefix / `key=value`
+  operand form is NOT canonicalizable and keys on its literal form only — a
+  write-capable variant can never hit a `read_only` verdict cached from a form
+  without it;
+- in-repo interpreter scripts keep the stronger script-identity key
+  (exe + content digest, args fully ignored).
+
+Reads try the canonical key first, then fall back to the pre-E3 legacy literal
+key (existing markers keep hitting until TTL/`--vacuum` reaps them). Writes
+persist under the canonical key with the raw command preserved in the marker's
+`command_raw` field for audit. Tests: `tests/test-canonical-cache-key.mjs`.
+
 ## Installation
 
 `install.mjs --install-hooks` (PR-B per #59 + PR-A per #86):

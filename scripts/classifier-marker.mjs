@@ -66,6 +66,18 @@
  * changes the sha for every cached tuple, making all existing markers
  * unreachable. Use --vacuum to reap them.
  *
+ * E3 canonical cache key (gate-classifier UX): for command subjects that are
+ * neither script-identity-keyed nor refused by command-canonical.mjs, the
+ * tuple's normalized_command carries the CANONICAL form (executable +
+ * subcommand/script-path + sorted flag-NAME set; values dropped; <REPO>/<HOME>
+ * placeholders) plus a `canonical_form_version` discriminator field. --read
+ * tries the canonical key first and falls back to the pre-E3 legacy LITERAL
+ * key so existing markers still hit; --write persists under the canonical
+ * key. Redirect/metachar/env-prefix forms are never canonicalizable and stay
+ * on the literal key, so a write-capable variant can never hit a read_only
+ * verdict cached from a form without it. The raw command is preserved in the
+ * marker's `command_raw` field for audit.
+ *
  * Allowlisted in command-classifier.sh as `interpreter_classifier_marker`
  * with strict argv-shape match + env-prefix-form rejection (per PR #271
  * cross-session attack class).
@@ -82,6 +94,12 @@ import { resolveRepoRoot } from './lib/local-dir.mjs'
 // policy versions; classifier-cache does not) stay independent while the
 // key-omission rule is shared, single-sourced, and cannot drift.
 import { isInterpreterScriptIdentity } from './lib/classifier-cache.mjs'
+// E3 (gate-classifier UX): conservative canonical command form. Cache lookup
+// and persist key on the canonical form (executable + subcommand/script-path
+// + flag-NAME set, values dropped, <REPO>/<HOME> path placeholders) so
+// verdicts generalize across flag-value variants. Non-canonicalizable shapes
+// (redirects/metachars/env-prefix/ambiguous operands) keep the literal key.
+import { canonicalizeCommand, CANONICAL_FORM_VERSION } from './lib/command-canonical.mjs'
 
 const LABELS = new Set([
   'read_only',
@@ -305,10 +323,44 @@ function buildPathTuple({ targetCanonical, projectRoot, sessionId }) {
   }
 }
 
+// ----- Canonical-form tuple (E3, gate-classifier UX) -----
+//
+// buildCanonicalFormTuple — the canonical-form sibling of buildTuple. Returns
+// null when the command is not canonicalizable (shell metachars, env-prefix,
+// ambiguous operands — see command-canonical.mjs) OR when the command already
+// keys on script identity (in-repo interpreter script: exe + digest — a
+// STRONGER generalization that also pins the script body; canonical form
+// would only weaken it).
+//
+// Namespace segregation from legacy tuples: the extra `canonical_form_version`
+// field changes the sorted-JSON field set, so a canonical sha can never
+// collide with a legacy literal sha even for identical strings.
+function buildCanonicalFormTuple({ command, projectRoot, callerCwd, sessionId, legacyTuple }) {
+  if (legacyTuple.normalized_command === null) return null // script-identity key wins
+  const canon = canonicalizeCommand({ command, projectRoot, callerCwd })
+  if (!canon.canonical) return null
+  return {
+    canonical_form_version: CANONICAL_FORM_VERSION,
+    project_root_canonical: projectRoot,
+    caller_cwd_or_rel: legacyTuple.caller_cwd_or_rel,
+    normalized_command: canon.canonical,
+    executable_resolved: legacyTuple.executable_resolved,
+    script_digest: legacyTuple.script_digest,
+    session_id: sessionId,
+    classifier_policy_version: CLASSIFIER_POLICY_VERSION,
+    normalized_command_version: NORMALIZED_COMMAND_VERSION
+  }
+}
+
 // resolveInputTuple — resolve the classification subject for --read/--write:
 // exactly one of {--command|--command-file} (a Bash command) OR --target-path
 // (a Write/Edit target). Returns the cache tuple, its sha, and the value to
 // store in the marker's informational `command_normalized` field.
+//
+// E3 key precedence for commands: the CANONICAL-form tuple is the primary
+// lookup/persist key when available; the legacy literal tuple is returned as
+// `legacyTuple`/`legacySha` so --read can fall back to pre-E3 markers
+// (backward compatibility: existing literal-key entries must still hit).
 function resolveInputTuple(argv, { projectRoot, callerCwd, sessionId }) {
   const targetPath = flag(argv, '--target-path')
   const inlineCmd = flag(argv, '--command')
@@ -326,11 +378,23 @@ function resolveInputTuple(argv, { projectRoot, callerCwd, sessionId }) {
 
   const command = resolveCommandArg(argv)
   if (command === undefined) die(2, '--command, --command-file, or --target-path required')
-  const tuple = buildTuple({ command, projectRoot, callerCwd, sessionId })
+  const legacyTuple = buildTuple({ command, projectRoot, callerCwd, sessionId })
+  const legacySha = cacheKey(legacyTuple)
+  const canonicalTuple = buildCanonicalFormTuple({ command, projectRoot, callerCwd, sessionId, legacyTuple })
+  const tuple = canonicalTuple || legacyTuple
   // payloadNorm is the INFORMATIONAL command_normalized field, NOT the key.
   // Computed from the full command (not tuple.normalized_command, which is null
   // for script-identity keys) so the marker always records what was classified.
-  return { tuple, sha: cacheKey(tuple), payloadNorm: normalizeCommand(command) }
+  return {
+    tuple,
+    sha: cacheKey(tuple),
+    payloadNorm: normalizeCommand(command),
+    keyForm: canonicalTuple ? 'canonical' : (legacyTuple.normalized_command === null ? 'script_identity' : 'literal'),
+    canonicalForm: canonicalTuple ? canonicalTuple.normalized_command : null,
+    legacyTuple,
+    legacySha,
+    commandRaw: String(command)
+  }
 }
 
 // ----- Path-component hardening (lstat each ancestor, refuse symlinks) -----
@@ -585,7 +649,8 @@ function mainRead(argv) {
   // --target-path) is a usage error (exit 2) that must take precedence over a
   // missing-store cache miss (exit 1) — otherwise a fresh repo with no
   // .checkpoints/ would mask the misuse as a benign miss.
-  const { tuple, sha } = resolveInputTuple(argv, { projectRoot, callerCwd, sessionId })
+  const { tuple, sha, keyForm, legacyTuple, legacySha } =
+    resolveInputTuple(argv, { projectRoot, callerCwd, sessionId })
 
   // Codex BLOCKER #1 fix: --read MUST apply the same ancestor validation as
   // --write. Symlinked .checkpoints/ would otherwise let a read escape to an
@@ -598,7 +663,22 @@ function mainRead(argv) {
   }
   const classifyDir = v.classifyDir
 
-  const result = readMarker(classifyDir, sha, tuple, sessionId)
+  let result = readMarker(classifyDir, sha, tuple, sessionId)
+  let keyFormUsed = keyForm
+
+  // E3 backward compatibility: canonical-key miss falls back to the legacy
+  // LITERAL key so pre-E3 markers still hit. Fallback fires ONLY on a clean
+  // miss/stale — a reject (tamper/symlink) on the canonical key stays a
+  // reject. Writes always persist under the canonical key, so the legacy
+  // entry naturally ages out via TTL + --vacuum.
+  if (result.status !== 'hit' && result.status !== 'reject'
+      && keyForm === 'canonical' && legacySha !== sha) {
+    const legacyResult = readMarker(classifyDir, legacySha, legacyTuple, sessionId)
+    if (legacyResult.status === 'hit') {
+      result = legacyResult
+      keyFormUsed = 'legacy_literal'
+    }
+  }
 
   if (result.status === 'hit') {
     emit({
@@ -607,7 +687,8 @@ function mainRead(argv) {
       confidence: result.payload.confidence,
       reason: result.payload.reason,
       project_root_used: projectRoot,
-      cache_key: sha,
+      cache_key: keyFormUsed === 'legacy_literal' ? legacySha : sha,
+      key_form: keyFormUsed,
       session_id: sessionId
     })
     process.exit(0)
@@ -617,6 +698,7 @@ function mainRead(argv) {
     reason: result.reason,
     project_root_used: projectRoot,
     cache_key: sha,
+    key_form: keyFormUsed,
     session_id: sessionId
   })
   process.exit(1)
@@ -661,7 +743,8 @@ function mainWrite(argv) {
   // Resolve + validate the subject BEFORE creating the store dir, so a misuse
   // (mutual-exclusion, oversize, off-repo --target-path) exits 2 without
   // leaving an empty .checkpoints/classify/ behind.
-  const { tuple, sha, payloadNorm } = resolveInputTuple(argv, { projectRoot, callerCwd, sessionId })
+  const { tuple, sha, payloadNorm, keyForm, canonicalForm, commandRaw } =
+    resolveInputTuple(argv, { projectRoot, callerCwd, sessionId })
   const { classifyDir } = validateMarkerStoreDir(projectRoot, { allowCreate: true, missingIsMiss: false })
   const nowIso = new Date().toISOString()
   const payload = {
@@ -669,6 +752,12 @@ function mainWrite(argv) {
     confidence,
     reason: String(reasonRaw).slice(0, REASON_MAX),
     command_normalized: payloadNorm,
+    // E3 audit fields: the RAW command as received (canonical keys generalize
+    // across variants, so the key alone no longer identifies the exact
+    // command that was classified) + the canonical form used for the key.
+    ...(commandRaw !== undefined ? { command_raw: commandRaw } : {}),
+    ...(keyForm ? { key_form: keyForm } : {}),
+    ...(canonicalForm ? { command_canonical: canonicalForm } : {}),
     _project_root_canonical: projectRoot,
     _cache_key: sha,
     _session_id: sessionId,
