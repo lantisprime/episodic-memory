@@ -177,5 +177,54 @@ t('testReviseActivationFields', () => {
   assert.match(revMd, /^status: active$/m, 'rejected revise leaves the target active (no supersede mutation)');
 });
 
+// --- S3: REQ-6 evidence linkage ---
+
+function storeViolation(cwd, home, { scope = 'local' } = {}) {
+  const r = run(path.join(REPO, 'scripts/em-violation.mjs'),
+    ['--pattern', 'bp-001-implementation-workflow', '--summary', 'v', '--body', 'b', '--scope', scope], { cwd, home });
+  assert.equal(r.code, 0, r.stdout);
+  return r.json.id;
+}
+
+t('testEvidenceValidViolation', () => {
+  const { cwd, home } = mkStore();
+  const vid = storeViolation(cwd, home);
+  const r = run(EM_STORE, [...LESSON, '--evidence', vid], { cwd, home });
+  assert.equal(r.code, 0, r.stdout);
+  const md = readEpisode(cwd, r.json.id);
+  assert.match(md, new RegExp(`^evidence: \\[${vid}\\]$`, 'm'));
+  const row = indexRows(cwd).find((e) => e.id === r.json.id);
+  assert.deepEqual(row.evidence, [vid]);
+});
+
+t('testEvidenceRejectsMissing', () => {
+  const { cwd, home } = mkStore();
+  const r = run(EM_STORE, [...LESSON, '--evidence', 'no-such-violation'], { cwd, home });
+  assert.equal(r.code, 1);
+  assert.match(r.json.message, /no-such-violation/);
+  assert.equal(episodeFiles(cwd).length, 0, 'no partial write');
+});
+
+t('testEvidenceRejectsNonViolation', () => {
+  const { cwd, home } = mkStore();
+  const other = run(EM_STORE, [...LESSON], { cwd, home });
+  assert.equal(other.code, 0);
+  const r = run(EM_STORE, [...LESSON, '--evidence', other.json.id], { cwd, home });
+  assert.equal(r.code, 1, 'EC4: lesson id as --evidence is wrong-category');
+  assert.match(r.json.message, /wrong-category/);
+  assert.equal(episodeFiles(cwd).length, 1, 'only the first lesson exists');
+});
+
+t('testEvidenceCrossScopeResolves', () => {
+  // F1: a LOCAL lesson may link a GLOBAL violation — resolution is MERGED, never per-active-scope.
+  const { cwd, home } = mkStore();
+  const globalVid = storeViolation(cwd, home, { scope: 'global' });
+  assert.ok(fs.existsSync(path.join(home, '.episodic-memory', 'episodes', `${globalVid}.md`)), 'violation landed in the fake-HOME global store');
+  const r = run(EM_STORE, [...LESSON, '--evidence', globalVid], { cwd, home });
+  assert.equal(r.code, 0, `cross-scope evidence must resolve: ${r.stdout}`);
+  const row = indexRows(cwd).find((e) => e.id === r.json.id);
+  assert.deepEqual(row.evidence, [globalVid]);
+});
+
 console.log(`\n${pass}/${pass + fail} pass`);
 process.exit(fail ? 1 : 0);

@@ -90,6 +90,10 @@ const evidence = flagAll('--evidence')
 // Typed T6 passthrough scalar (REQ-8): set by em-violation's handoff; generic
 // flag, violation-only in practice.
 const violatedPattern = flag('--violated-pattern')
+// REQ-7 violation-side forward-links, set by em-violation's handoff. Guarded +
+// re-validated below: em-store is also a direct write surface, and every
+// surface that feeds the earned band carries the SAME check (I2).
+const lessonLinks = flagAll('--lesson')
 // --pin: exempt from time decay (recall floor 0.6 instead of 0.1) and from
 // em-prune archival. For foundational decisions that must not fade.
 const pinned = argv.includes('--pin')
@@ -170,6 +174,25 @@ if (activation && Array.isArray(activation.evidence) && activation.evidence.leng
   }
 }
 
+// REQ-7 (S3): --lesson is the violation-side forward-link — valid only on
+// category:violation writes, and SYMMETRIC with --evidence (I2): each id must
+// resolve to an EXISTING category:lesson episode in the MERGED index.
+if (lessonLinks.length) {
+  if (category !== 'violation') {
+    console.log(JSON.stringify({ status: 'error', message: `--lesson is a violation-side linkage field, valid only with --category violation (got "${category}")` }))
+    process.exit(1)
+  }
+  const lv = resolveLinkage(lessonLinks, { requireCategory: 'lesson', index: loadMergedIndex() })
+  if (!lv.ok) {
+    console.log(JSON.stringify({
+      status: 'error',
+      message: `--lesson must name existing lesson episodes; missing: [${lv.missing.join(', ')}] wrong-category: [${lv.wrongCategory.join(', ')}]`,
+      missing: lv.missing, wrong_category: lv.wrongCategory
+    }))
+    process.exit(1)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Resolve data directory
 // ---------------------------------------------------------------------------
@@ -237,6 +260,8 @@ if (activation) {
   fmLines.push(`priority: ${activation.priority}`)
   if (activation.review_by !== undefined) fmLines.push(`review_by: ${activation.review_by}`)
 }
+// REQ-7 violation-side forward-links (validated above; unquoted inline array).
+if (lessonLinks.length) fmLines.push(`lessons: [${serializeInlineArray(lessonLinks)}]`)
 // T6 typed scalar (REQ-8): violation-side passthrough from em-violation's handoff.
 if (violatedPattern !== undefined) fmLines.push(`violated_pattern: ${violatedPattern}`)
 if (pinned) fmLines.push('pinned: true')
@@ -265,6 +290,7 @@ const activationIndexFields = {
     ACTIVATION_ARRAY_FIELDS.filter(f => Array.isArray(activation[f]) && activation[f].length)
       .map(f => [f, activation[f]])
   ) : {}),
+  ...(lessonLinks.length ? { lessons: lessonLinks.map(s => s.trim()) } : {}),
   ...(activation ? { priority: activation.priority } : {}),
   ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
   ...(violatedPattern !== undefined ? { violated_pattern: violatedPattern } : {}),
