@@ -116,14 +116,22 @@ t('testSessionStartPreflightByViolatedPattern', () => {
   const { cwd, home } = mkStore();
   const v = run(EM_VIOLATION, ['--pattern', PATTERN, '--summary', 'v', '--body', 'b', '--scope', 'local'], { cwd, home });
   assert.equal(v.code, 0);
-  // legacy-tag-only row must NOT count here: preflight is keyed by the TYPED field (REQ-15/T6 dep)
+  // reviewer F4: preflight is the THIRD violated_pattern read site — it
+  // dual-reads (typed field ∪ legacy tag) like em-recall/em-pattern-health,
+  // so a pre-migration tag-only violation still counts.
   const tagOnly = run(EM_STORE, ['--project', 't', '--category', 'violation', '--tags', `violated:${PATTERN}`,
     '--summary', 'tag-only', '--body', 'b', '--scope', 'local'], { cwd, home });
   assert.equal(tagOnly.code, 0);
   const { index } = buildTriggerIndex({ project: cwd, scope: 'local', now: new Date() });
   const pf = index.session_start.preflight;
-  assert.equal(pf.implementation[PATTERN], 1, 'typed violated_pattern rows counted per task type');
+  assert.equal(pf.implementation[PATTERN], 2, 'typed-only AND tag-only violations both count (dual-read)');
   assert.deepEqual(pf.push, {}, 'no bp-006 violations');
+  // a DUAL-written violation (the em-violation shape: tag + typed) counts ONCE
+  const dual = run(EM_STORE, ['--project', 't', '--category', 'violation', '--violated-pattern', PATTERN,
+    '--tags', `violated:${PATTERN}`, '--summary', 'dual', '--body', 'b', '--scope', 'local'], { cwd, home });
+  assert.equal(dual.code, 0);
+  const { index: i2 } = buildTriggerIndex({ project: cwd, scope: 'local', now: new Date() });
+  assert.equal(i2.session_start.preflight.implementation[PATTERN], 3, 'dual-written row counts once, not twice');
 });
 
 t('testSessionStartExcludesExpiredAndSuperseded', () => {

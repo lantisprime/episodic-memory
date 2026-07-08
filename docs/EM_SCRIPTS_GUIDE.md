@@ -256,8 +256,9 @@ Flags that matter:
   original). Only pass `local` or `global` to force a cross-store move.
 - Tags are inherited from the original and merged with any you pass.
 - The same lesson-only activation flags as `em-store` apply (validated against the
-  INHERITED category); activation fields are NOT inherited — re-pass `--trigger`
-  etc. on the revision if the lesson should keep firing.
+  INHERITED category). Activation, linkage, and `violated_pattern` are INHERITED
+  from the original — like tags — so a typo-revision never demotes a lesson to
+  freeform; a flag passed on the revise OVERRIDES that one field (replace, not merge).
 
 Common mistakes: inventing a new episode with `em-store` instead of revising, which
 leaves both versions active and searchable.
@@ -757,8 +758,12 @@ Flags that matter:
 - `--project <root>` is a PATH binding (unique among em-* scripts, where
   `--project` is a name filter): when `<root>` is an existing directory the local
   store is `<root>/.episodic-memory` regardless of caller cwd.
-- `--merged` prints the local-precedence merged entries (one store failing
-  degrades to the other with a stderr note, never fatal).
+- `--merged` prints the local-precedence merged view (one store failing degrades
+  to the other with a stderr note, never fatal). The merged view RECOMPUTES
+  `effective_priority` and `session_start` against BOTH stores' rows, so a
+  cross-scope link (local lesson, global violation) earns the band there; the
+  per-store artifact keeps a per-store band (deterministic per store). Consumers
+  read the merged view.
 
 The artifact: `trigger-index.json` carries `schema_version`, a `source` fingerprint
 (`index_mtime_ms` + `index_size` + `index_sha256`, TOCTOU-safe), a `build_report`

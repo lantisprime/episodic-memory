@@ -29,7 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { validateCategory, canonicalCategory } from './lib/categories.mjs'
-import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
+import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, parseActivationFromFrontmatter } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
@@ -138,6 +138,8 @@ if (!original) {
 // so validation has to precede that mutation, not follow the later metadata parse).
 // ---------------------------------------------------------------------------
 let activation = null // normalized RFC-009 activation fields (set in the block below)
+let inheritedLessons = [] // violation-side forward-links, inherited verbatim (F3)
+let inheritedViolatedPattern // T6 typed scalar, inherited verbatim (F3)
 {
   const origRaw = fs.readFileSync(original.filePath, 'utf8')
   const fm = origRaw.match(/^---\n([\s\S]*?)\n---/)
@@ -164,26 +166,36 @@ let activation = null // normalized RFC-009 activation fields (set in the block 
     process.exit(1)
   }
 
-  // RFC-009 R1: validate activation fields against the INHERITED category
-  // BEFORE the supersede mutation below (I4 — a rejected revise leaves the
-  // original active and the store byte-unchanged).
-  const av = validateActivation({
-    ...(triggers.length ? { triggers } : {}),
-    ...(appliesToProjects.length ? { applies_to_projects: appliesToProjects } : {}),
-    ...(appliesToTools.length ? { applies_to_tools: appliesToTools } : {}),
-    ...(evidence.length ? { evidence } : {}),
-    ...(priorityFlag !== undefined ? { priority: Number(priorityFlag) } : {}),
-    ...(reviewBy !== undefined ? { review_by: reviewBy } : {}),
-  }, { category: cat })
+  // RFC-009 R1 + reviewer F3: activation, linkage, and the T6 typed field are
+  // INHERITED from the original (tags already inherit — silent activation loss
+  // on a typo-revision demoted lessons to freeform and dropped violation band
+  // links). A flag passed on the revise OVERRIDES that field; absent flags keep
+  // the original's values. Validation runs on the MERGED result against the
+  // inherited category, BEFORE the supersede mutation below (I4).
+  const inherited = parseActivationFromFrontmatter(origRaw)
+  inheritedLessons = Array.isArray(inherited.lessons) ? inherited.lessons : []
+  inheritedViolatedPattern = inherited.violated_pattern
+  const merged = {
+    ...(triggers.length ? { triggers } : (inherited.triggers ? { triggers: inherited.triggers } : {})),
+    ...(appliesToProjects.length ? { applies_to_projects: appliesToProjects } : (inherited.applies_to_projects ? { applies_to_projects: inherited.applies_to_projects } : {})),
+    ...(appliesToTools.length ? { applies_to_tools: appliesToTools } : (inherited.applies_to_tools ? { applies_to_tools: inherited.applies_to_tools } : {})),
+    ...(evidence.length ? { evidence } : (inherited.evidence ? { evidence: inherited.evidence } : {})),
+    ...(priorityFlag !== undefined ? { priority: Number(priorityFlag) } : (inherited.priority !== undefined ? { priority: inherited.priority } : {})),
+    ...(reviewBy !== undefined ? { review_by: reviewBy } : (inherited.review_by !== undefined ? { review_by: inherited.review_by } : {})),
+  }
+  const av = validateActivation(merged, { category: cat })
   if (!av.ok) {
     console.log(JSON.stringify({ status: 'error', errors: av.errors, message: av.errors.map(e => e.message).join('; ') }))
     process.exit(1)
   }
-  activation = av.fields // null when the revise carries no activation flags
+  activation = av.fields // null when neither flags nor the original carry activation
 
-  // REQ-6 (revise-side parity): merged-index resolution, never per-active-scope (F1).
-  if (activation && Array.isArray(activation.evidence) && activation.evidence.length) {
-    const lv = resolveLinkage(activation.evidence, { requireCategory: 'violation', index: loadMergedIndex() })
+  // REQ-6 (revise-side parity): merged-index resolution, never per-active-scope
+  // (F1). Only NEWLY passed --evidence re-validates — inherited links carry
+  // verbatim (a linked violation may have been legitimately retracted since;
+  // the band derivation, not the write gate, is what discounts it).
+  if (evidence.length) {
+    const lv = resolveLinkage(evidence, { requireCategory: 'violation', index: loadMergedIndex() })
     if (!lv.ok) {
       console.log(JSON.stringify({
         status: 'error',
@@ -330,6 +342,9 @@ if (activation) {
   activationFmLines.push(`priority: ${activation.priority}`)
   if (activation.review_by !== undefined) activationFmLines.push(`review_by: ${activation.review_by}`)
 }
+// F3: violation-side fields inherit verbatim (no revise-side flags exist for them)
+if (inheritedLessons.length) activationFmLines.push(`lessons: [${serializeInlineArray(inheritedLessons)}]`)
+if (inheritedViolatedPattern !== undefined) activationFmLines.push(`violated_pattern: ${inheritedViolatedPattern}`)
 
 const frontmatter = [
   '---',
@@ -360,8 +375,10 @@ const activationIndexFields = {
     ACTIVATION_ARRAY_FIELDS.filter(f => Array.isArray(activation[f]) && activation[f].length)
       .map(f => [f, activation[f]])
   ) : {}),
+  ...(inheritedLessons.length ? { lessons: inheritedLessons } : {}),
   ...(activation ? { priority: activation.priority } : {}),
   ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
+  ...(inheritedViolatedPattern !== undefined ? { violated_pattern: inheritedViolatedPattern } : {}),
 }
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project: resolvedProject,

@@ -189,6 +189,24 @@ t('testBandChainResolvedViolation', () => {
     'evidence naming the superseded violation resolves to its active terminal (counts once)');
 });
 
+t('testBandCrossStoreMergedView', () => {
+  // Reviewer F2: a LOCAL lesson linking a GLOBAL violation (legitimate, REQ-6/F1)
+  // earns the band in the MERGED consumer view. The per-store artifact keeps a
+  // per-store band by design (a cached global index must not depend on the
+  // caller's local store); consumers read loadMergedTriggerIndex.
+  const { cwd, home } = mkStore();
+  const gv = run(EM_VIOLATION, ['--pattern', PATTERN, '--summary', 'gv', '--body', 'b', '--scope', 'global'], { cwd, home });
+  assert.equal(gv.code, 0);
+  const id = storeLesson(cwd, home, ['--trigger', 'x phrase', '--evidence', gv.json.id]);
+  const merged = run(EM_TRIGGER, ['--merged'], { cwd, home });
+  assert.equal(merged.code, 0, merged.stdout);
+  const entry = merged.json.entries.find((e) => e.episode_id === id);
+  assert.equal(entry.effective_priority, 8, 'cross-store link earns the band in the merged view');
+  const crit = merged.json.session_start.critical_entries.find((e) => e.episode_id === id);
+  assert.ok(crit, 'merged session_start critical band sees the cross-store link');
+  assert.equal(crit.effective_priority, 8);
+});
+
 t('testBandRetractedStops', () => {
   const { cwd, home } = mkStore();
   const v1 = storeViolation(cwd, home);

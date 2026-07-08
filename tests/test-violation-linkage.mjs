@@ -123,6 +123,24 @@ t('testViolationKeepsTagShim', () => {
   assert.equal(row.violated_pattern, PATTERN, 'dual-write: shim AND typed field');
 });
 
+t('testReviseViolationKeepsTypedFieldAndLessons', () => {
+  // Reviewer F3: revising a violation (e.g. a summary correction) must not
+  // strip its typed violated_pattern or its --lesson forward-links.
+  const { cwd, home } = mkStore();
+  const lessonId = storeLesson(cwd, home);
+  const v = run(EM_VIOLATION, ['--pattern', PATTERN, '--lesson', lessonId, '--summary', 'v', '--body', 'b', '--scope', 'local'], { cwd, home });
+  assert.equal(v.code, 0);
+  const EM_REVISE = path.join(REPO, 'scripts/em-revise.mjs');
+  const rev = run(EM_REVISE, ['--original', v.json.id, '--project', 't', '--summary', 'typo fix', '--body', 'c', '--scope', 'local'], { cwd, home });
+  assert.equal(rev.code, 0, rev.stdout);
+  const md = fs.readFileSync(path.join(storeDir(cwd), 'episodes', `${rev.json.id}.md`), 'utf8');
+  assert.match(md, new RegExp(`^violated_pattern: ${PATTERN}$`, 'm'), 'typed field inherited');
+  assert.match(md, new RegExp(`^lessons: \\[${lessonId}\\]$`, 'm'), 'forward-links inherited');
+  const row = indexRows(cwd).find((e) => e.id === rev.json.id);
+  assert.equal(row.violated_pattern, PATTERN);
+  assert.deepEqual(row.lessons, [lessonId]);
+});
+
 t('testStoreDirectLessonGuard', () => {
   // I2 forge control: --lesson through em-store directly is category-guarded +
   // linkage-validated the same as the em-violation surface.

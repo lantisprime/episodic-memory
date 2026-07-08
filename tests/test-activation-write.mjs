@@ -127,6 +127,29 @@ t('testUnquotedRoundTrip', () => {
   assert.equal(rebuiltRow.priority, storedRow.priority);
 });
 
+t('testStoreRejectsControlCharInjection', () => {
+  // Reviewer F1: a raw newline in ANY serialized value fabricates adjacent
+  // frontmatter keys (a forged superseded_by is chain/band forgery). The whole
+  // control-char class rejects BEFORE any write, on every serialized surface.
+  const { cwd, home } = mkStore();
+  const victim = '20990101-000000-victim-lesson-0001';
+  const r = run(EM_STORE, [...LESSON, '--trigger', `atk\nsuperseded_by: ${victim}\nx`], { cwd, home });
+  assert.equal(r.code, 1, 'newline trigger rejected');
+  assert.equal(r.json.errors[0].reason, 'illegal-char:\\x0a');
+  assert.equal(episodeFiles(cwd).length, 0, 'no partial write');
+  const r2 = run(EM_STORE, ['--project', 't', '--category', 'violation',
+    '--violated-pattern', `x\ntriggers: [forged]\npriority: 9`,
+    '--summary', 's', '--body', 'b', '--scope', 'local'], { cwd, home });
+  assert.equal(r2.code, 1, 'newline in --violated-pattern rejected (passthrough scalar is the same class)');
+  assert.match(r2.json.message, /illegal character/);
+  assert.equal(episodeFiles(cwd).length, 0);
+  const r3 = run(EM_STORE, [...LESSON, '--trigger', 'cr\rattack'], { cwd, home });
+  assert.equal(r3.code, 1, 'CR rejected too');
+  // rebuild proves no forged keys ever reached an index row
+  run(path.join(REPO, 'scripts/em-rebuild-index.mjs'), ['--scope', 'local'], { cwd, home });
+  assert.equal(indexRows(cwd).length, 0, 'nothing to rebuild — store byte-unchanged');
+});
+
 t('testStoreRejectsCommaTrigger', () => {
   const { cwd, home } = mkStore();
   const r = run(EM_STORE, [...LESSON, '--trigger', 'a, b'], { cwd, home });
@@ -175,6 +198,30 @@ t('testReviseActivationFields', () => {
   assert.equal(bad.json.errors[0].reason, 'earned-band');
   const revMd = readEpisode(cwd, rev.json.id);
   assert.match(revMd, /^status: active$/m, 'rejected revise leaves the target active (no supersede mutation)');
+});
+
+t('testReviseInheritsActivation', () => {
+  // Reviewer F3: a typo-revision must not demote a lesson to freeform — tags
+  // inherit, so activation inherits too; a passed flag OVERRIDES per field.
+  const { cwd, home } = mkStore();
+  const s = run(EM_STORE, [...LESSON, '--trigger', 'keep me', '--applies-to-tool', 'codex',
+    '--priority', '3', '--review-by', '2099-01-01'], { cwd, home });
+  assert.equal(s.code, 0);
+  const rev = run(EM_REVISE, ['--original', s.json.id, '--project', 't', '--summary', 'typo fix', '--body', 'c', '--scope', 'local'], { cwd, home });
+  assert.equal(rev.code, 0, rev.stdout);
+  const md = readEpisode(cwd, rev.json.id);
+  assert.match(md, /^triggers: \[keep me\]$/m, 'triggers inherited');
+  assert.match(md, /^applies_to_tools: \[codex\]$/m, 'scoping inherited');
+  assert.match(md, /^priority: 3$/m, 'declared priority inherited');
+  assert.match(md, /^review_by: 2099-01-01$/m, 'expiry inherited');
+  // per-field override: new trigger replaces, priority stays inherited
+  const rev2 = run(EM_REVISE, ['--original', rev.json.id, '--project', 't', '--summary', 'retarget', '--body', 'c',
+    '--scope', 'local', '--trigger', 'new phrase'], { cwd, home });
+  assert.equal(rev2.code, 0);
+  const md2 = readEpisode(cwd, rev2.json.id);
+  assert.match(md2, /^triggers: \[new phrase\]$/m, 'passed flag overrides the field');
+  assert.ok(!/keep me/.test(md2), 'override replaces, not merges');
+  assert.match(md2, /^priority: 3$/m, 'unpassed fields keep inheriting');
 });
 
 // --- S3: REQ-6 evidence linkage ---

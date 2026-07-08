@@ -359,14 +359,19 @@ export function buildSessionStart(rows, now = new Date()) {
 
   // preflight — per-task-type recent-violation counts keyed by the TYPED
   // violated_pattern field (why T6 is a hard dep of REQ-15). 30-day window.
+  // Reviewer F4: this is the THIRD violated_pattern read site — same T6
+  // dual-read as em-recall/em-pattern-health (typed field ∪ legacy tag, one
+  // count per row); sunset the tag leg after the burn-in window (issue #457).
   const cutoff = new Date(nowMs - 30 * DAY).toISOString().slice(0, 10)
   const preflight = {}
   for (const [taskType, patternIds] of Object.entries(TASK_TYPE_PATTERNS)) {
     const counts = {}
     for (const pid of patternIds) {
+      const legacyTag = `violated:${pid}` // T6 burn-in shim (legacy tag construction)
       const n = rows.filter(r =>
         r && r.category === 'violation' && r.status !== 'superseded' &&
-        r.violated_pattern === pid &&
+        (r.violated_pattern === pid ||
+          (Array.isArray(r.tags) && r.tags.includes(legacyTag))) &&
         typeof r.date === 'string' && r.date >= cutoff).length
       if (n > 0) counts[pid] = n
     }
@@ -385,6 +390,15 @@ export function buildSessionStart(rows, now = new Date()) {
  * precedence (mirrors em-search). One store failing degrades to the other with
  * a single stderr note — never throws (I5). Consumers (R9a, the P2 R4 hook)
  * call THIS, never buildTriggerIndex directly.
+ *
+ * Reviewer F2: the earned band is RECOMPUTED here against the UNION of both
+ * stores' rows, so a cross-scope link (local lesson --evidence global
+ * violation — legitimate per REQ-6/F1) earns the band a per-store artifact
+ * cannot see. The per-store trigger-index.json keeps its per-store band (a
+ * cached global artifact must stay deterministic — it cannot depend on
+ * whichever local store a caller sits in); every consumer reads THIS merged
+ * view, so the band consumers see is the cross-store one. `session_start` is
+ * rebuilt from the merged rows for the same reason.
  */
 export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
   let local = null
@@ -395,17 +409,36 @@ export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
   try { global = buildTriggerIndex({ scope: 'global', now }).index } catch (e) {
     process.stderr.write(`em-trigger-index: global build failed (${e.message}); proceeding with local only\n`)
   }
+
+  // union of both stores' rows, deduped by id with LOCAL precedence — the row
+  // set the cross-store band and the merged session_start are computed from.
+  // Read errors degrade to whatever loaded (matching the per-store degrades).
+  const mergedRows = []
+  const seenRows = new Set()
+  for (const scope of ['local', 'global']) {
+    let raw = ''
+    try {
+      const dir = resolveStoreDir({ project, scope })
+      raw = fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8')
+    } catch { continue }
+    for (const row of parseRows(raw)) {
+      if (!row || typeof row.id !== 'string' || seenRows.has(row.id)) continue
+      seenRows.add(row.id)
+      mergedRows.push(row)
+    }
+  }
+
   const seenEpisodes = new Set()
   const entries = []
   for (const idx of [local, global]) { // local first -> local precedence
     if (!idx || !Array.isArray(idx.entries)) continue
     for (const e of idx.entries) {
       if (seenEpisodes.has(e.episode_id)) continue // earlier store won this episode
-      entries.push(e)
+      entries.push({ ...e, effective_priority: effectivePriority(e.episode_id, mergedRows) })
     }
     for (const e of idx.entries) seenEpisodes.add(e.episode_id)
   }
-  return { entries, local, global }
+  return { entries, session_start: buildSessionStart(mergedRows, now), local, global }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +468,7 @@ if (isMainModule()) {
   }
   if (argv.includes('--merged')) {
     const merged = loadMergedTriggerIndex({ project })
-    console.log(JSON.stringify({ status: 'ok', entries: merged.entries }))
+    console.log(JSON.stringify({ status: 'ok', entries: merged.entries, session_start: merged.session_start }))
     process.exit(0)
   }
   const built = []

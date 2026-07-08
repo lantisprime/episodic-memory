@@ -29,7 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
-import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
+import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, illegalValueChar } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
@@ -171,6 +171,24 @@ if (activation && Array.isArray(activation.evidence) && activation.evidence.leng
       message: `--evidence must name existing violation episodes; missing: [${lv.missing.join(', ')}] wrong-category: [${lv.wrongCategory.join(', ')}]`,
       missing: lv.missing, wrong_category: lv.wrongCategory
     }))
+    process.exit(1)
+  }
+}
+
+// Reviewer F1/F6: the handoff passthroughs are serialized into frontmatter too —
+// a control char (esp. \n/\r) in either would FABRICATE adjacent frontmatter
+// keys (chain/band forgery). Same one-serialization-class rule as REQ-2 (I4).
+if (violatedPattern !== undefined) {
+  const bad = illegalValueChar(violatedPattern)
+  if (bad !== null) {
+    console.log(JSON.stringify({ status: 'error', message: `--violated-pattern value contains illegal character ${JSON.stringify(bad)} — values may not contain , [ ] " or control characters` }))
+    process.exit(1)
+  }
+}
+for (const l of lessonLinks) {
+  const bad = illegalValueChar(l)
+  if (bad !== null) {
+    console.log(JSON.stringify({ status: 'error', message: `--lesson value contains illegal character ${JSON.stringify(bad)}` }))
     process.exit(1)
   }
 }

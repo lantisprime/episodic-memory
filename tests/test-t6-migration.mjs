@@ -219,7 +219,9 @@ const EXPECTED_SHIM_FILES = {
   'em-recall.mjs': 1,
   'em-pattern-health.mjs': 2, // the key is built TWICE (fromTags + linearScan), codex r2
   'em-violation.mjs': 1, // WRITE-side construction — allow-listed marked shim
+  'em-trigger-index.mjs': 1, // session_start.preflight dual-read leg (reviewer F4)
 };
+const EXPECTED_SHIM_LINES = 5;
 
 function grepConstructionLines(scriptsDir) {
   const out = [];
@@ -234,10 +236,10 @@ function grepConstructionLines(scriptsDir) {
 
 t('testT2NoTagValueBranching', () => {
   const matches = grepConstructionLines(path.join(REPO, 'scripts'));
-  assert.equal(matches.length, 4, `exactly 4 marked construction lines expected, got ${matches.length}: ${matches.map((m) => `${m.file}:${m.lineNo}`).join(', ')}`);
+  assert.equal(matches.length, EXPECTED_SHIM_LINES, `exactly ${EXPECTED_SHIM_LINES} marked construction lines expected, got ${matches.length}: ${matches.map((m) => `${m.file}:${m.lineNo}`).join(', ')}`);
   const byFile = {};
   for (const m of matches) byFile[m.file] = (byFile[m.file] || 0) + 1;
-  assert.deepEqual(byFile, EXPECTED_SHIM_FILES, 'the allow-listed shim distribution across the three files');
+  assert.deepEqual(byFile, EXPECTED_SHIM_FILES, 'the allow-listed shim distribution across the four files');
   for (const m of matches) {
     assert.ok(/T6/.test(m.context), `T6 sunset marker on/adjacent to ${m.file}:${m.lineNo}`);
   }
@@ -249,7 +251,7 @@ t('testT2NoTagValueBranching', () => {
   fs.appendFileSync(path.join(scratch, 'em-recall.mjs'),
     '\nfunction plantedUnmarkedBranch(patternId, tags) { return tags.includes(`violated:${patternId}`) }\n');
   const planted = grepConstructionLines(scratch);
-  assert.equal(planted.length, 5, 'planted branch is discovered');
+  assert.equal(planted.length, EXPECTED_SHIM_LINES + 1, 'planted branch is discovered');
   const unmarked = planted.filter((m) => !/T6/.test(m.context));
   assert.equal(unmarked.length, 1, 'the planted line has no T6 marker → the gate would fail on it (non-vacuous)');
 });

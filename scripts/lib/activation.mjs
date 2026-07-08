@@ -29,6 +29,23 @@ export const TOOL_IDS = ['claude-code', 'codex', 'opencode', 'pi-agent', 'cursor
 // round-trip through em-rebuild-index's generic frontmatter parser.
 export const ILLEGAL_ARRAY_CHARS = [',', '[', ']', '"']
 
+// Reviewer F1 (2026-07-08): the four structural chars are not the whole class —
+// a raw newline/CR (or any control char) in a serialized value FABRICATES
+// adjacent frontmatter keys (e.g. a forged `superseded_by:` line that the band's
+// chain resolver then walks). Every serialized activation value rejects control
+// chars too; returns the offending char (escaped name) or null.
+export function illegalValueChar(s) {
+  const str = String(s)
+  for (const c of ILLEGAL_ARRAY_CHARS) {
+    if (str.includes(c)) return c
+  }
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i)
+    if (code < 0x20 || code === 0x7f) return `\\x${code.toString(16).padStart(2, '0')}`
+  }
+  return null
+}
+
 // The activation frontmatter fields (R1). Arrays serialize as unquoted inline arrays;
 // scalars as plain values. `evidence` is the lesson→violation back-link; `lessons` is
 // the violation→lesson forward-link (REQ-6/7).
@@ -84,9 +101,8 @@ export function serializeInlineArray(items) {
   const out = []
   for (const item of items) {
     const s = String(item).trim()
-    for (const c of ILLEGAL_ARRAY_CHARS) {
-      if (s.includes(c)) throw new Error(`inline-array item ${JSON.stringify(s)} contains illegal character ${JSON.stringify(c)}`)
-    }
+    const bad = illegalValueChar(s)
+    if (bad !== null) throw new Error(`inline-array item ${JSON.stringify(s)} contains illegal character ${JSON.stringify(bad)}`)
     if (s) out.push(s)
   }
   return out.join(', ')
@@ -151,13 +167,14 @@ export function validateActivation(fields, { category } = {}) {
   }
 
   // State B — inline-array items must survive the unquoted round-trip (REQ-2).
+  // Reviewer F1: control chars (\n, \r, ...) are in the same class as the four
+  // structural chars — a newline fabricates adjacent frontmatter keys.
   for (const [field, items] of Object.entries(arrays)) {
     for (const item of items) {
       const s = String(item)
-      for (const c of ILLEGAL_ARRAY_CHARS) {
-        if (s.includes(c)) {
-          errors.push({ field, reason: `illegal-char:${c}`, message: `"${field}" item ${JSON.stringify(s)} contains illegal character ${JSON.stringify(c)} — inline-array items may not contain , [ ] or "` })
-        }
+      const bad = illegalValueChar(s)
+      if (bad !== null) {
+        errors.push({ field, reason: `illegal-char:${bad}`, message: `"${field}" item ${JSON.stringify(s)} contains illegal character ${JSON.stringify(bad)} — inline-array items may not contain , [ ] " or control characters` })
       }
       if (!s.trim()) {
         errors.push({ field, reason: 'empty-item', message: `"${field}" contains an empty item` })
@@ -222,6 +239,39 @@ export function validateActivation(fields, { category } = {}) {
   if (arrays.evidence.length) out.evidence = arrays.evidence.map(t => String(t).trim())
   if (f.review_by !== undefined) out.review_by = String(f.review_by)
   return { ok: true, fields: out }
+}
+
+/**
+ * Parse the activation/linkage/T6 fields out of an episode file's frontmatter
+ * (reviewer F3: em-revise INHERITS these from the original unless overridden —
+ * tags already inherit, so silent activation loss on revision was an asymmetry).
+ * Mirrors em-rebuild-index's generic parser for the subset the writers emit.
+ * @param {string} content full episode .md content
+ * @returns {{triggers?:string[], applies_to_projects?:string[], applies_to_tools?:string[],
+ *            evidence?:string[], lessons?:string[], priority?:number, review_by?:string,
+ *            violated_pattern?:string}}
+ */
+export function parseActivationFromFrontmatter(content) {
+  const out = {}
+  const match = String(content).match(/^---\n([\s\S]*?)\n---/)
+  if (!match) return out
+  for (const line of match[1].split('\n')) {
+    const m = line.match(/^(\w+):\s*(.*)$/)
+    if (!m) continue
+    const [, key, raw] = m
+    if (ACTIVATION_ARRAY_FIELDS.includes(key)) {
+      const arr = raw.match(/^\[(.*)\]$/)
+      if (arr) out[key] = arr[1].split(',').map(s => s.trim()).filter(Boolean)
+    } else if (key === 'priority') {
+      const n = Number(raw)
+      if (Number.isInteger(n)) out.priority = n
+    } else if (key === 'review_by') {
+      out.review_by = raw
+    } else if (key === 'violated_pattern') {
+      out.violated_pattern = raw
+    }
+  }
+  return out
 }
 
 /**
