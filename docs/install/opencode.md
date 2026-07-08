@@ -35,7 +35,7 @@ node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool opencode --project <ABSOLUTE_PA
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
 ```
-Installed 32 scripts to <HOME>/.episodic-memory/scripts
+Installed 33 scripts to <HOME>/.episodic-memory/scripts
 Seeded default LLM classifier config at <HOME>/.episodic-memory/classifier-config.json
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
@@ -58,7 +58,7 @@ warns and skips instead of creating a duplicate.
 
 | Path | What |
 |---|---|
-| `~/.episodic-memory/scripts/` | 32 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
+| `~/.episodic-memory/scripts/` | 33 substrate scripts (em-*, em.mjs, second-opinion) + `lib/` |
 | `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` | agent-facing per-script reference |
 | `~/.episodic-memory/patterns/_index.json` | pattern registry |
 | `<project>/.opencode/skills/episodic-memory/SKILL.md` | the OpenCode skill (points at the guide) |

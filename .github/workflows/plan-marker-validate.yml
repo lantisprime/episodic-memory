@@ -234,6 +234,9 @@ jobs:
       - name: Guard against raw control bytes in tracked source (wave-6 hardening)
         run: node tests/test-no-raw-control-bytes.mjs
 
+      - name: Run em-capture session auto-capture suite (wave-6 #2)
+        run: node tests/test-em-capture.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

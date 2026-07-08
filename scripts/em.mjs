@@ -33,6 +33,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 // absent here still dispatch — they just render without a description.
 const DESCRIPTIONS = {
   store: 'Save a new episode (decision, lesson, discovery, ...)',
+  capture: 'Draft candidate episodes from session transcripts; confirm-before-store',
   search: 'Search episodes by query/tag/category/project',
   list: 'List episodes, newest first',
   recall: 'Proactive session-start recall for the current project',

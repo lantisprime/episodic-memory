@@ -203,6 +203,7 @@ async function flowInstall() {
   await maybeAddPathShim()
   await maybeConfigureSemantic(projectDir)
   await maybeConfigureRoutines()
+  await maybeConfigureCapture()
   return verifyWithDoctor(projectDir)
 }
 
@@ -346,6 +347,31 @@ async function maybeConfigureRoutines() {
     console.log(`    Logs: ${r.json.log_dir} — manage with: em routines list|enable|disable|run`)
   } else {
     console.log(`${BAD} Scheduling failed (${r.json ? r.json.message : `exit ${r.code}`}). Try later: em routines sync`)
+  }
+}
+
+// Wave-6 #2: session auto-capture opt-in. EOF/enter default to SKIP — piped
+// answer sequences in tests rely on starved answers defaulting safely, and
+// auto-capture is an explicit-activation capability (drafts only; confirm
+// happens via `em-capture review`).
+async function maybeConfigureCapture() {
+  console.log('\nSession auto-capture (optional): at session end, draft candidate episodes')
+  console.log('(decisions, lessons, discoveries) from the transcript; you confirm them later')
+  console.log('with `em capture review` — drafts are never stored without confirmation.')
+  if (!(await askYesNo('Enable session auto-capture?', false))) {
+    console.log('    Skipped. Later: write ~/.episodic-memory/capture-config.json {"enabled": true}')
+    console.log('    or run: node ~/.episodic-memory/scripts/em-capture.mjs extract --session-id <id>')
+    return
+  }
+  const cfgPath = path.join(GLOBAL_DIR, 'capture-config.json')
+  const cfg = { enabled: true, mode: 'heuristic', max: 5 }
+  try {
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n')
+    console.log(`${OK} Auto-capture enabled (heuristic mode) — config at ${cfgPath}`)
+    console.log(`    LLM-drafted candidates instead: set {"mode": "cmd", "cmd": "sh ${path.join(REPO_DIR, 'examples', 'capturers', 'claude-capture.sh')}"}`)
+    console.log('    Review pending drafts any time: em capture list')
+  } catch (err) {
+    console.log(`${BAD} Could not write ${cfgPath} (${err.message}). Try later.`)
   }
 }
 

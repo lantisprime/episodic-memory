@@ -61,7 +61,7 @@ plain stdin lines, so agents can script it:
 Every install (all tools) prints, among other lines:
 
 ```
-Installed 32 scripts to <HOME>/.episodic-memory/scripts
+Installed 33 scripts to <HOME>/.episodic-memory/scripts
 Installed patterns/_index.json to <HOME>/.episodic-memory/patterns
 Installed EM_SCRIPTS_GUIDE.md to <HOME>/.episodic-memory
 ...
@@ -109,7 +109,7 @@ Verify the shared substrate with one command and read the command reference:
 
 ```
 node <HOME>/.episodic-memory/scripts/em-doctor.mjs   # {"status":"ok",...} + exit 0 = healthy
-ls <HOME>/.episodic-memory/scripts        # 32 scripts (30 em-*.mjs + em.mjs + second-opinion.mjs) + lib/
+ls <HOME>/.episodic-memory/scripts        # 33 scripts (31 em-*.mjs + em.mjs + second-opinion.mjs) + lib/
 cat <HOME>/.episodic-memory/EM_SCRIPTS_GUIDE.md
 ```
 

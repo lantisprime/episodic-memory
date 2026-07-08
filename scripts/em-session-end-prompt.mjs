@@ -191,6 +191,32 @@ const knownPatterns = patterns.map(p => ({
 
 const scriptsDir = path.join(os.homedir(), '.episodic-memory', 'scripts')
 
+// Wave-6 #2 session auto-capture: fire-and-forget draft extraction from this
+// session's transcript. STRICTLY best-effort — a SessionEnd hook must never
+// block session teardown, so the child is detached/unref'd and every failure
+// is swallowed to stderr. Runs ONLY when the operator opted in via
+// ~/.episodic-memory/capture-config.json {"enabled": true} (explicit
+// activation; the wizard's capture step writes it). Drafts are confirmed
+// later via `em-capture review` — never silently promoted to episodes.
+try {
+  const captureConfigPath = path.join(os.homedir(), '.episodic-memory', 'capture-config.json')
+  const captureScript = path.join(scriptsDir, 'em-capture.mjs')
+  let captureCfg = null
+  try { captureCfg = JSON.parse(fs.readFileSync(captureConfigPath, 'utf8')) } catch { /* not configured */ }
+  if (captureCfg && captureCfg.enabled === true && sessionEndSid && fs.existsSync(captureScript)) {
+    const { spawn } = await import('node:child_process')
+    const child = spawn(process.execPath, [captureScript, 'extract', '--session-id', sessionEndSid,
+      ...(sessionEndCwd ? ['--project', path.basename(sessionEndCwd)] : [])], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: sessionEndCwd && fs.existsSync(sessionEndCwd) ? sessionEndCwd : os.homedir(),
+    })
+    child.unref()
+  }
+} catch (err) {
+  process.stderr.write(`em-session-end-prompt: auto-capture spawn skipped (${err.message})\n`)
+}
+
 console.log(JSON.stringify({
   prompt: 'Were any behavioral patterns violated this session?',
   known_patterns: knownPatterns,
