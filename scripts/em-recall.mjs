@@ -427,6 +427,15 @@ const episodes = results.map(({ entry, score }) => {
   return { ...rest, source: _source, score: Math.round(score * 1000) / 1000 }
 })
 
+// Pending auto-capture drafts (wave-6 #2): a pure memory-side COUNT of
+// ~/.episodic-memory/drafts/*.json. Drafts are not episodes and never enter
+// ranking; this count only nudges the session to run `em-capture list`.
+let pending_drafts = 0
+try {
+  pending_drafts = fs.readdirSync(path.join(os.homedir(), '.episodic-memory', 'drafts'))
+    .filter(f => f.endsWith('.json')).length
+} catch { /* no drafts dir yet */ }
+
 const result = {
   status: 'ok',
   context: {
@@ -437,6 +446,7 @@ const result = {
   },
   count: episodes.length,
   episodes,
+  pending_drafts,
   preflight_warnings,
   prune_suggestion
 }

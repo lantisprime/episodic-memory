@@ -317,10 +317,40 @@ function checkBackupConfig() {
 // Run checks
 // ---------------------------------------------------------------------------
 checkNodeVersion()
+// Wave-6 #2 auto-capture drafts: pending drafts are meant to be reviewed or
+// discarded promptly (confirm-before-store); ones older than 14 days are
+// probably forgotten, not pending.
+const DRAFT_STALE_MS = 14 * 24 * 60 * 60 * 1000
+function checkDrafts() {
+  const draftsDir = path.join(GLOBAL_DIR, 'drafts')
+  let files = []
+  try { files = fs.readdirSync(draftsDir).filter(f => f.endsWith('.json')) } catch {
+    report('drafts', 'global', 'ok', 'no pending auto-capture drafts')
+    return
+  }
+  if (!files.length) {
+    report('drafts', 'global', 'ok', 'no pending auto-capture drafts')
+    return
+  }
+  const now = Date.now()
+  let stale = 0
+  for (const f of files) {
+    try {
+      if (now - fs.statSync(path.join(draftsDir, f)).mtimeMs > DRAFT_STALE_MS) stale++
+    } catch { /* raced deletion */ }
+  }
+  if (stale > 0) {
+    report('drafts', 'global', 'warn', `${stale} auto-capture draft(s) older than 14 days — review or discard: em-capture list`, { fix: 'em-capture' })
+  } else {
+    report('drafts', 'global', 'ok', `${files.length} pending auto-capture draft(s) (review: em-capture list)`)
+  }
+}
+
 if (scope === 'local' || scope === 'all') checkStore(LOCAL_DIR, 'local')
 if (scope === 'global' || scope === 'all') checkStore(GLOBAL_DIR, 'global')
 checkInstalledScripts()
 checkBackupConfig()
+checkDrafts()
 
 // ---------------------------------------------------------------------------
 // --fix: rebuild indexes for scopes with rebuildable findings, then re-verify

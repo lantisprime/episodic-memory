@@ -48,6 +48,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Find a topic across all projects | `em-search --query <topic> --scope all` | Grepping episode files |
 | Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
 | "What is connected to this episode?" (lineage, clusters, hubs) | `em-graph --from <id>` / `--orphans` / `--hubs` | Manual joins across multiple searches |
+| Significant session ended, nothing stored yet | `em-capture extract` then `review` (or `em-capture list` when recall reports `pending_drafts`) | Reconstructing the session from memory, or silently storing without review |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -511,6 +512,38 @@ skipped, frontmatter excluded), `tags` (opt-in pseudo-nodes for cluster
 queries). Undirected BFS, depth default 2, node limit 50 (closest first,
 `truncated` flagged). Lineage keeps superseded nodes, marked via `status`.
 Output: `{root, nodes:[{id,distance,summary,...}], edges:[{from,to,type}]}`.
+
+### em-capture
+
+Session auto-capture (wave-6 #2): draft candidate episodes from a session
+transcript at session end; confirm them into the store later.
+Confirm-before-store is the invariant — drafts are never silently promoted.
+
+- WHEN TO USE: a significant session ended and nothing was stored; reviewing
+  `pending_drafts` surfaced by `em-recall`; enabling continuous capture via
+  the wizard.
+- WHEN NOT TO USE: as a substitute for deliberate `em-store` at
+  decision/lesson time — capture is the safety net, not the primary path.
+
+```
+node ~/.episodic-memory/scripts/em-capture.mjs extract [--transcript <path>] [--session-id <id>]
+  [--project <name>] [--mode heuristic|cmd] [--cmd "<command>"] [--max <n>] [--dry-run]
+node ~/.episodic-memory/scripts/em-capture.mjs list
+node ~/.episodic-memory/scripts/em-capture.mjs review --draft <id>
+  (--accept <n,...> | --accept-all | --reject <n,...> | --discard) [--scope local|global]
+```
+
+Drafts live at `~/.episodic-memory/drafts/<draft-id>.json` — not episodes, no
+index rows, invisible to search/recall ranking (recall reports only a
+`pending_drafts` count). Heuristic mode (default, zero-LLM) scans for explicit
+markers ("remember this", "lesson:", "decision:"), assistant decision
+language, error-then-fix command pairs, and merged-PR milestones; fenced code
+and inline backticks are stripped first. `cmd` mode pipes
+`{session_id, project, max, chunks}` to a user command returning
+`{candidates:[...]}` — template: `examples/capturers/claude-capture.sh`
+(drives `claude -p` via your existing login). Accepts write through
+`em-store.mjs` as a subprocess (category validation + indexing apply) and are
+tagged `auto-captured`. `em-doctor` warns on drafts older than 14 days.
 
 ### em-check-stale
 

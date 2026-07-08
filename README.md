@@ -436,6 +436,18 @@ node ~/.episodic-memory/scripts/em-graph.mjs --orphans    # dead ends
 node ~/.episodic-memory/scripts/em-graph.mjs --hubs       # load-bearing episodes
 ```
 
+### Auto-capture (`em capture`)
+```bash
+# At session end (opt-in via the wizard or ~/.episodic-memory/capture-config.json),
+# candidate episodes are DRAFTED from the session transcript; you confirm them
+# later. Drafts are never stored without confirmation.
+node ~/.episodic-memory/scripts/em-capture.mjs extract --session-id <id>   # draft (heuristic, zero-LLM)
+node ~/.episodic-memory/scripts/em-capture.mjs list                        # pending drafts
+node ~/.episodic-memory/scripts/em-capture.mjs review --draft <id> --accept-all
+# LLM-drafted candidates via your Claude Code login (no API key):
+#   capture-config.json {"mode":"cmd","cmd":"sh <repo>/examples/capturers/claude-capture.sh"}
+```
+
 ### Scheduled maintenance (`em routines`)
 ```bash
 # Adapted to the machine: launchd (macOS), systemd user timers (Linux), or a
