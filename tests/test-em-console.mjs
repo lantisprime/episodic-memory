@@ -294,6 +294,37 @@ await (async () => {
       const m = r.json.result.chain[0]
       assert.ok(m.id && m.summary && 'body' in m, `chain member missing id/summary/body: ${JSON.stringify(Object.keys(m))}`)
     })
+    await test('a chain larger than the 64KB pipe buffer survives end-to-end (exit-truncation regression)', async () => {
+      // em-search's history path used console.log + process.exit(0): on a pipe,
+      // exit discards unflushed output past 64KB, so big --full chains arrived
+      // as exactly 65536 truncated bytes and failed the server-side JSON parse.
+      // Seed via DIRECT em-store/em-revise spawns (the console's own 20k body
+      // cap rightly refuses this via the API; the real-world big chains are
+      // CLI-stored workplans).
+      const bigBody = 'line of filler text for the pipe buffer regression\n'.repeat(900) // ~45KB per member
+      const bodyFile = path.join(s1.root, 'big-body.txt')
+      fs.writeFileSync(bodyFile, bigBody)
+      const stR = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'em-store.mjs'),
+        '--project', 'console-fixture', '--category', 'decision', '--scope', 'local',
+        '--summary', 'big body seed', '--body-file', bodyFile], {
+        cwd: s1.cwd, env: { ...process.env, HOME: s1.home }, encoding: 'utf8',
+      })
+      const seedBig = JSON.parse(stR.stdout.trim())
+      assert.strictEqual(seedBig.status, 'ok', stR.stdout.slice(0, 200))
+      const rvR = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'em-revise.mjs'),
+        '--original', seedBig.id, '--project', 'console-fixture',
+        '--summary', 'big body rev', '--body-file', bodyFile], {
+        cwd: s1.cwd, env: { ...process.env, HOME: s1.home }, encoding: 'utf8',
+      })
+      assert.strictEqual(JSON.parse(rvR.stdout.trim()).status, 'ok', rvR.stdout.slice(0, 200))
+      const hist = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'history', flags: { history: seedBig.id } } })
+      assert.strictEqual(hist.json.status, 'ok')
+      assert.ok(Array.isArray(hist.json.result.chain), `chain missing — parse fell back to raw: ${JSON.stringify(Object.keys(hist.json.result))}`)
+      assert.strictEqual(hist.json.result.chain.length, 2)
+      const totalBytes = JSON.stringify(hist.json.result).length
+      assert.ok(totalBytes > 65536, `chain payload only ${totalBytes} bytes — regression not exercising the pipe buffer`)
+      assert.ok(hist.json.result.chain.every((m) => (m.body || '').length > 40000), 'bodies truncated')
+    })
     await test('client render path: drawer resolves result.chain and miniMd neutralizes a hostile stored body', async () => {
       // Store an episode whose BODY is hostile markdown, walk its history via
       // the API, then drive the SERVED page's own esc/miniMd/autoRender on the
