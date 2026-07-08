@@ -129,7 +129,7 @@ function maybeNormalizePath(tok, callerCwd, projectRoot, homeDir) {
  */
 export function canonicalizeCommand({ command, projectRoot, callerCwd, homeDir = os.homedir() }) {
   const none = (reason) => ({
-    canonical: null, reason, execToken: null, execBase: null, subject: '', flags: [], interpreter: false
+    canonical: null, reason, execToken: null, execBase: null, execBare: false, subject: '', flags: [], interpreter: false
   })
 
   // Same normalization as classifier-marker.mjs normalizeCommand: strip
@@ -149,6 +149,11 @@ export function canonicalizeCommand({ command, projectRoot, callerCwd, homeDir =
   const execBase = path.basename(expandTilde(toks[0], homeDir))
   const execToken = maybeNormalizePath(toks[0], callerCwd, projectRoot, homeDir)
   const interpreter = INTERPRETERS.has(execBase)
+  // Bare = PATH-resolved name with no path component. `/tmp/evil/node`,
+  // `./node`, and `~/bin/node` all share execBase "node" but are NOT the
+  // system interpreter; trust surfaces (the read-only manifest) must require
+  // bareness or an impostor binary rides a by-design entry.
+  const execBare = !/[\\/]/.test(toks[0])
 
   let subject = ''
   let rest
@@ -188,6 +193,7 @@ export function canonicalizeCommand({ command, projectRoot, callerCwd, homeDir =
     reason: 'ok',
     execToken,
     execBase,
+    execBare,
     subject,
     flags,
     interpreter

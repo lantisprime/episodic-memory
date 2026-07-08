@@ -102,11 +102,22 @@ function loadManifest() {
 // handling: a malformed entry never matches.
 function entryMatches(entry, canon, defaultLocs) {
   if (!entry || typeof entry !== 'object') return false
+  // The executable must be a BARE PATH-resolved name: `/tmp/evil/node` and
+  // `./node` share execBase "node" with the system interpreter but are
+  // arbitrary binaries — a by-design read-only grant must never ride a
+  // basename (review finding, runtime-confirmed impostor bypass).
+  if (!canon.execBare) return false
   if (!Array.isArray(entry.exec) || !entry.exec.includes(canon.execBase)) return false
 
   if (typeof entry.script === 'string' && entry.script) {
-    const locs = Array.isArray(entry.script_locations) && entry.script_locations.length
-      ? entry.script_locations : defaultLocs
+    // Trust is pinned to the INSTALLED copy (<HOME>/.episodic-memory/scripts,
+    // written only by install.mjs). <REPO>-relative locations are refused
+    // even when a manifest lists them: any repo's scripts/em-*.mjs can be a
+    // locally modified, write-capable file (review finding — a branch under
+    // review would auto-classify its own edited script read_only).
+    const locs = (Array.isArray(entry.script_locations) && entry.script_locations.length
+      ? entry.script_locations : defaultLocs)
+      .filter((loc) => typeof loc === 'string' && !loc.includes('<REPO>'))
     if (!locs.some((loc) => canon.subject === `${loc}/${entry.script}`)) return false
   } else if (typeof entry.subcommand === 'string' && entry.subcommand) {
     if (canon.subject !== entry.subcommand) return false
@@ -140,7 +151,7 @@ function manifestConsult(canon) {
   const defaultLocs = Array.isArray(loaded.manifest.default_script_locations)
     && loaded.manifest.default_script_locations.length
     ? loaded.manifest.default_script_locations
-    : ['<REPO>/scripts', '<HOME>/.episodic-memory/scripts']
+    : ['<HOME>/.episodic-memory/scripts']
   for (const entry of loaded.manifest.entries) {
     try {
       if (entryMatches(entry, canon, defaultLocs)) {

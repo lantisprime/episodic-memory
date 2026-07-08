@@ -122,36 +122,44 @@ test('§S4 manifest entry ids are unique', () => {
 
 // ===== §H: helper-level matching polarities =================================
 
-test('§H1 HIT: node scripts/em-stats.mjs --scope all → read_only via manifest', () => {
+// Trust is pinned to the INSTALLED copy (<HOME>/.episodic-memory/scripts) —
+// repo-relative scripts/em-*.mjs can be locally modified, write-capable files
+// (review finding), so they must never match. INSTALLED below is a path SHAPE
+// (canonicalization does not require the file to exist).
+const INSTALLED = path.join(os.homedir(), '.episodic-memory', 'scripts')
+
+test('§H1 HIT: installed em-stats → read_only; repo-relative form NEVER matches', () => {
   const repo = mkrepo('h1')
-  const out = runConsult(repo, 'node scripts/em-stats.mjs --scope all')
+  const out = runConsult(repo, `node ${INSTALLED}/em-stats.mjs --scope all`)
   assert.strictEqual(out.decision, 'read_only', JSON.stringify(out))
   assert.strictEqual(out.source, 'manifest')
   assert.strictEqual(out.entry_id, 'em-stats')
+  const repoForm = runConsult(repo, 'node scripts/em-stats.mjs --scope all')
+  assert.strictEqual(repoForm.decision, 'hold', `repo-path script must NOT ride the manifest: ${JSON.stringify(repoForm)}`)
 })
 
 test('§H2 polarity pair (same binary): em-doctor plain → hit; em-doctor --fix → hold', () => {
   const repo = mkrepo('h2')
-  const plain = runConsult(repo, 'node scripts/em-doctor.mjs --scope all --strict')
+  const plain = runConsult(repo, `node ${INSTALLED}/em-doctor.mjs --scope all --strict`)
   assert.strictEqual(plain.decision, 'read_only', JSON.stringify(plain))
   assert.strictEqual(plain.entry_id, 'em-doctor')
-  const fix = runConsult(repo, 'node scripts/em-doctor.mjs --scope all --fix')
+  const fix = runConsult(repo, `node ${INSTALLED}/em-doctor.mjs --scope all --fix`)
   assert.strictEqual(fix.decision, 'hold', `--fix must NOT match: ${JSON.stringify(fix)}`)
 })
 
 test('§H3 require_flags: em-pattern-health --check → hit; without --check → hold', () => {
   const repo = mkrepo('h3')
-  const withCheck = runConsult(repo, 'node scripts/em-pattern-health.mjs --check')
+  const withCheck = runConsult(repo, `node ${INSTALLED}/em-pattern-health.mjs --check`)
   assert.strictEqual(withCheck.decision, 'read_only', JSON.stringify(withCheck))
-  const without = runConsult(repo, 'node scripts/em-pattern-health.mjs')
+  const without = runConsult(repo, `node ${INSTALLED}/em-pattern-health.mjs`)
   assert.strictEqual(without.decision, 'hold', JSON.stringify(without))
 })
 
 test('§H4 allow_flags closure: em-recall documented flags → hit; unknown flag → hold', () => {
   const repo = mkrepo('h4')
-  const ok = runConsult(repo, 'node scripts/em-recall.mjs --project x --limit 5 --no-track')
+  const ok = runConsult(repo, `node ${INSTALLED}/em-recall.mjs --project x --limit 5 --no-track`)
   assert.strictEqual(ok.decision, 'read_only', JSON.stringify(ok))
-  const unknown = runConsult(repo, 'node scripts/em-recall.mjs --project x --store-draft')
+  const unknown = runConsult(repo, `node ${INSTALLED}/em-recall.mjs --project x --store-draft`)
   assert.strictEqual(unknown.decision, 'hold', JSON.stringify(unknown))
 })
 
@@ -170,8 +178,18 @@ test('§H6 out-of-registry script location NEVER matches (e.g. /tmp/em-stats.mjs
 
 test('§H7 redirect variant of a manifest-listed command NEVER matches', () => {
   const repo = mkrepo('h7')
-  const out = runConsult(repo, 'node scripts/em-stats.mjs --scope all > dump.json')
+  const out = runConsult(repo, `node ${INSTALLED}/em-stats.mjs --scope all > dump.json`)
   assert.strictEqual(out.decision, 'hold', JSON.stringify(out))
+})
+
+test('§H9 impostor interpreter: path-qualified `node` NEVER rides a manifest entry', () => {
+  const repo = mkrepo('h9')
+  // Same execBase "node", arbitrary binary — the review's runtime-confirmed
+  // bypass. Bare PATH-resolved names only.
+  const abs = runConsult(repo, `/tmp/evil/node ${INSTALLED}/em-stats.mjs --top 5`)
+  assert.strictEqual(abs.decision, 'hold', JSON.stringify(abs))
+  const rel = runConsult(repo, `./node ${INSTALLED}/em-stats.mjs --top 5`)
+  assert.strictEqual(rel.decision, 'hold', JSON.stringify(rel))
 })
 
 test('§H8 node --version matches the flags-only entry; node script.mjs --version does not ride it', () => {
@@ -188,7 +206,8 @@ test('§H8 node --version matches the flags-only entry; node script.mjs --versio
 test('§E1 gate E2E HIT: manifest reader (em-stats) is allowed with no agent involvement', () => {
   const repo = mkrepo('e1')
   const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'romanifest-home-'))
-  const r = runGate(repo, testHome, 's_e1', 'node scripts/em-stats.mjs --scope all')
+  // The gate's consult child resolves <HOME> against ITS env (testHome).
+  const r = runGate(repo, testHome, 's_e1', `node ${testHome}/.episodic-memory/scripts/em-stats.mjs --scope all`)
   assert.strictEqual(r.status, 0, `gate errored: ${r.stderr}`)
   assert.ok(!(r.stdout || '').includes('"block"'), `expected allow, got: ${r.stdout}`)
   // No verdict marker persisted — the manifest is the durable authority.
@@ -199,7 +218,7 @@ test('§E1 gate E2E HIT: manifest reader (em-stats) is allowed with no agent inv
 test('§E2 gate E2E polarity: SAME binary with the write flag (em-doctor --fix) is held', () => {
   const repo = mkrepo('e2')
   const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'romanifest-home-'))
-  const r = runGate(repo, testHome, 's_e2', 'node scripts/em-doctor.mjs --fix')
+  const r = runGate(repo, testHome, 's_e2', `node ${testHome}/.episodic-memory/scripts/em-doctor.mjs --fix`)
   assert.ok((r.stdout || '').includes('"block"'), `expected block, got: ${r.stdout || r.stderr}`)
 })
 

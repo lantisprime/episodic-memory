@@ -4,9 +4,12 @@
  * Rigor contract (behavior-simulated on isolated fixture stores):
  *   - em-rebuild-index drops posting lists for tokens whose df exceeds 40% of
  *     the corpus and records them (sorted) under "_dropped";
- *   - correctness gate: em-search results (ids + ordering + scores) are
- *     IDENTICAL before and after the diet for queries mixing common (dropped)
- *     and rare (kept) tokens — both the strict AND tier and the partial tier;
+ *   - correctness gate: em-search full matches and ANCHORED partials (those
+ *     hitting at least one non-dropped token) are IDENTICAL before and after
+ *     the diet. Partials whose ONLY hit is a dropped/common token are
+ *     intentionally not returned when a rare anchor exists — widening the
+ *     partial pool on any dropped token re-created the O(n) full-store body
+ *     scan (review finding); that tail class scores ≤ ~0.1;
  *   - both polarities: a dropped-token query still finds episodes (full-scan
  *     fallback, the probe's failing case) AND rare-token pruning still prunes
  *     (asserted at the tokenCandidates level: the AND set is exactly the rare
@@ -127,11 +130,30 @@ t('fixture tokens.json shrinks', () => {
   console.log(`      tokens.json bytes: ${sizeBefore} -> ${sizeAfter} (${Math.round((1 - sizeAfter / sizeBefore) * 100)}% smaller)`);
 });
 
-t('correctness gate: ids + ordering + scores identical before/after the diet for every query', () => {
+t('correctness gate: full matches + anchored partials identical before/after the diet', () => {
+  // Post-review contract (O(n) finding): the partial pool stays anchored to
+  // non-dropped tokens' postings, so a pre-diet partial survives iff it hits
+  // at least one NON-dropped query token. Full matches always survive. The
+  // all-tokens-dropped query ("deployment") full-scans and stays identical.
+  const tok = tokensOf(fx);
+  const droppedSet = new Set(Array.isArray(tok._dropped) ? tok._dropped : []);
+  const textOf = (id) => fs.readFileSync(path.join(fx.store, 'episodes', `${id}.md`), 'utf8').toLowerCase();
   for (const [q] of QUERIES) {
     const after = search(fx, ['--query', q]);
-    assert.deepEqual(after, before.get(q), `query "${q}" diverged:\n  before ${JSON.stringify(before.get(q))}\n  after  ${JSON.stringify(after)}`);
+    const qtoks = q.split(' ');
+    const expected = before.get(q).filter(e =>
+      e.match !== 'partial' || qtoks.some(t2 => !droppedSet.has(t2) && textOf(e.id).includes(t2)));
+    assert.deepEqual(after, expected, `query "${q}" diverged:\n  expected ${JSON.stringify(expected)}\n  after  ${JSON.stringify(after)}`);
   }
+});
+
+t('anchored-pool polarity: dropped-only partial tail absent WITH a rare anchor, present when ALL tokens dropped', () => {
+  // With the rare anchor "zephyr", the four deployment-only episodes are no
+  // longer partial hits (bounded pool). With every query token dropped, the
+  // inherent full scan still surfaces every episode (polarity 1 covers it).
+  const r = search(fx, ['--query', 'deployment zephyr']);
+  assert.equal(r.length, 1, `expected only the full match, got ${JSON.stringify(r)}`);
+  assert.equal(r[0].id, ids[0]);
 });
 
 t('polarity 1: single dropped-token query still finds all episodes (not zero candidates)', () => {

@@ -418,13 +418,19 @@ function checkGateFriction() {
     return
   }
   const lines = raw.split('\n').filter(Boolean)
-  const counts = { allow: 0, silence: 0, hold: 0, block: 0 }
+  // Closed decision vocabulary + null-proto tally: a line whose decision is an
+  // Object.prototype key ('constructor', 'toString') must count as malformed,
+  // not read an inherited function as its current count (#469/#470 invariant:
+  // external strings never index a default-proto object).
+  const DECISIONS = ['allow', 'silence', 'hold', 'block']
+  const counts = Object.assign(Object.create(null), { allow: 0, silence: 0, hold: 0, block: 0 })
   let malformed = 0
   const holdShas = new Map() // cmd_sha256 → hold-event count
   for (const line of lines) {
     let row
     try { row = JSON.parse(line) } catch { malformed++; continue }
-    if (row === null || typeof row !== 'object' || typeof row.decision !== 'string') { malformed++; continue }
+    if (row === null || typeof row !== 'object' || typeof row.decision !== 'string'
+        || !DECISIONS.includes(row.decision)) { malformed++; continue }
     counts[row.decision] = (counts[row.decision] || 0) + 1
     if (row.decision === 'hold' && typeof row.cmd_sha256 === 'string' && /^[0-9a-f]{64}$/.test(row.cmd_sha256)) {
       holdShas.set(row.cmd_sha256, (holdShas.get(row.cmd_sha256) || 0) + 1)
@@ -547,7 +553,6 @@ if (scope === 'global' || scope === 'all') checkInstallsDrift()
 checkInstalledScripts()
 checkBackupConfig()
 checkDrafts()
-checkInstallsDrift()
 
 // ---------------------------------------------------------------------------
 // --fix: rebuild indexes for scopes with rebuildable findings, then re-verify

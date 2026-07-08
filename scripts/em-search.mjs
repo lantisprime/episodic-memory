@@ -310,14 +310,20 @@ if (query) {
     // the pool narrows to episodes containing at least one token; on the
     // fallback path, partials come from summary/tags only (no O(n) body reads).
     //
-    // Dropped tokens (S2 diet) have no posting lists, so (a) an episode whose
-    // only hit is a dropped token is missing from `any` — when any query
-    // token is dropped the partial pool must widen to every candidate row,
-    // and (b) perToken cannot answer body membership for them — inBody falls
-    // back to reading the episode body (cached per episode), reproducing the
-    // pre-diet index answer exactly.
-    const hasDropped = candidateInfo && candidateInfo.dropped.size > 0
-    const partialPool = (candidateInfo && !hasDropped
+    // Dropped tokens (S2 diet) have no posting lists, so perToken cannot
+    // answer body membership for them — inBody falls back to reading the
+    // episode body (cached per episode). The pool, however, stays ANCHORED to
+    // the non-dropped tokens' postings (`any` ∪ uncovered): widening to every
+    // row whenever one token was dropped re-created the O(n) full-store body
+    // scan the index exists to avoid (review finding, confirmed on the
+    // 1811-episode store). Only when EVERY query token is dropped
+    // (candidateInfo.all === null) is a full scan inherent — same as the
+    // strict tier above. Cost of the bound: an episode whose ONLY hit is a
+    // common (dropped) token no longer surfaces as a partial when a rare
+    // anchor exists; that class scores ≤ ~0.1 (coverage 0.5 × body weight)
+    // and sat below every real match.
+    const allDropped = candidateInfo && candidateInfo.all === null
+    const partialPool = (candidateInfo && !allDropped
       ? results.filter(e => candidateInfo.any.has(e.id) || !candidateInfo.covered.has(e.id))
       : results)
       .filter(e => !matchedIds.has(e.id))

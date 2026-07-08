@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "Canonical command shapes that are read-only BY DESIGN (E4). Consulted by checkpoint-gate.sh (via scripts/classifier-hold-consult.mjs) ONLY when an agent-classification hold is otherwise imminent — i.e. for shapes the structural classifier could not label (reason default_write / interpreter_other). em-* scripts already hardcoded read_only in command-classifier.sh (em-search, em-list, em-watch-codex, em-pattern-health, em-check-stale, em-rebuild-index, em-workflow-validate) never reach the hold, but are listed anyway so this file is the complete by-design reader registry; git read subcommands (status/log/diff/show) are auto-classified by the git case-arm and are deliberately NOT duplicated here. Reader/writer facts derive from docs/EM_SCRIPTS_GUIDE.md and the scripts themselves. Matching is on the canonical form (scripts/lib/command-canonical.mjs): flag NAMES only, values dropped; redirect/metachar/env-prefix forms never canonicalize and therefore never match.",
-  "default_script_locations": ["<REPO>/scripts", "<HOME>/.episodic-memory/scripts"],
+  "default_script_locations": ["<HOME>/.episodic-memory/scripts"],
   "entries": [
     {
       "id": "em-search",

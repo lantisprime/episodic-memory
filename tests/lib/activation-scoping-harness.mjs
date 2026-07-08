@@ -175,6 +175,13 @@ function scrubEnv(env) {
   delete env.SO_INSTALL_SNAPSHOT_PATH
   delete env.SO_RUNBOOK_PATH
   delete env.SO_QUICKREF_PATH
+  // Hermeticity: with a key present, the checkpoint-gate's E2 hold-consult
+  // (classifier-hold-consult.mjs → llm-classify.mjs, config default
+  // enabled:true) makes a REAL billed API call from inside the test suite and
+  // a confident verdict flips an expected HOLD to ALLOW (flaky cells, stray
+  // verdict markers). test-checkpoint-gate.sh scrubs this at run_hook; the
+  // shared harness must match.
+  delete env.ANTHROPIC_API_KEY
   return env
 }
 
