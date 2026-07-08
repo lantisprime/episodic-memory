@@ -144,7 +144,8 @@ function assertNoStore(sandbox, label) {
 // The installed substrate set: every script that got a --help handler.
 // ---------------------------------------------------------------------------
 const SUBSTRATE = [
-  'em-audit-compliance.mjs', 'em-backup.mjs', 'em-check-stale.mjs', 'em-list.mjs',
+  'em-audit-compliance.mjs', 'em-backup.mjs', 'em-check-stale.mjs',
+  'em-console.mjs', 'em-manage.mjs', 'em-list.mjs',
   'em-lock.mjs', 'em-mine-transcripts.mjs', 'em-pattern-health.mjs', 'em-prune.mjs',
   'em-rebuild-index.mjs', 'em-recall.mjs', 'em-restore.mjs', 'em-review-request.mjs',
   'em-revise.mjs', 'em-rfc-validate.mjs', 'em-search.mjs', 'em-seed-patterns.mjs',

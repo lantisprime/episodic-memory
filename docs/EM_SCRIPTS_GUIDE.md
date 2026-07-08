@@ -52,6 +52,8 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Session start printed an install version-drift notice | `em-sync-install` (this project, from the dist cache) or `node <repo>/install.mjs --update-consumers` (all registered projects) | Hand-copying hook/skill files, or re-running full installs in every consuming project |
 | One view of EVERY registered project's store (analytics/health/fold) | `em-stats --all-projects`, `em-doctor --all-projects`, `em-consolidate --fold-superseded --all-projects --dry-run` | Cd-ing into each project and running per-store commands |
 | The same lesson keeps recurring across projects | `em-promote` (dry-run), then `em-promote --apply` (EXPERIMENTAL) | Re-learning it per project, or hand-copying lesson episodes to global |
+| User wants to SEE the store (dashboard, browse, drafts, hygiene) | `em-console` — hand the user the printed URL | Pasting walls of JSON at the user |
+| User wants guided maintenance in the terminal | `em-manage` (interactive menu) | Dictating flag-by-flag commands to a human |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -857,6 +859,25 @@ promotes under its new hash with a `Supersedes-promotion:` back-reference.
 Malformed existing promoted episodes (bad hash tag, missing `## Sources`)
 are reported in `warnings`, never fatal. Exit 1 only when an `--apply` write
 failed; usage errors exit 2.
+
+### em-console
+
+Local web console over the CLI contract: one page (dashboard, browse + history,
+recall preview, capture drafts, maintenance) whose every action POSTs to a closed
+command registry that spawns the sibling `em-*` scripts and returns their JSON.
+Loopback-only, per-launch token in the printed URL, read-only unless launched with
+`--allow-write`, idles out after `--idle-timeout` seconds (default 1800). Agent
+rule: this is a HUMAN surface — launch it for the user and hand over the URL;
+agents keep using the JSON CLI directly.
+
+### em-manage
+
+Interactive day-2 maintenance wizard: status (doctor + stats), hygiene
+(rebuild-index, fold-superseded, prune, doctor --fix — dry-run first, apply only
+on explicit confirm), backup, capture drafts, routines, and an em-console
+launcher. Prose menus for humans; every underlying operation is a spawned `em-*`
+script. Scriptable via piped stdin (EOF takes defaults). Agent rule: human
+surface — suggest it to users; agents call the underlying scripts directly.
 
 ### em-pattern-health
 
