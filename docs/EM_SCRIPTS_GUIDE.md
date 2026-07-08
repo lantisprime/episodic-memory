@@ -49,6 +49,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
 | "What is connected to this episode?" (lineage, clusters, hubs) | `em-graph --from <id>` / `--orphans` / `--hubs` | Manual joins across multiple searches |
 | Significant session ended, nothing stored yet | `em-capture extract` then `review` (or `em-capture list` when recall reports `pending_drafts`) | Reconstructing the session from memory, or silently storing without review |
+| Session start printed an install version-drift notice | `em-sync-install` (this project, from the dist cache) or `node <repo>/install.mjs --update-consumers` (all registered projects) | Hand-copying hook/skill files, or re-running full installs in every consuming project |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -617,7 +618,10 @@ node ~/.episodic-memory/scripts/em-doctor.mjs [--scope local|global|all] [--fix]
 Checks: Node version, index.jsonl parse, index↔episode-file drift (both
 directions), tags.json + category-index.json consistency, dangling
 `supersedes` pointers, stale `.tmp` files from interrupted atomic writes,
-dead-pid `.lock` files, installed-script presence/drift, backup config.
+dead-pid `.lock` files, installed-script presence/drift, backup config,
+consumer installs-drift (registered projects behind the global install version
+or carrying locally modified installed artifacts — fix hint:
+`install.mjs --update-consumers`).
 
 Output (trimmed):
 
@@ -631,6 +635,40 @@ Output (trimmed):
   `.tmp`/`.lock` litter, then re-runs the store checks and reports the post-fix
   state. Everything else stays report-only.
 - Every non-ok finding carries a `fix` hint when a safe automated repair exists.
+
+### em-sync-install
+
+Checksum-guarded refresh of the CURRENT project's installed episodic-memory
+artifacts (skills, instruction files, hooks) from the global dist cache
+(`~/.episodic-memory/dist/<version>/`), written by `install.mjs` on every
+install. This is the apply-side of the SessionStart drift notice: only files
+whose on-disk sha256 still matches the project's install manifest
+(`<project>/.episodic-memory-install.json`) are overwritten; locally modified
+files are always left untouched and reported. Only projects present in the
+consumer registry (`~/.episodic-memory/installs.json`) are ever touched, and
+enforcement artifacts are skipped unless the registry entry says
+`enforcement_installed: true`.
+
+- WHEN TO USE: the SessionStart hook printed a version-drift notice and you
+  want to update just this project without the repo checkout (`install.mjs
+  --update-consumers` sweeps ALL registered projects from the repo instead).
+  Runs automatically at session start when the operator set
+  `"auto_update": true` in `<project>/.episodic-memory/enforce-config.json`.
+- WHEN NOT TO USE: to install into a NEW project (use `install.mjs`); it never
+  adds files, only refreshes what a previous install recorded.
+
+```
+node ~/.episodic-memory/scripts/em-sync-install.mjs [--project <dir>] [--dry-run]
+```
+
+Output (trimmed):
+
+```json
+{"status":"refreshed","from_version":"1111111111111111111111111111111111111111","to_version":"ef0d77166644d02e34fe0644c3b27ece4cfb19cd","refreshed":[".claude/skills/episodic-memory/SKILL.md"],"skipped_modified":[".claude/hooks/checkpoint-gate.sh"],"notice":"episodic-memory: auto-updated 1 artifact(s) to ef0d77166644; 1 locally modified file(s) left untouched: .claude/hooks/checkpoint-gate.sh"}
+```
+
+Degrade statuses (always exit 0): `current` (nothing to do), `no-manifest`,
+`no-cache`, `no-global-manifest`, `unregistered`.
 
 ### em-prune
 
