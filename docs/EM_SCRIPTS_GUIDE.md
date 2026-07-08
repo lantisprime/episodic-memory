@@ -217,7 +217,10 @@ Flags that matter (from the script's own `Usage:` header):
 - Query lookups are accelerated by `tokens.json` (a token inverted index the
   writers maintain; rebuilt by `em-rebuild-index`). Results are identical to a
   full scan — the index only prunes candidates. Missing index → slow full
-  scan + a rebuild warning.
+  scan + a rebuild warning. Tokens dropped by the df diet (recorded under the
+  index's `_dropped` marker; see `em-rebuild-index`) are non-pruning: a query
+  containing one falls back to full scoring for that token instead of
+  returning zero candidates, so results stay identical there too.
 - Partial tier: when strict matches leave `--limit` unfilled, multi-word
   queries also return episodes matching at least HALF the tokens, marked
   `"match":"partial"` and scored below every full match. `--no-score`
@@ -231,7 +234,10 @@ Flags that matter (from the script's own `Usage:` header):
   History queries and `--include-superseded` already skip tracking.
 - `--full` includes episode bodies. `--history <id>` returns the whole revision
   chain. The walk follows `supersedes`, `superseded_by`, and `consolidates` edges
-  (cycle-safe); a single-`supersedes` chain is unchanged.
+  (cycle-safe); a single-`supersedes` chain is unchanged. Chain members that
+  were archived (`em-prune`, `em-consolidate --fold-superseded`) still appear:
+  the walk also reads `archived-index.jsonl`, flags them `"archived": true`,
+  and `--full` resolves their bodies from `archived/`.
 - `--category <cat>` is index-backed via `category-index.json` (same degrade-to-linear-scan
   fallback as `--tag`). A deprecated category name canonicalizes to its successor; an unknown
   category still filters (tolerant read).
@@ -325,10 +331,21 @@ so consistently useful episodes rise and consistently irrelevant ones sink.
 
 ```
 node ~/.episodic-memory/scripts/em-feedback.mjs --id <episode-id> (--useful | --noise)
+node ~/.episodic-memory/scripts/em-feedback.mjs --scan-text <file> [--scope local|global|all] [--dry-run]
 ```
 
 Output: `{"status":"ok","id":"...","feedback":3,"scope":"global"}`. Counter
 clamps to [-10, 10] and survives index rebuilds.
+
+`--scan-text` is batch inference: an episode id cited in a session handoff,
+PR body, or lessons write-up demonstrably shaped that artifact, which is the
+`--useful` signal without the typing. It extracts episode-id patterns (shape
+derived from em-store's generator), dedupes, skips ids that do not resolve in
+the selected scope(s), and records ONE +1 per resolved id. `--dry-run`
+previews without writing. Wrap-up habit: scan the handoff/PR body so cited
+episodes earn recall weight.
+
+Output: `{"status":"ok","mode":"scan-text","scope":"all","scanned":1,"matched":5,"resolved":4,"recorded":4,"skipped_unresolved":1,...}`
 
 ### em-move
 
@@ -370,6 +387,8 @@ semantic-consolidation capability). Dry-run by DEFAULT — `--apply` writes.
 node ~/.episodic-memory/scripts/em-consolidate.mjs [--scope local|global] \
   [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] \
   [--include-pinned] [--apply] [--confirm]
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
+  [--min-chain <n>] [--dry-run] [--scope local|global]
 ```
 
 Clustering is body-token Jaccard within (project, category) groups; the
@@ -379,6 +398,18 @@ episodes (~0.0). On `--apply`, each cluster gets one digest episode carrying
 pinning; members flip to `status: superseded` + `superseded_by: <digest>` in
 file and index, so they stop surfacing but stay reachable via `--history`.
 More than 5 clusters requires `--confirm`.
+
+`--fold-superseded` targets long revision chains instead of duplicates: for
+each LINEAR supersedes-chain with at least `--min-chain` members (default
+10), the non-terminal members are archived via the same mechanism `em-prune`
+uses (file to `archived/`, index row to `archived-index.jsonl`, `tags.json`
+cleaned — a reversible move, never a delete). The terminal episode is
+untouched, ids stay immutable, bodies are never edited, and
+`em-search --history` still shows the full chain (the walk reads archived
+metadata; archived members carry `"archived": true`). Pinned or
+still-active members are kept and reported; forked/non-linear chains are
+skipped whole. `--dry-run` lists exactly what a real run would move. Output:
+`{"status":"ok","mode":"fold-superseded","dry_run":false,"chains":[{"terminal":"...","chain_length":12,"folded":[...],"kept":[...]}],"folded_total":11}`.
 
 ### em-stats
 
@@ -391,7 +422,11 @@ node ~/.episodic-memory/scripts/em-stats.mjs [--scope local|global|all] [--top <
 Per scope: episode totals (active/superseded/pinned), archived count,
 category + project + tag distributions, age buckets, access/feedback
 aggregates, a prunable estimate (same threshold as em-prune; pinned rows
-excluded), index-file presence/sizes, and the date range.
+excluded), index-file presence/sizes, the date range, and
+`derived_index_bloat_ratio` (tokens.json bytes / index.jsonl bytes; `null`
+when either file is absent). A ratio far above ~1-5x means the token index is
+dominated by non-discriminating posting lists — `em-rebuild-index` applies
+the df diet and shrinks it; `em-doctor` warns above 20x.
 
 ### em-embed
 
@@ -589,6 +624,15 @@ Output:
 map to the successor key; unknown categories are indexed under their literal key AND counted
 as drift). It backs `em-search --category` the same way `tags.json` backs `--tag`.
 
+`tokens.json` df diet: posting lists for tokens appearing in more than 40% of the
+corpus (`DF_DROP_RATIO` in `lib/relevance.mjs`) are dropped — they do not
+discriminate, and they dominated the file (a 1811-episode store measured 49.9MB of
+tokens.json against 1.3MB of index.jsonl). Dropped tokens are recorded sorted under
+the `_dropped` key so readers treat them as non-pruning (full-scoring fallback)
+rather than absent; search results are identical before and after the diet.
+Incremental writers (`em-store`/`em-revise`/`em-move`) never regrow a dropped
+token; the next rebuild recomputes df from scratch.
+
 `--check` (RFC-009 R10f) is a read-only drift report: it lists every episode whose stored
 category is unknown or deprecated and exits 1 if any exist, 0 otherwise. It writes nothing.
 Use it in CI/hooks to catch taxonomy drift without correcting it (correction is a later phase).
@@ -615,9 +659,11 @@ node ~/.episodic-memory/scripts/em-doctor.mjs [--scope local|global|all] [--fix]
 ```
 
 Checks: Node version, index.jsonl parse, index↔episode-file drift (both
-directions), tags.json + category-index.json consistency, dangling
-`supersedes` pointers, stale `.tmp` files from interrupted atomic writes,
-dead-pid `.lock` files, installed-script presence/drift, backup config.
+directions), tags.json + category-index.json consistency, tokens.json bloat
+(warn when tokens.json exceeds 20x the size of index.jsonl — fix is a
+rebuild, which applies the df diet), dangling `supersedes` pointers, stale
+`.tmp` files from interrupted atomic writes, dead-pid `.lock` files,
+installed-script presence/drift, backup config.
 
 Output (trimmed):
 
