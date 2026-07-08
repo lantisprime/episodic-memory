@@ -135,13 +135,16 @@ function rebuildDir(dataDir, label) {
   const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort()
   const entries = []
 
-  const tagsIndex = {}
-  const tokensIndex = {}
+  // Null-proto maps: keys come from episode content (tags, tokens, category
+  // names), and "constructor" on a plain {} resolves to Object.prototype's
+  // inherited function instead of undefined (issue #469).
+  const tagsIndex = Object.create(null)
+  const tokensIndex = Object.create(null)
   // category-index + drift counts (R10d/R10f). Reader/index surface: if the vocab cannot load,
   // DEGRADE — build index.jsonl + tags.json as before and skip category-index (B1, I3).
-  const categoryIndex = {}
-  const driftUnknown = {}
-  const driftDeprecated = {}
+  const categoryIndex = Object.create(null)
+  const driftUnknown = Object.create(null)
+  const driftDeprecated = Object.create(null)
   let vocabLoaded = true
   try { loadCategories() } catch { vocabLoaded = false }
 

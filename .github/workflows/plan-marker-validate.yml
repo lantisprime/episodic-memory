@@ -192,6 +192,12 @@ jobs:
       - name: Run RFC-009 P1a categories.json global-deploy mock E2E
         run: node tests/test-install-categories.mjs
 
+      - name: Run issue #469 prototype-key-collision regression tests
+        run: node tests/test-prototype-key-collision.mjs
+
+      - name: Run recall-v2 token-index suite (tokens.json write/read parity)
+        run: node tests/test-recall-v2.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

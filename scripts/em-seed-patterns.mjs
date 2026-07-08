@@ -16,6 +16,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
+import { nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
@@ -56,9 +57,11 @@ try {
 // Load existing tags.json to check for already-seeded patterns
 // ---------------------------------------------------------------------------
 const tagsFile = path.join(GLOBAL_DIR, 'tags.json')
-let tagsIndex = {}
+// Null-proto: a pattern_id/tag named "constructor" must not resolve to
+// Object.prototype — the inherited function reads as "already seeded" (issue #469)
+let tagsIndex = Object.create(null)
 try {
-  tagsIndex = JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+  tagsIndex = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8')))
 } catch {}
 
 // ---------------------------------------------------------------------------
@@ -103,8 +106,8 @@ function queueTagsUpdate(episodeId, tags) {
 function flushTagsIndex() {
   if (pendingTagUpdates.length === 0) return
   const tagsFile = path.join(GLOBAL_DIR, 'tags.json')
-  let idx = {}
-  try { idx = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
+  let idx = Object.create(null)
+  try { idx = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8'))) } catch {}
   for (const { episodeId, tags } of pendingTagUpdates) {
     for (const tag of tags) {
       if (!idx[tag]) idx[tag] = []
@@ -128,8 +131,8 @@ function queueCategoryUpdate(episodeId, category) {
 function flushCategoryIndex() {
   if (pendingCategoryUpdates.length === 0) return
   const catFile = path.join(GLOBAL_DIR, 'category-index.json')
-  let idx = {}
-  try { idx = JSON.parse(fs.readFileSync(catFile, 'utf8')) } catch {}
+  let idx = Object.create(null)
+  try { idx = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8'))) } catch {}
   for (const { episodeId, category } of pendingCategoryUpdates) {
     if (!idx[category]) idx[category] = []
     if (!idx[category].includes(episodeId)) idx[category].push(episodeId)
