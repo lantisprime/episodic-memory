@@ -56,6 +56,7 @@ import {
 export const PROJECT_MANIFEST_BASENAME = '.episodic-memory-install.json'
 export const GLOBAL_MANIFEST_BASENAME = 'install-manifest.json'
 export const REGISTRY_BASENAME = 'installs.json'
+export const DIST_DIR_BASENAME = 'dist'
 
 export function projectManifestPath(projectDir) {
   return path.join(projectDir, PROJECT_MANIFEST_BASENAME)
@@ -65,6 +66,9 @@ export function globalManifestPath(globalDir) {
 }
 export function registryPath(globalDir) {
   return path.join(globalDir, REGISTRY_BASENAME)
+}
+export function distDir(globalDir, version) {
+  return path.join(globalDir, DIST_DIR_BASENAME, version)
 }
 
 export function sha256File(p) {
@@ -247,6 +251,16 @@ export function globalArtifactPairs(repoDir, globalDir) {
   add('categories.json', 'categories.json')
   add('docs/EM_SCRIPTS_GUIDE.md', 'EM_SCRIPTS_GUIDE.md')
   return pairs
+}
+
+// The unique payload source set behind the per-project pairs — what the dist
+// cache mirrors (keyed by repo-relative path, matching manifest `source`).
+export function perProjectSourceSet(repoDir) {
+  const seen = new Map()
+  for (const p of perProjectArtifactPairs(repoDir, repoDir /* dests unused */)) {
+    if (!seen.has(p.sourceRel)) seen.set(p.sourceRel, p.source)
+  }
+  return seen
 }
 
 // ---------------------------------------------------------------------------
@@ -487,4 +501,114 @@ export function updateConsumers({ repoDir, globalDir, dryRun = false }) {
     writeRegistry(regPath, keptEntries)
   }
   return report
+}
+
+// ---------------------------------------------------------------------------
+// DIST CACHE deploy (install-time): mirror the current per-project payload
+// SOURCES to ~/.episodic-memory/dist/<version>/<repo-relative-path>. Payload
+// files only — no registrations, no hooks wiring (Principle 12 untouched;
+// this is a copy source, like a plugin-marketplace cache). Older version dirs
+// are pruned (keep only current).
+// ---------------------------------------------------------------------------
+export function deployDistCache(repoDir, globalDir, version) {
+  const distRoot = path.join(globalDir, DIST_DIR_BASENAME)
+  const target = path.join(distRoot, version)
+  const tmp = path.join(distRoot, `.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`)
+  const sources = perProjectSourceSet(repoDir)
+  fs.mkdirSync(tmp, { recursive: true })
+  try {
+    for (const [rel, abs] of sources) {
+      const dst = path.join(tmp, ...rel.split('/'))
+      fs.mkdirSync(path.dirname(dst), { recursive: true })
+      fs.copyFileSync(abs, dst)
+    }
+    fs.rmSync(target, { recursive: true, force: true })
+    fs.renameSync(tmp, target)
+  } catch (e) {
+    try { fs.rmSync(tmp, { recursive: true, force: true }) } catch {}
+    throw e
+  }
+  // Prune superseded version dirs (best-effort).
+  let pruned = 0
+  try {
+    for (const e of fs.readdirSync(distRoot, { withFileTypes: true })) {
+      if (!e.isDirectory() || e.name === version) continue
+      fs.rmSync(path.join(distRoot, e.name), { recursive: true, force: true })
+      pruned++
+    }
+  } catch {}
+  return { target, files: sources.size, pruned }
+}
+
+// ---------------------------------------------------------------------------
+// SESSION-START AUTO-UPDATE (opt-in): refresh ONE project from the dist cache,
+// checksum-guarded exactly like the sweep. Degrades to a no-op status on any
+// missing precondition — the SessionStart hook falls back to the plain drift
+// notice and never blocks session start.
+//
+// `notice` (when present) is a single plain line, safe for the hook to lift
+// verbatim into SessionStart output (no quotes, no newlines).
+// ---------------------------------------------------------------------------
+export function syncProjectFromDist({ globalDir, projectDir, dryRun = false }) {
+  const projectAbs = normalizeProjectPath(projectDir)
+  const gm = readJsonSafe(globalManifestPath(globalDir))
+  if (!gm || typeof gm.source_version !== 'string') {
+    return { status: 'no-global-manifest', project: projectAbs }
+  }
+  const version = gm.source_version
+  const mPath = projectManifestPath(projectAbs)
+  const manifest = readJsonSafe(mPath)
+  if (!manifest || !Array.isArray(manifest.artifacts)) {
+    return { status: 'no-manifest', project: projectAbs }
+  }
+  if (manifest.source_version === version) {
+    return { status: 'current', project: projectAbs, version }
+  }
+  const cache = distDir(globalDir, version)
+  if (!fs.existsSync(cache)) {
+    return { status: 'no-cache', project: projectAbs, from_version: manifest.source_version, to_version: version }
+  }
+  // Consent: only registry-listed projects are ever touched (Principle 3).
+  const { entries } = readRegistry(registryPath(globalDir))
+  const projEntries = entries.filter((e) => {
+    try { return normalizeProjectPath(e.project_path) === projectAbs } catch { return false }
+  })
+  if (projEntries.length === 0) {
+    return { status: 'unregistered', project: projectAbs }
+  }
+  const allowEnforcement = projEntries.some((e) => e.enforcement_installed === true)
+  const fromVersion = manifest.source_version
+  const res = refreshProjectArtifacts({
+    projectDir: projectAbs,
+    manifest,
+    resolveSource: (a) => (typeof a.source === 'string' ? path.join(cache, ...a.source.split('/')) : null),
+    allowEnforcement,
+    dryRun,
+  })
+  if (!dryRun) {
+    applyRefreshToManifest(manifest, res.refreshed, version)
+    writeJsonAtomic(mPath, manifest)
+    const now = new Date().toISOString()
+    upsertRegistryEntries(registryPath(globalDir), projEntries.map((e) => ({ ...e, version, last_install_ts: now })))
+  }
+  const out = {
+    status: 'refreshed',
+    project: projectAbs,
+    from_version: fromVersion,
+    to_version: version,
+    refreshed: res.refreshed.map((r) => r.path).sort(),
+    skipped_modified: res.skippedModified.map((s) => s.path).sort(),
+    dry_run: !!dryRun,
+  }
+  if (out.refreshed.length > 0 || out.skipped_modified.length > 0) {
+    const short = version.slice(0, 12)
+    let notice = `episodic-memory: auto-updated ${out.refreshed.length} artifact(s) to ${short}`
+    if (out.skipped_modified.length > 0) {
+      const shown = out.skipped_modified.slice(0, 3).join(', ')
+      const more = out.skipped_modified.length > 3 ? ` (+${out.skipped_modified.length - 3} more)` : ''
+      notice += `; ${out.skipped_modified.length} locally modified file(s) left untouched: ${shown}${more}`
+    }
+    out.notice = notice
+  }
+  return out
 }

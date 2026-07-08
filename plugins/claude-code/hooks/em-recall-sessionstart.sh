@@ -118,13 +118,21 @@ warn_hook_freshness() {
 
 warn_hook_freshness
 
-# ─── install-version drift notice (Layer 1) ──────────
+# ─── install-version drift notice + opt-in auto-update (Layer 1) ──────────
 # Cheap happy path: two file reads + sed extraction of writer-controlled JSON
 # (install-version manifests are written by install.mjs with one key per line
 # and hex-ish values, so a line-oriented sed is reliable; no node spawn unless
 # drift is detected AND the operator opted in to auto-update). Silent when the
 # versions match, silent when either manifest is missing — degrade, never
 # block, never noisy.
+#
+# Opt-in auto-update: when <project>/.episodic-memory/enforce-config.json has
+# "auto_update": true (never set automatically — operator-owned), a detected
+# drift triggers em-sync-install.mjs, which re-copies UNMODIFIED artifacts
+# (on-disk sha256 == project manifest checksum) from the global dist cache
+# (~/.episodic-memory/dist/<version>/) and reports locally modified files it
+# left untouched. Any failure (missing cache, unregistered project, partial
+# state) falls back to the plain one-line drift notice.
 _manifest_field() {
   # $1 = file, $2 = key. Writer-controlled JSON (2-space indent, key per line).
   sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -n1
@@ -142,6 +150,25 @@ check_install_version_drift() {
   [ -n "$proj_ver" ] || return 0
   [ -n "$global_ver" ] || return 0
   [ "$proj_ver" = "$global_ver" ] && return 0
+
+  # Drift. Opt-in auto-update first (operator consent flag, default absent/false).
+  local cfg="$CWD/.episodic-memory/enforce-config.json"
+  local sync="$HOME/.episodic-memory/scripts/em-sync-install.mjs"
+  if [ -f "$cfg" ] && grep -Eq '"auto_update"[[:space:]]*:[[:space:]]*true' "$cfg" 2>/dev/null && [ -f "$sync" ]; then
+    local out notice
+    out="$(node "$sync" --project "$CWD" 2>/dev/null || true)"
+    notice="$(printf '%s' "$out" | sed -n 's/.*"notice"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    if [ -n "$notice" ]; then
+      echo "$notice"
+      return 0
+    fi
+    # A refresh that copied nothing (pure version-label catch-up) or a
+    # concurrent update already landing → silent success.
+    if printf '%s' "$out" | grep -Eq '"status":[[:space:]]*"(refreshed|current)"'; then
+      return 0
+    fi
+    # Anything else (no-cache, unregistered, error) → plain notice below.
+  fi
 
   local repo_path
   repo_path="$(_manifest_field "$global_manifest" source_repo)"

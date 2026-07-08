@@ -32,8 +32,8 @@ import {
   perProjectArtifactPairs, globalArtifactPairs, buildArtifactEntries,
   mergeArtifactEntries, buildManifest, resolveSourceVersion, writeJsonAtomic,
   readJsonSafe, projectManifestPath, globalManifestPath, registryPath,
-  readRegistry, upsertRegistryEntries, updateConsumers, normalizeProjectPath,
-  PROJECT_MANIFEST_BASENAME,
+  readRegistry, upsertRegistryEntries, updateConsumers, deployDistCache,
+  normalizeProjectPath, PROJECT_MANIFEST_BASENAME,
 } from './scripts/lib/install-version.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -2964,6 +2964,15 @@ try {
       }
     })
     upsertRegistryEntries(registryPath(GLOBAL_DIR), registryUpdates)
+  }
+
+  // 7d. Dist cache: mirror the current per-project payload SOURCES to
+  // ~/.episodic-memory/dist/<version>/ (copy source only, zero registrations —
+  // Principle 12 untouched) so the opt-in SessionStart auto-update can refresh
+  // consumers without this repo checkout present. Prunes superseded versions.
+  if (!uninstallEnforcement) {
+    const dist = deployDistCache(REPO_DIR, GLOBAL_DIR, sourceVersion)
+    console.log(`Recorded install version ${sourceVersion.slice(0, 12)} (manifests + registry); dist cache: ${dist.files} payload file(s) at ${dist.target}`)
   }
 } catch (e) {
   console.log(`WARNING: could not record install version manifests: ${e.message} (install itself is complete; --update-consumers and the drift notice need a successful manifest write)`)

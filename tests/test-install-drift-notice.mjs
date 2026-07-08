@@ -108,6 +108,7 @@ console.log('=== setup: real install (enforcement) into isolated HOME ===')
     { cwd: project, encoding: 'utf8', env: { ...process.env, HOME: home } })
   truthy('setup: install exits 0', r.status === 0, `status=${r.status} stderr=${(r.stderr || '').slice(-300)}`)
   truthy('setup: deployed SessionStart hook present', fs.existsSync(HOOK), HOOK)
+  truthy('setup: dist cache deployed', fs.existsSync(path.join(home, '.episodic-memory', 'dist', GIT_HEAD)), 'dist missing')
 }
 
 // ===========================================================================
@@ -144,6 +145,106 @@ console.log('=== N1/N2/N3: drift notice — current→silent, drift→one line, 
   fs.writeFileSync(globalManifest, savedG)
 }
 
+// ===========================================================================
+console.log('=== A1: auto_update:true + drift → refreshed from dist cache ===')
+// ===========================================================================
+{
+  setAutoUpdate(true)
+  // drift is still in place from N-block (manifest restored above)
+  const r = runHook()
+  const lines = autoUpdateLines(r.stdout)
+  truthy('A1: exit 0 with ONE auto-update line', r.status === 0 && lines.length === 1,
+    `status=${r.status} lines=${JSON.stringify(lines)}`)
+  truthy('A1: line reports 1 artifact at the new short sha',
+    lines.length === 1 && lines[0].includes('auto-updated 1 artifact(s)') && lines[0].includes(GIT_HEAD.slice(0, 12)),
+    lines[0] || '(none)')
+  truthy('A1: skill refreshed to current repo bytes (checksum)',
+    fs.readFileSync(path.join(project, SKILL_REL)).equals(fs.readFileSync(path.join(REPO, 'instructions', 'SKILL.md'))),
+    'bytes differ')
+  const m = readJson(projManifest)
+  truthy('A1: project manifest bumped to the global version with the refreshed sha',
+    m.source_version === GIT_HEAD &&
+    m.artifacts.find((a) => a.path === SKILL_REL).sha256 === sha256(fs.readFileSync(path.join(REPO, 'instructions', 'SKILL.md'))),
+    JSON.stringify({ v: m.source_version }))
+  const reg = readJson(path.join(home, '.episodic-memory', 'installs.json'))
+  truthy('A1: registry entry version updated', reg.entries.find((e) => e.tool === 'claude-code').version === GIT_HEAD,
+    JSON.stringify(reg.entries))
+  const r2 = runHook()
+  truthy('A1: second run is silent (current)', r2.status === 0 &&
+    driftLines(r2.stdout).length === 0 && autoUpdateLines(r2.stdout).length === 0,
+    (r2.stdout || '').slice(0, 200))
+}
+
+// ===========================================================================
+console.log('=== A2: auto_update:true + drift + one MODIFIED file → refreshed others, modified untouched + reported ===')
+// ===========================================================================
+{
+  makeDrift()
+  fs.appendFileSync(path.join(project, GATE_REL), '\n# operator tweak\n')
+  const r = runHook()
+  const lines = autoUpdateLines(r.stdout)
+  truthy('A2: one auto-update line reporting the untouched modified file',
+    r.status === 0 && lines.length === 1 && lines[0].includes('left untouched') && lines[0].includes(GATE_REL),
+    JSON.stringify(lines))
+  truthy('A2: modified checkpoint-gate.sh untouched',
+    fs.readFileSync(path.join(project, GATE_REL), 'utf8').endsWith('# operator tweak\n'), 'operator tweak lost')
+  truthy('A2: unmodified skill still refreshed',
+    fs.readFileSync(path.join(project, SKILL_REL)).equals(fs.readFileSync(path.join(REPO, 'instructions', 'SKILL.md'))),
+    'bytes differ')
+  truthy('A2: manifest version bumped; modified entry keeps its old sha (stays flagged)',
+    readJson(projManifest).source_version === GIT_HEAD &&
+    readJson(projManifest).artifacts.find((a) => a.path === GATE_REL).sha256 !==
+      sha256(fs.readFileSync(path.join(project, GATE_REL))),
+    'unexpected manifest state')
+}
+
+// ===========================================================================
+console.log('=== A3: auto_update:false + drift → notice only, disk unchanged ===')
+// ===========================================================================
+{
+  setAutoUpdate(false)
+  makeDrift()
+  const pre = snapshotTree(project)
+  const r = runHook()
+  truthy('A3: plain drift notice, no auto-update line',
+    r.status === 0 && driftLines(r.stdout).length === 1 && autoUpdateLines(r.stdout).length === 0,
+    (r.stdout || '').slice(0, 300))
+  truthy('A3: disk unchanged (checksum sweep)', snapshotsEqual(pre, snapshotTree(project)), 'tree changed')
+}
+
+// ===========================================================================
+console.log('=== A4: auto_update:true + missing dist cache → plain-notice fallback, exit 0 ===')
+// ===========================================================================
+{
+  setAutoUpdate(true)
+  // drift still in place from A3
+  fs.rmSync(path.join(home, '.episodic-memory', 'dist'), { recursive: true, force: true })
+  const pre = snapshotTree(project)
+  const r = runHook()
+  truthy('A4: falls back to the plain drift notice, exit 0',
+    r.status === 0 && driftLines(r.stdout).length === 1 && autoUpdateLines(r.stdout).length === 0,
+    `status=${r.status} out=${(r.stdout || '').slice(0, 300)}`)
+  truthy('A4: disk unchanged', snapshotsEqual(pre, snapshotTree(project)), 'tree changed')
+}
+
+// ===========================================================================
+console.log('=== A5: auto_update:true + UNREGISTERED project → plain-notice fallback (consent) ===')
+// ===========================================================================
+{
+  // Restore the dist cache by re-recording global state, then de-register.
+  const r0 = spawnSync('node', [INSTALL, '--tool', 'claude-code', '--project', project, '--install-enforcement'],
+    { cwd: project, encoding: 'utf8', env: { ...process.env, HOME: home } })
+  truthy('A5: re-install exits 0', r0.status === 0, `status=${r0.status}`)
+  makeDrift()
+  fs.writeFileSync(path.join(home, '.episodic-memory', 'installs.json'),
+    JSON.stringify({ schema_version: 1, entries: [] }, null, 2))
+  const pre = snapshotTree(project)
+  const r = runHook()
+  truthy('A5: unregistered → plain notice fallback, exit 0',
+    r.status === 0 && driftLines(r.stdout).length === 1 && autoUpdateLines(r.stdout).length === 0,
+    `status=${r.status} out=${(r.stdout || '').slice(0, 300)}`)
+  truthy('A5: disk unchanged (never touch unregistered projects)', snapshotsEqual(pre, snapshotTree(project)), 'tree changed')
+}
 
 for (const d of [home, project]) { try { fs.rmSync(d, { recursive: true, force: true }) } catch {} }
 
