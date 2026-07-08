@@ -54,6 +54,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | The same lesson keeps recurring across projects | `em-promote` (dry-run), then `em-promote --apply` (EXPERIMENTAL) | Re-learning it per project, or hand-copying lesson episodes to global |
 | User wants to SEE the store (dashboard, browse, drafts, hygiene) | `em-console` — hand the user the printed URL | Pasting walls of JSON at the user |
 | User wants guided maintenance in the terminal | `em-manage` (interactive menu) | Dictating flag-by-flag commands to a human |
+| Make a lesson surface on a phrase / tool / activity (or rebuild that index) | `em-store --category lesson --trigger ...` then `em-trigger-index` | Hoping search recall happens to resurface the lesson |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -141,6 +142,42 @@ every script through `scripts/lib/categories.mjs`. Do not hardcode category name
 
 ---
 
+## Lesson activation (RFC-009 R1/R2, shipped in P1b)
+
+Lesson episodes may carry OPTIONAL activation frontmatter, written through flags on
+`em-store`/`em-revise` (lesson-only; any other category rejects them):
+
+- `--trigger <value>` (repeatable) — three explicit kinds: a plain **phrase**
+  (`"second opinion"`), a **tool** binding (`tool:Bash:git*`), or an **activity**
+  class (`activity:plan`). Activity classes come from the closed vocabulary in
+  `activation-classes.json` (repo root; deployed to `~/.episodic-memory/`) —
+  `plan|design|review|troubleshoot|implement|push|rule`; an unknown or deprecated
+  class is rejected at write time. (Phrase sets inside the vocabulary are empty in
+  P1b; the P2 activation adapter populates and consumes them.)
+- `--applies-to-project <slug|*>` / `--applies-to-tool <id>` (repeatable) — scoping;
+  tool ids are the fixed set `claude-code|codex|opencode|pi-agent|cursor|windsurf`.
+- `--priority <1-7>` (default 5) — the DECLARED priority. **8-9 is the EARNED
+  critical band and is never writer-declarable**: it is derived at trigger-index
+  build time from linked violations (one linked violation → `effective_priority` 8,
+  two or more → 9). Stored episode bytes are never mutated by the band.
+- `--review-by <YYYY-MM-DD>` — expiry; an expired lesson drops out of the trigger index.
+- `--evidence <violation-id>` (repeatable) — back-link a lesson to the violations
+  that prove it matters. Validated at write time against the MERGED local+global
+  index (existence + `category: violation`).
+
+`em-violation` gains the symmetric `--lesson <lesson-id>` (repeatable) forward-link and
+now writes a typed `violated_pattern: <pattern-id>` frontmatter scalar (T6): `em-recall`'s
+violation preflight and `em-pattern-health`'s strike counting read the typed field,
+dual-read with the legacy `violated:<id>` tag during the burn-in window (issue #457).
+
+`em-trigger-index` builds ONE derived `trigger-index.json` per store (see its full
+entry); writes of trigger-bearing lessons print an informational R9a collision report
+on stderr when another active lesson shares a trigger phrase (the write always proceeds).
+The `RFC-009-lesson-activation.contract.json` mirror + `validate-rfc-009-contract-mirror.mjs`
+diff these surfaces against code in CI.
+
+---
+
 ## Full entries
 
 ### em-store
@@ -183,9 +220,13 @@ Flags that matter:
   permission gate. Mutually exclusive with `--body`.
 - Tags accept `--tags a,b`, repeated `--tag a --tag b`, or a mix. They are merged,
   deduplicated, lowercased, and sorted.
+- Lesson-only activation flags (`--trigger`, `--applies-to-project`, `--applies-to-tool`,
+  `--priority`, `--review-by`, `--evidence`) — see "Lesson activation" above. Inline-array
+  values may not contain `,` `[` `]` `"` (rejected before any write).
 
 Common mistakes: forgetting `--category`; passing `--scope local` when you meant the
-default global; hand-writing the file instead of calling this script.
+default global; hand-writing the file instead of calling this script; trying
+`--priority 8` (the 8-9 band is earned, not declared).
 
 ### em-revise
 
@@ -214,6 +255,10 @@ Flags that matter:
 - `--scope` defaults to `inherit` (the revision lands in the same store as the
   original). Only pass `local` or `global` to force a cross-store move.
 - Tags are inherited from the original and merged with any you pass.
+- The same lesson-only activation flags as `em-store` apply (validated against the
+  INHERITED category). Activation, linkage, and `violated_pattern` are INHERITED
+  from the original — like tags — so a typo-revision never demotes a lesson to
+  freeform; a flag passed on the revise OVERRIDES that one field (replace, not merge).
 
 Common mistakes: inventing a new episode with `em-store` instead of revising, which
 leaves both versions active and searchable.
@@ -693,6 +738,45 @@ node ~/.episodic-memory/scripts/em-rebuild-index.mjs --check --scope all
 Note: `--help` short-circuits safely (PR #449), but any OTHER unknown argument is
 ignored and a rebuild runs. `--scope all` rebuilds both local and global.
 
+### em-trigger-index
+
+Build the derived lesson-activation trigger index (RFC-009 R2).
+
+- WHEN TO USE: after storing/revising trigger-bearing lessons, to (re)build
+  `trigger-index.json`; or `--merged` to see the deduped local+global view a
+  consumer would read. Builds are lazy — an unchanged store is a cache hit.
+- WHEN NOT TO USE: as a search surface (use `em-search`); to mutate episodes (it
+  is read-only over the store and never rewrites stored bytes).
+
+```
+node ~/.episodic-memory/scripts/em-trigger-index.mjs [--project <root>] [--scope local|global|all] [--merged]
+```
+
+Output: `{"status":"ok","built":[{"scope":"local","store":".../.episodic-memory","entries":3,"cache_hit":false}]}`
+
+Flags that matter:
+- `--project <root>` is a PATH binding (unique among em-* scripts, where
+  `--project` is a name filter): when `<root>` is an existing directory the local
+  store is `<root>/.episodic-memory` regardless of caller cwd.
+- `--merged` prints the local-precedence merged view (one store failing degrades
+  to the other with a stderr note, never fatal). The merged view RECOMPUTES
+  `effective_priority` and `session_start` against BOTH stores' rows, so a
+  cross-scope link (local lesson, global violation) earns the band there; the
+  per-store artifact keeps a per-store band (deterministic per store). Consumers
+  read the merged view.
+
+The artifact: `trigger-index.json` carries `schema_version`, a `source` fingerprint
+(`index_mtime_ms` + `index_size` + `index_sha256`, TOCTOU-safe), a `build_report`
+(excluded unknown/deprecated activity classes), `entries` (per-trigger rows with
+`trigger_kind` phrase|tool|activity and the DERIVED `effective_priority` 1-9), and a
+`session_start` section (`critical_entries` = every band-8/9 lesson, trigger-independent;
+`entries` = top-10 by the `static_score` blend; `preflight` = per-task-type recent
+violation counts keyed by `violated_pattern`) that the P2 session-start hook will read.
+
+Common mistakes: confusing the stored `priority` (1-7, declared) with
+`effective_priority` (1-9, derived — the 8-9 band is earned from linked violations,
+never written); expecting `--project` to filter by name like other scripts.
+
 ### em-doctor
 
 Health check + repair for the stores and the installation. One command answers
@@ -922,8 +1006,16 @@ node ~/.episodic-memory/scripts/em-violation.mjs \
   --pattern <pattern-id> \
   --summary "<what happened>" \
   --body "<detail>" \
-  [--sequence "<actual actions>"] [--correct "<correct actions>"] [--scope global|local]
+  [--sequence "<actual actions>"] [--correct "<correct actions>"] [--scope global|local] \
+  [--lesson <lesson-episode-id>]...
 ```
+
+Flags that matter:
+- `--lesson <id>` (repeatable) forward-links the violation to the lesson(s) whose
+  surfacing failed — this is what feeds a lesson's earned 8-9 band (see "Lesson
+  activation"). Each id must resolve to an existing `category: lesson` episode.
+- The episode carries a typed `violated_pattern: <pattern-id>` field (T6); the
+  legacy `violated:<id>` tag remains as a burn-in shim only.
 
 Missing-args output:
 

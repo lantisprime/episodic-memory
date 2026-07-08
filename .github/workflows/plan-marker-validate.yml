@@ -282,6 +282,27 @@ jobs:
       - name: Run SessionStart drift-notice + opt-in auto-update suite (Layer 1)
         run: node tests/test-install-drift-notice.mjs
 
+      - name: Run activation lib + activity-class vocab suite (RFC-009 P1b S1)
+        run: node tests/test-activation-lib.mjs
+
+      - name: Run R1 activation write + R9a collision suite (RFC-009 P1b S2/S3/S7)
+        run: node tests/test-activation-write.mjs
+
+      - name: Run violation linkage + T6 write suite (RFC-009 P1b S3)
+        run: node tests/test-violation-linkage.mjs
+
+      - name: Run T6 migration + T2 grep-gate suite (RFC-009 P1b S4)
+        run: node tests/test-t6-migration.mjs
+
+      - name: Run trigger-index core suite (RFC-009 P1b S5)
+        run: node tests/test-trigger-index.mjs
+
+      - name: Run trigger-index session_start suite (RFC-009 P1b S6)
+        run: node tests/test-trigger-session-start.mjs
+
+      - name: Run install activation-classes deploy E2E (RFC-009 P1b S9)
+        run: node tests/test-install-activation.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

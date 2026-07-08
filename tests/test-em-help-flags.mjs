@@ -149,7 +149,8 @@ const SUBSTRATE = [
   'em-lock.mjs', 'em-mine-transcripts.mjs', 'em-pattern-health.mjs', 'em-prune.mjs',
   'em-rebuild-index.mjs', 'em-recall.mjs', 'em-restore.mjs', 'em-review-request.mjs',
   'em-revise.mjs', 'em-rfc-validate.mjs', 'em-search.mjs', 'em-seed-patterns.mjs',
-  'em-store.mjs', 'em-violation.mjs', 'em-watch-codex.mjs', 'em-workflow-validate.mjs',
+  'em-store.mjs', 'em-trigger-index.mjs', 'em-violation.mjs', 'em-watch-codex.mjs',
+  'em-workflow-validate.mjs',
   'second-opinion.mjs',
 ]
 

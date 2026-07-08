@@ -54,6 +54,7 @@ const DESCRIPTIONS = {
   routines: 'Scheduled maintenance manager (sync/list/run/enable/disable)',
   prune: 'Archive stale low-relevance episodes',
   'rebuild-index': 'Regenerate index.jsonl, tags.json, category-index.json',
+  'trigger-index': 'Build the derived lesson-activation trigger index (RFC-009 R2)',
   backup: 'Sync stores to a backup git repository',
   restore: 'Restore stores from a backup repository',
   violation: 'Record a behavioral-pattern violation',

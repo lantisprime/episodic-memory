@@ -1,0 +1,72 @@
+{
+  "version": "1.0.0",
+  "_doc": "RFC-009 P1b data-artifact contract mirror — P1b-shipped surfaces ONLY. Later phases EXTEND it: P2 adds the activity-class phrase sets + lesson-suppress.json consumption, P3+ adds the R9b/c/d clerk surfaces. Validated in CI by scripts/validate-rfc-009-contract-mirror.mjs.",
+  "activation_flags": {
+    "em-store": [
+      "--trigger",
+      "--applies-to-project",
+      "--applies-to-tool",
+      "--priority",
+      "--review-by",
+      "--evidence",
+      "--lesson",
+      "--violated-pattern"
+    ],
+    "em-revise": [
+      "--trigger",
+      "--applies-to-project",
+      "--applies-to-tool",
+      "--priority",
+      "--review-by",
+      "--evidence"
+    ],
+    "em-violation": [
+      "--lesson"
+    ]
+  },
+  "activation_fields": [
+    "triggers",
+    "applies_to_projects",
+    "applies_to_tools",
+    "evidence",
+    "lessons",
+    "priority",
+    "review_by",
+    "violated_pattern"
+  ],
+  "tool_ids": [
+    "claude-code",
+    "codex",
+    "opencode",
+    "pi-agent",
+    "cursor",
+    "windsurf"
+  ],
+  "activity_classes": [
+    "plan",
+    "design",
+    "review",
+    "troubleshoot",
+    "implement",
+    "push",
+    "rule"
+  ],
+  "trigger_index_shape": {
+    "schema_version": 1,
+    "entry_fields": [
+      "trigger_kind",
+      "value",
+      "episode_id",
+      "summary",
+      "effective_priority",
+      "applies_to_projects",
+      "applies_to_tools",
+      "review_by"
+    ],
+    "trigger_kind_enum": [
+      "phrase",
+      "tool",
+      "activity"
+    ]
+  }
+}
