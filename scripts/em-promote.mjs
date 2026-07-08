@@ -166,15 +166,29 @@ for (const m of members) {
   byRoot.get(root).push(m)
 }
 
-// Candidate: >=2 distinct member identities spanning >=2 distinct stores.
-// A lone replica (one identity present in two stores) is clone-store noise,
-// not recurrence; two near-identical lessons inside ONE store are
+// Candidate: recurrence must be INDEPENDENT presence, never explainable by
+// replication (reviewer F1: a full store clone makes every member span both
+// stores, so "spans >=2 stores" is satisfiable by copying alone). The
+// predicate is a pair of DISTINCT member identities whose store-sets are
+// DISJOINT — the two lessons never co-reside, so no replication of one store
+// can account for both. Fail-safe direction: mixed replication shapes
+// (lesson1 in {A,B}, lesson2 in {B}) are excluded even when a genuine
+// recurrence might hide inside — a missed promotion is recoverable, a
+// fabricated one pollutes global. Near-duplicates inside ONE store are
 // em-consolidate's business, not promotion's.
 const candidates = []
 for (const cluster of byRoot.values()) {
   if (cluster.length < 2) continue
+  let independent = false
+  outer: for (let i = 0; i < cluster.length; i++) {
+    for (let j = i + 1; j < cluster.length; j++) {
+      let sharesStore = false
+      for (const s of cluster[i].stores) if (cluster[j].stores.has(s)) { sharesStore = true; break }
+      if (!sharesStore) { independent = true; break outer }
+    }
+  }
+  if (!independent) continue
   const storeUnion = new Set(cluster.flatMap(m => [...m.stores]))
-  if (storeUnion.size < 2) continue
   cluster.sort((a, b) => a.id.localeCompare(b.id) || a.key.localeCompare(b.key))
   const keys = cluster.map(m => m.key).sort()
   candidates.push({
@@ -209,11 +223,21 @@ for (const r of globalRows) {
     warnings.push({ episode: r.id, problem: 'episode file missing' })
     continue
   }
-  const srcSection = content.split(/^## Sources$/m)[1]
-  if (typeof srcSection !== 'string') {
+  // Reviewer F2: member excerpts are UNTRUSTED text composed above the real
+  // Sources section — a body containing a literal "## Sources" line would
+  // hijack a first-match parse and poison the superset back-ref with fake
+  // ids. The REAL section is always composed LAST, so parse the final
+  // segment; multiple headers are surfaced (write-side quoting below makes
+  // them rare, but hand-written episodes stay possible).
+  const segments = content.split(/^## Sources$/m)
+  if (segments.length < 2) {
     warnings.push({ episode: r.id, problem: 'missing ## Sources section' })
     continue
   }
+  if (segments.length > 2) {
+    warnings.push({ episode: r.id, problem: `multiple ## Sources headers (${segments.length - 1}) — parsing the last` })
+  }
+  const srcSection = segments[segments.length - 1]
   const ids = new Set()
   for (const m of srcSection.matchAll(/^- (\S+) \(/gm)) ids.add(m[1])
   if (ids.size === 0) warnings.push({ episode: r.id, problem: 'empty/malformed ## Sources list' })
@@ -268,14 +292,21 @@ const today = new Date().toISOString().slice(0, 10)
 for (const c of fresh) {
   const newest = c.members[c.members.length - 1]
   const summary = `Recurring lesson: ${newest.summary}`
+  // Reviewer F3: member tags are untrusted for the IDENTITY axis — a stray
+  // promoted:* member tag unioned onto the digest would enter the dedupe set
+  // and silently skip a future legitimate candidate. Only OUR hash tag rides.
   const tags = normalizeTags([
-    ...c.members.flatMap(m => m.tags),
+    ...c.members.flatMap(m => m.tags).filter(t => !String(t).startsWith(PROMOTED_HASH_TAG_PREFIX) && String(t) !== PROMOTED_TAG),
     PROMOTED_TAG,
     `${PROMOTED_HASH_TAG_PREFIX}${c.hash}`,
   ])
+  // Reviewer F2 (write side): excerpts and summaries are untrusted markdown —
+  // quote any heading line so member text can never mint a section marker
+  // (the read side additionally parses only the LAST ## Sources section).
+  const quoteHeadings = (s) => s.replace(/^(#{1,6} ?)/gm, '> $1')
   const sections = c.members.map(m => {
-    const excerpt = m.body.split('\n').slice(0, EXCERPT_MAX_LINES).join('\n').trim()
-    return `## ${m.summary}\n\n(id: \`${m.id}\`, project: ${m.project}, stores: ${[...m.stores].sort().join(', ')})\n\n${excerpt}`
+    const excerpt = quoteHeadings(m.body.split('\n').slice(0, EXCERPT_MAX_LINES).join('\n').trim())
+    return `## Member: ${quoteHeadings(m.summary)}\n\n(id: \`${m.id}\`, project: ${m.project}, stores: ${[...m.stores].sort().join(', ')})\n\n${excerpt}`
   })
   const sourceLines = c.members.map(m => `- ${m.id} (${m.project}, ${[...m.stores].sort().join(', ')})`)
   if (c.supersedes_promotion) sourceLines.push(`- Supersedes-promotion: ${c.supersedes_promotion}`)

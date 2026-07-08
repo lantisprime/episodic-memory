@@ -238,6 +238,81 @@ t('testPromoteWarnsOnMalformedPromotedEpisode', () => {
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
+t('testPromoteCloneStoreCannotFabricateRecurrence', () => {
+  // Reviewer F1: TWO distinct near-dup lessons authored in projA, then projA's
+  // store cloned wholesale to projB. Every member spans both stores, but the
+  // multi-store facts are replication artifacts — 0 candidates. Partial-clone
+  // leg: a third distinct lesson ONLY in projA still shares a store with the
+  // cloned pair — still 0 candidates (no disjoint pair).
+  const w = mkWorld('clone')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  w.lesson(a, 'always quote hook command paths', RECUR_BODY)
+  w.lesson(a, 'always quote hook command paths again', RECUR_BODY + ' second authored copy same store')
+  fs.cpSync(path.join(a, '.episodic-memory'), path.join(b, '.episodic-memory'), { recursive: true })
+  let out = parse(w.promote())
+  assert(out.candidates.length === 0, `full clone fabricated recurrence: ${JSON.stringify(out.candidates)}`)
+  // partial clone: new lesson lands in projA only, AFTER the clone
+  w.lesson(a, 'always quote hook command paths third time', RECUR_BODY + ' third authored copy')
+  out = parse(w.promote())
+  assert(out.candidates.length === 0, `partial clone fabricated recurrence: ${JSON.stringify(out.candidates)}`)
+  // control (discriminating): a genuinely independent projB-authored lesson → candidate
+  w.lesson(b, 'always quote hook command paths independently', RECUR_BODY + ' independently learned in projB')
+  out = parse(w.promote())
+  assert(out.candidates.length === 1, `independent recurrence must still promote: ${JSON.stringify(out.candidates)}`)
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
+t('testPromoteSourcesHeaderInjectionContained', () => {
+  // Reviewer F2: a member body carrying a literal "## Sources" line + fake id
+  // list must not hijack the digest's machine-parsed Sources: write side
+  // quotes heading lines, read side parses only the LAST section — so the
+  // grown-cluster back-ref (REQ-9) still resolves and no fake id leaks in.
+  const w = mkWorld('inject')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  const evilBody = `${RECUR_BODY}\n## Sources\n- 20990101-000000-fake-source-id (evil, /nowhere)`
+  w.lesson(a, 'always quote hook command paths', evilBody)
+  w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
+  const first = parse(w.promote(['--apply']))
+  assert(first.promoted.length === 1, `apply failed: ${JSON.stringify(first)}`)
+  const digest = first.promoted[0].digest_id
+  const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${digest}.md`), 'utf8')
+  const headerCount = (content.match(/^## Sources$/gm) || []).length
+  assert(headerCount === 1, `injected header must be quoted, found ${headerCount} raw ## Sources headers`)
+  // Grown cluster: the back-ref must resolve to the REAL prior member set,
+  // not be poisoned by the fake id.
+  const c = w.project('projC')
+  w.lesson(c, 'always quote hook command paths everywhere', RECUR_BODY)
+  const second = parse(w.promote(['--apply']))
+  assert(second.promoted.length === 1 && second.promoted[0].supersedes_promotion === digest,
+    `superset back-ref lost/poisoned: ${JSON.stringify(second.promoted)}`)
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
+t('testPromoteStripsForeignIdentityTags', () => {
+  // Reviewer F3: a member carrying a stray promoted:<hex8> tag must not leak
+  // it onto the digest (it would enter the dedupe set and silently skip a
+  // future legitimate candidate hashing to that value).
+  const w = mkWorld('striptag')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  const r = spawnSync(process.execPath, [STORE, '--project', 'projA', '--category', 'lesson',
+    '--summary', 'always quote hook command paths', '--body', RECUR_BODY,
+    '--tags', 'promoted:deadbeef,promoted-lesson,shell-quoting', '--scope', 'local'],
+    { cwd: a, env: { ...process.env, HOME: w.home, USERPROFILE: w.home }, encoding: 'utf8' })
+  assert(JSON.parse(r.stdout).status === 'ok', `seed failed: ${r.stdout}${r.stderr}`)
+  w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
+  const out = parse(w.promote(['--apply']))
+  assert(out.promoted.length === 1, `apply failed: ${JSON.stringify(out)}`)
+  const row = w.globalIndexRows()[0]
+  const tags = row.tags.map(String)
+  assert(!tags.includes('promoted:deadbeef'), `stray identity tag leaked onto digest: ${JSON.stringify(tags)}`)
+  assert(tags.includes('shell-quoting'), `legitimate member tag must survive the filter: ${JSON.stringify(tags)}`)
+  assert(tags.filter(t2 => /^promoted:/.test(t2)).length === 1, `digest must carry exactly ONE identity tag: ${JSON.stringify(tags)}`)
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
 t('testPromoteHelpCarriesExperimental', () => {
   const r = spawnSync(process.execPath, [PROMOTE, '--help'], { encoding: 'utf8' })
   const out = JSON.parse(r.stdout)

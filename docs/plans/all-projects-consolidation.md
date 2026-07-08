@@ -448,7 +448,7 @@ Group 4: promote (12) — tests/test-em-promote.mjs
   testPromoteHelpCarriesExperimental — --help JSON contains "EXPERIMENTAL"
   testPromoteIsSubstrateScript — isSubstrateScript('em-promote.mjs') === true
 
-Total: 37 tests (+ existing suites stay green).
+Total: 40 tests (Group 4 grew to 15 with the reviewer F1-F3 regressions; + existing suites stay green).
 Runners: node tests/test-registered-stores.mjs · node tests/test-all-projects-observability.mjs ·
 node tests/test-fold-all-projects.mjs · node tests/test-em-promote.mjs
 ```
@@ -462,16 +462,21 @@ non-empty-input-derived (EC-empty-identity guard).
 
 Filled with observed output at implementation time:
 
-| Claim | Command (strong layer) | Observed artifact |
+| Claim | Command (strong layer) | Observed artifact (2026-07-08 build session) |
 |---|---|---|
-| All new tests pass | `node tests/test-<each>.mjs` (4 commands) | `<N>/<N> pass` each |
-| Existing fold suite unregressed | `node tests/test-fold-superseded.mjs` | `<N>/<N> pass` |
-| P12 untouched | `node tests/test-p12-invariant-suite.mjs` | pass |
-| Real-store smoke (read-only) | `node scripts/em-stats.mjs --all-projects` on operator machine | JSON with ≥1 project block |
-| Real-store fold dry-run only | `node scripts/em-consolidate.mjs --fold-superseded --all-projects --dry-run` | JSON report, zero writes |
-| CI green per workflow | `gh pr checks <PR>` then `gh run list` per workflow (lesson `…8ff2`) | all SUCCESS |
-| Deployed after merge | `install.mjs` + shasum repo vs `~/.episodic-memory/scripts/<file>` | hash equality |
-| MD reflection | `grep -n "em-promote" CAPABILITIES.md docs/EM_SCRIPTS_GUIDE.md` | ≥1 match each |
+| All new tests pass | `node tests/test-<each>.mjs` (4 commands) | 7/7, 10/10, 8/8, 15/15 pass |
+| Existing fold suite unregressed | `node tests/test-fold-superseded.mjs` | 11/11 pass (also test-em-consolidate 8/8, test-em-doctor 13/13, test-em-stats-semantic 13/13) |
+| P12 untouched | `node tests/test-p12-invariant-suite.mjs` | `P12 INVARIANT GATE: PASS` (7 members) |
+| Repo-wide guards | control-bytes, install-manifest, lib-closure, em-cli, readonly-manifest suites | 552 files clean; 57/57; 6/6; 9/9; 16/16 |
+| Real-store smoke (read-only) | `node scripts/em-stats.mjs --all-projects --scope global` | `project:episodic-memory` block present, 1816 episodes, totals 2299 |
+| Real-store fold dry-run only | `node scripts/em-consolidate.mjs --fold-superseded --all-projects --dry-run` | real 49-member workplan chain found (folded_total 48 preview, terminal kept, forked chain skipped non-linear), zero writes |
+| em dispatch + experimental label | `node scripts/em.mjs promote --help` | `tier:"EXPERIMENTAL", decision_date:"2026-10-08"` |
+| Promote degrade (1 store) | `node scripts/em-promote.mjs` | `note:"needs >=2 registered stores (consumer registry lists 1)"` |
+| REQ-12 CI registration | 4-suite grep of plan-marker-validate.yml | `4` |
+| Step-9 issues | `gh issue create` ×3 | #478 (§17-A/D/E), #479 (§17-B), #480 (§17-C) |
+| CI green per workflow | `gh pr checks <PR>` then `gh run list` per workflow (lesson `…8ff2`) | (at PR time) |
+| Deployed after merge | `install.mjs` + shasum repo vs `~/.episodic-memory/scripts/<file>` | (post-merge) |
+| MD reflection | `grep -c "em-promote" CAPABILITIES.md docs/EM_SCRIPTS_GUIDE.md` | 3 + 3 matches |
 
 ## §16 Risk Analysis
 
@@ -487,7 +492,7 @@ Filled with observed output at implementation time:
 ## §17 Open Decisions
 
 - **§17-A Typed provenance on promoted episodes** → deferred to RFC-009 P1b `--evidence`/`--lesson`
-  linkage; tracked in an issue filed at PR-C time (Rule 18 step 9). 5 fields: (1) scenario: body-only
+  linkage; tracked in **#478** (also carries §17-D and §17-E). 5 fields: (1) scenario: body-only
   sources cannot be machine-joined — reproduced by grepping a promoted fixture episode for a typed
   field (absent); (2) spec: no accepted RFC requires typed provenance today (RFC-009 P1b ships it;
   P1b is approved-pending, not merged); (3) history: codex R1/R2 on P1b validated the linkage design
@@ -495,14 +500,14 @@ Filled with observed output at implementation time:
   are similarly untyped in v1 — class-consistent; (5) residual: promoted episodes can't be
   automatically re-verified against sources until P1b lands; failure mode is graceful (stale derived
   lesson, correctable via em-revise).
-- **§17-B em-routines scheduling of all-projects doctor** → deferred; issue at PR-A time. 5 fields:
+- **§17-B em-routines scheduling of all-projects doctor** → deferred; tracked in **#479**. 5 fields:
   (1) scenario: nothing breaks — absence just means manual invocation; (2) spec: P6 requires opt-in
   triggers for recurring work — deferral is the conservative side; (3) history: em-routines launchd
   work (v116-era) shipped separately from the capabilities it schedules; (4) same-class: em-doctor
   single-store is likewise unscheduled by default; (5) residual: operators run it by hand; no
   corruption path.
 - **§17-C Cluster-mode consolidate across projects** → non-goal (§5), revisit after fold burn-in;
-  issue at PR-B time with the same 5-field discipline.
+  tracked in **#480** with the 5-field discipline.
 - **§17-D Concurrent `--apply` TOCTOU (planner M5)** → deferred; folded into the §17-A issue.
   5 fields: (1) scenario: two concurrent applies both pass the hash-dedupe read then both write →
   duplicate digest content, no corruption (em-store appends atomic per write; not reproduced — same
@@ -518,7 +523,7 @@ Filled with observed output at implementation time:
 
 ## §18 Done Criteria
 
-- [ ] All 37 §14 tests pass + all pre-existing suites green (per workflow, `gh run list`).
+- [ ] All 40 §14 tests pass + all pre-existing suites green (per workflow, `gh run list`).
 - [ ] §15 ledger fully populated with observed output.
 - [ ] Real-store read-only smoke run (stats + fold dry-run) pasted into PR body.
 - [ ] CAPABILITIES.md + EM_SCRIPTS_GUIDE.md reflect shipped capabilities (REQ-13).
@@ -534,6 +539,7 @@ interactive cmux (standing directive 2026-06-28), 2-round cap, iterate HOLDs wit
 |---|---|---|---|---|---|
 | 1 | negative-scenario-planner (v6.7) | claude subagent | 5 (+3 MAJOR, 2 MINOR) | HOLD | `20260708-080241-hold-apc-plan-round-1-afc8` |
 | 2 | codex R1 | codex gpt-5.5 high (cmux, interactive) | 5 | HOLD — all folded (CX1-CX5 below); operator waived further rounds and pre-approved implementation (2026-07-08) | cmux transcript, session `apc-review` |
+| 3 | negative-scenario-reviewer (v4.8, impl diff) | claude subagent | 2 MAJOR + 1 MINOR (all em-promote.mjs) | HOLD — all fixed same cycle (F1-F3 below) | `20260708-084913-hold-apc-impl-round-1-2-major-em-promote-09f3` |
 
 ### 19.1 Resolved blockers — planner round 1 (all folded, this revision)
 
@@ -559,6 +565,15 @@ Codex round 1 (gpt-5.5 high, static review; planner round carried the runtime pr
 | CX3 | REQ-12 CI grep proof omitted the fold suite | ACCEPT | grep names all four suites, expects 4 |
 | CX4 | LOW altitude with deferred A.7 tables; stale 5/5 count symptom | ACCEPT WITH MODIFICATION | §A.7 staged mechanical-spec gate (per-slice table + lint BEFORE first edit, recorded in PR); 5/5→7/7 fixed |
 | CX5 | `--limit` advertised but unspecified | ACCEPT | flag removed; deterministic hash-asc candidate ordering stated |
+
+Implementation review round (negative-scenario-reviewer v4.8 on `git diff main...HEAD`; fold/gate/protection/doctor/cwd-binding all held under its runtime probes):
+
+| # | Finding | Verdict | Resolution + evidence |
+|---|---|---|---|
+| F1 | recurrence predicate satisfiable by store replication alone (full clone → observed `candidates=1`) | ACCEPT | predicate re-specified: a candidate requires a pair of DISTINCT members with DISJOINT store-sets (fail-safe: partial-clone shapes excluded); `testPromoteCloneStoreCannotFabricateRecurrence` (full + partial clone + independent control) |
+| F2 | `## Sources` first-match parse hijackable by untrusted member excerpts (observed doubled header + `supersedes_promotion:null`) | ACCEPT | write side quotes heading lines in excerpts + `## Member:` prefix; read side parses the LAST section + warns on multiple headers; `testPromoteSourcesHeaderInjectionContained` |
+| F3 | member tag union leaks stray `promoted:*` tags into the dedupe identity set | ACCEPT | identity-prefixed tags stripped from the union (exactly one hash tag per digest); `testPromoteStripsForeignIdentityTags` |
+| N1/N2 | scope-label dual role; identity on the tag axis | DEFER | documented P1b retirements, #478 |
 
 ## §20 Lessons Encoded
 
@@ -675,7 +690,7 @@ one CI-registration EDIT (`.github/workflows/plan-marker-validate.yml`, APPEND r
 node tests/test-registered-stores.mjs         # 7/7
 node tests/test-all-projects-observability.mjs # 10/10
 node tests/test-fold-all-projects.mjs          # 8/8
-node tests/test-em-promote.mjs                 # 12/12
+node tests/test-em-promote.mjs                 # 15/15
 node tests/test-fold-superseded.mjs            # unregressed
 node tests/test-p12-invariant-suite.mjs        # pass
 node scripts/em-stats.mjs --all-projects       # real-store JSON, >=1 project block
