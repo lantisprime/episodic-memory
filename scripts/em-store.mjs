@@ -323,7 +323,7 @@ if (activation && Array.isArray(activation.triggers) && activation.triggers.leng
     for (const e of merged.entries) {
       if (e.episode_id === id) continue // self-exclusion: the just-written episode
       if (!mine.has(e.value)) continue
-      const key = `${e.episode_id} ${e.value}`
+      const key = `${e.episode_id} ${e.value}`
       if (reported.has(key)) continue
       reported.add(key)
       process.stderr.write(`collision: trigger "${e.value}" also on ${e.episode_id}: ${e.summary}\n`)
