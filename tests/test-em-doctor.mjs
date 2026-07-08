@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -158,7 +159,75 @@ t('missing store is ok (created on first use), not an error', () => {
   fs.rmSync(emptyCwd, { recursive: true, force: true });
 });
 
-for (const f of [healthy, sick, warned, deviant]) {
+// ---------------------------------------------------------------------------
+// Gate-friction (E5): parse .checkpoints/gate-log.jsonl written by the
+// enforcement gates; false-positive metric joins hold cmd_sha256 against
+// .checkpoints/classify/ verdicts (sha256 of whitespace-normalized command).
+// ---------------------------------------------------------------------------
+const friction = mkFixture();
+
+t('gate-friction: absent log → ok, no false-positive noise', () => {
+  const r = run(['--scope', 'local'], friction.cwd, friction.env);
+  assert.equal(check(r.json, 'gate-friction').level, 'ok');
+  assert.match(check(r.json, 'gate-friction').message, /absent/);
+  assert.equal(check(r.json, 'gate-log-size'), undefined, 'no size warn without a log');
+});
+
+t('gate-friction: counts per decision + malformed lines skipped, never fatal', () => {
+  const ckpt = path.join(friction.cwd, '.checkpoints');
+  fs.mkdirSync(ckpt, { recursive: true });
+  const line = (decision, sha = '') => JSON.stringify({
+    ts: 1, gate: 'checkpoint', tool: 'Bash', label: 'shared_write',
+    reason: 'x', decision, sid: 's', cmd_sha256: sha,
+  }) + '\n';
+  // sha256('node /tmp/foo.mjs') — the whitespace-normalized held command.
+  const heldSha = crypto.createHash('sha256')
+    .update('node /tmp/foo.mjs').digest('hex');
+  fs.writeFileSync(path.join(ckpt, 'gate-log.jsonl'),
+    line('allow') + line('hold', heldSha) + line('block') + line('silence') +
+    'not-json\n' + '[1,2,3]\n');
+  const r = run(['--scope', 'local'], friction.cwd, friction.env);
+  const g = check(r.json, 'gate-friction');
+  assert.equal(g.level, 'ok');
+  assert.match(g.message, /1 allow, 1 silence, 1 hold, 1 block/);
+  assert.match(g.message, /2 malformed line\(s\) skipped/);
+  assert.equal(check(r.json, 'gate-false-positives').level, 'ok',
+    'hold with no matching verdict is not a false positive');
+});
+
+t('gate-friction: hold later classified read_only → false-positive warn', () => {
+  const classify = path.join(friction.cwd, '.checkpoints', 'classify');
+  fs.mkdirSync(classify, { recursive: true });
+  // Marker's informational command_normalized joins by re-hash (extra
+  // whitespace proves the collapse rules are applied before hashing).
+  fs.writeFileSync(path.join(classify, 'deadbeef.json'), JSON.stringify({
+    schema_version: 2, label: 'read_only', command_normalized: 'node   /tmp/foo.mjs ',
+  }));
+  const r = run(['--scope', 'local'], friction.cwd, friction.env);
+  const fp = check(r.json, 'gate-false-positives');
+  assert.equal(fp.level, 'warn');
+  assert.match(fp.message, /1 held command shape/);
+});
+
+t('gate-friction: shared_write verdict does NOT count as false positive', () => {
+  const classify = path.join(friction.cwd, '.checkpoints', 'classify');
+  fs.writeFileSync(path.join(classify, 'deadbeef.json'), JSON.stringify({
+    schema_version: 2, label: 'shared_write', command_normalized: 'node /tmp/foo.mjs',
+  }));
+  const r = run(['--scope', 'local'], friction.cwd, friction.env);
+  assert.equal(check(r.json, 'gate-false-positives').level, 'ok');
+});
+
+t('gate-friction: log over 5MB → size warn', () => {
+  const logPath = path.join(friction.cwd, '.checkpoints', 'gate-log.jsonl');
+  const row = JSON.stringify({ ts: 1, gate: 'checkpoint', tool: 'Bash', label: '', reason: 'x', decision: 'allow', sid: 's', cmd_sha256: '' }) + '\n';
+  fs.writeFileSync(logPath, row.repeat(Math.ceil((5 * 1024 * 1024) / row.length) + 10));
+  const r = run(['--scope', 'local'], friction.cwd, friction.env);
+  assert.equal(check(r.json, 'gate-log-size').level, 'warn');
+  assert.match(check(r.json, 'gate-log-size').message, /5MB/);
+});
+
+for (const f of [healthy, sick, warned, deviant, friction]) {
   fs.rmSync(f.cwd, { recursive: true, force: true });
   fs.rmSync(f.home, { recursive: true, force: true });
 }

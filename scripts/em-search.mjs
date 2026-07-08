@@ -21,7 +21,7 @@ import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import {
-  normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex,
+  normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex, loadArchivedIndex,
   computeScore, writeBackAccessTracking, scoreTextMatch,
   tokenizeQuery, loadTokensIndex, tokenCandidates, scorePartialMatch
 } from './lib/relevance.mjs'
@@ -103,7 +103,23 @@ if (historyId) {
   let currentId = historyId
 
   // Walk backwards: find what this episode supersedes
+  //
+  // The walk sees index rows PLUS archived metadata: em-prune and
+  // em-consolidate --fold-superseded move an episode's file to archived/ and
+  // its row to archived-index.jsonl, so a chain with archived members would
+  // otherwise silently truncate (runtime-probed: archiving one intermediate
+  // cut a 4-link chain to 2 from the terminal and 1 from the root). Live
+  // rows win on id collision; archived rows are marked `archived: true` in
+  // the output and their bodies resolve from archived/.
   const allEntries = [...results]
+  for (const [dir, label] of [[LOCAL_DIR, 'local'], [GLOBAL_DIR, 'global']]) {
+    if (scope !== 'all' && scope !== label) continue
+    for (const row of loadArchivedIndex(dir, label)) {
+      if (seen.has(row.id)) continue
+      seen.add(row.id)
+      allEntries.push(row)
+    }
+  }
   const byId = new Map(allEntries.map(e => [e.id, e]))
 
   // Find the root of the chain
@@ -144,19 +160,20 @@ if (historyId) {
     }
   }
 
-  // Include full body if requested
+  // Include full body if requested (archived members read from archived/)
   const output = chain.map(e => {
+    const { _dataDir, _archived, ...rest } = e
+    const row = _archived ? { ...rest, archived: true } : rest
     if (full) {
-      const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
+      const filePath = path.join(_dataDir, _archived ? 'archived' : 'episodes', `${e.id}.md`)
       if (fs.existsSync(filePath)) {
         const content = fs.readFileSync(filePath, 'utf8')
         const parts = content.split('---')
         const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
-        return { ...e, body, _source: e._source, _dataDir: undefined }
+        return { ...row, body }
       }
     }
-    const { _dataDir, ...rest } = e
-    return rest
+    return row
   })
 
   // No access tracking for history queries (investigative, not usage signals)
@@ -263,7 +280,15 @@ if (query) {
   // Episodes the token index has never seen (hand-written rows, stores
   // predating tokens.json) bypass pruning and take the full-scoring path —
   // index gaps degrade to a slower search, never to hidden episodes.
-  const pool = candidateInfo
+  //
+  // Dropped-token semantics (S2 diet): a query token recorded under
+  // "_dropped" is common-by-df, not absent — its posting list was removed on
+  // purpose. tokenCandidates already excludes dropped tokens from the AND
+  // intersection (they are non-pruning), and returns all === null when NO
+  // token can prune, in which case the query full-scans. Either way the
+  // final scoring below is the same scoreTextMatch a scan would run, so
+  // results stay byte-identical to the pre-diet index.
+  const pool = candidateInfo && candidateInfo.all !== null
     ? results.filter(e => candidateInfo.all.has(e.id) || !candidateInfo.covered.has(e.id))
     : results
   const matched = pool.filter(e => {
@@ -284,13 +309,41 @@ if (query) {
     // With the token index, body membership is known without file reads and
     // the pool narrows to episodes containing at least one token; on the
     // fallback path, partials come from summary/tags only (no O(n) body reads).
-    const partialPool = (candidateInfo
+    //
+    // Dropped tokens (S2 diet) have no posting lists, so perToken cannot
+    // answer body membership for them — inBody falls back to reading the
+    // episode body (cached per episode). The pool, however, stays ANCHORED to
+    // the non-dropped tokens' postings (`any` ∪ uncovered): widening to every
+    // row whenever one token was dropped re-created the O(n) full-store body
+    // scan the index exists to avoid (review finding, confirmed on the
+    // 1811-episode store). Only when EVERY query token is dropped
+    // (candidateInfo.all === null) is a full scan inherent — same as the
+    // strict tier above. Cost of the bound: an episode whose ONLY hit is a
+    // common (dropped) token no longer surfaces as a partial when a rare
+    // anchor exists; that class scores ≤ ~0.1 (coverage 0.5 × body weight)
+    // and sat below every real match.
+    const allDropped = candidateInfo && candidateInfo.all === null
+    const partialPool = (candidateInfo && !allDropped
       ? results.filter(e => candidateInfo.any.has(e.id) || !candidateInfo.covered.has(e.id))
       : results)
       .filter(e => !matchedIds.has(e.id))
     for (const e of partialPool) {
+      let bodyLower // lazy, read at most once per episode
+      const readBodyLower = () => {
+        if (bodyLower === undefined) {
+          try {
+            bodyLower = fs.readFileSync(path.join(e._dataDir, 'episodes', `${e.id}.md`), 'utf8').toLowerCase()
+          } catch { bodyLower = null }
+        }
+        return bodyLower
+      }
       const inBody = candidateInfo
-        ? (tok => candidateInfo.perToken.get(tok)?.has(e.id) ?? false)
+        ? (tok => {
+            if (candidateInfo.perToken.get(tok)?.has(e.id)) return true
+            if (!candidateInfo.dropped.has(tok)) return false
+            const b = readBodyLower()
+            return b ? b.includes(tok) : false
+          })
         : (() => false)
       const { matched: isPartial, textMatch } = scorePartialMatch(e, qtokens, inBody)
       if (isPartial) {

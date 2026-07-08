@@ -8,12 +8,17 @@
     "active": {
       "type": "boolean",
       "description": "Project-level enforcement switch. false ⇒ R5 silence for the gates P3b-2 wires (stop proceeds, no refuse). Distinct from the registry plugin status (M3). Default true (absent ⇒ enforcement on)."
+    },
+    "auto_update": {
+      "type": "boolean",
+      "description": "Layer 1 opt-in: when true, the SessionStart drift check auto-refreshes this project's UNMODIFIED installed artifacts (on-disk sha256 == install manifest checksum) from the global dist cache instead of only printing the drift notice. Locally modified files are always left untouched and reported. NEVER enabled automatically — the installer seeds enforce-config.json without it; only the operator sets it. Default false (absent ⇒ notice only). NOTE: set this only after the project's deployed enforce-config.schema.json includes this property — an older deployed schema rejects the key and loadEnforceConfig then fails closed to {active:true}, overriding a deliberate active:false."
     }
   },
   "additionalProperties": { "$ref": "#/$defs/perBp" },
   "propertyNames": {
     "oneOf": [
       { "const": "active" },
+      { "const": "auto_update" },
       { "type": "string", "pattern": "^bp-[0-9]{3}$" }
     ]
   },

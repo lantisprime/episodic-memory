@@ -70,7 +70,11 @@ mock_json() {
 }
 
 run_hook() {
-  HOME="$TEST_HOME" bash "$HOOK"
+  # ANTHROPIC_API_KEY cleared (E2): the pre-hold consult's LLM stage must
+  # never make live API calls from the test suite on a dev machine with a key
+  # in the environment — without a key it skips fast and the gate holds, which
+  # is exactly the pre-E2 behavior these tests assert.
+  HOME="$TEST_HOME" ANTHROPIC_API_KEY="" bash "$HOOK"
 }
 
 assert_allowed() {
@@ -1599,15 +1603,23 @@ assert_blocked "SA-cwd5. Absolute in-repo FILE_PATH → normal predicate (regres
 # verify the hook's null side-effect.)
 reset_state
 touch "$PRE_REQ"
-PRE_REQ_MTIME_BEFORE="$(stat -f %m "$PRE_REQ" 2>/dev/null || stat -c %Y "$PRE_REQ" 2>/dev/null)"
+# GNU-first stat: on Linux `stat -f %m` does NOT fail — GNU -f prints a
+# multi-line FILESYSTEM status block (including free-block counts that change
+# on any unrelated disk write), so the BSD-first order compared filesystem
+# snapshots, not mtimes. It was accidentally stable until E5 telemetry wrote
+# gate-log.jsonl between the two captures. `stat -c %Y` errors cleanly on BSD,
+# so GNU-first is the safe order.
+PRE_REQ_MTIME_BEFORE="$(stat -c %Y "$PRE_REQ" 2>/dev/null || stat -f %m "$PRE_REQ" 2>/dev/null)"
 echo "$(mock_path_json 'Edit' "$OFFREPO_DIR/memory/x.md")" | run_hook >/dev/null 2>&1
-PRE_REQ_MTIME_AFTER="$(stat -f %m "$PRE_REQ" 2>/dev/null || stat -c %Y "$PRE_REQ" 2>/dev/null)"
+PRE_REQ_MTIME_AFTER="$(stat -c %Y "$PRE_REQ" 2>/dev/null || stat -f %m "$PRE_REQ" 2>/dev/null)"
 if [ "$PRE_REQ_MTIME_BEFORE" = "$PRE_REQ_MTIME_AFTER" ] \
    && [ ! -e "$PRE_DONE" ] && [ ! -e "$POST_REQ" ] && [ ! -e "$POST_DONE" ]; then
   echo "  ✓ SA-disk. Off-repo Edit while armed: no marker artifacts touched (R6 R7 criterion)"
   ((passed++))
 else
   echo "  ✗ SA-disk. Off-repo Edit while armed: marker artifacts changed unexpectedly"
+  echo "     mtime_before=$PRE_REQ_MTIME_BEFORE mtime_after=$PRE_REQ_MTIME_AFTER pre_done=$([ -e "$PRE_DONE" ] && echo EXISTS || echo no) post_req=$([ -e "$POST_REQ" ] && echo EXISTS || echo no) post_done=$([ -e "$POST_DONE" ] && echo EXISTS || echo no)"
+  echo "     .checkpoints listing: $(ls -a "$TEST_DIR/.checkpoints" 2>/dev/null | tr '\n' ' ')"
   ((failed++))
 fi
 

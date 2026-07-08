@@ -73,6 +73,14 @@
       "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-009-lesson-activation.md"
+    },
+    {
+      "id": "RFC-010",
+      "slug": "versioned-central-engine",
+      "title": "Version-pinned central enforcement engine with per-project shims",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-010-versioned-central-engine.md"
     }
   ]
 }

@@ -131,6 +131,17 @@ function statsFor(dataDir, label) {
     archived = fs.readFileSync(path.join(dataDir, 'archived-index.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length
   } catch {}
 
+  // Derived-index bloat: tokens.json is DERIVED from the same episodes
+  // index.jsonl describes, so their byte ratio is a health signal — a ratio
+  // far above ~1-5x means the token vocabulary is dominated by
+  // non-discriminating posting lists (fix: em-rebuild-index, which applies
+  // the df diet). em-doctor warns above 20x.
+  const idxInfo = fileInfo(dataDir, 'index.jsonl')
+  const tokInfo = fileInfo(dataDir, 'tokens.json')
+  const bloatRatio = idxInfo.present && tokInfo.present && idxInfo.bytes > 0
+    ? Math.round((tokInfo.bytes / idxInfo.bytes) * 10) / 10
+    : null
+
   return {
     scope: label,
     dir: dataDir,
@@ -145,11 +156,12 @@ function statsFor(dataDir, label) {
     prunable_estimate: prunable,
     date_range: { oldest, newest },
     index_files: {
-      'index.jsonl': fileInfo(dataDir, 'index.jsonl'),
+      'index.jsonl': idxInfo,
       'tags.json': fileInfo(dataDir, 'tags.json'),
       'category-index.json': fileInfo(dataDir, 'category-index.json'),
-      'tokens.json': fileInfo(dataDir, 'tokens.json'),
+      'tokens.json': tokInfo,
     },
+    derived_index_bloat_ratio: bloatRatio,
   }
 }
 

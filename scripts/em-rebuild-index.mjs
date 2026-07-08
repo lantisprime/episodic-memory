@@ -15,7 +15,7 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
-import { episodeTokens } from './lib/relevance.mjs'
+import { episodeTokens, DF_DROP_RATIO, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -226,6 +226,23 @@ function rebuildDir(dataDir, label) {
   const tagsTmp = tagsFile + '.tmp'
   fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
   fs.renameSync(tagsTmp, tagsFile)
+
+  // tokens.json diet (S2): drop posting lists for tokens whose document
+  // frequency exceeds DF_DROP_RATIO (40%) of the corpus. Such tokens do not
+  // discriminate — their posting lists approximate "every id" and dominated
+  // the file (observed 38x tokens.json/index.jsonl bloat on a 1811-episode
+  // store). Dropped tokens are recorded (sorted, compact) under
+  // TOKENS_DROPPED_KEY so readers treat them as NON-PRUNING (full-scoring
+  // fallback) instead of zero-candidate. See lib/relevance.mjs.
+  const totalDocs = entries.length
+  const droppedTokens = []
+  for (const tok of Object.keys(tokensIndex)) {
+    if (tokensIndex[tok].length > DF_DROP_RATIO * totalDocs) {
+      droppedTokens.push(tok)
+      delete tokensIndex[tok]
+    }
+  }
+  if (droppedTokens.length) tokensIndex[TOKENS_DROPPED_KEY] = droppedTokens.sort()
 
   // tokens.json — compact (no pretty-print: the vocabulary is large and this
   // file is machine-read only).

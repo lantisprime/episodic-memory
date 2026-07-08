@@ -109,8 +109,20 @@ t('em-rebuild-index --scope local succeeds and indexes the token (crashed before
   assert.equal(r.code, 0, `stderr: ${r.stderr}`);
   assert.equal(r.json?.status, 'ok');
   const tokens = JSON.parse(fs.readFileSync(path.join(store, 'tokens.json'), 'utf8'));
-  assert.ok(Object.hasOwn(tokens, 'constructor'));
-  assert.ok(tokens['constructor'].length >= 1);
+  // #469 invariant: the "constructor" token is handled as data, never via
+  // Object.prototype. Since the S2 df diet, a token this common in a tiny
+  // fixture may legally live in the _dropped list instead of carrying a
+  // posting list — either way it must be an OWN string entry...
+  assert.ok(
+    (Object.hasOwn(tokens, 'constructor') && tokens['constructor'].length >= 1) ||
+    (Array.isArray(tokens._dropped) && tokens._dropped.includes('constructor')),
+    `constructor token neither indexed nor recorded as dropped: ${JSON.stringify(Object.keys(tokens))}`
+  );
+  // ...and the chain tip must stay reachable through it (dropped → full
+  // scan; the original storedId is superseded by the revision above, so the
+  // active hit is the revision carrying the same "constructor" tag).
+  const s = run('em-search.mjs', ['--query', 'constructor', '--scope', 'local', '--no-track'], cwd, env);
+  assert.ok(s.json.episodes.some(e => (e.tags || []).includes('constructor')), s.stdout);
   const tags = JSON.parse(fs.readFileSync(path.join(store, 'tags.json'), 'utf8'));
   assert.ok(Array.isArray(tags['constructor']));
 });

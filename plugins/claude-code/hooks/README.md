@@ -25,6 +25,47 @@ Phase 3b (RFC-002) introduces user-level hooks that need to be installed into `~
 | `lib/repo-root.sh` | sourced | `resolve_repo_root` git-common-dir walker (PR #105 / #85) |
 | `lib/command-classifier.sh` | sourced | Quote/heredoc-aware Bash classifier (#86 PR-B / #89 / #101) |
 
+## Gate decision telemetry (E5) — `.checkpoints/gate-log.jsonl`
+
+`checkpoint-gate.sh`, `plan-gate.sh`, and `stop-gate.sh` append one JSON line
+per terminal decision to `<repo>/.checkpoints/gate-log.jsonl`:
+
+```json
+{"ts":<epoch-s>,"gate":"checkpoint|plan|stop","tool":"Bash","label":"<classifier label>","reason":"<site token>","decision":"allow|silence|hold|block","sid":"<session>","cmd_sha256":"<sha256>"}
+```
+
+Design constraints (all load-bearing):
+
+- **Observability only, never decision-bearing.** Pure-bash `printf >>` under
+  `|| true`; a telemetry failure can neither fail the hook nor change its
+  decision, and no node process is spawned for logging.
+- **Quoting safety.** The raw command is NEVER embedded (bash-side JSON
+  escaping of arbitrary command text is a bug factory). `cmd_sha256` is the
+  sha256 of the WHITESPACE-NORMALIZED command (runs of space/tab/CR/LF
+  collapsed to one space, trimmed — the same collapse
+  `classifier-marker.mjs` `normalizeCommand` applies, minus its
+  trailing-comment strip). All other fields are controlled tokens sanitized
+  to `[A-Za-z0-9._:-]`.
+- **Never creates `.checkpoints/`.** Appends only when the dir already
+  exists — a fallback REPO_ROOT (non-git cwd, off-project invocation) must
+  not grow a marker dir (the SA-cwd-strict caller-leak class). Telemetry is
+  silently off until the project's first marker/classify activity creates
+  the dir.
+- **Decision vocabulary.** `hold` = novel Bash command parked for agent
+  classification (`_block_needs_classification`) — distinct from `block`
+  (checkpoint/plan/push/integrity blocks). `silence` = an enforce-config
+  consult (`active:false` / clamp) turned the gate off for this call.
+- **Deliberately unlogged sites**: the read-only-TOOL early exit (one line
+  per Read/Grep would swamp the log with non-decisions), the hooks/lib-missing
+  block (telemetry helpers not defined yet at that point), and plan-gate's
+  allow paths (its no-op common case; checkpoint-gate logs the allow story).
+
+Consumers: `em-doctor` gate-friction section (counts per decision,
+false-positive metric via the `.checkpoints/classify/` join, >5MB warning) —
+see `docs/EM_SCRIPTS_GUIDE.md`. Conformance: `tests/test-gate-conformance.mjs`
+asserts one line per decision with the expected `decision` values against the
+real installed gate.
+
 ## Marker storage (.checkpoints/ migration, 2026-05-09)
 
 Marker WRITES land at `<repo-root>/.checkpoints/.X` (PRIMARY); reads check
@@ -35,6 +76,70 @@ Write to a `.X` basename inside any `.claude/` segment, regardless of
 allowlist. See `tools/migration-cutover.mjs` and `tools/migration-sweep.mjs`
 for the install-parity check and burn-in exit gate that protect the
 fallback-removal commit.
+
+## Classifier verdict cache — canonical key (E3)
+
+`checkpoint-gate.sh` holds novel Bash commands for agent classification; the
+verdicts live in `<repo>/.checkpoints/classify/<sha>.json` and are read/written
+by `scripts/classifier-marker.mjs`. The cache key is a CONSERVATIVE canonical
+command form (`scripts/lib/command-canonical.mjs`): executable +
+subcommand/script-path token (absolute prefixes under the repo root / `$HOME`
+normalized to `<REPO>` / `<HOME>`) + the sorted SET of flag names — flag VALUES
+and positional operands dropped. So `node em-x.mjs --limit 1` and
+`node em-x.mjs --limit 2` share one verdict, while:
+
+- different flag-NAME sets never share a verdict;
+- any redirect / pipe / substitution / quoting / env-prefix / `key=value`
+  operand form is NOT canonicalizable and keys on its literal form only — a
+  write-capable variant can never hit a `read_only` verdict cached from a form
+  without it;
+- in-repo interpreter scripts keep the stronger script-identity key
+  (exe + content digest, args fully ignored).
+
+Reads try the canonical key first, then fall back to the pre-E3 legacy literal
+key (existing markers keep hitting until TTL/`--vacuum` reaps them). Writes
+persist under the canonical key with the raw command preserved in the marker's
+`command_raw` field for audit. Tests: `tests/test-canonical-cache-key.mjs`.
+
+## Pre-hold consult order (E4 read-only manifest + E2 LLM auto-classify)
+
+When a novel Bash command would otherwise be HELD for agent classification
+(LABEL=shared_write with an unevaluated-novel reason — the per-session marker
+cache already missed), `checkpoint-gate.sh` consults
+`scripts/classifier-hold-consult.mjs` BEFORE emitting the hold (spawn
+discipline: the common allow paths never pay the node spawn). Consult order:
+
+1. **Per-session marker cache** (already consulted inside the classifier —
+   the miss is what made the reason unevaluated-novel).
+2. **First-party read-only manifest** `patterns/readonly-commands.json`
+   (schema: `patterns/readonly-commands.schema.json`): canonical command
+   shapes that are read-only BY DESIGN (em-* readers, `em-doctor` without
+   `--fix`, `em-pattern-health --check`, `em-recall` with its documented read
+   flags, `node --version`). A match classifies `read_only` with no agent
+   involvement and the command runs; nothing is persisted (the manifest is the
+   durable authority). Matching runs on the canonical form, so a redirect or
+   extra write-flag variant can never match.
+3. **LLM auto-classify (E2)** `scripts/llm-classify.mjs --three-way`:
+   non-interactive only — it requires `ANTHROPIC_API_KEY` (skipped instantly
+   without one; a PreToolUse hook can never prompt for auth) and honors
+   `classifier-config.json` (`enabled:false` disables the stage; env/project/
+   global precedence via `classifier-config-loader.mjs`). Strict 3-way rubric
+   (`read_only` / `nonsrc_write` / `shared_write`), hard-killed at 10s. A
+   verdict with confidence >= 0.8 is persisted into the SAME per-session
+   verdict cache (`classifier-marker.mjs --write --source llm`, payload gains
+   `"source":"llm"`) and the command proceeds per verdict: read_only /
+   nonsrc_write run; shared_write falls through to the existing arm/block
+   branch.
+4. **Existing agent hold** (fail-closed): manifest miss + LLM
+   miss/failure/timeout/low-confidence/malformed output, malformed manifest,
+   helper absent, or garbage output all fall through to
+   `_block_needs_classification`.
+
+Installed layouts resolve the manifest from
+`~/.episodic-memory/patterns/readonly-commands.json` (deployed by
+`install.mjs`); repo-source runs use `patterns/` directly. Tests:
+`tests/test-readonly-manifest.mjs` (E4),
+`tests/test-llm-hold-classify.mjs` (E2 — stubbed local API, never live).
 
 ## Installation
 

@@ -135,24 +135,32 @@ run(EM_STORE, ['--project', 'fx', '--category', 'lesson', '--summary', 'Middlewa
 run(EM_STORE, ['--project', 'other', '--category', 'discovery', '--summary', 'Widget relevance heuristics',
   '--body', 'unrelated', '--tags', 'misc', '--scope', 'local'], cwd, env);
 
-t('em-search: substring query behaves as before (score 0.7)', () => {
+// Scores carry a same-day recency decay: an episode stored today loses up to
+// ~0.002 by late evening (computeScore's age term uses date+time vs now), so
+// exact equality is time-of-day flaky (0.7 passes in the morning, 0.699 in
+// the afternoon — reproduced on unmodified main). Assert the text-match tier
+// with a decay-wide tolerance instead; tier separation (0.7 vs 0.4 vs 0.38)
+// is far larger than the decay.
+const closeTo = (actual, tier) => Math.abs(actual - tier) <= 0.005
+
+t('em-search: substring query behaves as before (score ~0.7)', () => {
   const r = run(EM_SEARCH, ['--query', 'atomic rename', '--scope', 'local', '--no-track'], cwd, env);
   const hit = r.json.episodes.find(e => e.summary.startsWith('Use atomic'));
   assert.ok(hit, 'summary-substring episode must match');
-  assert.equal(hit.score, 0.7);
+  assert.ok(closeTo(hit.score, 0.7), `score ${hit.score} not within decay tolerance of 0.7`);
 });
 
 t('em-search: scattered multi-term query now matches (new capability)', () => {
   const r = run(EM_SEARCH, ['--query', 'index atomic writes', '--scope', 'local', '--no-track'], cwd, env);
   assert.equal(r.json.count, 1);
-  assert.equal(r.json.episodes[0].score, 0.665);
+  assert.ok(closeTo(r.json.episodes[0].score, 0.665), `score ${r.json.episodes[0].score} not within decay tolerance of 0.665`);
 });
 
-t('em-search: body substring still matches at 0.4', () => {
+t('em-search: body substring still matches at ~0.4', () => {
   const r = run(EM_SEARCH, ['--query', 'write rename pattern', '--scope', 'local', '--no-track'], cwd, env);
   const hit = r.json.episodes.find(e => e.summary.startsWith('Middleware'));
   assert.ok(hit);
-  assert.equal(hit.score, 0.4);
+  assert.ok(closeTo(hit.score, 0.4), `score ${hit.score} not within decay tolerance of 0.4`);
 });
 
 t('em-search: unmatched query returns empty', () => {
@@ -168,7 +176,7 @@ t('em-recall: pass 2b surfaces cross-project episodes via summary tokens', () =>
   const r = run(EM_RECALL, ['--scope', 'local', '--no-track', '--days', '0', '--limit', '10'], cwd, env);
   const other = r.json.episodes.find(e => e.project === 'other');
   assert.ok(other, `cross-project summary-token episode missing: ${JSON.stringify(r.json.episodes.map(e => e.summary))}`);
-  assert.equal(other.score, 0.6);
+  assert.ok(closeTo(other.score, 0.6), `score ${other.score} not within decay tolerance of 0.6`);
 });
 
 fs.rmSync(cwd, { recursive: true, force: true });

@@ -47,6 +47,7 @@ const DESCRIPTIONS = {
   pin: 'Pin/unpin an episode (never decays, never pruned)',
   feedback: 'Mark a recalled episode as useful or noise (ranking signal)',
   doctor: 'Health-check the stores and installation (--fix repairs)',
+  'sync-install': 'Refresh this project\'s installed artifacts from the global dist cache (checksum-guarded)',
   routines: 'Scheduled maintenance manager (sync/list/run/enable/disable)',
   prune: 'Archive stale low-relevance episodes',
   'rebuild-index': 'Regenerate index.jsonl, tags.json, category-index.json',

@@ -49,6 +49,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Show the full history of one episode | `em-search --history <id> --full` | Guessing which revision is current |
 | "What is connected to this episode?" (lineage, clusters, hubs) | `em-graph --from <id>` / `--orphans` / `--hubs` | Manual joins across multiple searches |
 | Significant session ended, nothing stored yet | `em-capture extract` then `review` (or `em-capture list` when recall reports `pending_drafts`) | Reconstructing the session from memory, or silently storing without review |
+| Session start printed an install version-drift notice | `em-sync-install` (this project, from the dist cache) or `node <repo>/install.mjs --update-consumers` (all registered projects) | Hand-copying hook/skill files, or re-running full installs in every consuming project |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -82,6 +83,33 @@ default.
    default behavior, including a real `em-prune` pass; if `--help` returns
    anything other than `status: "help"`, refresh the install before probing
    further, and read the flag lists in this guide instead.
+
+---
+
+## Read-only manifest (checkpoint-gate integration, E4)
+
+`patterns/readonly-commands.json` (schema:
+`patterns/readonly-commands.schema.json`; deployed to
+`~/.episodic-memory/patterns/readonly-commands.json`) is the first-party
+registry of command shapes that are read-only BY DESIGN. The Claude Code
+checkpoint gate consults it — via `scripts/classifier-hold-consult.mjs`, on
+the canonical form from `scripts/lib/command-canonical.mjs` — before holding a
+novel Bash command for agent classification, so by-design readers (`em-stats`,
+`em-graph`, `em-doctor` without `--fix`, `em-pattern-health --check`,
+`em-recall` with its documented read flags, `node --version`, and the readers
+already hardcoded in the shell classifier) run without a false-positive hold.
+
+Maintenance rule: when a script gains a WRITE flag, add it to that entry's
+`deny_flags` (or move the entry to a closed `allow_flags` list) in the same
+PR; when a new read-only script ships, add an entry citing this guide. A stale
+manifest fails CLOSED (the hold returns) — never open. Tests:
+`tests/test-readonly-manifest.mjs`.
+
+On a manifest miss the gate additionally tries a non-interactive LLM
+auto-classify (`llm-classify.mjs --three-way`; requires `ANTHROPIC_API_KEY`,
+hard 10s timeout, confidence >= 0.8, verdict cached with `"source":"llm"`)
+before falling back to the agent hold. See
+`plugins/claude-code/hooks/README.md` for the full consult order.
 
 ---
 
@@ -217,7 +245,10 @@ Flags that matter (from the script's own `Usage:` header):
 - Query lookups are accelerated by `tokens.json` (a token inverted index the
   writers maintain; rebuilt by `em-rebuild-index`). Results are identical to a
   full scan — the index only prunes candidates. Missing index → slow full
-  scan + a rebuild warning.
+  scan + a rebuild warning. Tokens dropped by the df diet (recorded under the
+  index's `_dropped` marker; see `em-rebuild-index`) are non-pruning: a query
+  containing one falls back to full scoring for that token instead of
+  returning zero candidates, so results stay identical there too.
 - Partial tier: when strict matches leave `--limit` unfilled, multi-word
   queries also return episodes matching at least HALF the tokens, marked
   `"match":"partial"` and scored below every full match. `--no-score`
@@ -231,7 +262,10 @@ Flags that matter (from the script's own `Usage:` header):
   History queries and `--include-superseded` already skip tracking.
 - `--full` includes episode bodies. `--history <id>` returns the whole revision
   chain. The walk follows `supersedes`, `superseded_by`, and `consolidates` edges
-  (cycle-safe); a single-`supersedes` chain is unchanged.
+  (cycle-safe); a single-`supersedes` chain is unchanged. Chain members that
+  were archived (`em-prune`, `em-consolidate --fold-superseded`) still appear:
+  the walk also reads `archived-index.jsonl`, flags them `"archived": true`,
+  and `--full` resolves their bodies from `archived/`.
 - `--category <cat>` is index-backed via `category-index.json` (same degrade-to-linear-scan
   fallback as `--tag`). A deprecated category name canonicalizes to its successor; an unknown
   category still filters (tolerant read).
@@ -325,10 +359,21 @@ so consistently useful episodes rise and consistently irrelevant ones sink.
 
 ```
 node ~/.episodic-memory/scripts/em-feedback.mjs --id <episode-id> (--useful | --noise)
+node ~/.episodic-memory/scripts/em-feedback.mjs --scan-text <file> [--scope local|global|all] [--dry-run]
 ```
 
 Output: `{"status":"ok","id":"...","feedback":3,"scope":"global"}`. Counter
 clamps to [-10, 10] and survives index rebuilds.
+
+`--scan-text` is batch inference: an episode id cited in a session handoff,
+PR body, or lessons write-up demonstrably shaped that artifact, which is the
+`--useful` signal without the typing. It extracts episode-id patterns (shape
+derived from em-store's generator), dedupes, skips ids that do not resolve in
+the selected scope(s), and records ONE +1 per resolved id. `--dry-run`
+previews without writing. Wrap-up habit: scan the handoff/PR body so cited
+episodes earn recall weight.
+
+Output: `{"status":"ok","mode":"scan-text","scope":"all","scanned":1,"matched":5,"resolved":4,"recorded":4,"skipped_unresolved":1,...}`
 
 ### em-move
 
@@ -370,6 +415,8 @@ semantic-consolidation capability). Dry-run by DEFAULT — `--apply` writes.
 node ~/.episodic-memory/scripts/em-consolidate.mjs [--scope local|global] \
   [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] \
   [--include-pinned] [--apply] [--confirm]
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
+  [--min-chain <n>] [--dry-run] [--scope local|global]
 ```
 
 Clustering is body-token Jaccard within (project, category) groups; the
@@ -379,6 +426,18 @@ episodes (~0.0). On `--apply`, each cluster gets one digest episode carrying
 pinning; members flip to `status: superseded` + `superseded_by: <digest>` in
 file and index, so they stop surfacing but stay reachable via `--history`.
 More than 5 clusters requires `--confirm`.
+
+`--fold-superseded` targets long revision chains instead of duplicates: for
+each LINEAR supersedes-chain with at least `--min-chain` members (default
+10), the non-terminal members are archived via the same mechanism `em-prune`
+uses (file to `archived/`, index row to `archived-index.jsonl`, `tags.json`
+cleaned — a reversible move, never a delete). The terminal episode is
+untouched, ids stay immutable, bodies are never edited, and
+`em-search --history` still shows the full chain (the walk reads archived
+metadata; archived members carry `"archived": true`). Pinned or
+still-active members are kept and reported; forked/non-linear chains are
+skipped whole. `--dry-run` lists exactly what a real run would move. Output:
+`{"status":"ok","mode":"fold-superseded","dry_run":false,"chains":[{"terminal":"...","chain_length":12,"folded":[...],"kept":[...]}],"folded_total":11}`.
 
 ### em-stats
 
@@ -391,7 +450,11 @@ node ~/.episodic-memory/scripts/em-stats.mjs [--scope local|global|all] [--top <
 Per scope: episode totals (active/superseded/pinned), archived count,
 category + project + tag distributions, age buckets, access/feedback
 aggregates, a prunable estimate (same threshold as em-prune; pinned rows
-excluded), index-file presence/sizes, and the date range.
+excluded), index-file presence/sizes, the date range, and
+`derived_index_bloat_ratio` (tokens.json bytes / index.jsonl bytes; `null`
+when either file is absent). A ratio far above ~1-5x means the token index is
+dominated by non-discriminating posting lists — `em-rebuild-index` applies
+the df diet and shrinks it; `em-doctor` warns above 20x.
 
 ### em-embed
 
@@ -589,6 +652,15 @@ Output:
 map to the successor key; unknown categories are indexed under their literal key AND counted
 as drift). It backs `em-search --category` the same way `tags.json` backs `--tag`.
 
+`tokens.json` df diet: posting lists for tokens appearing in more than 40% of the
+corpus (`DF_DROP_RATIO` in `lib/relevance.mjs`) are dropped — they do not
+discriminate, and they dominated the file (a 1811-episode store measured 49.9MB of
+tokens.json against 1.3MB of index.jsonl). Dropped tokens are recorded sorted under
+the `_dropped` key so readers treat them as non-pruning (full-scoring fallback)
+rather than absent; search results are identical before and after the diet.
+Incremental writers (`em-store`/`em-revise`/`em-move`) never regrow a dropped
+token; the next rebuild recomputes df from scratch.
+
 `--check` (RFC-009 R10f) is a read-only drift report: it lists every episode whose stored
 category is unknown or deprecated and exits 1 if any exist, 0 otherwise. It writes nothing.
 Use it in CI/hooks to catch taxonomy drift without correcting it (correction is a later phase).
@@ -615,9 +687,34 @@ node ~/.episodic-memory/scripts/em-doctor.mjs [--scope local|global|all] [--fix]
 ```
 
 Checks: Node version, index.jsonl parse, index↔episode-file drift (both
-directions), tags.json + category-index.json consistency, dangling
-`supersedes` pointers, stale `.tmp` files from interrupted atomic writes,
-dead-pid `.lock` files, installed-script presence/drift, backup config.
+directions), tags.json + category-index.json consistency, tokens.json bloat
+(warn when tokens.json exceeds 20x the size of index.jsonl — fix is a
+rebuild, which applies the df diet), dangling `supersedes` pointers, stale
+`.tmp` files from interrupted atomic writes, dead-pid `.lock` files,
+installed-script presence/drift, backup config, consumer installs-drift
+(registered projects behind the global install version or carrying locally
+modified installed artifacts — fix hint: `install.mjs --update-consumers`),
+gate friction (below).
+
+**Gate friction** (`gate-friction`, `gate-false-positives`, `gate-log-size`;
+local scope). The Claude Code enforcement gates (checkpoint-gate.sh,
+plan-gate.sh, stop-gate.sh) append one JSON line per terminal decision to
+`<repo>/.checkpoints/gate-log.jsonl`:
+
+```json
+{"ts":1783487852,"gate":"checkpoint","tool":"Bash","label":"read_only","reason":"read_only","decision":"allow","sid":"<session>","cmd_sha256":"<sha256 of the whitespace-normalized command>"}
+```
+
+`em-doctor` reports counts per decision (`allow` / `silence` / `hold` /
+`block`) and the **false-positive metric**: a `hold` (novel Bash command
+parked for agent classification) whose command shape later received a
+`read_only` or `nonsrc_write` verdict in `.checkpoints/classify/` was
+friction on a harmless command — the join re-hashes each verdict marker's
+`command_normalized` with the same whitespace-collapse rules the gate hashes
+with. Warns when downgraded holds exist and when the log exceeds 5MB (the
+gates only append; rotate/truncate it yourself). Absent or partially
+malformed logs degrade gracefully (absent → ok; bad lines counted and
+skipped).
 
 Output (trimmed):
 
@@ -631,6 +728,40 @@ Output (trimmed):
   `.tmp`/`.lock` litter, then re-runs the store checks and reports the post-fix
   state. Everything else stays report-only.
 - Every non-ok finding carries a `fix` hint when a safe automated repair exists.
+
+### em-sync-install
+
+Checksum-guarded refresh of the CURRENT project's installed episodic-memory
+artifacts (skills, instruction files, hooks) from the global dist cache
+(`~/.episodic-memory/dist/<version>/`), written by `install.mjs` on every
+install. This is the apply-side of the SessionStart drift notice: only files
+whose on-disk sha256 still matches the project's install manifest
+(`<project>/.episodic-memory-install.json`) are overwritten; locally modified
+files are always left untouched and reported. Only projects present in the
+consumer registry (`~/.episodic-memory/installs.json`) are ever touched, and
+enforcement artifacts are skipped unless the registry entry says
+`enforcement_installed: true`.
+
+- WHEN TO USE: the SessionStart hook printed a version-drift notice and you
+  want to update just this project without the repo checkout (`install.mjs
+  --update-consumers` sweeps ALL registered projects from the repo instead).
+  Runs automatically at session start when the operator set
+  `"auto_update": true` in `<project>/.episodic-memory/enforce-config.json`.
+- WHEN NOT TO USE: to install into a NEW project (use `install.mjs`); it never
+  adds files, only refreshes what a previous install recorded.
+
+```
+node ~/.episodic-memory/scripts/em-sync-install.mjs [--project <dir>] [--dry-run]
+```
+
+Output (trimmed):
+
+```json
+{"status":"refreshed","from_version":"1111111111111111111111111111111111111111","to_version":"ef0d77166644d02e34fe0644c3b27ece4cfb19cd","refreshed":[".claude/skills/episodic-memory/SKILL.md"],"skipped_modified":[".claude/hooks/checkpoint-gate.sh"],"notice":"episodic-memory: auto-updated 1 artifact(s) to ef0d77166644; 1 locally modified file(s) left untouched: .claude/hooks/checkpoint-gate.sh"}
+```
+
+Degrade statuses (always exit 0): `current` (nothing to do), `no-manifest`,
+`no-cache`, `no-global-manifest`, `unregistered`.
 
 ### em-prune
 
