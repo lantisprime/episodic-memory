@@ -706,6 +706,52 @@ _block_needs_classification() {
   jq -nc '{decision: "block", reason: "Novel command held for agent classification (it has NOT run). Classify it once (read_only / nonsrc_write / shared_write) via classifier-marker.mjs, then retry. Hook: checkpoint-gate.sh."}'
   exit 0
 }
+# Pre-hold consult (gate-classifier UX E4 manifest + E2 LLM): invoked ONLY when
+# an agent-classification hold is otherwise imminent (spawn discipline — the
+# common allow paths never pay this node spawn). Echoes exactly one of
+# read_only / nonsrc_write / shared_write on a trusted consult verdict
+# (source manifest|llm); echoes nothing otherwise. Fail-closed: helper absent,
+# non-zero exit, empty/garbage output, or a decision outside the 3-way set all
+# leave the caller on the existing _block_needs_classification hold.
+_hold_consult() {
+  local helper=""
+  # P4d/P12 resolution order: co-located per-project install, legacy global,
+  # repo-source (dev/CI) — same order the classifier's helper lookups use.
+  if [ -f "$HOOK_DIR/classifier-hold-consult.mjs" ]; then
+    helper="$HOOK_DIR/classifier-hold-consult.mjs"
+  elif [ -f "$HOME/.episodic-memory/scripts/classifier-hold-consult.mjs" ]; then
+    helper="$HOME/.episodic-memory/scripts/classifier-hold-consult.mjs"
+  elif [ -f "$HOOK_DIR/../../../scripts/classifier-hold-consult.mjs" ]; then
+    helper="$HOOK_DIR/../../../scripts/classifier-hold-consult.mjs"
+  fi
+  [ -n "$helper" ] || return 1
+  local out
+  # Subshell cd binds the helper's process.cwd() to REPO_ROOT (needed by the
+  # E2 persist path's cross-repo write defense). CLAUDE_CODE_SESSION_ID is
+  # threaded so the persisted marker keys to THIS session.
+  out="$(cd "$REPO_ROOT" 2>/dev/null && CLAUDE_CODE_SESSION_ID="$MY_SID" node "$helper" \
+    --project-root "$REPO_ROOT" \
+    --caller-cwd "$CWD" \
+    --command "$COMMAND" \
+    --session-id "$MY_SID" 2>/dev/null)" || return 1
+  [ -n "$out" ] || return 1
+  # Inline node parser with a strict decision+source allowlist (same defense
+  # pattern as the marker-hit parsers in agent-classifier.sh).
+  printf '%s' "$out" | node -e '
+    const ALLOWED = new Set(["read_only","nonsrc_write","shared_write"])
+    const SOURCES = new Set(["manifest","llm"])
+    let buf = ""
+    process.stdin.on("data", c => buf += c)
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(buf.trim().split("\n").pop())
+        if (j && SOURCES.has(j.source) && ALLOWED.has(j.decision)) {
+          process.stdout.write(j.decision)
+        }
+      } catch {}
+    })
+  ' 2>/dev/null
+}
 # Path-aware pre-block variant (PR-B2 §11). Used by the Edit/Write pre-gate for
 # an in-repo target with no path verdict on file: leads checkpoint-first, then
 # offers the 2-way nonsrc_write path-verdict escape (classify the TARGET PATH).
@@ -1529,24 +1575,53 @@ case "$TOOL_NAME" in
       # pre-checkpoint is then required. unknown / unsafe_complex and recognized
       # write reasons (redirects, git/gh subcommands) still arm here (fail closed).
       if [ "$LABEL" = "shared_write" ] && _bash_reason_is_unevaluated_novel "$REASON"; then
-        # Agent-classifier-first (#351): novel unevaluated command is HELD for
-        # classification regardless of plan state — this is NOT a checkpoint
-        # (it never arms) and is orthogonal to the planapproval redesign.
-        #
         # R5 consult-gap fix (2026-07-08): the F11 consult above only runs when
         # a pre-checkpoint block is imminent (armed / plan-approved), so with
         # NO plan and nothing armed this hold still fired under active:false —
         # contradicting the R5 scope note (the hold exists only to route
         # would-be pre-checkpoint writes, so active:false must silence it too).
-        # Consult here as well; spawn discipline holds (node spawns only when
-        # the hold is already imminent). Fail-closed: empty/garbage disposition
-        # falls through to the hold (B1).
+        # Consult FIRST here: enforcement off means the whole classification
+        # routing is off, and nothing else should spawn. Fail-closed:
+        # empty/garbage disposition falls through (B1).
         PRE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate pre_checkpoint --marker-root "$REPO_ROOT" 2>/dev/null)" || PRE_DISP=""
         if [ "$PRE_DISP" = "silence" ] || [ "$PRE_DISP" = "clamp-off" ]; then
           _gate_log silence enforce_config_needs_classification
           exit 0
         fi
-        _block_needs_classification
+        # Gate-classifier UX (E4/E2): a hold is now imminent — consult the
+        # first-party read-only manifest, then (E2) the LLM auto-classifier,
+        # BEFORE holding. Full consult order: enforce-config (above) →
+        # per-session marker cache (already missed — that is what made REASON
+        # unevaluated-novel) → manifest → LLM → agent hold. Verdict handling
+        # mirrors the classifier labels:
+        #   read_only / nonsrc_write → run (these labels never arm the
+        #     pre-checkpoint; see _bash_label_arms_pre_checkpoint);
+        #   shared_write → the existing arm/block branch below;
+        #   anything else (miss/failure/timeout) → the existing agent hold
+        #     (fail-closed).
+        _hc_verdict="$(_hold_consult)" || _hc_verdict=""
+        case "$_hc_verdict" in
+          read_only|nonsrc_write)
+            : # by-design reader (manifest) or high-confidence LLM verdict —
+              # allowed; the terminal fall-through logs the allow (E5).
+            ;;
+          shared_write)
+            # LLM says repo-source write: fall through to the recognized-write
+            # arm/block branch (identical to the else-arm below).
+            _arm_checkpoint_required_if_missing
+            if checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" \
+               || _plan_approved_exists_for_session "$MY_SID"; then
+              _block_pre_with_hint
+            fi
+            ;;
+          *)
+            # Agent-classifier-first (#351): novel unevaluated command is HELD
+            # for classification regardless of plan state — this is NOT a
+            # checkpoint (it never arms) and is orthogonal to the planapproval
+            # redesign.
+            _block_needs_classification
+            ;;
+        esac
       else
         # planapproval redesign: arm no-ops unless an approved-plan token exists
         # (consumes it only if the arm succeeded). Block if a checkpoint is armed

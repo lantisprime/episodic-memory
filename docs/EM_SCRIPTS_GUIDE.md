@@ -85,6 +85,33 @@ default.
 
 ---
 
+## Read-only manifest (checkpoint-gate integration, E4)
+
+`patterns/readonly-commands.json` (schema:
+`patterns/readonly-commands.schema.json`; deployed to
+`~/.episodic-memory/patterns/readonly-commands.json`) is the first-party
+registry of command shapes that are read-only BY DESIGN. The Claude Code
+checkpoint gate consults it — via `scripts/classifier-hold-consult.mjs`, on
+the canonical form from `scripts/lib/command-canonical.mjs` — before holding a
+novel Bash command for agent classification, so by-design readers (`em-stats`,
+`em-graph`, `em-doctor` without `--fix`, `em-pattern-health --check`,
+`em-recall` with its documented read flags, `node --version`, and the readers
+already hardcoded in the shell classifier) run without a false-positive hold.
+
+Maintenance rule: when a script gains a WRITE flag, add it to that entry's
+`deny_flags` (or move the entry to a closed `allow_flags` list) in the same
+PR; when a new read-only script ships, add an entry citing this guide. A stale
+manifest fails CLOSED (the hold returns) — never open. Tests:
+`tests/test-readonly-manifest.mjs`.
+
+On a manifest miss the gate additionally tries a non-interactive LLM
+auto-classify (`llm-classify.mjs --three-way`; requires `ANTHROPIC_API_KEY`,
+hard 10s timeout, confidence >= 0.8, verdict cached with `"source":"llm"`)
+before falling back to the agent hold. See
+`plugins/claude-code/hooks/README.md` for the full consult order.
+
+---
+
 ## Category vocabulary (RFC-009 R10)
 
 The set of valid episode categories is a closed vocabulary defined once in

@@ -70,7 +70,11 @@ mock_json() {
 }
 
 run_hook() {
-  HOME="$TEST_HOME" bash "$HOOK"
+  # ANTHROPIC_API_KEY cleared (E2): the pre-hold consult's LLM stage must
+  # never make live API calls from the test suite on a dev machine with a key
+  # in the environment — without a key it skips fast and the gate holds, which
+  # is exactly the pre-E2 behavior these tests assert.
+  HOME="$TEST_HOME" ANTHROPIC_API_KEY="" bash "$HOOK"
 }
 
 assert_allowed() {

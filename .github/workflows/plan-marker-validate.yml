@@ -87,6 +87,15 @@ jobs:
       - name: Run agent-classifier (shell wrapper + dispatcher + marker hot path) tests (PR #331; renamed PR-B)
         run: node tests/test-agent-classifier.mjs
 
+      - name: Run canonical cache-key tests (E3 — flag-set generalization + legacy-literal fallback)
+        run: node tests/test-canonical-cache-key.mjs
+
+      - name: Run read-only manifest tests (E4 — schema + matcher polarities + gate E2E)
+        run: node tests/test-readonly-manifest.mjs
+
+      - name: Run LLM hold-classify tests (E2 — stubbed API success/persist + fail-closed polarities)
+        run: node tests/test-llm-hold-classify.mjs
+
       - name: Run checkpoint-gate regression (incl. F1 Bash re-gate + .review-store carve-out, PR-B)
         run: bash tests/test-checkpoint-gate.sh
 
