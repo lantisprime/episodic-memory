@@ -37,6 +37,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
@@ -346,11 +347,83 @@ function checkDrafts() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// installs-drift (Layer 1): compare each registered consumer project's install
+// manifest against the global one — report behind/modified counts. Reads
+// ~/.episodic-memory/installs.json (consumer registry) + install-manifest.json
+// (global version) + each project's .episodic-memory-install.json. Degrades to
+// a single ok row when the registry/manifests are absent (pre-Layer-1 installs
+// or nothing installed per-project yet). Self-contained + additive — no other
+// section touched.
+// ---------------------------------------------------------------------------
+function checkInstallsDrift() {
+  const readJson = (p) => {
+    try {
+      const v = JSON.parse(fs.readFileSync(p, 'utf8'))
+      return v && typeof v === 'object' && !Array.isArray(v) ? v : null
+    } catch { return null }
+  }
+  const registry = readJson(path.join(GLOBAL_DIR, 'installs.json'))
+  const entries = registry && Array.isArray(registry.entries) ? registry.entries : []
+  if (entries.length === 0) {
+    report('installs-drift', 'global', 'ok', 'no consumer registry entries (no per-project installs recorded yet)')
+    return
+  }
+  const globalManifest = readJson(path.join(GLOBAL_DIR, 'install-manifest.json'))
+  const globalVersion = globalManifest && typeof globalManifest.source_version === 'string'
+    ? globalManifest.source_version : null
+  const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')
+
+  const projects = [...new Set(entries
+    .filter(e => e && typeof e.project_path === 'string')
+    .map(e => e.project_path))]
+  let behind = 0
+  let withModified = 0
+  let vanished = 0
+  let noManifest = 0
+  const details = []
+  for (const projectPath of projects) {
+    if (!fs.existsSync(projectPath)) {
+      vanished++
+      details.push(`${projectPath}: path gone (sweep will prune)`)
+      continue
+    }
+    const m = readJson(path.join(projectPath, '.episodic-memory-install.json'))
+    if (!m || !Array.isArray(m.artifacts)) {
+      noManifest++
+      details.push(`${projectPath}: no install manifest (pre-Layer-1 install; re-run install.mjs)`)
+      continue
+    }
+    const isBehind = globalVersion && typeof m.source_version === 'string' && m.source_version !== globalVersion
+    if (isBehind) behind++
+    let modified = 0
+    for (const a of m.artifacts) {
+      if (!a || typeof a.path !== 'string' || typeof a.sha256 !== 'string') continue
+      const dest = path.join(projectPath, a.path)
+      try {
+        if (sha256(dest) !== a.sha256) modified++
+      } catch { modified++ /* missing file counts as locally changed */ }
+    }
+    if (modified > 0) withModified++
+    if (isBehind || modified > 0) {
+      details.push(`${projectPath}: ${isBehind ? `behind global (${String(m.source_version).slice(0, 12)} vs ${globalVersion.slice(0, 12)})` : 'at global version'}${modified > 0 ? `, ${modified} locally modified artifact(s)` : ''}`)
+    }
+  }
+  if (behind + withModified + vanished + noManifest === 0) {
+    report('installs-drift', 'global', 'ok', `${projects.length} consumer project(s) current with global${globalVersion ? ` (${globalVersion.slice(0, 12)})` : ''}`)
+  } else {
+    report('installs-drift', 'global', 'warn',
+      `${projects.length} consumer project(s): ${behind} behind global, ${withModified} with locally modified artifacts, ${vanished} vanished, ${noManifest} without a manifest. Refresh: node <episodic-memory-repo>/install.mjs --update-consumers (modified files are never overwritten).`,
+      verbose ? { projects: details } : undefined)
+  }
+}
+
 if (scope === 'local' || scope === 'all') checkStore(LOCAL_DIR, 'local')
 if (scope === 'global' || scope === 'all') checkStore(GLOBAL_DIR, 'global')
 checkInstalledScripts()
 checkBackupConfig()
 checkDrafts()
+checkInstallsDrift()
 
 // ---------------------------------------------------------------------------
 // --fix: rebuild indexes for scopes with rebuildable findings, then re-verify

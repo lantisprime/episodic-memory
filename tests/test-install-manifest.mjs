@@ -316,6 +316,31 @@ let dryReport = null
 }
 
 // ===========================================================================
+console.log('=== T6: em-doctor installs-drift — degrade / drifted→warn / current→ok ===')
+// ===========================================================================
+{
+  const doctor = (home, cwd) => {
+    const r = spawnSync('node', [path.join(REPO, 'scripts', 'em-doctor.mjs'), '--scope', 'global'],
+      { cwd, encoding: 'utf8', env: { ...process.env, HOME: home } })
+    return JSON.parse(r.stdout)
+  }
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'l1-home-empty-'))
+  cleanups.push(emptyHome)
+  const d0 = doctor(emptyHome, REPO).checks.find((c) => c.id === 'installs-drift')
+  truthy('T6: absent registry degrades to ok', d0 && d0.level === 'ok', JSON.stringify(d0 || null))
+
+  // S5 home after the sweep: projA still carries a modified plan-gate.sh → warn.
+  const d1 = doctor(S5.home, S5.project).checks.find((c) => c.id === 'installs-drift')
+  truthy('T6: modified consumer artifacts → warn', d1 && d1.level === 'warn', JSON.stringify(d1 || null))
+
+  // Fresh sandbox, nothing touched → ok with all projects current.
+  const S6 = mkSandbox('doctor-ok')
+  runInstall({ home: S6.home, project: S6.project })
+  const d2 = doctor(S6.home, S6.project).checks.find((c) => c.id === 'installs-drift')
+  truthy('T6: current consumer → ok', d2 && d2.level === 'ok', JSON.stringify(d2 || null))
+}
+
+// ===========================================================================
 console.log('=== T7: --update-consumers with an empty registry is a no-op ===')
 // ===========================================================================
 {
