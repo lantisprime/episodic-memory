@@ -36,7 +36,7 @@ All four are ways of **using episodes**. None of them enforce workflows.
 |---|---|---|---|---|---|
 | **Memory-store strategy** | Persists episodes and builds derived indexes from them (e.g. knowledge graph) | episodes (write) + derived indexes | `em-store` | `store-strategy` | append-only log + lexical index |
 | **Recall strategy** | Retrieves + ranks episodes for use | episodes (read) | `em-recall` | `recall-strategy` | lexical tag-based (zero-dep) |
-| **Learning strategy** | Derives new knowledge from episodes + derived indexes, writes it back as global episodes | indexes (read) → episodes (write) | `em-store` (write-back) | `learning` | none (opt-in) |
+| **Learning strategy** | Derives new knowledge from episodes + derived indexes, writes it back as global episodes | indexes (read) → episodes (write) | `em-store` (write-back) | `learning` | `em-promote` (EXPERIMENTAL, decision 2026-10-08); otherwise none (opt-in) |
 | **Curation strategy** | Maintains, reorganizes, and audits the corpus without deriving new knowledge (archive, fold, relocate, verify) | episodes + derived indexes (read/move/archive) | `em-prune`, `em-consolidate`, `em-doctor` | `curation` | manual opt-in commands |
 
 ### 1. Memory-store strategy
@@ -55,6 +55,10 @@ RFC-007 Graph Projection); this charter owns only the capability contract.
 How the system turns accumulated episodes (and the derived indexes a store strategy builds)
 into **new** knowledge, written back as new global episodes for future recall. Reads indexes,
 persists derived knowledge via `em-store`. Opt-in, substrate-side, enforcement-free.
+First shipped member: `em-promote` (EXPERIMENTAL tier, promote-or-remove decision
+2026-10-08) — detects lessons recurring across ≥2 registered project stores and, on
+explicit `--apply`, writes one derived global lesson episode per recurrence (sources
+untouched; provenance carried in-body pending RFC-009 P1b typed linkage).
 
 ### 4. Curation strategy
 How the corpus stays healthy over time: pruning, backup and restore, relocation between
@@ -73,7 +77,10 @@ Every capability is **a way to use memory episodes** — storing them, recalling
 learning from them, or curating them. A capability may operate over a single store or
 across many registered stores (discovery via the consumer registry at
 `~/.episodic-memory/installs.json`); cross-store scope changes reach, not these rules.
-This is the test for "does X belong here":
+Shipped cross-store members: `em-stats --all-projects` and `em-doctor --all-projects`
+(curation: per-registered-store analytics and health), `em-consolidate --fold-superseded
+--all-projects` (curation: reversible chain folding, `--confirm`-gated), and `em-promote`
+(learning, experimental). This is the test for "does X belong here":
 
 - X is an operation over episodes that **does not** enforce workflow → it is a substrate
   capability (this document).

@@ -62,6 +62,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds } from './lib/protection.mjs'
+import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -69,7 +70,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-consolidate.mjs', usage: 'node em-consolidate.mjs [--scope local|global] [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] [--include-pinned] [--apply] [--confirm] — fold near-duplicate episodes into digest episodes (dry-run by default) | --fold-superseded [--min-chain <n>] [--dry-run] — archive non-terminal members of long supersedes-chains (reversible; terminal untouched; history walk still resolves the chain)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-consolidate.mjs', usage: 'node em-consolidate.mjs [--scope local|global] [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] [--include-pinned] [--apply] [--confirm] — fold near-duplicate episodes into digest episodes (dry-run by default) | --fold-superseded [--min-chain <n>] [--dry-run] [--all-projects] — archive non-terminal members of long supersedes-chains (reversible; terminal untouched; history walk still resolves the chain). --all-projects (fold mode only, mutually exclusive with --scope) folds every consumer-registry store; a real multi-store run requires --confirm; per-store R6 protection unions cwd-local + global + all registered stores' }))
   process.exit(0)
 }
 
@@ -94,6 +95,20 @@ const dryRun = argv.includes('--dry-run')
 // store's worst chain measured ~145 members).
 const DEFAULT_MIN_CHAIN = 10
 const minChain = parseInt(flag('--min-chain') || String(DEFAULT_MIN_CHAIN), 10)
+
+const allProjects = argv.includes('--all-projects')
+// --all-projects guards fail CLOSED before any other work: fold mode only,
+// never combined with --scope (the registry, not the scope flag, names the
+// stores), and a real multi-store run demands --confirm (checked in the fold
+// block before the first archive move).
+if (allProjects && !foldSuperseded) {
+  console.log(JSON.stringify({ status: 'error', message: '--all-projects is valid only with --fold-superseded (cluster-mode digests never write into other projects\' stores; plan §5).' }))
+  process.exit(2)
+}
+if (allProjects && argv.includes('--scope')) {
+  console.log(JSON.stringify({ status: 'error', message: '--all-projects and --scope are mutually exclusive: the consumer registry names the stores.' }))
+  process.exit(2)
+}
 
 if (scope !== 'local' && scope !== 'global') {
   console.log(JSON.stringify({ status: 'error', message: `Invalid --scope "${scope}". Must be local or global (single-scope by design; em-move first for cross-scope folding).` }))
@@ -131,144 +146,210 @@ if (foldSuperseded) {
     process.exit(2)
   }
 
-  const rows = loadIndex(DATA_DIR, scope)
-  const byId = new Map()
-  for (const r of rows) {
-    if (typeof r.id === 'string' && !byId.has(r.id)) byId.set(r.id, r)
+  // Multi-store consent gate (plan REQ-6): a REAL --all-projects fold requires
+  // --confirm, checked before ANY store is touched (fail closed).
+  if (allProjects && !dryRun && !confirm) {
+    console.log(JSON.stringify({ status: 'error', message: 'A real --all-projects fold archives across every registered store. Re-run with --confirm (or --dry-run to preview).' }))
+    process.exit(2)
   }
 
-  // RFC-009 R6 archival protection — the SAME set em-prune honors, so a folded
-  // chain member that is evidence-linked, a trigger-bearing lesson, a
-  // consolidates-member, a latest run record, or in the chain-closure of any of
-  // those is NEVER archived by fold (review finding: fold bypassed this,
-  // archiving episodes em-prune guarantees are protected). The protection scan
-  // is cross-store (a global lesson's evidence can name a local violation), so
-  // it reads BOTH stores' index rows regardless of the fold's own scope.
+  // Fold one store. Pure extraction of the single-store fold body — the
+  // caller supplies the store dir, a display label, and the (possibly
+  // cross-store) protected-id set; behavior for the single-store path is
+  // unchanged.
+  function foldStore(dataDir, loadLabel, protectedIds) {
+    const episodesDir = path.join(dataDir, 'episodes')
+    const rows = loadIndex(dataDir, loadLabel)
+    const byId = new Map()
+    for (const r of rows) {
+      if (typeof r.id === 'string' && !byId.has(r.id)) byId.set(r.id, r)
+    }
+
+    // Supersession edges only (supersedes back-pointers + explicit
+    // superseded_by) — consolidates edges belong to digest clusters, not
+    // revision chains, and are deliberately not followed here.
+    const successorsOf = new Map() // id -> Set<successor id>
+    const predecessorsOf = new Map() // id -> Set<predecessor id>
+    const addEdge = (from, to) => {
+      if (!successorsOf.has(from)) successorsOf.set(from, new Set())
+      successorsOf.get(from).add(to)
+      if (!predecessorsOf.has(to)) predecessorsOf.set(to, new Set())
+      predecessorsOf.get(to).add(from)
+    }
+    for (const r of byId.values()) {
+      if (typeof r.supersedes === 'string' && byId.has(r.supersedes) && r.supersedes !== r.id) addEdge(r.supersedes, r.id)
+      if (typeof r.superseded_by === 'string' && byId.has(r.superseded_by) && r.superseded_by !== r.id) addEdge(r.id, r.superseded_by)
+    }
+
+    // Connected components over the supersession edges (union-find).
+    const parentUF = new Map()
+    const findUF = (x) => {
+      while (parentUF.get(x) !== x) { parentUF.set(x, parentUF.get(parentUF.get(x))); x = parentUF.get(x) }
+      return x
+    }
+    const unionUF = (a, b) => { const ra = findUF(a), rb = findUF(b); if (ra !== rb) parentUF.set(ra, rb) }
+    for (const id of byId.keys()) parentUF.set(id, id)
+    for (const [from, succs] of successorsOf) for (const to of succs) unionUF(from, to)
+
+    const components = new Map()
+    for (const id of byId.keys()) {
+      const root = findUF(id)
+      if (!components.has(root)) components.set(root, [])
+      components.get(root).push(id)
+    }
+
+    const chains = []
+    const skipped = []
+    for (const memberIds of components.values()) {
+      if (memberIds.length < minChain) continue // chain shorter than N: untouched
+      // Linearity: a fold-eligible chain is a simple path — every member has at
+      // most one successor and one predecessor, and exactly one terminal (no
+      // successor). Forks/merges (e.g. two revisions superseding the same
+      // episode, or a consolidation cluster's shared superseded_by target) are
+      // skipped whole: archiving any member of an ambiguous chain could hide
+      // the branch the walk would have surfaced.
+      const terminals = memberIds.filter(id => !(successorsOf.get(id)?.size))
+      const nonLinear = memberIds.some(id => (successorsOf.get(id)?.size || 0) > 1 || (predecessorsOf.get(id)?.size || 0) > 1)
+      if (terminals.length !== 1 || nonLinear) {
+        skipped.push({ members: [...memberIds].sort(), reason: 'non-linear', terminals: terminals.sort() })
+        continue
+      }
+      const terminal = terminals[0]
+      const folded = []
+      const kept = []
+      for (const id of memberIds) {
+        if (id === terminal) continue
+        const r = byId.get(id)
+        if (r.pinned === true) kept.push({ id, reason: 'pinned' })
+        else if (r.status !== 'superseded') kept.push({ id, reason: 'not-superseded' })
+        else if (protectedIds.has(id)) kept.push({ id, reason: `r6-protected:${protectedIds.get(id).reason}` })
+        else folded.push(id)
+      }
+      folded.sort()
+      kept.sort((a, b) => a.id.localeCompare(b.id))
+      chains.push({ terminal, chain_length: memberIds.length, folded, kept })
+    }
+    chains.sort((a, b) => a.terminal.localeCompare(b.terminal))
+
+    const allFoldIds = new Set(chains.flatMap(c => c.folded))
+
+    if (!dryRun && allFoldIds.size > 0) {
+      // SAME archive mechanism as em-prune.pruneDir: move the file to
+      // archived/, drop the index row, clean tags.json, append the row to
+      // archived-index.jsonl. Reversible (nothing is ever deleted); the
+      // history walk keeps resolving the chain from archived metadata.
+      const archivedDir = path.join(dataDir, 'archived')
+      const indexFile = path.join(dataDir, 'index.jsonl')
+      const archivedIndexFile = path.join(dataDir, 'archived-index.jsonl')
+      fs.mkdirSync(archivedDir, { recursive: true })
+
+      for (const id of allFoldIds) {
+        try {
+          fs.renameSync(path.join(episodesDir, `${id}.md`), path.join(archivedDir, `${id}.md`))
+        } catch {}
+      }
+
+      // index.jsonl: keep only non-folded rows (atomic rewrite); folded rows
+      // move to archived-index.jsonl with reader-internal fields stripped.
+      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+      const keptLines = []
+      const archivedLines = []
+      for (const line of lines) {
+        let entry = null
+        try { entry = JSON.parse(line) } catch {}
+        if (entry && allFoldIds.has(entry.id)) archivedLines.push(JSON.stringify(entry))
+        else keptLines.push(line)
+      }
+      const tmpIndex = indexFile + '.tmp'
+      fs.writeFileSync(tmpIndex, keptLines.join('\n') + (keptLines.length ? '\n' : ''), 'utf8')
+      fs.renameSync(tmpIndex, indexFile)
+
+      const tagsFile = path.join(dataDir, 'tags.json')
+      // Null-proto map (#469/#470): a tag literally named "constructor"/"__proto__"
+      // must not resolve to an inherited Object.prototype member. loadTagsIndex
+      // is the sanctioned reader; raw JSON.parse reintroduces the collision.
+      const tagsIndex = loadTagsIndex(dataDir) || Object.create(null)
+      for (const tag of Object.keys(tagsIndex)) {
+        if (!Array.isArray(tagsIndex[tag])) continue
+        tagsIndex[tag] = tagsIndex[tag].filter(id => !allFoldIds.has(id))
+        if (tagsIndex[tag].length === 0) delete tagsIndex[tag]
+      }
+      const tagsTmp = tagsFile + '.tmp'
+      fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
+      fs.renameSync(tagsTmp, tagsFile)
+
+      const existingArchived = fs.existsSync(archivedIndexFile) ? fs.readFileSync(archivedIndexFile, 'utf8') : ''
+      const archivedTmp = archivedIndexFile + '.tmp'
+      fs.writeFileSync(archivedTmp, existingArchived + archivedLines.join('\n') + '\n', 'utf8')
+      fs.renameSync(archivedTmp, archivedIndexFile)
+    }
+
+    return { chains, skipped, folded_total: allFoldIds.size }
+  }
+
   const today = new Date().toISOString().slice(0, 10)
+
+  if (allProjects) {
+    // Registry-driven fold. Protection rows are loaded ONCE as the UNION of
+    // cwd-local + global + every registered store (planner B3: a referencer
+    // in a THIRD store validly protects a member folded elsewhere), with
+    // storeLabel = realpath(data_dir) — the display label must never feed the
+    // class-d latestByStore bucket key (planner B4: basename collisions merge
+    // buckets and silently unprotect one store's latest run record).
+    const registered = resolveRegisteredStores()
+    const protectionDirs = new Map() // realpath -> dir
+    for (const d of [LOCAL_DIR, GLOBAL_DIR, ...registered.map(s => s.data_dir)]) {
+      const key = realpathSafe(d)
+      if (!protectionDirs.has(key)) protectionDirs.set(key, d)
+    }
+    const protectionRows = []
+    for (const [key, d] of protectionDirs) {
+      protectionRows.push(...loadProtectionRows(fs, path, d, key))
+    }
+    const protectedIds = computeProtectedIds(protectionRows, today)
+
+    const stores = []
+    let foldedTotal = 0
+    for (const st of registered) {
+      if (!st.store_matches_project) {
+        stores.push({ project_path: st.project_path, data_dir: st.data_dir, label: st.label, skipped_store: 'non-root-store' })
+        continue
+      }
+      if (!fs.existsSync(path.join(st.data_dir, 'index.jsonl'))) {
+        stores.push({ project_path: st.project_path, data_dir: st.data_dir, label: st.label, skipped_store: 'no-index' })
+        continue
+      }
+      const res = foldStore(st.data_dir, st.label, protectedIds)
+      foldedTotal += res.folded_total
+      stores.push({ project_path: st.project_path, data_dir: st.data_dir, label: st.label, ...res })
+    }
+
+    console.log(JSON.stringify({
+      status: 'ok',
+      mode: 'fold-superseded',
+      all_projects: true,
+      dry_run: dryRun,
+      min_chain: minChain,
+      stores,
+      folded_total: foldedTotal,
+      ...(dryRun && foldedTotal ? { hint: 'Re-run without --dry-run (plus --confirm) to archive.' } : {}),
+    }))
+    process.exit(0)
+  }
+
+  // Single-store fold (unchanged behavior). RFC-009 R6 archival protection —
+  // the SAME set em-prune honors, so a folded chain member that is
+  // evidence-linked, a trigger-bearing lesson, a consolidates-member, a latest
+  // run record, or in the chain-closure of any of those is NEVER archived by
+  // fold. The protection scan is cross-store (a global lesson's evidence can
+  // name a local violation), so it reads BOTH stores' index rows regardless of
+  // the fold's own scope.
   const protectionRows = [
     ...loadProtectionRows(fs, path, LOCAL_DIR, 'local'),
     ...loadProtectionRows(fs, path, GLOBAL_DIR, 'global')
   ]
   const protectedIds = computeProtectedIds(protectionRows, today)
-
-  // Supersession edges only (supersedes back-pointers + explicit
-  // superseded_by) — consolidates edges belong to digest clusters, not
-  // revision chains, and are deliberately not followed here.
-  const successorsOf = new Map() // id -> Set<successor id>
-  const predecessorsOf = new Map() // id -> Set<predecessor id>
-  const addEdge = (from, to) => {
-    if (!successorsOf.has(from)) successorsOf.set(from, new Set())
-    successorsOf.get(from).add(to)
-    if (!predecessorsOf.has(to)) predecessorsOf.set(to, new Set())
-    predecessorsOf.get(to).add(from)
-  }
-  for (const r of byId.values()) {
-    if (typeof r.supersedes === 'string' && byId.has(r.supersedes) && r.supersedes !== r.id) addEdge(r.supersedes, r.id)
-    if (typeof r.superseded_by === 'string' && byId.has(r.superseded_by) && r.superseded_by !== r.id) addEdge(r.id, r.superseded_by)
-  }
-
-  // Connected components over the supersession edges (union-find).
-  const parentUF = new Map()
-  const findUF = (x) => {
-    while (parentUF.get(x) !== x) { parentUF.set(x, parentUF.get(parentUF.get(x))); x = parentUF.get(x) }
-    return x
-  }
-  const unionUF = (a, b) => { const ra = findUF(a), rb = findUF(b); if (ra !== rb) parentUF.set(ra, rb) }
-  for (const id of byId.keys()) parentUF.set(id, id)
-  for (const [from, succs] of successorsOf) for (const to of succs) unionUF(from, to)
-
-  const components = new Map()
-  for (const id of byId.keys()) {
-    const root = findUF(id)
-    if (!components.has(root)) components.set(root, [])
-    components.get(root).push(id)
-  }
-
-  const chains = []
-  const skipped = []
-  for (const memberIds of components.values()) {
-    if (memberIds.length < minChain) continue // chain shorter than N: untouched
-    // Linearity: a fold-eligible chain is a simple path — every member has at
-    // most one successor and one predecessor, and exactly one terminal (no
-    // successor). Forks/merges (e.g. two revisions superseding the same
-    // episode, or a consolidation cluster's shared superseded_by target) are
-    // skipped whole: archiving any member of an ambiguous chain could hide
-    // the branch the walk would have surfaced.
-    const terminals = memberIds.filter(id => !(successorsOf.get(id)?.size))
-    const nonLinear = memberIds.some(id => (successorsOf.get(id)?.size || 0) > 1 || (predecessorsOf.get(id)?.size || 0) > 1)
-    if (terminals.length !== 1 || nonLinear) {
-      skipped.push({ members: [...memberIds].sort(), reason: 'non-linear', terminals: terminals.sort() })
-      continue
-    }
-    const terminal = terminals[0]
-    const folded = []
-    const kept = []
-    for (const id of memberIds) {
-      if (id === terminal) continue
-      const r = byId.get(id)
-      if (r.pinned === true) kept.push({ id, reason: 'pinned' })
-      else if (r.status !== 'superseded') kept.push({ id, reason: 'not-superseded' })
-      else if (protectedIds.has(id)) kept.push({ id, reason: `r6-protected:${protectedIds.get(id).reason}` })
-      else folded.push(id)
-    }
-    folded.sort()
-    kept.sort((a, b) => a.id.localeCompare(b.id))
-    chains.push({ terminal, chain_length: memberIds.length, folded, kept })
-  }
-  chains.sort((a, b) => a.terminal.localeCompare(b.terminal))
-
-  const allFoldIds = new Set(chains.flatMap(c => c.folded))
-
-  if (!dryRun && allFoldIds.size > 0) {
-    // SAME archive mechanism as em-prune.pruneDir: move the file to
-    // archived/, drop the index row, clean tags.json, append the row to
-    // archived-index.jsonl. Reversible (nothing is ever deleted); the
-    // history walk keeps resolving the chain from archived metadata.
-    const archivedDir = path.join(DATA_DIR, 'archived')
-    const indexFile = path.join(DATA_DIR, 'index.jsonl')
-    const archivedIndexFile = path.join(DATA_DIR, 'archived-index.jsonl')
-    fs.mkdirSync(archivedDir, { recursive: true })
-
-    for (const id of allFoldIds) {
-      try {
-        fs.renameSync(path.join(EPISODES_DIR, `${id}.md`), path.join(archivedDir, `${id}.md`))
-      } catch {}
-    }
-
-    // index.jsonl: keep only non-folded rows (atomic rewrite); folded rows
-    // move to archived-index.jsonl with reader-internal fields stripped.
-    const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-    const keptLines = []
-    const archivedLines = []
-    for (const line of lines) {
-      let entry = null
-      try { entry = JSON.parse(line) } catch {}
-      if (entry && allFoldIds.has(entry.id)) archivedLines.push(JSON.stringify(entry))
-      else keptLines.push(line)
-    }
-    const tmpIndex = indexFile + '.tmp'
-    fs.writeFileSync(tmpIndex, keptLines.join('\n') + (keptLines.length ? '\n' : ''), 'utf8')
-    fs.renameSync(tmpIndex, indexFile)
-
-    const tagsFile = path.join(DATA_DIR, 'tags.json')
-    // Null-proto map (#469/#470): a tag literally named "constructor"/"__proto__"
-    // must not resolve to an inherited Object.prototype member. loadTagsIndex
-    // is the sanctioned reader; raw JSON.parse reintroduces the collision.
-    const tagsIndex = loadTagsIndex(DATA_DIR) || Object.create(null)
-    for (const tag of Object.keys(tagsIndex)) {
-      if (!Array.isArray(tagsIndex[tag])) continue
-      tagsIndex[tag] = tagsIndex[tag].filter(id => !allFoldIds.has(id))
-      if (tagsIndex[tag].length === 0) delete tagsIndex[tag]
-    }
-    const tagsTmp = tagsFile + '.tmp'
-    fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
-    fs.renameSync(tagsTmp, tagsFile)
-
-    const existingArchived = fs.existsSync(archivedIndexFile) ? fs.readFileSync(archivedIndexFile, 'utf8') : ''
-    const archivedTmp = archivedIndexFile + '.tmp'
-    fs.writeFileSync(archivedTmp, existingArchived + archivedLines.join('\n') + '\n', 'utf8')
-    fs.renameSync(archivedTmp, archivedIndexFile)
-  }
+  const res = foldStore(DATA_DIR, scope, protectedIds)
 
   console.log(JSON.stringify({
     status: 'ok',
@@ -276,10 +357,10 @@ if (foldSuperseded) {
     dry_run: dryRun,
     scope,
     min_chain: minChain,
-    chains,
-    ...(skipped.length ? { skipped } : {}),
-    folded_total: allFoldIds.size,
-    ...(dryRun && allFoldIds.size ? { hint: 'Re-run without --dry-run to archive.' } : {}),
+    chains: res.chains,
+    ...(res.skipped.length ? { skipped: res.skipped } : {}),
+    folded_total: res.folded_total,
+    ...(dryRun && res.folded_total ? { hint: 'Re-run without --dry-run to archive.' } : {}),
   }))
   process.exit(0)
 }

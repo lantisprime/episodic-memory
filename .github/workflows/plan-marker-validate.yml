@@ -258,6 +258,18 @@ jobs:
       - name: Run em-consolidate fold-superseded suite (S4)
         run: node tests/test-fold-superseded.mjs
 
+      - name: Run registered-stores lib suite (APC-S1)
+        run: node tests/test-registered-stores.mjs
+
+      - name: Run all-projects stats+doctor observability suite (APC-S2/S3)
+        run: node tests/test-all-projects-observability.mjs
+
+      - name: Run fold --all-projects suite (APC-S4)
+        run: node tests/test-fold-all-projects.mjs
+
+      - name: Run em-promote experimental suite (APC-S5)
+        run: node tests/test-em-promote.mjs
+
       - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
         run: node tests/test-install-manifest.mjs
 
