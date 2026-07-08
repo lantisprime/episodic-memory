@@ -478,8 +478,26 @@ function renderDrafts(r) {
   const drafts = r.drafts || [];
   if (!drafts.length) return '<div class="ledger"><p class="empty">No pending drafts — sessions with auto-capture enabled will queue candidates here.</p></div>';
   return countLine(drafts.length, 'draft' + (drafts.length === 1 ? '' : 's'), 'waiting for review') +
-    drafts.map(d => '<div class="sub-card">' + autoRender(d, 1) + '</div>').join('') +
-    '<p class="note" style="margin-top:8px">Confirm or discard from the CLI: <span class="mono">em capture review --draft &lt;id&gt;</span></p>';
+    drafts.map(d =>
+      '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600;word-break:break-all">' + esc(d.id || '') + '</div>' +
+      '<div class="note" style="font-size:12px">' + esc(d.project || '') + (d.session_id ? ' · session ' + esc(String(d.session_id).slice(0, 12)) : '') + (d.ts ? ' · ' + esc(d.ts) : '') + '</div>' +
+      '<div class="stat-line">' +
+      '<div class="s"><div class="v lvl-warn">' + esc(d.pending ?? 0) + '</div><div class="k">pending</div></div>' +
+      '<div class="s"><div class="v lvl-ok">' + esc(d.accepted ?? 0) + '</div><div class="k">accepted</div></div>' +
+      '<div class="s"><div class="v">' + esc(d.rejected ?? 0) + '</div><div class="k">rejected</div></div>' +
+      '</div>' +
+      ((d.summaries || []).length ? '<ul class="idlist">' + d.summaries.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '') +
+      (d.id ? '<p class="note" style="margin-top:8px">Review: <span class="mono">em capture review --draft ' + esc(d.id) + '</span></p>' : '') +
+      '</div>').join('');
+}
+function renderRecall(r) {
+  let extras = '';
+  if (r.pending_drafts > 0) extras += '<p class="count-line"><span class="n">' + esc(r.pending_drafts) + '</span> capture draft(s) pending — see the Drafts tab.</p>';
+  for (const w of r.preflight_warnings || []) {
+    extras += '<p class="note" style="margin-top:6px"><span class="lvl-warn">warning</span> ' + esc(typeof w === 'string' ? w : (w.message || JSON.stringify(w))) + '</p>';
+  }
+  if (r.prune_suggestion) extras += '<p class="note" style="margin-top:6px">prune suggestion: ' + esc(typeof r.prune_suggestion === 'string' ? r.prune_suggestion : JSON.stringify(r.prune_suggestion)) + '</p>';
+  return renderEpisodes(r) + extras;
 }
 const HUMANIZE = {
   doctor: renderDoctorReport,
@@ -550,7 +568,9 @@ async function showEpisode(id) {
     el('d-body').innerHTML = '<p class="err-line">' + esc(res.body.message || 'failed') + '</p>' + raw(res.body);
     return;
   }
-  const eps = res.body.result.episodes || res.body.result.history || [];
+  // em-search --history returns the members under result.chain (oldest first).
+  const eps = res.body.result.chain || res.body.result.episodes || [];
+  el('d-title').textContent = 'Revision chain · ' + eps.length + ' member' + (eps.length === 1 ? '' : 's');
   el('d-body').innerHTML = (eps.length ? eps.map(e =>
     '<div class="d-ep">' +
     '<div class="id">' + esc(e.id) + '</div>' +
@@ -603,7 +623,8 @@ async function refreshOverview() {
   const stats = statsRes.body.status === 'ok' ? statsRes.body.result : null;
   const doctor = doctorRes.body.status === 'ok' ? doctorRes.body.result : null;
   const draftsRaw = draftsRes.body.status === 'ok' ? draftsRes.body.result : null;
-  const drafts = draftsRaw ? (Array.isArray(draftsRaw.drafts) ? draftsRaw.drafts.length : (draftsRaw.count || 0)) : 0;
+  const drafts = draftsRaw && Array.isArray(draftsRaw.drafts)
+    ? draftsRaw.drafts.filter(d => (d.pending || 0) > 0).length : 0;
 
   const scopes = (stats && stats.scopes) || [];
   const totalActive = scopes.reduce((n, s) => n + ((s.episodes && s.episodes.active) || 0), 0);
@@ -708,7 +729,7 @@ function buildRecall() {
     const flags = {};
     if (el('rc-proj').value.trim()) flags.project = el('rc-proj').value.trim();
     if (el('rc-task').value) flags['task-type'] = el('rc-task').value;
-    resultOrError(await run('recall', flags), renderEpisodes, el('rc-out'));
+    resultOrError(await run('recall', flags), renderRecall, el('rc-out'));
   };
 }
 

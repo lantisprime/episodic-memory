@@ -286,6 +286,13 @@ await (async () => {
       const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'history', flags: { history: seeded.id } } })
       assert.strictEqual(r.status, 200)
       assert.strictEqual(r.json.exit_code, 0)
+      // Pin the FIELD the page's drawer reads: the chain rides under result.chain
+      // with id/summary/body per member. The drawer showed "no chain found" when
+      // this drifted silently (page read .episodes) — exit-0 alone missed it.
+      assert.ok(Array.isArray(r.json.result.chain), `result.chain missing: ${JSON.stringify(Object.keys(r.json.result))}`)
+      assert.ok(r.json.result.chain.length >= 1, 'empty chain for seeded episode')
+      const m = r.json.result.chain[0]
+      assert.ok(m.id && m.summary && 'body' in m, `chain member missing id/summary/body: ${JSON.stringify(Object.keys(m))}`)
     })
     await test('write flag on wrong shape still validated (bad episode id → 400)', async () => {
       const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'pin', flags: { id: 'not-an-id' } } })
