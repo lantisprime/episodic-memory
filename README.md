@@ -471,6 +471,24 @@ node ~/.episodic-memory/scripts/em-promote.mjs            # preview candidates
 node ~/.episodic-memory/scripts/em-promote.mjs --apply    # write global lessons
 ```
 
+### Web console (`em console`) and manager (`em manage`)
+```bash
+# Point-and-click view of the store: dashboard (stats + doctor), browse/search
+# with history chains, recall preview, pending capture drafts, hygiene panel.
+# Loopback-only with a per-launch token; read-only unless --allow-write; idles
+# out after 30 minutes by default. Open the URL it prints.
+node ~/.episodic-memory/scripts/em-console.mjs                  # read-only
+node ~/.episodic-memory/scripts/em-console.mjs --allow-write    # + store/revise/pin/fix
+
+# Guided day-2 maintenance without memorizing flags: status, hygiene
+# (rebuild-index / fold / prune / doctor --fix, dry-run first), backup,
+# capture drafts, routines, console launcher.
+node ~/.episodic-memory/scripts/em-manage.mjs
+```
+Both are presentation layers over the same CLI contract: every button and menu
+action spawns the corresponding `em-*` script and shows its JSON. Nothing is
+decided in the UI, and no data leaves your machine.
+
 ### Graph traversal (`em graph`)
 ```bash
 # What is connected to this episode? Lineage across supersedes/consolidates/

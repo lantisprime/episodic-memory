@@ -270,6 +270,12 @@ jobs:
       - name: Run em-promote experimental suite (APC-S5)
         run: node tests/test-em-promote.mjs
 
+      - name: Run em-console web console suite
+        run: node tests/test-em-console.mjs
+
+      - name: Run em-manage wizard suite
+        run: node tests/test-em-manage.mjs
+
       - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
         run: node tests/test-install-manifest.mjs
 

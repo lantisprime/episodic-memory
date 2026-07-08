@@ -12,8 +12,9 @@
  *   em recall
  *   em doctor --fix
  *
- * `em help` prints a human-readable command table (the only non-JSON output
- * surface in the substrate — every delegated command still emits JSON).
+ * `em help` prints a human-readable command table. Interactive presentation
+ * surfaces (this help table, the `em manage` wizard) print prose; every
+ * non-interactive command still emits JSON.
  * `em help --json` emits the same table as JSON for tooling.
  *
  * Command resolution is directory-driven: any em-<name>.mjs sitting next to
@@ -40,6 +41,8 @@ const DESCRIPTIONS = {
   revise: 'Correct a past episode via a revision chain',
   move: 'Relocate episodes between local and global scopes (RFC-005)',
   consolidate: 'Fold near-duplicate episodes into digest episodes (dry-run default)',
+  console: 'Local web console over the store (loopback-only, read-only by default)',
+  manage: 'Interactive day-2 maintenance wizard (status, hygiene, backup, drafts)',
   graph: 'Typed-edge traversal: lineage, clusters, orphans, hubs (RFC-007)',
   stats: 'Store analytics: totals, categories, age, tags, prunable estimate',
   embed: 'Build/update the embeddings sidecar for semantic search',

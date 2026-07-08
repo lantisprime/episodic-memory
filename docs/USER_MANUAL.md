@@ -18,6 +18,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 8b: Running a Second-Opinion Review on a Plan or Diff](#scenario-8b-running-a-second-opinion-review-on-a-plan-or-diff)
 - [Scenario 8c: Running Routines on a Schedule (macOS)](#scenario-8c-running-routines-on-a-schedule-macos)
 - [Scenario 8d: One View Across Every Project](#scenario-8d-one-view-across-every-project)
+- [Scenario 8e: Looking at Your Memory Instead of Querying It](#scenario-8e-looking-at-your-memory-instead-of-querying-it)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
@@ -457,6 +458,43 @@ review, not gospel.
 **When you don't want this:** with a single registered project there is nothing to correlate —
 the commands say so and exit cleanly. Everything here is opt-in and manual; nothing scans your
 projects in the background.
+
+---
+
+## Scenario 8e: Looking at Your Memory Instead of Querying It
+
+**What happens:** Sometimes you want to see the store, not interrogate it through an
+assistant — skim what accumulated this month, check health at a glance, read a
+decision's full revision chain, or clean up without memorizing flags.
+
+```bash
+# Local web console: prints a URL with a one-time token — open it.
+node ~/.episodic-memory/scripts/em-console.mjs
+# {"status":"ok","url":"http://127.0.0.1:52341/?token=...","allow_write":false,...}
+```
+
+The page has a dashboard (per-scope analytics + doctor results), a browse tab
+(search and list with filters; click any row for its full revision history), a
+recall preview, pending auto-capture drafts, and a maintenance panel. It binds to
+127.0.0.1 only, requires the token from the printed URL, and by default is
+read-only — store/revise/pin/fix buttons stay disabled until you relaunch with
+`--allow-write`. Close the tab and forget it: the server shuts itself down after
+30 idle minutes.
+
+Prefer the terminal? The same day-2 chores come as a guided menu:
+
+```bash
+node ~/.episodic-memory/scripts/em-manage.mjs
+```
+
+Pick `status` for health + analytics, `hygiene` for rebuild-index / fold / prune
+(you always see the dry-run before anything is applied and confirm explicitly),
+`backup`, `capture` for pending drafts, `routines`, or `console` to launch the web
+page from the menu.
+
+**When you don't want this:** neither surface is for agents — they keep using the
+JSON CLI. And nothing here runs unattended: both exist only while you're looking
+at them.
 
 ---
 
