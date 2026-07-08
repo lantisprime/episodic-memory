@@ -204,7 +204,7 @@ jobs:
       - name: Run relevance suite (wave 1)
         run: node tests/test-relevance.mjs
 
-      - name: Run em-move suite (wave: RFC-005)
+      - name: Run em-move suite (RFC-005)
         run: node tests/test-em-move.mjs
 
       - name: Run em-stats + semantic recall suite
@@ -234,7 +234,7 @@ jobs:
       - name: Guard against raw control bytes in tracked source (wave-6 hardening)
         run: node tests/test-no-raw-control-bytes.mjs
 
-      - name: Run em-capture session auto-capture suite (wave-6 #2)
+      - name: Run em-capture session auto-capture suite (wave-6 second deliverable)
         run: node tests/test-em-capture.mjs
 
   p12-invariant-gate:
