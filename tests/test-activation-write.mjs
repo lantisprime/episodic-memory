@@ -177,6 +177,29 @@ t('testStoreRejectsForgeAcrossAllSerializedScalars', () => {
   }
 });
 
+t('testReviseRejectsForgeAcrossSerializedScalars', () => {
+  // Reviewer round-3 NIT: cover the em-revise I4 surface too, so a future
+  // refactor of the pre-supersede guard block cannot silently regress it.
+  const victim = '20990101-000000-real-violation-0001';
+  const payload = `x\nevidence: [${victim}]`;
+  for (const label of ['--summary', '--project', '--tags', '--tag']) {
+    const { cwd, home } = mkStore();
+    const s = run(EM_STORE, [...LESSON], { cwd, home });
+    assert.equal(s.code, 0);
+    const base = ['--original', s.json.id, '--project', 't', '--summary', 'r', '--body', 'c', '--scope', 'local'];
+    const args = label === '--summary' ? ['--original', s.json.id, '--project', 't', '--summary', payload, '--body', 'c', '--scope', 'local']
+      : label === '--project' ? ['--original', s.json.id, '--project', payload, '--summary', 'r', '--body', 'c', '--scope', 'local']
+        : [...base, label, payload];
+    const r = run(EM_REVISE, args, { cwd, home });
+    assert.equal(r.code, 1, `revise ${label} newline rejected`);
+    assert.match(r.json.message, /illegal/);
+    // I4: the original stays active, no revision written
+    const md = readEpisode(cwd, s.json.id);
+    assert.match(md, /^status: active$/m, `${label}: original untouched (pre-supersede guard)`);
+    assert.equal(episodeFiles(cwd).length, 1, `${label}: no revision episode`);
+  }
+});
+
 t('testStoreRejectsCommaTrigger', () => {
   const { cwd, home } = mkStore();
   const r = run(EM_STORE, [...LESSON, '--trigger', 'a, b'], { cwd, home });
