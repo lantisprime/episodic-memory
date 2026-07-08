@@ -216,6 +216,42 @@ table.checks th { color: var(--faint); font-weight: 500; font-size: 12px; }
 .x-btn { border: 1px solid var(--line); background: var(--card); border-radius: 999px;
   width: 30px; height: 30px; font-size: 14px; color: var(--muted); }
 
+/* ---- humanized output ------------------------------------------------------------ */
+.count-line { font-size: 15px; color: var(--ink-2); margin: 12px 0 0; }
+.count-line .n { font: 600 17px var(--mono); color: var(--ink); }
+table.kv { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }
+table.kv td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.kv td.k { color: var(--muted); font: 12px var(--mono); white-space: nowrap; width: 1%; padding-right: 18px; }
+table.kv tr:last-child td { border-bottom: none; }
+.sub-card { border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-top: 10px; }
+.sub-card .id { font: 600 12px var(--mono); word-break: break-all; cursor: pointer; color: var(--accent-dark); }
+.stat-line { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; }
+.stat-line .s { min-width: 90px; }
+.stat-line .s .v { font: 500 20px var(--mono); }
+.stat-line .s .k { color: var(--faint); font-size: 12px; }
+details.more { margin-top: 8px; }
+details.more summary { color: var(--accent-dark); font-size: 13px; cursor: pointer; }
+.idlist { margin: 8px 0 0; padding: 0; list-style: none; }
+.idlist li { font: 12px var(--mono); color: var(--muted); padding: 3px 0; word-break: break-all; }
+
+/* ---- mini markdown ----------------------------------------------------------------- */
+.md { font-size: 14px; color: var(--ink-2); line-height: 1.6; }
+.md h1, .md h2, .md h3 { font: 500 17px var(--serif); color: var(--ink); margin: 14px 0 6px; }
+.md h1 { font-size: 19px; } .md h3 { font-size: 15px; }
+.md p { margin: 8px 0; }
+.md ul, .md ol { margin: 8px 0; padding-left: 22px; }
+.md li { margin: 3px 0; }
+.md code { font: 12px var(--mono); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 5px; padding: 1px 5px; }
+.md pre { margin: 10px 0; }
+.md pre code { background: none; border: none; padding: 0; }
+.md hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.md table { border-collapse: collapse; font-size: 13px; margin: 10px 0; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+.md th { color: var(--muted); font-weight: 600; background: var(--bg); }
+.md a { color: var(--accent-dark); }
+.md strong { color: var(--ink); }
+
 /* ---- toast --------------------------------------------------------------------- */
 #toast {
   position: fixed; bottom: 18px; right: 18px; z-index: 90; display: none;
@@ -282,6 +318,186 @@ function catBadge(category) {
   return '<span class="badge ' + cls + '">' + esc(c || '—') + '</span>';
 }
 
+// --- mini markdown (escape-first: the WHOLE source is HTML-escaped before any
+// transform runs, so user < > are entities by construction and only this
+// renderer emits tags; hrefs are scheme-allowlisted to http/https) -----------
+function miniMd(src) {
+  const escaped = esc(src);
+  // Extract fenced code blocks first so no other transform fires inside them.
+  const fences = [];
+  let text = escaped.replace(/\`\`\`[^\\n]*\\n([\\s\\S]*?)\`\`\`/g, (m, code) => {
+    fences.push('<pre><code>' + code + '</code></pre>');
+    return '\\u0000F' + (fences.length - 1) + '\\u0000';
+  });
+  const inline = (s) => s
+    .replace(/\`([^\`\\n]+)\`/g, '<code>$1</code>')
+    .replace(/\\*\\*([^*\\n]+)\\*\\*/g, '<strong>$1</strong>')
+    .replace(/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const lines = text.split('\\n');
+  const out = [];
+  let list = null; // 'ul' | 'ol'
+  let tableBuf = [];
+  const closeList = () => { if (list) { out.push('</' + list + '>'); list = null; } };
+  const flushTable = () => {
+    if (!tableBuf.length) return;
+    const rows = tableBuf.map(l => l.replace(/^\\||\\|$/g, '').split('|').map(c => c.trim()));
+    tableBuf = [];
+    const isSep = rows.length > 1 && rows[1].every(c => /^:?-{2,}:?$/.test(c));
+    let html = '<table>';
+    rows.forEach((cells, i) => {
+      if (isSep && i === 1) return;
+      const tag = isSep && i === 0 ? 'th' : 'td';
+      html += '<tr>' + cells.map(c => '<' + tag + '>' + inline(c) + '</' + tag + '>').join('') + '</tr>';
+    });
+    out.push(html + '</table>');
+  };
+  for (const lineRaw of lines) {
+    const line = lineRaw;
+    const fence = line.match(/^\\u0000F(\\d+)\\u0000$/);
+    if (fence) { closeList(); flushTable(); out.push(fences[+fence[1]]); continue; }
+    if (/^\\s*\\|.*\\|\\s*$/.test(line)) { closeList(); tableBuf.push(line.trim()); continue; }
+    flushTable();
+    const h = line.match(/^(#{1,3})\\s+(.*)$/);
+    if (h) { closeList(); out.push('<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>'); continue; }
+    if (/^\\s*(---+|\\*\\*\\*+)\\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
+    const ul = line.match(/^\\s*[-*]\\s+(.*)$/);
+    const ol = line.match(/^\\s*\\d+[.)]\\s+(.*)$/);
+    if (ul || ol) {
+      const want = ul ? 'ul' : 'ol';
+      if (list !== want) { closeList(); out.push('<' + want + '>'); list = want; }
+      out.push('<li>' + inline((ul || ol)[1]) + '</li>');
+      continue;
+    }
+    closeList();
+    if (line.trim() === '') continue;
+    out.push('<p>' + inline(line) + '</p>');
+  }
+  closeList(); flushTable();
+  return '<div class="md">' + out.join('') + '</div>';
+}
+
+// --- generic JSON humanizer (fallback for shapes without a typed renderer) ---
+function autoRender(v, depth = 0) {
+  if (v === null || v === undefined) return '<span class="note">—</span>';
+  if (typeof v !== 'object') return esc(String(v));
+  if (depth > 3) return '<span class="note">…</span>';
+  if (Array.isArray(v)) {
+    if (!v.length) return '<span class="note">none</span>';
+    if (v.every(x => typeof x !== 'object' || x === null)) {
+      return '<p class="chips" style="margin:4px 0 0">' + v.slice(0, 60).map(x => '<span>' + esc(String(x)) + '</span>').join('') +
+        (v.length > 60 ? '<span>+' + (v.length - 60) + ' more</span>' : '') + '</p>';
+    }
+    return v.slice(0, 30).map(x => '<div class="sub-card">' + autoRender(x, depth + 1) + '</div>').join('') +
+      (v.length > 30 ? '<p class="note">+' + (v.length - 30) + ' more — see raw JSON</p>' : '');
+  }
+  const entries = Object.entries(v);
+  if (!entries.length) return '<span class="note">empty</span>';
+  return '<table class="kv">' + entries.map(([k, val]) =>
+    '<tr><td class="k">' + esc(k) + '</td><td>' + autoRender(val, depth + 1) + '</td></tr>').join('') + '</table>';
+}
+
+// --- typed renderers: known command shapes -> calm human output --------------
+function countLine(n, noun, tail) {
+  return '<p class="count-line"><span class="n">' + esc(String(n)) + '</span> ' + esc(noun + (tail ? ' ' + tail : '')) + '</p>';
+}
+function epId(id) { return '<span class="id" data-ep-id="' + esc(id) + '" title="open revision chain">' + esc(id) + '</span>'; }
+function idList(ids, label) {
+  if (!ids || !ids.length) return '';
+  return '<details class="more"><summary>' + esc(label + ' (' + ids.length + ')') + '</summary><ul class="idlist">' +
+    ids.map(i => '<li>' + epId(i) + '</li>').join('') + '</ul></details>';
+}
+function renderDoctorReport(r) {
+  const sum = r.summary || {};
+  const bad = (r.checks || []).filter(c => c.level !== 'ok');
+  let html = '<div class="stat-line">' +
+    '<div class="s"><div class="v lvl-' + esc(r.status) + '">' + esc(r.status) + '</div><div class="k">verdict</div></div>' +
+    '<div class="s"><div class="v lvl-ok">' + esc(sum.ok ?? '—') + '</div><div class="k">ok</div></div>' +
+    '<div class="s"><div class="v lvl-warn">' + esc(sum.warn ?? '—') + '</div><div class="k">warn</div></div>' +
+    '<div class="s"><div class="v lvl-error">' + esc(sum.error ?? '—') + '</div><div class="k">error</div></div></div>';
+  if (bad.length) {
+    html += '<div style="max-height:30vh;overflow-y:auto"><table class="checks"><tr><th>level</th><th>check</th><th>message</th></tr>' +
+      bad.map(c => '<tr><td class="lvl-' + esc(c.level) + '">' + esc(c.level) + '</td><td class="mono" style="font-size:12px">' + esc(c.id) + (c.scope && c.scope !== '-' ? ':' + esc(c.scope) : '') + '</td><td>' + esc(c.message) + '</td></tr>').join('') + '</table></div>';
+  } else {
+    html += '<p class="note" style="margin-top:8px">Every check passes.</p>';
+  }
+  return html;
+}
+function renderStatsReport(r) {
+  return (r.scopes || []).map(s => {
+    const ep = s.episodes || {};
+    const cats = Object.entries(s.by_category || {}).sort((a, b) => b[1] - a[1]);
+    return '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600">' + esc(s.scope || '') + '</div>' +
+      (s.dir ? '<div class="note" style="font-size:12px;word-break:break-all">' + esc(s.dir) + '</div>' : '') +
+      '<div class="stat-line">' +
+      '<div class="s"><div class="v">' + esc(ep.active ?? '—') + '</div><div class="k">active</div></div>' +
+      '<div class="s"><div class="v">' + esc(ep.superseded ?? '—') + '</div><div class="k">superseded</div></div>' +
+      '<div class="s"><div class="v">' + esc(ep.pinned ?? '—') + '</div><div class="k">pinned</div></div>' +
+      '<div class="s"><div class="v">' + esc(s.prunable_estimate ?? '—') + '</div><div class="k">prunable est.</div></div>' +
+      '</div>' +
+      (cats.length ? '<p class="chips" style="margin:8px 0 0">' + cats.map(([k, c]) => '<span>' + esc(k) + ' ' + esc(c) + '</span>').join('') + '</p>' : '') +
+      '</div>';
+  }).join('') || '<p class="note">no scopes reported</p>';
+}
+function renderFold(r) {
+  const chains = r.chains || [];
+  const verb = r.dry_run ? 'would fold' : 'folded';
+  let html = countLine(r.folded_total ?? 0, 'revision' + ((r.folded_total ?? 0) === 1 ? '' : 's'), verb + ' across ' + chains.length + ' chain' + (chains.length === 1 ? '' : 's') + (r.scope ? ' in the ' + r.scope + ' store' : ''));
+  if (r.dry_run && chains.length) html += '<p class="note" style="margin-top:4px">This is a preview — nothing was written. Terminals are always kept.</p>';
+  html += chains.slice(0, 12).map(c =>
+    '<div class="sub-card"><div class="note" style="font-size:12px">chain of ' + esc(c.chain_length) + ' · keeps terminal</div>' +
+    '<div style="margin:4px 0 2px">' + epId(c.terminal) + '</div>' +
+    idList(c.folded, (r.dry_run ? 'members that would fold' : 'folded members')) + '</div>').join('');
+  if (chains.length > 12) html += '<p class="note">+' + (chains.length - 12) + ' more chains — see raw JSON</p>';
+  return html;
+}
+function renderPrune(r) {
+  const results = r.results || [];
+  return results.map(s =>
+    '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600">' + esc(s.scope || '') + '</div>' +
+    '<div class="stat-line">' +
+    '<div class="s"><div class="v">' + esc(s.prunable ?? s.archived ?? 0) + '</div><div class="k">' + (r.dry_run === false || s.archived !== undefined ? 'archived' : 'prunable') + '</div></div>' +
+    '<div class="s"><div class="v">' + esc(s.remaining ?? '—') + '</div><div class="k">remaining</div></div>' +
+    '<div class="s"><div class="v">' + esc(s.protected ?? 0) + '</div><div class="k">protected</div></div>' +
+    '</div>' +
+    idList((s.episodes || []).map(e => typeof e === 'string' ? e : e.id).filter(Boolean), 'episodes affected') +
+    idList(s.protected_episodes || [], 'protected (never archived)') +
+    '</div>').join('') || '<p class="note">nothing to report</p>';
+}
+function renderRebuild(r) {
+  return (r.rebuilt || []).map(s => {
+    const drift = s.category_drift || {};
+    const unknown = Object.keys(drift.unknown || {}).length;
+    const deprecated = Object.keys(drift.deprecated || {}).length;
+    return '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600">' + esc(s.scope || '') + '</div>' +
+      countLine(s.count ?? 0, 'episode' + ((s.count ?? 0) === 1 ? '' : 's'), 'reindexed') +
+      (unknown || deprecated ? '<p class="note">category drift: ' + unknown + ' unknown · ' + deprecated + ' deprecated</p>'
+        : '<p class="note">no category drift</p>') + '</div>';
+  }).join('') || '<p class="note">nothing rebuilt</p>';
+}
+function renderDrafts(r) {
+  const drafts = r.drafts || [];
+  if (!drafts.length) return '<div class="ledger"><p class="empty">No pending drafts — sessions with auto-capture enabled will queue candidates here.</p></div>';
+  return countLine(drafts.length, 'draft' + (drafts.length === 1 ? '' : 's'), 'waiting for review') +
+    drafts.map(d => '<div class="sub-card">' + autoRender(d, 1) + '</div>').join('') +
+    '<p class="note" style="margin-top:8px">Confirm or discard from the CLI: <span class="mono">em capture review --draft &lt;id&gt;</span></p>';
+}
+const HUMANIZE = {
+  doctor: renderDoctorReport,
+  'doctor-fix': renderDoctorReport,
+  stats: renderStatsReport,
+  'fold-preview': renderFold,
+  'fold-apply': renderFold,
+  'prune-preview': renderPrune,
+  'prune-apply': renderPrune,
+  'rebuild-index': renderRebuild,
+  'capture-list': renderDrafts,
+};
+function humanize(cmd, result) {
+  if (!result || typeof result !== 'object') return autoRender(result);
+  const typed = HUMANIZE[cmd];
+  try { return typed ? typed(result) : autoRender(result); } catch { return autoRender(result); }
+}
+
 // --- shell -------------------------------------------------------------------
 let META = { allow_write: false, categories: [], cwd: '' };
 const TABS = [
@@ -341,7 +557,7 @@ async function showEpisode(id) {
     '<div style="margin:6px 0 2px">' + catBadge(e.category) + (e.status ? ' <span class="badge neutral">' + esc(e.status) + '</span>' : '') + '</div>' +
     '<div class="sum">' + esc(e.summary) + '</div>' +
     (e.tags && e.tags.length ? '<p class="chips" style="margin:6px 0 0">' + e.tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</p>' : '') +
-    (e.body ? '<pre>' + esc(e.body) + '</pre>' : '') +
+    (e.body ? miniMd(e.body) : '') +
     '</div>').join('') : '<p class="empty">no chain found</p>') + raw(res.body);
 }
 document.addEventListener('click', (ev) => {
@@ -504,7 +720,7 @@ function buildDrafts() {
     '<div class="row" style="margin-bottom:12px"><button class="btn sm secondary" id="cp-run">Refresh</button></div>' +
     '<div id="cp-out"></div>';
   el('cp-run').onclick = async () => {
-    resultOrError(await run('capture-list', {}), r => '<div class="card"><pre style="margin:0">' + esc(JSON.stringify(r, null, 2)) + '</pre></div>', el('cp-out'));
+    resultOrError(await run('capture-list', {}), r => humanize('capture-list', r), el('cp-out'));
   };
   el('cp-run').click();
 }
@@ -545,10 +761,9 @@ function buildMaintenance() {
     '<button class="btn sm secondary" id="m-ap-doctor">Doctor</button>' +
     '</div><div class="out" id="m-ap-out"></div></div>' +
     '</div>';
-  const jsonR = r => '<pre>' + esc(JSON.stringify(r, null, 2)) + '</pre>';
   const wire = (id, cmd, flagsFn, out) => {
     const b = el(id); if (!b || b.disabled) return;
-    b.onclick = async () => resultOrError(await run(cmd, flagsFn()), jsonR, el(out));
+    b.onclick = async () => resultOrError(await run(cmd, flagsFn()), r => humanize(cmd, r), el(out));
   };
   wire('m-rebuild', 'rebuild-index', () => ({ scope: 'all' }), 'm-idx-out');
   wire('m-fix', 'doctor-fix', () => ({ scope: 'all' }), 'm-idx-out');
