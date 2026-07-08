@@ -7,6 +7,16 @@
  *
  * Usage:
  *   node em-doctor.mjs [--scope local|global|all] [--fix] [--strict] [--verbose]
+ *                      [--all-projects]
+ *
+ * --all-projects additionally runs the store-class checks once per consumer-
+ * registry store (scope label `project:<basename>`; every store-class row
+ * carries a `data_dir` field — the label is display-only and non-unique, the
+ * dir is the identity). --fix routes rebuilds by data_dir, never by label,
+ * and only for stores the substrate itself would resolve at that project root
+ * (store_matches_project — a git-nested/worktree registration is reported
+ * `skipped: non-root-store` because a spawned rebuild would repair a DIFFERENT
+ * store than the one diagnosed).
  *
  * Checks, per store scope:
  *   node-version      Node.js >= 18
@@ -48,6 +58,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
+import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -56,7 +67,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-doctor.mjs', usage: 'node em-doctor.mjs [--scope local|global|all] [--fix] [--strict] [--verbose]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-doctor.mjs', usage: 'node em-doctor.mjs [--scope local|global|all] [--fix] [--strict] [--verbose] [--all-projects] — --all-projects adds per-consumer-registry-store health checks (rows carry data_dir; --fix routes by data_dir and skips non-root-store registrations)' }))
   process.exit(0)
 }
 
@@ -70,6 +81,7 @@ const scope = flag('--scope') || 'all'
 const fix = argv.includes('--fix')
 const strict = argv.includes('--strict')
 const verbose = argv.includes('--verbose')
+const allProjects = argv.includes('--all-projects')
 
 const VALID_SCOPES = ['local', 'global', 'all']
 if (!VALID_SCOPES.includes(scope)) {
@@ -546,8 +558,30 @@ function checkInstallsDrift() {
   }
 }
 
-if (scope === 'local' || scope === 'all') checkStore(LOCAL_DIR, 'local')
-if (scope === 'global' || scope === 'all') checkStore(GLOBAL_DIR, 'global')
+// Every store-class row carries data_dir (the identity; scope labels are
+// display-only and can collide across same-basename registered projects).
+function checkStoreWithDir(dataDir, scopeName) {
+  const before = checks.length
+  checkStore(dataDir, scopeName)
+  for (let i = before; i < checks.length; i++) checks[i].data_dir = dataDir
+}
+
+const ranStoreDirs = new Set()
+if (scope === 'local' || scope === 'all') { checkStoreWithDir(LOCAL_DIR, 'local'); ranStoreDirs.add(realpathSafe(LOCAL_DIR)) }
+if (scope === 'global' || scope === 'all') { checkStoreWithDir(GLOBAL_DIR, 'global'); ranStoreDirs.add(realpathSafe(GLOBAL_DIR)) }
+
+// --all-projects: store-class checks per consumer-registry store not already
+// covered (realpath both sides — a cwd-local store symlinked to a registered
+// store must not produce two blocks). Non-store checks below still run once.
+const registeredStores = allProjects ? resolveRegisteredStores() : []
+const registeredByDir = new Map(registeredStores.map(st => [st.data_dir, st]))
+for (const st of registeredStores) {
+  const key = realpathSafe(st.data_dir)
+  if (ranStoreDirs.has(key)) continue
+  ranStoreDirs.add(key)
+  checkStoreWithDir(st.data_dir, st.label)
+}
+
 if (scope === 'local' || scope === 'all') checkGateFriction()
 if (scope === 'global' || scope === 'all') checkInstallsDrift()
 checkInstalledScripts()
@@ -559,25 +593,49 @@ checkDrafts()
 // by re-running the store checks and replacing their rows.
 // ---------------------------------------------------------------------------
 if (fix) {
-  const rebuildScopes = new Set(
-    checks.filter(c => c.fix === 'em-rebuild-index' && c.level !== 'ok').map(c => c.scope)
-  )
-  for (const s of rebuildScopes) {
-    const rebuildScript = path.join(SCRIPT_DIR, 'em-rebuild-index.mjs')
-    const r = spawnSync(process.execPath, [rebuildScript, '--scope', s], {
-      encoding: 'utf8',
-      // local rebuild must resolve the SAME local store this doctor saw
-      cwd: s === 'local' ? path.dirname(LOCAL_DIR) : process.cwd()
-    })
-    fixes.push({ action: 'rebuild-index', scope: s, exit: r.status, output: (r.stdout || '').trim().slice(0, 500) })
-  }
-  if (rebuildScopes.size > 0) {
-    // Re-verify: drop the pre-fix store rows and re-run those checks.
-    const rerun = [...rebuildScopes]
-    for (let i = checks.length - 1; i >= 0; i--) {
-      if (rerun.includes(checks[i].scope)) checks.splice(i, 1)
+  // Rebuild routing is keyed by data_dir (identity), never by the scope label
+  // (display-only; two registered projects named "app" share a label). Foreign
+  // stores rebuild via a spawn with cwd = that project's root, and ONLY when
+  // the substrate's own resolution matches that root (store_matches_project) —
+  // otherwise the spawned rebuild would repair a different store than the one
+  // diagnosed, so the entry is reported and skipped.
+  const rebuildTargets = new Map() // data_dir -> {scopeLabel, scopeArg, cwd}
+  const skippedNonRoot = new Set()
+  for (const c of checks) {
+    if (c.fix !== 'em-rebuild-index' || c.level === 'ok') continue
+    if (c.scope === 'local') {
+      rebuildTargets.set(LOCAL_DIR, { scopeLabel: 'local', scopeArg: 'local', cwd: path.dirname(LOCAL_DIR) })
+    } else if (c.scope === 'global') {
+      rebuildTargets.set(GLOBAL_DIR, { scopeLabel: 'global', scopeArg: 'global', cwd: process.cwd() })
+    } else if (typeof c.data_dir === 'string') {
+      const st = registeredByDir.get(c.data_dir)
+      if (!st) continue
+      if (!st.store_matches_project) {
+        if (!skippedNonRoot.has(c.data_dir)) {
+          skippedNonRoot.add(c.data_dir)
+          fixes.push({ action: 'skipped', reason: 'non-root-store', scope: c.scope, dir: c.data_dir, project: st.project_path })
+        }
+        continue
+      }
+      rebuildTargets.set(c.data_dir, { scopeLabel: c.scope, scopeArg: 'local', cwd: st.project_path })
     }
-    for (const s of rerun) checkStore(s === 'local' ? LOCAL_DIR : GLOBAL_DIR, s)
+  }
+  for (const [dataDir, t] of rebuildTargets) {
+    const rebuildScript = path.join(SCRIPT_DIR, 'em-rebuild-index.mjs')
+    const r = spawnSync(process.execPath, [rebuildScript, '--scope', t.scopeArg], {
+      encoding: 'utf8',
+      // the rebuild must resolve the SAME store this doctor saw
+      cwd: t.cwd,
+    })
+    fixes.push({ action: 'rebuild-index', scope: t.scopeLabel, dir: dataDir, exit: r.status, output: (r.stdout || '').trim().slice(0, 500) })
+  }
+  if (rebuildTargets.size > 0) {
+    // Re-verify: drop the pre-fix store rows for rebuilt dirs and re-run.
+    const rerunDirs = new Set(rebuildTargets.keys())
+    for (let i = checks.length - 1; i >= 0; i--) {
+      if (typeof checks[i].data_dir === 'string' && rerunDirs.has(checks[i].data_dir)) checks.splice(i, 1)
+    }
+    for (const [dataDir, t] of rebuildTargets) checkStoreWithDir(dataDir, t.scopeLabel)
   }
 }
 

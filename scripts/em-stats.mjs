@@ -3,7 +3,7 @@
  * em-stats.mjs — store analytics: what does memory actually hold?
  *
  * Usage:
- *   node em-stats.mjs [--scope local|global|all] [--top <n>]
+ *   node em-stats.mjs [--scope local|global|all] [--top <n>] [--all-projects]
  *
  * Per scope: episode totals (active/superseded/pinned), archived count,
  * category and project distributions, age buckets, top tags, access +
@@ -21,6 +21,7 @@ import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, computeScore } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
+import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -28,7 +29,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-stats.mjs', usage: 'node em-stats.mjs [--scope local|global|all] [--top <n>] — read-only store analytics (totals, categories, projects, age buckets, tags, access/feedback, prunable estimate)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-stats.mjs', usage: 'node em-stats.mjs [--scope local|global|all] [--top <n>] [--all-projects] — read-only store analytics (totals, categories, projects, age buckets, tags, access/feedback, prunable estimate); --all-projects appends one scope block per consumer-registry store (label project:<basename>; the dir field is the identity)' }))
   process.exit(0)
 }
 
@@ -168,6 +169,20 @@ function statsFor(dataDir, label) {
 const scopes = []
 if (scope === 'local' || scope === 'all') scopes.push(statsFor(LOCAL_DIR, 'local'))
 if (scope === 'global' || scope === 'all') scopes.push(statsFor(GLOBAL_DIR, 'global'))
+
+// --all-projects: one block per consumer-registry store not already covered.
+// Identity is realpath on BOTH comparison operands (the dir field a block
+// carries is the unresolved spelling; a cwd-local store symlinked to a
+// registered store must not double-count).
+if (argv.includes('--all-projects')) {
+  const included = new Set(scopes.map(s => realpathSafe(s.dir)))
+  for (const st of resolveRegisteredStores()) {
+    const key = realpathSafe(st.data_dir)
+    if (included.has(key)) continue
+    included.add(key)
+    scopes.push(statsFor(st.data_dir, st.label))
+  }
+}
 
 const totals = {
   episodes: scopes.reduce((n, s) => n + s.episodes.total, 0),
