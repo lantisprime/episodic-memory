@@ -340,6 +340,8 @@ Health check + repair for stores and installation: index parse/drift, tags + cat
 node ~/.episodic-memory/scripts/em-doctor.mjs            # report (exit 1 on errors)
 node ~/.episodic-memory/scripts/em-doctor.mjs --fix      # rebuild indexes, clear litter
 node ~/.episodic-memory/scripts/em-doctor.mjs --strict   # CI mode: warns also fail
+node ~/.episodic-memory/scripts/em-doctor.mjs --all-projects        # + every registered project store
+node ~/.episodic-memory/scripts/em-doctor.mjs --all-projects --fix  # repair each store in place
 ```
 
 ### Sync Install (per-project update from the dist cache)
@@ -401,6 +403,8 @@ node ~/.episodic-memory/scripts/em-move.mjs --filter-tag leaked --to local --dry
 # Read-only analytics: totals, categories, projects, age buckets, tags,
 # access/feedback aggregates, prunable estimate, index-file health.
 node ~/.episodic-memory/scripts/em-stats.mjs --scope all
+# One block per consumer-registry project store, on top of the --scope blocks:
+node ~/.episodic-memory/scripts/em-stats.mjs --all-projects
 ```
 
 ### Semantic search (optional embeddings sidecar)
@@ -448,6 +452,23 @@ A failing/unavailable reranker falls back to vector order with a warning;
 # surfacing in search while staying reachable via --history.
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local            # preview
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local --apply    # fold
+
+# Archive long supersedes-chains (reversible move; terminal untouched), and
+# the registry-wide form: every registered project store in one pass. A real
+# multi-store run requires --confirm; unsafe store layouts are skipped.
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded --dry-run
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded --all-projects --dry-run
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded --all-projects --confirm
+```
+
+### Promote (EXPERIMENTAL — cross-project recurring lessons)
+```bash
+# Detect lessons recurring independently across >=2 registered project stores
+# and write ONE global lesson episode per recurrence with a ## Sources list.
+# Dry-run by default; source stores are never written; re-runs are idempotent.
+# Experimental tier: promote-or-remove decision 2026-10-08.
+node ~/.episodic-memory/scripts/em-promote.mjs            # preview candidates
+node ~/.episodic-memory/scripts/em-promote.mjs --apply    # write global lessons
 ```
 
 ### Graph traversal (`em graph`)
