@@ -148,3 +148,12 @@ HOLD, 3xP2 + 1xP3):
 | R1-2 | No concurrency bound on /api/run child fan-out (80 parallel calls -> 75 simultaneous children x 32MB maxBuffer) | P2 | FIXED — in-process semaphore: 4 running children max, 32 queued max, 429 beyond; 50-way burst regression asserts only 200/429 and post-burst responsiveness. |
 | R1-3 | em-manage dry-run consent TOCTOU: store mutated between preview and `y` applies unpreviewed state | P2 | FIXED — apply re-runs the dry-run; on any JSON difference it prints the refreshed preview and re-asks (loop until stable or declined). Regression drives a live wizard, injects a second chain mid-prompt, asserts re-confirmation fires and declined apply leaves bytes untouched. |
 | R1-4 | Query-string token accepted on every route, not just the bootstrap page | P3 | FIXED — `?token=` authorizes GET / only; /api/* requires the X-EM-Token header. Regression: query token on /api/meta and /api/run -> 401, page load -> 200. |
+
+codex round 2 (verify-the-folds + new-finding hunt): **VERDICT ACCEPT, blockers
+none.** Independent probes: error relay both polarities (invalid-category store
+-> wrapper error; corrupt-index doctor -> wrapper ok, status issues); token
+scope (page 200, /api/* query token 401, wrong-header + correct-query 401);
+100-way mixed burst -> 36 executed / 64x429, max 4 concurrent children,
+responsive after; re-preview loop stable on unchanged store (no false "store
+changed"), real apply archived the expected files; diff scan confirmed zero new
+enforcement surface. Suites 24/24 + 9/9 re-run by codex.
