@@ -149,6 +149,42 @@ t('loadTagsIndex returns a null-proto map (read path cannot see Object.prototype
   assert.equal(Object.getPrototypeOf(idx), null);
 });
 
+t('em-move local->global survives a "constructor" tag (left a partial move before)', () => {
+  const s = run('em-store.mjs', ['--project', 'fx', '--category', 'decision',
+    '--summary', 'movable episode', '--body', 'constructor token here too',
+    '--tags', 'constructor', '--scope', 'local'], cwd, env);
+  assert.equal(s.json?.status, 'ok', s.stdout);
+  const r = run('em-move.mjs', ['--id', s.json.id, '--to', 'global', '--confirm', '--no-audit'], cwd, env);
+  assert.equal(r.code, 0, `stderr: ${r.stderr}\nstdout: ${r.stdout}`);
+  assert.equal(r.json?.status, 'ok', r.stdout);
+  const globalTags = JSON.parse(fs.readFileSync(path.join(home, '.episodic-memory', 'tags.json'), 'utf8'));
+  assert.ok(Object.hasOwn(globalTags, 'constructor'), 'destination tags.json must own-key "constructor"');
+  assert.ok(globalTags['constructor'].includes(s.json.id));
+});
+
+t('em-seed-patterns seeds a pattern_id/tag "constructor" (falsely skipped, then crashed before)', () => {
+  // Fresh HOME: the em-move probe above legitimately put a "constructor" tag
+  // into the shared global store, which would make a skip here correct.
+  const seedHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'protokey-seed-home-')));
+  const seedEnv = { HOME: seedHome };
+  const pdir = path.join(cwd, 'patterns-fixture');
+  fs.mkdirSync(pdir, { recursive: true });
+  fs.writeFileSync(path.join(pdir, '_index.json'), JSON.stringify({
+    patterns: [{ pattern_id: 'constructor', file: 'c.md', name: 'colliding pattern' }]
+  }), 'utf8');
+  fs.writeFileSync(path.join(pdir, 'c.md'), [
+    '---', 'name: colliding pattern', 'category: decision',
+    'tags: [constructor]', '---', '', 'pattern body', ''
+  ].join('\n'), 'utf8');
+  const r = run('em-seed-patterns.mjs', ['--dir', pdir], cwd, seedEnv);
+  assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+  assert.equal(r.json?.seeded, 1, `inherited Object.prototype.constructor must not read as already-seeded: ${r.stdout}`);
+  assert.equal(r.json?.skipped, 0, r.stdout);
+  const globalTags = JSON.parse(fs.readFileSync(path.join(seedHome, '.episodic-memory', 'tags.json'), 'utf8'));
+  assert.ok(Object.hasOwn(globalTags, 'constructor'), 'seeded tag must land in global tags.json');
+  fs.rmSync(seedHome, { recursive: true, force: true });
+});
+
 fs.rmSync(cwd, { recursive: true, force: true });
 fs.rmSync(home, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

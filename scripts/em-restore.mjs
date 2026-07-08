@@ -30,6 +30,7 @@ import path from 'path'
 import os from 'os'
 import { execFileSync } from 'child_process'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
+import { nullProtoIndex } from './lib/relevance.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -444,7 +445,8 @@ function mergeIndexes(targetDir, restoredEntries, conflictMode) {
   // single-output-boundary lesson (`20260503-134615-...-8457`) to file
   // ownership: tags.json is rebuilt EXCLUSIVELY from the merged index map,
   // never read from disk. em-rebuild-index uses the same discipline.
-  const tagsIndex = {}
+  // Null-proto: a tag named "constructor" must not resolve to Object.prototype (issue #469)
+  const tagsIndex = Object.create(null)
   for (const id of sortedIds) {
     const e = merged.get(id)
     for (const tag of (e.tags || [])) {
@@ -1144,8 +1146,9 @@ function run(opts) {
       // RFC-009 R10d: merge the restored ids into category-index.json under their canonical
       // category key (temp+rename), mirroring the store/revise incremental maintenance.
       const catFile = path.join(targetDir, 'category-index.json')
-      let catIndex = {}
-      try { catIndex = JSON.parse(fs.readFileSync(catFile, 'utf8')) } catch {}
+      // Null-proto: unknown categories index under their literal key (issue #469)
+      let catIndex = Object.create(null)
+      try { catIndex = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8'))) } catch {}
       for (const fm of fms) {
         const key = canonicalCategory(fm.category)
         if (!catIndex[key]) catIndex[key] = []
@@ -1180,7 +1183,8 @@ function redactPlanItem(w) {
 }
 
 function countBy(iter, key) {
-  const m = {}
+  // Null-proto: tally keys can be episode-derived strings (issue #469)
+  const m = Object.create(null)
   for (const x of (iter instanceof Map ? iter.values() : iter)) {
     const k = key(x)
     m[k] = (m[k] || 0) + 1

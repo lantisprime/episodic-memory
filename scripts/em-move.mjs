@@ -43,7 +43,7 @@ import crypto from 'crypto'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
+import { normalizeTags, episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -131,8 +131,10 @@ function removeFromInverted(dataDir, fileName, id, warnings, pretty) {
 function addToInverted(dataDir, fileName, id, keys, pretty) {
   if (keys.length === 0) return
   const p = path.join(dataDir, fileName)
-  let idx = {}
-  try { idx = JSON.parse(fs.readFileSync(p, 'utf8')) } catch {}
+  // Null-proto: a tag/category key named "constructor" must not resolve to
+  // Object.prototype (issue #469)
+  let idx = Object.create(null)
+  try { idx = nullProtoIndex(JSON.parse(fs.readFileSync(p, 'utf8'))) } catch {}
   for (const key of keys) {
     if (!idx[key]) idx[key] = []
     if (!idx[key].includes(id)) idx[key].push(id)
