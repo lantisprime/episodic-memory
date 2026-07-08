@@ -191,7 +191,7 @@ const warnings = []
 let usedFallback = false
 
 function violationIdsFromTags(patternId) {
-  const key = `violated:${patternId}`.toLowerCase()
+  const key = `violated:${patternId}`.toLowerCase() // T6 burn-in shim — legacy tag leg; sunset after dual-read window (issue #457)
   const ids = new Set()
   let anyTagsFile = false
   let foundKey = false
@@ -207,7 +207,7 @@ function violationIdsFromTags(patternId) {
 }
 
 function violationIdsLinearScan(patternId) {
-  const key = `violated:${patternId}`.toLowerCase()
+  const key = `violated:${patternId}`.toLowerCase() // T6 burn-in shim — legacy tag leg; sunset after dual-read window (issue #457)
   const ids = new Set()
   for (const e of dedupedEntries) {
     // Tolerate-and-skip a non-array `tags` (a hand-written row with
@@ -242,6 +242,18 @@ function parseDateMs(s) {
   return Number.isNaN(ms) ? null : ms
 }
 
+// T6 dual-read burn-in — the typed `violated_pattern` index field is the
+// load-bearing surface; the tag fast-path/linear-scan legs stay until the
+// sunset window closes (issue #457), then this becomes the only leg.
+function violationIdsFromTypedField(patternId) {
+  const key = String(patternId).toLowerCase()
+  const ids = new Set()
+  for (const e of dedupedEntries) {
+    if (typeof e.violated_pattern === 'string' && e.violated_pattern.toLowerCase() === key) ids.add(e.id)
+  }
+  return ids
+}
+
 function countViolationsForPattern(patternId) {
   const { ids: tagIds, anyTagsFile, foundKey } = violationIdsFromTags(patternId)
   let candidateIds = tagIds
@@ -257,6 +269,10 @@ function countViolationsForPattern(patternId) {
       warnings.push('tags.json missing or stale. Falling back to linear scan. Run em-rebuild-index.mjs to regenerate.')
     }
   }
+  // T6 dual-read: UNION the typed-field matches with the tag-derived candidate
+  // set, deduped by episode id (a Set), so pre-migration tag-only violations
+  // and post-migration typed-only violations both count (issue #457).
+  for (const id of violationIdsFromTypedField(patternId)) candidateIds.add(id)
   let count = 0
   let lastViolated = null
   for (const id of candidateIds) {

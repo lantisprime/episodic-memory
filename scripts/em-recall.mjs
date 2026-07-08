@@ -161,11 +161,14 @@ function runViolationPreflight(activeEntries, taskType, patterns) {
 
   const warnings = []
   for (const patternId of filterIds) {
-    const violationTag = `violated:${patternId}`
+    // T6 dual-read burn-in — typed `violated_pattern` field ∪ legacy
+    // `violated:<id>` tag, per-entry OR so each episode counts once; sunset the
+    // tag leg after the burn-in window (issue #457).
+    const violationTag = `violated:${patternId}` // T6 burn-in shim (legacy tag construction)
     const matching = activeEntries.filter(e =>
       e.category === 'violation' &&
-      Array.isArray(e.tags) &&
-      e.tags.includes(violationTag) &&
+      (e.violated_pattern === patternId ||
+        (Array.isArray(e.tags) && e.tags.includes(violationTag))) &&
       typeof e.date === 'string' &&
       e.date >= cutoffStr
     )
