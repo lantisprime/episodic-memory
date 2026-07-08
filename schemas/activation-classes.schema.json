@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/activation-classes.schema.json",
+  "title": "Activity-class vocabulary for lesson activation triggers (RFC-009 R1/R3)",
+  "description": "Meta-schema for activation-classes.json — the closed activity-class set that `activity:<class>` triggers name. P1b ships names + descriptions with empty `phrases` arrays; P2/R3 populates phrases when the matching code that consumes them lands (plan §17-A, F5c).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "classes"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Editorial semver of the vocabulary document."
+    },
+    "classes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/activityClass"
+      }
+    }
+  },
+  "$defs": {
+    "className": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "activityClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "phrases"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/className"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "phrases": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Prompt-matching phrase set. EMPTY in P1b by design; consumed by the R3 activation adapter in P2."
+        },
+        "deprecated_for": {
+          "$ref": "#/$defs/className"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "version": "1.0.0",
+  "classes": [
+    {
+      "name": "plan",
+      "description": "planning / plan-approval work mode",
+      "phrases": []
+    },
+    {
+      "name": "design",
+      "description": "architecture and design discussion, trade-off weighing",
+      "phrases": []
+    },
+    {
+      "name": "review",
+      "description": "code, plan, or PR review activity",
+      "phrases": []
+    },
+    {
+      "name": "troubleshoot",
+      "description": "debugging, failure diagnosis, root-cause work",
+      "phrases": []
+    },
+    {
+      "name": "implement",
+      "description": "writing or modifying code against a plan or spec",
+      "phrases": []
+    },
+    {
+      "name": "push",
+      "description": "commit, merge, release, or deploy activity",
+      "phrases": []
+    },
+    {
+      "name": "rule",
+      "description": "rule, enforcement, or behavioral-pattern work",
+      "phrases": []
+    }
+  ]
+}
