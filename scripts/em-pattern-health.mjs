@@ -210,7 +210,12 @@ function violationIdsLinearScan(patternId) {
   const key = `violated:${patternId}`.toLowerCase()
   const ids = new Set()
   for (const e of dedupedEntries) {
-    if (!e.tags) continue
+    // Tolerate-and-skip a non-array `tags` (a hand-written row with
+    // `"tags": "..."`, the #447 tolerated-writer class): a raw `.map` here
+    // crashes the linear-scan fallback with a stack trace instead of the JSON
+    // contract — and the fallback is the COMMON path in hermetic projects that
+    // have no tags.json (issue #455). Mirrors em-prune's stringItems guard.
+    if (!Array.isArray(e.tags)) continue
     if (e.tags.map(t => String(t).toLowerCase().trim()).includes(key)) ids.add(e.id)
   }
   return ids

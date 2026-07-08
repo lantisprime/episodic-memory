@@ -133,6 +133,34 @@ t('testNonHermeticUnchanged', () => {
   assert(r.violations === 3, `legacy scope-all tst-001 violations ${r.violations}, want 3 (1 local + 2 global)`)
 })
 
+// Issue #455: a hand-written index row with a STRING `tags` field (the #447
+// tolerated-writer class) must not crash violationIdsLinearScan — the fallback
+// is the common hermetic path (no tags.json). Regression: pre-fix this threw
+// `e.tags.map is not a function` (stack trace, exit 1) instead of JSON.
+t('testStringTagsDoesNotCrashLinearScan', () => {
+  const badRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'em-455-'))
+  const badProj = path.join(badRoot, 'proj')
+  const badHome = path.join(badRoot, 'home')
+  fs.mkdirSync(badHome, { recursive: true })
+  fs.mkdirSync(badProj, { recursive: true })
+  spawnSync('git', ['init', '-q'], { cwd: badProj })
+  writeJson(path.join(badProj, 'patterns', '_index.json'), { patterns: [{ pattern_id: 'tst-001' }] })
+  // NO tags.json → linear-scan fallback. One well-formed row + one string-tags row.
+  writeLines(path.join(badProj, '.episodic-memory', 'index.jsonl'), [
+    vio('20260701-000001-ok', 'tst-001', RECENT),
+    { id: '20260701-000002-bad', date: RECENT, time: '00:00', project: 'fx', category: 'violation', status: 'active', supersedes: null, tags: 'violated:tst-001', summary: 'string-tags row', access_count: 0, last_accessed: null },
+  ])
+  const r = spawnSync(process.execPath, [SCRIPT, '--hermetic'], { cwd: badProj, env: { ...process.env, HOME: badHome, USERPROFILE: badHome }, encoding: 'utf8' })
+  assert(!/is not a function|TypeError/.test(r.stderr || ''), `crashed on string tags: ${r.stderr}`)
+  let out
+  try { out = JSON.parse(r.stdout) } catch { throw new Error(`non-JSON output: ${r.stdout}\n${r.stderr}`) }
+  assert(Array.isArray(out.patterns), `JSON contract broken: ${r.stdout}`)
+  // The string-tags row is skipped (tolerated), the well-formed one counts.
+  const row001 = out.patterns.find(p => p.pattern_id === 'tst-001')
+  assert(row001 && row001.violations === 1, `well-formed row must still count, string row skipped: ${JSON.stringify(row001)}`)
+  fs.rmSync(badRoot, { recursive: true, force: true })
+})
+
 let pass = 0
 for (const [name, fn] of tests) {
   try { fn(); console.log(`ok ${name}`); pass++ } catch (e) { console.log(`FAIL ${name}: ${e.message}`) }
