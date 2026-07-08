@@ -27,7 +27,7 @@ import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
 import { spawnSync } from 'child_process'
-import { tokenizeQuery } from './relevance.mjs'
+import { tokenizeQuery, TOKENS_DROPPED_KEY } from './relevance.mjs'
 
 export const HASH_DIM = 256
 export const HASH_MODEL = `hash-v1-${HASH_DIM}`
@@ -95,6 +95,10 @@ export function buildIdf(tokensIndexes) {
   const allIds = new Set()
   for (const idx of present) {
     for (const [tok, ids] of Object.entries(idx)) {
+      // S2 diet marker: its value is a list of dropped TOKEN strings, not ids.
+      // Dropped tokens simply take the default weight 1 in hashEmbed — they
+      // are common by definition, so their true idf was ~1 anyway.
+      if (tok === TOKENS_DROPPED_KEY) continue
       if (!Array.isArray(ids)) continue
       df.set(tok, (df.get(tok) || 0) + ids.length)
       for (const id of ids) allIds.add(id)

@@ -263,7 +263,15 @@ if (query) {
   // Episodes the token index has never seen (hand-written rows, stores
   // predating tokens.json) bypass pruning and take the full-scoring path —
   // index gaps degrade to a slower search, never to hidden episodes.
-  const pool = candidateInfo
+  //
+  // Dropped-token semantics (S2 diet): a query token recorded under
+  // "_dropped" is common-by-df, not absent — its posting list was removed on
+  // purpose. tokenCandidates already excludes dropped tokens from the AND
+  // intersection (they are non-pruning), and returns all === null when NO
+  // token can prune, in which case the query full-scans. Either way the
+  // final scoring below is the same scoreTextMatch a scan would run, so
+  // results stay byte-identical to the pre-diet index.
+  const pool = candidateInfo && candidateInfo.all !== null
     ? results.filter(e => candidateInfo.all.has(e.id) || !candidateInfo.covered.has(e.id))
     : results
   const matched = pool.filter(e => {
@@ -284,13 +292,35 @@ if (query) {
     // With the token index, body membership is known without file reads and
     // the pool narrows to episodes containing at least one token; on the
     // fallback path, partials come from summary/tags only (no O(n) body reads).
-    const partialPool = (candidateInfo
+    //
+    // Dropped tokens (S2 diet) have no posting lists, so (a) an episode whose
+    // only hit is a dropped token is missing from `any` — when any query
+    // token is dropped the partial pool must widen to every candidate row,
+    // and (b) perToken cannot answer body membership for them — inBody falls
+    // back to reading the episode body (cached per episode), reproducing the
+    // pre-diet index answer exactly.
+    const hasDropped = candidateInfo && candidateInfo.dropped.size > 0
+    const partialPool = (candidateInfo && !hasDropped
       ? results.filter(e => candidateInfo.any.has(e.id) || !candidateInfo.covered.has(e.id))
       : results)
       .filter(e => !matchedIds.has(e.id))
     for (const e of partialPool) {
+      let bodyLower // lazy, read at most once per episode
+      const readBodyLower = () => {
+        if (bodyLower === undefined) {
+          try {
+            bodyLower = fs.readFileSync(path.join(e._dataDir, 'episodes', `${e.id}.md`), 'utf8').toLowerCase()
+          } catch { bodyLower = null }
+        }
+        return bodyLower
+      }
       const inBody = candidateInfo
-        ? (tok => candidateInfo.perToken.get(tok)?.has(e.id) ?? false)
+        ? (tok => {
+            if (candidateInfo.perToken.get(tok)?.has(e.id)) return true
+            if (!candidateInfo.dropped.has(tok)) return false
+            const b = readBodyLower()
+            return b ? b.includes(tok) : false
+          })
         : (() => false)
       const { matched: isPartial, textMatch } = scorePartialMatch(e, qtokens, inBody)
       if (isPartial) {

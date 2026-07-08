@@ -40,7 +40,7 @@ import os from 'os'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { loadIndex } from './lib/relevance.mjs'
+import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -80,6 +80,11 @@ function report(id, scopeName, level, message, extra) {
 // Age threshold for treating a .tmp sidecar as litter rather than an
 // in-flight atomic write.
 const TMP_LITTER_MS = 60 * 60 * 1000
+
+// Warn when tokens.json grows beyond this multiple of index.jsonl (S2 diet;
+// the live store that motivated it measured 38x). Healthy dieted stores sit
+// well under this.
+const TOKENS_BLOAT_RATIO = 20
 
 // ---------------------------------------------------------------------------
 // Environment checks
@@ -187,7 +192,9 @@ function checkStore(dataDir, scopeName) {
       continue
     }
     const danglers = []
-    for (const ids of Object.values(idx)) {
+    for (const [key, ids] of Object.entries(idx)) {
+      // tokens.json df-diet marker: value is dropped TOKEN strings, not ids.
+      if (fileName === 'tokens.json' && key === TOKENS_DROPPED_KEY) continue
       if (!Array.isArray(ids)) continue
       for (const id of ids) if (!indexedIds.has(id)) danglers.push(id)
     }
@@ -197,6 +204,26 @@ function checkStore(dataDir, scopeName) {
       report(checkId, scopeName, 'ok', `${fileName} consistent`)
     }
   }
+
+  // --- tokens-bloat ---------------------------------------------------------
+  // tokens.json is derived from the same episodes index.jsonl describes; a
+  // byte ratio above TOKENS_BLOAT_RATIO means the vocabulary is dominated by
+  // non-discriminating posting lists (common tokens). A rebuild applies the
+  // df diet (em-rebuild-index drops >40%-df posting lists) and shrinks it.
+  try {
+    const idxBytes = fs.statSync(indexFile).size
+    const tokBytes = fs.statSync(path.join(dataDir, 'tokens.json')).size
+    if (idxBytes > 0) {
+      const ratio = tokBytes / idxBytes
+      if (ratio > TOKENS_BLOAT_RATIO) {
+        report('tokens-bloat', scopeName, 'warn',
+          `tokens.json is ${Math.round(ratio)}x the size of index.jsonl (threshold ${TOKENS_BLOAT_RATIO}x) — rebuild to apply the df diet`,
+          { fix: 'em-rebuild-index' })
+      } else {
+        report('tokens-bloat', scopeName, 'ok', `tokens.json/index.jsonl ratio ${Math.round(ratio * 10) / 10}x`)
+      }
+    }
+  } catch { /* either file absent — covered by the presence checks above */ }
 
   // --- supersedes-links ----------------------------------------------------
   const dangling = entries.filter(e => e.supersedes && !indexedIds.has(e.supersedes)).map(e => e.id)

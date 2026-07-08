@@ -256,6 +256,22 @@ export function episodeTokens({ summary, tags, body }) {
   return toks
 }
 
+// ---------------------------------------------------------------------------
+// tokens.json diet (S2). A token that appears in more than DF_DROP_RATIO of
+// the corpus does not discriminate — its posting list is nearly "every id",
+// which is where the observed 38x tokens.json-vs-index.jsonl bloat came from
+// (1811-episode store: 49.9MB vs 1.3MB). em-rebuild-index drops those posting
+// lists and records the dropped tokens (sorted, compact) under
+// TOKENS_DROPPED_KEY so readers can tell "dropped because common" apart from
+// "genuinely absent from the corpus": a dropped query token must be
+// NON-PRUNING (fall back to full scoring), while an absent one legitimately
+// yields zero candidates. The marker key contains an underscore, which the
+// tokenizer ([^a-z0-9]+ splitter) can never produce, so it cannot collide
+// with a real token.
+// ---------------------------------------------------------------------------
+export const DF_DROP_RATIO = 0.4
+export const TOKENS_DROPPED_KEY = '_dropped'
+
 export function loadTokensIndex(dataDir) {
   try {
     return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'tokens.json'), 'utf8')))
@@ -266,13 +282,19 @@ export function loadTokensIndex(dataDir) {
 
 // Incremental writer, structurally mirroring em-store's updateTagsIndex.
 // Shared here (not in em-store) because em-store executes top-level on import.
+// Tokens listed under TOKENS_DROPPED_KEY are skipped: re-adding a dropped
+// token here would create a PARTIAL posting list (only post-rebuild episodes)
+// that readers would trust for pruning and silently hide the older episodes.
+// Dropped stays dropped until the next em-rebuild-index recomputes df.
 export function updateTokensIndex(dataDir, episodeId, tokens) {
   const tokensFile = path.join(dataDir, 'tokens.json')
   let index = Object.create(null)
   try {
     index = nullProtoIndex(JSON.parse(fs.readFileSync(tokensFile, 'utf8')))
   } catch {}
+  const dropped = new Set(Array.isArray(index[TOKENS_DROPPED_KEY]) ? index[TOKENS_DROPPED_KEY] : [])
   for (const tok of tokens) {
+    if (dropped.has(tok)) continue
     if (!index[tok]) index[tok] = []
     if (!index[tok].includes(episodeId)) index[tok].push(episodeId)
   }
@@ -284,18 +306,40 @@ export function updateTokensIndex(dataDir, episodeId, tokens) {
 // tokenCandidates(indexes, queryTokens) — resolve query tokens against one or
 // more stores' token indexes (already-parsed objects). Returns:
 //   perToken  Map<queryToken, Set<id>> — ids whose text contains that token
-//   all       Set<id> — ids containing EVERY query token (the AND candidates)
+//   all       Set<id> — ids containing EVERY PRUNING query token (the AND
+//             candidates), or null when NO query token is pruning (see
+//             `dropped` below): null means "the index cannot constrain this
+//             query at all" and callers must fall back to a full scan.
 //   any       Set<id> — ids containing AT LEAST ONE token (the partial pool)
 //   covered   Set<id> — every id the index knows about AT ALL. An episode
 //             absent from `covered` (hand-written row, store predating
 //             tokens.json) must NOT be pruned by the index — callers fall
 //             back to full scoring for it, so index gaps degrade to the slow
 //             path instead of silently hiding episodes.
+//   dropped   Set<queryToken> — query tokens that hit a df-dropped vocabulary
+//             entry (TOKENS_DROPPED_KEY) in ANY index. Their posting lists
+//             are gone-by-design, so they are NON-PRUNING: they neither
+//             constrain `all` nor populate `perToken`/`any`; callers must
+//             resolve them against episode text (full scoring / body read)
+//             instead of treating "no candidates" as "no matches".
+//             Dropped-token detection uses the same key.includes(qtok)
+//             containment as posting lookups, so a query token that would
+//             have matched a dropped vocabulary key substring-wise is also
+//             treated as non-pruning.
 export function tokenCandidates(indexes, queryTokens) {
   const perToken = new Map(queryTokens.map(q => [q, new Set()]))
   const covered = new Set()
+  const dropped = new Set()
   for (const idx of indexes) {
+    const droppedKeys = Array.isArray(idx[TOKENS_DROPPED_KEY]) ? idx[TOKENS_DROPPED_KEY] : []
+    for (const dkey of droppedKeys) {
+      if (typeof dkey !== 'string') continue
+      for (const qtok of queryTokens) {
+        if (dkey.includes(qtok)) dropped.add(qtok)
+      }
+    }
     for (const key of Object.keys(idx)) {
+      if (key === TOKENS_DROPPED_KEY) continue // marker, not a posting list
       const ids = idx[key]
       if (!Array.isArray(ids)) continue
       for (const id of ids) covered.add(id)
@@ -309,12 +353,16 @@ export function tokenCandidates(indexes, queryTokens) {
   }
   let all = null
   const any = new Set()
-  for (const ids of perToken.values()) {
+  for (const [qtok, ids] of perToken.entries()) {
     for (const id of ids) any.add(id)
+    if (dropped.has(qtok)) continue // non-pruning: must not constrain the AND set
     if (all === null) all = new Set(ids)
     else for (const id of all) { if (!ids.has(id)) all.delete(id) }
   }
-  return { perToken, all: all || new Set(), any, covered }
+  // all === null here means every query token was dropped — the index knows
+  // nothing useful; keep null so callers full-scan instead of zero-candidate.
+  if (all === null && dropped.size === 0) all = new Set()
+  return { perToken, all, any, covered, dropped }
 }
 
 // ---------------------------------------------------------------------------
