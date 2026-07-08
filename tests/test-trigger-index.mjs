@@ -217,6 +217,9 @@ t('testBandRetractedStops', () => {
 t('testCacheHitUnchanged', () => {
   const { cwd, home } = mkStore();
   storeLesson(cwd, home, ['--trigger', 'x phrase']);
+  // the R9a collision read already lazy-built the index at store time (S7);
+  // clear it so this test controls the first build itself
+  fs.rmSync(tiPath(cwd), { force: true });
   const r1 = build(cwd, home);
   assert.equal(r1.json.built[0].cache_hit, false);
   const mtime1 = fs.statSync(tiPath(cwd)).mtimeMs;
@@ -228,10 +231,19 @@ t('testCacheHitUnchanged', () => {
 t('testCacheInvalidatedByStore', () => {
   const { cwd, home } = mkStore();
   storeLesson(cwd, home, ['--trigger', 'x phrase']);
+  fs.rmSync(tiPath(cwd), { force: true });
   build(cwd, home);
-  const id2 = storeLesson(cwd, home, ['--trigger', 'y phrase']);
+  // plant the second lesson WITHOUT the writers (no R9a lazy rebuild), so the
+  // explicit build below is what observes the fingerprint invalidation
+  const id2 = '20260708-000000-planted-second-0001';
+  fs.writeFileSync(path.join(storeDir(cwd), 'episodes', `${id2}.md`), [
+    '---', `id: ${id2}`, 'date: 2026-07-08', 'time: "00:00"', 'project: t', 'category: lesson',
+    'status: active', 'tags: []', 'summary: second', 'triggers: [y phrase]', 'priority: 5',
+    '---', '', '# x', '', 'b', '',
+  ].join('\n'));
+  assert.equal(run(EM_REBUILD, ['--scope', 'local'], { cwd, home }).code, 0);
   const r = build(cwd, home);
-  assert.equal(r.json.built[0].cache_hit, false, 'mid-session store invalidates the cache');
+  assert.equal(r.json.built[0].cache_hit, false, 'mid-session store invalidates the cache (sha/mtime/size moved)');
   assert.equal(entryFor(cwd, id2).length, 1, 'the new lesson is in the rebuilt index');
 });
 
@@ -430,6 +442,9 @@ t('testTriggerBuildExcludesUnknownClass', () => {
 t('testBuildDegradesOnUnloadableVocab', () => {
   const { cwd, home } = mkStore();
   storeLesson(cwd, home, ['--trigger', 'activity:plan', '--trigger', 'still here phrase']);
+  // clear the R9a-built cache (built with a LOADABLE vocab at store time) so
+  // the degraded build below actually rebuilds
+  fs.rmSync(tiPath(cwd), { force: true });
   const r = run(EM_TRIGGER, ['--scope', 'local'], { cwd, home, env: { EM_ACTIVATION_CLASSES_PATH: '/nonexistent/x.json' } });
   assert.equal(r.code, 0, 'F4: unreadable vocab at BUILD degrades, never throws');
   const ti = readTi(cwd);
