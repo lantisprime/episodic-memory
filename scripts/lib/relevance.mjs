@@ -93,6 +93,30 @@ export function loadIndex(dataDir, source) {
 }
 
 // ---------------------------------------------------------------------------
+// loadArchivedIndex(dataDir, source) — read archived-index.jsonl rows (the
+// metadata em-prune and em-consolidate --fold-superseded append when they
+// move an episode file to archived/). Same tolerant shape as loadIndex, plus
+// _archived: true so callers resolve bodies from archived/ instead of
+// episodes/. Used by the em-search --history walk so folded/pruned chain
+// members stay resolvable. Missing/corrupt file degrades to [].
+// ---------------------------------------------------------------------------
+export function loadArchivedIndex(dataDir, source) {
+  const indexFile = path.join(dataDir, 'archived-index.jsonl')
+  if (!fs.existsSync(indexFile)) return []
+  try {
+    return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+      try {
+        const entry = JSON.parse(line)
+        entry._source = source
+        entry._dataDir = dataDir
+        entry._archived = true
+        return entry
+      } catch { return null }
+    }).filter(Boolean)
+  } catch { return [] }
+}
+
+// ---------------------------------------------------------------------------
 // computeScore(entry, textMatchScore) — relevance = text match × linear time
 // decay × usage boost.
 //

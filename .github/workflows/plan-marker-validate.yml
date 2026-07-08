@@ -243,6 +243,9 @@ jobs:
       - name: Run em-feedback --scan-text suite (S3)
         run: node tests/test-feedback-scan.mjs
 
+      - name: Run em-consolidate fold-superseded suite (S4)
+        run: node tests/test-fold-superseded.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

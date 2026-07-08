@@ -21,7 +21,7 @@ import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import {
-  normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex,
+  normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex, loadArchivedIndex,
   computeScore, writeBackAccessTracking, scoreTextMatch,
   tokenizeQuery, loadTokensIndex, tokenCandidates, scorePartialMatch
 } from './lib/relevance.mjs'
@@ -103,7 +103,23 @@ if (historyId) {
   let currentId = historyId
 
   // Walk backwards: find what this episode supersedes
+  //
+  // The walk sees index rows PLUS archived metadata: em-prune and
+  // em-consolidate --fold-superseded move an episode's file to archived/ and
+  // its row to archived-index.jsonl, so a chain with archived members would
+  // otherwise silently truncate (runtime-probed: archiving one intermediate
+  // cut a 4-link chain to 2 from the terminal and 1 from the root). Live
+  // rows win on id collision; archived rows are marked `archived: true` in
+  // the output and their bodies resolve from archived/.
   const allEntries = [...results]
+  for (const [dir, label] of [[LOCAL_DIR, 'local'], [GLOBAL_DIR, 'global']]) {
+    if (scope !== 'all' && scope !== label) continue
+    for (const row of loadArchivedIndex(dir, label)) {
+      if (seen.has(row.id)) continue
+      seen.add(row.id)
+      allEntries.push(row)
+    }
+  }
   const byId = new Map(allEntries.map(e => [e.id, e]))
 
   // Find the root of the chain
@@ -144,19 +160,20 @@ if (historyId) {
     }
   }
 
-  // Include full body if requested
+  // Include full body if requested (archived members read from archived/)
   const output = chain.map(e => {
+    const { _dataDir, _archived, ...rest } = e
+    const row = _archived ? { ...rest, archived: true } : rest
     if (full) {
-      const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
+      const filePath = path.join(_dataDir, _archived ? 'archived' : 'episodes', `${e.id}.md`)
       if (fs.existsSync(filePath)) {
         const content = fs.readFileSync(filePath, 'utf8')
         const parts = content.split('---')
         const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
-        return { ...e, body, _source: e._source, _dataDir: undefined }
+        return { ...row, body }
       }
     }
-    const { _dataDir, ...rest } = e
-    return rest
+    return row
   })
 
   // No access tracking for history queries (investigative, not usage signals)

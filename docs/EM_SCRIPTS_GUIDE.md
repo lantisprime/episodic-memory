@@ -234,7 +234,10 @@ Flags that matter (from the script's own `Usage:` header):
   History queries and `--include-superseded` already skip tracking.
 - `--full` includes episode bodies. `--history <id>` returns the whole revision
   chain. The walk follows `supersedes`, `superseded_by`, and `consolidates` edges
-  (cycle-safe); a single-`supersedes` chain is unchanged.
+  (cycle-safe); a single-`supersedes` chain is unchanged. Chain members that
+  were archived (`em-prune`, `em-consolidate --fold-superseded`) still appear:
+  the walk also reads `archived-index.jsonl`, flags them `"archived": true`,
+  and `--full` resolves their bodies from `archived/`.
 - `--category <cat>` is index-backed via `category-index.json` (same degrade-to-linear-scan
   fallback as `--tag`). A deprecated category name canonicalizes to its successor; an unknown
   category still filters (tolerant read).
@@ -384,6 +387,8 @@ semantic-consolidation capability). Dry-run by DEFAULT — `--apply` writes.
 node ~/.episodic-memory/scripts/em-consolidate.mjs [--scope local|global] \
   [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] \
   [--include-pinned] [--apply] [--confirm]
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
+  [--min-chain <n>] [--dry-run] [--scope local|global]
 ```
 
 Clustering is body-token Jaccard within (project, category) groups; the
@@ -393,6 +398,18 @@ episodes (~0.0). On `--apply`, each cluster gets one digest episode carrying
 pinning; members flip to `status: superseded` + `superseded_by: <digest>` in
 file and index, so they stop surfacing but stay reachable via `--history`.
 More than 5 clusters requires `--confirm`.
+
+`--fold-superseded` targets long revision chains instead of duplicates: for
+each LINEAR supersedes-chain with at least `--min-chain` members (default
+10), the non-terminal members are archived via the same mechanism `em-prune`
+uses (file to `archived/`, index row to `archived-index.jsonl`, `tags.json`
+cleaned — a reversible move, never a delete). The terminal episode is
+untouched, ids stay immutable, bodies are never edited, and
+`em-search --history` still shows the full chain (the walk reads archived
+metadata; archived members carry `"archived": true`). Pinned or
+still-active members are kept and reported; forked/non-linear chains are
+skipped whole. `--dry-run` lists exactly what a real run would move. Output:
+`{"status":"ok","mode":"fold-superseded","dry_run":false,"chains":[{"terminal":"...","chain_length":12,"folded":[...],"kept":[...]}],"folded_total":11}`.
 
 ### em-stats
 
