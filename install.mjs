@@ -32,7 +32,7 @@ import {
   perProjectArtifactPairs, globalArtifactPairs, buildArtifactEntries,
   mergeArtifactEntries, buildManifest, resolveSourceVersion, writeJsonAtomic,
   readJsonSafe, projectManifestPath, globalManifestPath, registryPath,
-  readRegistry, upsertRegistryEntries, normalizeProjectPath,
+  readRegistry, upsertRegistryEntries, updateConsumers, normalizeProjectPath,
   PROJECT_MANIFEST_BASENAME,
 } from './scripts/lib/install-version.mjs'
 
@@ -136,6 +136,29 @@ if (bootstrapLastPrompt) {
   if (!tool) process.exit(0)
 }
 
+// ---------------------------------------------------------------------------
+// --update-consumers [--dry-run]: standalone operation, doesn't require --tool.
+// Layer 1 update sweep: iterate the consumer registry (~/.episodic-memory/
+// installs.json); for each registered project, refresh manifest-listed
+// artifacts whose on-disk sha256 still matches the manifest checksum
+// (unmodified) to the current repo version; skip user-MODIFIED artifacts with
+// a warning (Principle 10 — never silently overwritten); prune vanished
+// project paths. Projects not in the registry are NEVER touched (Principle 3),
+// and enforcement artifacts are never refreshed into a project whose registry
+// entry says enforcement_installed:false. Prints one JSON report:
+// { projects_scanned, refreshed, skipped_modified, pruned, ... }.
+// --dry-run computes the identical report and writes nothing.
+// ---------------------------------------------------------------------------
+if (argv.includes('--update-consumers')) {
+  const report = updateConsumers({
+    repoDir: REPO_DIR,
+    globalDir: GLOBAL_DIR,
+    dryRun: argv.includes('--dry-run'),
+  })
+  console.log(JSON.stringify(report, null, 2))
+  process.exit(0)
+}
+
 // --wizard: interactive guided setup (prereq checks → tool/project selection →
 // optional hooks/backup → verify with em-doctor; also drives migrate-from-backup
 // and health-check flows). Delegates to scripts/install-wizard.mjs, which
@@ -149,6 +172,7 @@ if (argv.includes('--wizard')) {
 if (!tool) {
   console.log(`Usage: node install.mjs --wizard   (interactive guided setup — recommended)
        node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+       node install.mjs --update-consumers [--dry-run]   (refresh registered consuming projects)
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
@@ -209,6 +233,18 @@ Second-opinion harness:
                           not on PATH → skipped). Required for harness I-27a
                           gate (registry-stale-at-gate) + composer I-27b
                           (preamble-tamper-at-composer).
+
+Update distribution (Layer 1):
+  --update-consumers      Standalone (no --tool): sweep the consumer registry
+                          (~/.episodic-memory/installs.json) and refresh every
+                          registered project's UNMODIFIED installed artifacts
+                          (on-disk sha256 == manifest checksum) to this repo's
+                          current version. User-modified artifacts are skipped
+                          with a warning, vanished projects pruned from the
+                          registry. Prints one JSON report. Pair with
+                          --dry-run to see exactly what a real run would do
+                          without writing anything.
+  --dry-run               With --update-consumers: report only, change nothing.
 
 Pre-flight prompt-binding bootstrap:
   --bootstrap-last-prompt  Write a bootstrap sentinel at

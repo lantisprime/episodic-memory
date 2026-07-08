@@ -345,3 +345,146 @@ export function upsertRegistryEntries(regPath, updates) {
   writeRegistry(regPath, [...map.values()])
   return map.size
 }
+
+// ---------------------------------------------------------------------------
+// Checksum-guarded refresh core — shared by the update sweep (sources = repo)
+// and the session-start auto-update (sources = dist cache).
+//
+// Per manifest artifact:
+//   on-disk sha == manifest sha  → OURS, unmodified → refresh to the current
+//                                  source bytes (skip when already current)
+//   on-disk sha != manifest sha  → user-MODIFIED → skip + report (P10)
+//   dest missing                 → user deleted → skip + report, never re-add
+//   kind enforcement, consent off→ skip silently (spec guard)
+//   source unavailable           → skip + report (repo/cache lacks the file)
+// ---------------------------------------------------------------------------
+export function refreshProjectArtifacts({ projectDir, manifest, resolveSource, allowEnforcement, dryRun }) {
+  const refreshed = []          // [{path, sha256}]
+  const skippedModified = []    // [{path, reason: 'modified'|'missing'}]
+  const missingSource = []      // [path]
+  const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : []
+  for (const a of artifacts) {
+    if (!a || typeof a.path !== 'string' || typeof a.sha256 !== 'string') continue
+    if (a.kind === 'enforcement' && !allowEnforcement) continue
+    const dest = path.join(projectDir, a.path)
+    if (!fs.existsSync(dest)) {
+      skippedModified.push({ path: a.path, reason: 'missing' })
+      continue
+    }
+    let diskSha
+    try { diskSha = sha256File(dest) } catch { continue }
+    if (diskSha !== a.sha256) {
+      skippedModified.push({ path: a.path, reason: 'modified' })
+      continue
+    }
+    const src = resolveSource(a)
+    if (!src || !fs.existsSync(src)) {
+      missingSource.push(a.path)
+      continue
+    }
+    let srcSha
+    try { srcSha = sha256File(src) } catch { missingSource.push(a.path); continue }
+    if (srcSha === diskSha) continue // already current
+    if (!dryRun) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true })
+      fs.copyFileSync(src, dest)
+      // Executables: hooks + hook scripts are installed 0755 by install.mjs.
+      if (a.path.startsWith('.claude/hooks/') && /\.(sh|mjs)$/.test(a.path)) {
+        try { fs.chmodSync(dest, 0o755) } catch {}
+      }
+    }
+    refreshed.push({ path: a.path, sha256: srcSha })
+  }
+  return { refreshed, skippedModified, missingSource }
+}
+
+// In-place manifest update after a refresh: bump refreshed artifact hashes +
+// the manifest version/timestamp. Modified entries keep their old sha so the
+// sweep keeps flagging them.
+export function applyRefreshToManifest(manifest, refreshed, newVersion) {
+  const byPath = new Map((manifest.artifacts || []).map((a) => [a.path, a]))
+  for (const r of refreshed) {
+    const a = byPath.get(r.path)
+    if (a) a.sha256 = r.sha256
+  }
+  manifest.source_version = newVersion
+  manifest.installed_at = new Date().toISOString()
+  return manifest
+}
+
+// ---------------------------------------------------------------------------
+// UPDATE SWEEP (install.mjs --update-consumers [--dry-run]).
+// Returns one JSON-able report; a dry run computes the identical report and
+// writes NOTHING (tests assert byte-parity of the fixture tree).
+// ---------------------------------------------------------------------------
+export function updateConsumers({ repoDir, globalDir, dryRun = false }) {
+  const regPath = registryPath(globalDir)
+  const { entries } = readRegistry(regPath)
+  const globalArtifacts = buildArtifactEntries(globalArtifactPairs(repoDir, globalDir))
+  const version = resolveSourceVersion(repoDir, globalArtifacts)
+  const report = {
+    projects_scanned: 0,
+    refreshed: [],
+    skipped_modified: [],
+    pruned: [],
+    skipped_no_manifest: [],
+    dry_run: !!dryRun,
+  }
+
+  const byProject = new Map()
+  for (const e of entries) {
+    if (!byProject.has(e.project_path)) byProject.set(e.project_path, [])
+    byProject.get(e.project_path).push(e)
+  }
+
+  const keptEntries = []
+  const now = new Date().toISOString()
+  for (const [projectPath, projEntries] of [...byProject.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    report.projects_scanned++
+    if (!fs.existsSync(projectPath)) {
+      report.pruned.push(projectPath)
+      continue // entries dropped (pruned from registry on a real run)
+    }
+    const mPath = projectManifestPath(projectPath)
+    const manifest = readJsonSafe(mPath)
+    if (!manifest || !Array.isArray(manifest.artifacts)) {
+      report.skipped_no_manifest.push(projectPath)
+      keptEntries.push(...projEntries)
+      continue
+    }
+    const allowEnforcement = projEntries.some((e) => e.enforcement_installed === true)
+    const res = refreshProjectArtifacts({
+      projectDir: projectPath,
+      manifest,
+      resolveSource: (a) => (typeof a.source === 'string' ? path.join(repoDir, a.source) : null),
+      allowEnforcement,
+      dryRun,
+    })
+    for (const s of res.skippedModified) {
+      report.skipped_modified.push({ project: projectPath, path: s.path, reason: s.reason })
+      console.error(`! ${path.join(projectPath, s.path)} — ${s.reason === 'missing' ? 'removed locally' : 'locally modified'}; left untouched (re-run install.mjs against this project to review)`)
+    }
+    const versionChanges = manifest.source_version !== version
+    if (res.refreshed.length > 0 || versionChanges) {
+      report.refreshed.push({
+        project: projectPath,
+        version,
+        files: res.refreshed.map((r) => r.path).sort(),
+      })
+      if (!dryRun) {
+        applyRefreshToManifest(manifest, res.refreshed, version)
+        writeJsonAtomic(mPath, manifest)
+        for (const e of projEntries) {
+          keptEntries.push({ ...e, version, last_install_ts: now })
+        }
+        continue
+      }
+    }
+    keptEntries.push(...projEntries)
+  }
+
+  if (!dryRun && (report.pruned.length > 0 || report.refreshed.length > 0)) {
+    writeRegistry(regPath, keptEntries)
+  }
+  return report
+}

@@ -191,6 +191,144 @@ console.log('=== T4: consumer registry — entry, dedupe, second tool, malformed
 }
 
 // ===========================================================================
+console.log('=== T5: --update-consumers — refresh/skip/prune/unregistered/enforcement-guard, dry-run parity ===')
+// ===========================================================================
+const S5 = mkSandbox('sweep-a')
+const S5b = { project: fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'l1-proj-sweep-b-'))) }
+execFileSync('git', ['init', '-q'], { cwd: S5b.project })
+cleanups.push(S5b.project)
+const SKILL_REL = '.claude/skills/episodic-memory/SKILL.md'
+const PLANGATE_REL = '.claude/hooks/plan-gate.sh'
+const GATE_REL = '.claude/hooks/checkpoint-gate.sh'
+let dryReport = null
+{
+  // projA: enforcement install; projB: core-only install into the SAME home.
+  truthy('T5: projA install exits 0',
+    runInstall({ home: S5.home, project: S5.project, extra: ['--install-enforcement'] }).status === 0, 'install failed')
+  truthy('T5: projB install exits 0',
+    runInstall({ home: S5.home, project: S5b.project }).status === 0, 'install failed')
+
+  // projA drift: stale-UNMODIFIED skill (old bytes, manifest sha matches old
+  // bytes, old version label) + user-MODIFIED plan-gate.sh (bytes changed,
+  // manifest sha untouched).
+  const mA = readJson(projManifestPath(S5.project))
+  const oldSkill = Buffer.from('OLD SKILL CONTENT (simulated older install)\n')
+  fs.writeFileSync(path.join(S5.project, SKILL_REL), oldSkill)
+  mA.artifacts.find((a) => a.path === SKILL_REL).sha256 = sha256(oldSkill)
+  mA.source_version = '1'.repeat(40)
+  fs.writeFileSync(projManifestPath(S5.project), JSON.stringify(mA, null, 2))
+  fs.appendFileSync(path.join(S5.project, PLANGATE_REL), '\n# operator edit — do not clobber\n')
+
+  // projB enforcement-guard probe: registry says enforcement_installed:false,
+  // but hand-inject an enforcement-kind manifest row pointing at a REAL repo
+  // source with coherent old bytes+sha. The sweep must refuse to refresh it.
+  const mB = readJson(projManifestPath(S5b.project))
+  const oldGate = Buffer.from('OLD GATE CONTENT (must never be refreshed without enforcement consent)\n')
+  fs.mkdirSync(path.dirname(path.join(S5b.project, GATE_REL)), { recursive: true })
+  fs.writeFileSync(path.join(S5b.project, GATE_REL), oldGate)
+  mB.artifacts.push({
+    path: GATE_REL,
+    source: 'plugins/claude-code/hooks/checkpoint-gate.sh',
+    kind: 'enforcement',
+    sha256: sha256(oldGate),
+  })
+  mB.source_version = '1'.repeat(40)
+  fs.writeFileSync(projManifestPath(S5b.project), JSON.stringify(mB, null, 2))
+
+  // projC: valid manifest + stale-unmodified artifact but NOT in the registry
+  // → must never be touched (Principle 3).
+  const projC = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'l1-proj-unreg-')))
+  cleanups.push(projC)
+  fs.mkdirSync(path.join(projC, path.dirname(SKILL_REL)), { recursive: true })
+  fs.writeFileSync(path.join(projC, SKILL_REL), oldSkill)
+  fs.writeFileSync(projManifestPath(projC), JSON.stringify({
+    schema_version: 1, scope: 'project', tool: 'claude-code',
+    source_version: '1'.repeat(40), source_repo: REPO, installed_at: new Date().toISOString(),
+    artifacts: [{ path: SKILL_REL, source: 'instructions/SKILL.md', kind: 'core', sha256: sha256(oldSkill) }],
+  }, null, 2))
+
+  // Vanished project: registry entry whose path no longer exists.
+  const ghost = path.join(os.tmpdir(), `l1-ghost-${Date.now()}`)
+  const reg = readJson(registryFilePath(S5.home))
+  reg.entries.push({ project_path: ghost, tool: 'claude-code', version: '1'.repeat(40), enforcement_installed: false, last_install_ts: new Date().toISOString() })
+  fs.writeFileSync(registryFilePath(S5.home), JSON.stringify(reg, null, 2))
+
+  // --- dry run: identical report, ZERO disk changes -----------------------
+  const preA = snapshotTree(S5.project)
+  const preB = snapshotTree(S5b.project)
+  const preC = snapshotTree(projC)
+  const preHome = snapshotTree(S5.home)
+  const dr = runSweep(S5.home, true)
+  truthy('T5: dry-run exits 0', dr.status === 0, `status=${dr.status} stderr=${(dr.stderr || '').slice(-300)}`)
+  dryReport = JSON.parse(dr.stdout)
+  truthy('T5: dry-run flags dry_run=true', dryReport.dry_run === true, dr.stdout.slice(0, 200))
+  truthy('T5: dry-run changed NOTHING on disk (projA/projB/projC/home checksum sweep)',
+    snapshotsEqual(preA, snapshotTree(S5.project)) && snapshotsEqual(preB, snapshotTree(S5b.project)) &&
+    snapshotsEqual(preC, snapshotTree(projC)) && snapshotsEqual(preHome, snapshotTree(S5.home)),
+    'tree changed under --dry-run')
+
+  // --- real run: report parity + both polarities on disk ------------------
+  const rr = runSweep(S5.home, false)
+  truthy('T5: real run exits 0', rr.status === 0, `status=${rr.status}`)
+  const report = JSON.parse(rr.stdout)
+  const strip = (rep) => { const c = JSON.parse(JSON.stringify(rep)); delete c.dry_run; return c }
+  truthy('T5: real report matches dry-run report exactly (minus dry_run flag)',
+    JSON.stringify(strip(report)) === JSON.stringify(strip(dryReport)),
+    `dry=${JSON.stringify(strip(dryReport))} real=${JSON.stringify(strip(report))}`)
+
+  truthy('T5: report scanned 3 registered projects', report.projects_scanned === 3, `got ${report.projects_scanned}`)
+  const refA = report.refreshed.find((x) => x.project === S5.project)
+  truthy('T5: projA refreshed with the stale-unmodified skill', !!refA && refA.files.includes(SKILL_REL) && refA.version === GIT_HEAD,
+    JSON.stringify(report.refreshed))
+  truthy('T5: modified plan-gate.sh skipped with reason', report.skipped_modified.some(
+    (x) => x.project === S5.project && x.path === PLANGATE_REL && x.reason === 'modified'),
+    JSON.stringify(report.skipped_modified))
+  truthy('T5: skip warning printed (diff-style stderr line)', (rr.stderr || '').includes(PLANGATE_REL), (rr.stderr || '').slice(0, 300))
+  truthy('T5: vanished project pruned in report', report.pruned.length === 1 && report.pruned[0].includes('l1-ghost-'),
+    JSON.stringify(report.pruned))
+
+  truthy('T5: projA skill refreshed to current repo bytes',
+    fs.readFileSync(path.join(S5.project, SKILL_REL)).equals(fs.readFileSync(path.join(REPO, 'instructions', 'SKILL.md'))),
+    'bytes differ')
+  truthy('T5: projA modified plan-gate.sh untouched',
+    fs.readFileSync(path.join(S5.project, PLANGATE_REL), 'utf8').endsWith('# operator edit — do not clobber\n'),
+    'operator edit lost')
+  const mA2 = readJson(projManifestPath(S5.project))
+  truthy('T5: projA manifest bumped to git HEAD with refreshed sha',
+    mA2.source_version === GIT_HEAD &&
+    mA2.artifacts.find((a) => a.path === SKILL_REL).sha256 === sha256(path.join(REPO, 'instructions', 'SKILL.md')),
+    JSON.stringify({ v: mA2.source_version }))
+  const reg2 = readJson(registryFilePath(S5.home))
+  truthy('T5: ghost entry pruned from the registry', !reg2.entries.some((e) => e.project_path === ghost),
+    JSON.stringify(reg2.entries.map((e) => e.project_path)))
+  truthy('T5: projA registry entry version updated', reg2.entries.find((e) => e.project_path === S5.project).version === GIT_HEAD,
+    JSON.stringify(reg2.entries))
+
+  truthy('T5: UNREGISTERED projC untouched (checksum sweep)', snapshotsEqual(preC, snapshotTree(projC)),
+    'projC changed')
+  truthy('T5: projC absent from the report', !JSON.stringify(report).includes(projC), 'projC mentioned')
+
+  truthy('T5: enforcement artifact NOT refreshed for enforcement_installed:false projB',
+    fs.readFileSync(path.join(S5b.project, GATE_REL)).equals(oldGate), 'guarded gate file was refreshed')
+  const refB = report.refreshed.find((x) => x.project === S5b.project)
+  truthy('T5: projB report (if any) does not list the guarded gate', !refB || !refB.files.includes(GATE_REL),
+    JSON.stringify(refB || null))
+}
+
+// ===========================================================================
+console.log('=== T7: --update-consumers with an empty registry is a no-op ===')
+// ===========================================================================
+{
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'l1-home-noreg-'))
+  cleanups.push(emptyHome)
+  const r = runSweep(emptyHome, false)
+  truthy('T7: exits 0', r.status === 0, `status=${r.status}`)
+  const rep = JSON.parse(r.stdout)
+  truthy('T7: zero-report shape', rep.projects_scanned === 0 && rep.refreshed.length === 0 &&
+    rep.skipped_modified.length === 0 && rep.pruned.length === 0, r.stdout)
+}
+
+// ===========================================================================
 console.log('=== T8: --uninstall-enforcement never touches global Layer-1 state; flag heals on next install ===')
 // Regression (found by test-uninstall-enforcement t_no_global_touch during
 // Layer 1 implementation, 2026-07-08): the first cut wrote the global
