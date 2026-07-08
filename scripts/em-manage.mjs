@@ -208,6 +208,13 @@ async function actionRoutines() {
 }
 
 async function actionConsole() {
+  // Non-interactive stdin has no Ctrl-C path back to the menu: em-console
+  // never reads stdin, so spawnSync would block until the idle timeout.
+  if (process.stdin.isTTY !== true) {
+    console.log('  console needs an interactive terminal — run it directly:')
+    console.log(`    node ${path.join(SCRIPT_DIR, 'em-console.mjs')}`)
+    return
+  }
   const write = await askYesNo('Enable write commands in the console (--allow-write)?', false)
   console.log('  Launching em-console — open the printed URL; Ctrl+C returns here.\n')
   const args = [path.join(SCRIPT_DIR, 'em-console.mjs'), ...(write ? ['--allow-write'] : [])]

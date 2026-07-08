@@ -161,6 +161,17 @@ test('fold dry-run with declined apply leaves the store untouched', () => {
   } finally { s.cleanup() }
 })
 
+console.log('console launcher:')
+test('option 6 under piped stdin refuses instead of blocking (F3 regression)', () => {
+  const s = makeSandbox()
+  try {
+    const r = runWizard(s, '6\nq\n')
+    assert.notStrictEqual(r.status, null, 'wizard hung on console launch under piped stdin')
+    assert.strictEqual(r.status, 0, `exit ${r.status}; stderr: ${r.stderr}`)
+    assert.ok(/interactive terminal/.test(r.stdout), `no refusal message:\n${r.stdout}`)
+  } finally { s.cleanup() }
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const f of failures) console.log(`  - ${f.name}: ${f.error}`)

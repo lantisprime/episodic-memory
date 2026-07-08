@@ -23,6 +23,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import assert from 'assert'
+import crypto from 'crypto'
 import { spawn, spawnSync } from 'child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
@@ -101,6 +102,21 @@ function seedEpisode(sandbox) {
   const json = JSON.parse(r.stdout.trim())
   assert.strictEqual(json.status, 'ok', `seed store failed: ${r.stdout}`)
   return json
+}
+
+// Content hash of every FILE under root (relative path + bytes), so any
+// mutation by a supposedly-read-only command flips the digest.
+function treeHash(root) {
+  const h = crypto.createHash('sha256')
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = path.join(dir, ent.name)
+      if (ent.isDirectory()) walk(p)
+      else if (ent.isFile()) { h.update(path.relative(root, p)); h.update(fs.readFileSync(p)) }
+    }
+  }
+  walk(root)
+  return h.digest('hex')
 }
 
 function localStoreSnapshot(sandbox) {
@@ -202,6 +218,40 @@ await (async () => {
       const r = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'search', flags: { query: '--scope' } } })
       assert.strictEqual(r.status, 400)
       assert.ok(/may not start/.test(r.json.message), r.json.message)
+    })
+    await test('prototype-chain flag names are rejected (F1 regression)', async () => {
+      // Plain-object lookup as allowlist membership resolves prototype keys
+      // truthy (same class as the #469 null-proto index fix). JSON.parse is
+      // used so "__proto__" lands as an OWN property of the flags object.
+      for (const name of ['__proto__', 'hasOwnProperty', 'valueOf', 'constructor', 'toString']) {
+        const flags = JSON.parse(`{"query":"x","${name}":"x"}`)
+        const r = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'search', flags } })
+        assert.strictEqual(r.status, 400, `prototype key "${name}" rode the allowlist (got ${r.status})`)
+      }
+    })
+    await test('newline in a short token field is rejected; multiline body accepted (F2 regression)', async () => {
+      const bad = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'search', flags: { query: 'x', tag: 'a\nb' } } })
+      assert.strictEqual(bad.status, 400, `newline in tag accepted (got ${bad.status})`)
+      const good = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'search', flags: { query: 'line one\nline two' } } })
+      assert.strictEqual(good.status, 200, 'multiline prose query rejected')
+    })
+    await test('every write:false command leaves the store byte-identical (F5 conformance)', async () => {
+      const READ_CASES = [
+        ['stats', {}], ['doctor', {}], ['search', { query: 'fixture' }], ['list', {}],
+        ['recall', {}], ['graph', { orphans: true }], ['semantic', { query: 'fixture' }],
+        ['capture-list', {}], ['fold-preview', { scope: 'local' }], ['prune-preview', { scope: 'local' }],
+        ['history', { history: seeded.id }],
+      ]
+      const meta = await req(ro.port, '/api/meta', { token: TOKEN })
+      const readCmds = meta.json.commands.filter((c) => !c.write).map((c) => c.name).sort()
+      assert.deepStrictEqual(readCmds, READ_CASES.map(([n]) => n).sort(),
+        'READ_CASES drifted from the registry — add the new read command to this sweep')
+      for (const [cmd, flags] of READ_CASES) {
+        const before = treeHash(s1.root)
+        const r = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd, flags } })
+        assert.strictEqual(r.status, 200, `${cmd} HTTP ${r.status}`)
+        assert.strictEqual(treeHash(s1.root), before, `read command "${cmd}" mutated the sandbox`)
+      }
     })
     await test('write command on read-only server → 403 and no disk mutation', async () => {
       const before = localStoreSnapshot(s1)

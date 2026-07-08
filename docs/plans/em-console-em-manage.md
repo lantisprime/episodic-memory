@@ -126,4 +126,14 @@ em.mjs DESCRIPTIONS entries.
 
 ## 8. Review dispositions
 
-Filled post-review (negative-scenario-reviewer on the implementation diff).
+negative-scenario-reviewer on the implementation diff (runtime probes on
+isolated fixture stores; verdict ACCEPT, no P1):
+
+| # | Finding | Sev | Disposition |
+|---|---|---|---|
+| F1 | Prototype-key flag names ride the allowlist (plain-object lookup as membership; `__proto__`/`valueOf`/`hasOwnProperty` resolve truthy) | P2 | FIXED — `Object.hasOwn` guard in buildArgs; regression test sends 5 prototype keys, expects 400 each. Same invariant class as #469. |
+| F2 | `str` kind accepted raw CR/LF/TAB in short token fields (tag/project/reason) | P3 | FIXED — control-byte reject split by kind: `multiline` (summary/body/query) keeps tab/LF/CR, plain `str` rejects all control bytes. Regression: newline-in-tag 400, multiline query 200. |
+| F3 | em-manage option 6 (console launch) blocks up to the 1800s idle window under piped stdin (no Ctrl-C path) | P2 | FIXED — non-TTY stdin refuses with the direct command printed; regression feeds `6` and asserts refusal + exit 0. |
+| F4 | Idle shutdown checked on a fixed 30s tick regardless of `--idle-timeout` | P3 | FIXED — interval = min(30s, idleTimeoutMs). |
+| F5 | Registry `write:false` classification had no conformance test tying it to actual non-mutation | P3 | FIXED — byte-stability sweep: every read command runs against a seeded sandbox and the full tree sha256 must be identical before/after; the case list is pinned to the registry so a new read command fails the sweep until added. |
+| F6 | CSP `script-src 'unsafe-inline'` means esc() is the only XSS layer (all sinks verified escaped) | P3 | PARTIAL — added `object-src 'none'; base-uri 'none'; form-action 'none'`. Script nonce deferred: single-page inline app, all sinks audited + hostile-payload probed by the reviewer. |

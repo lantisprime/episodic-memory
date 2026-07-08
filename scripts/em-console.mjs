@@ -91,7 +91,7 @@ const token = flag('--token') || crypto.randomBytes(24).toString('base64url')
 // ---------------------------------------------------------------------------
 const T = {
   str: { kind: 'str', max: 400 },
-  text: { kind: 'str', max: 20000 }, // summary/body/query prose
+  text: { kind: 'str', max: 20000, multiline: true }, // summary/body/query prose
   int: { kind: 'int', max: 1000 },
   bool: { kind: 'bool' },
   id: { kind: 'id' }, // episode id
@@ -148,8 +148,11 @@ function buildArgs(entry, flags) {
   if (typeof flags !== 'object' || Array.isArray(flags)) return { error: 'flags must be an object' }
   const args = [...(entry.fixed || [])]
   for (const name of Object.keys(flags)) {
+    // Object.hasOwn, not a plain lookup: prototype keys (__proto__, valueOf,
+    // hasOwnProperty, ...) resolve truthy through the chain and would ride the
+    // allowlist (same invariant class as the #469 null-proto index fix).
+    if (!Object.hasOwn(entry.flags, name)) return { error: `unknown flag "${name}" for this command` }
     const spec = entry.flags[name]
-    if (!spec) return { error: `unknown flag "${name}" for this command` }
     const v = flags[name]
     if (spec.kind === 'bool') {
       if (v !== true) return { error: `flag "${name}" is boolean: pass true or omit it` }
@@ -167,8 +170,12 @@ function buildArgs(entry, flags) {
     } else { // str
       if (s.length === 0 || s.length > spec.max) return { error: `flag "${name}" must be 1-${spec.max} characters` }
       if (s.startsWith('-')) return { error: `flag "${name}" may not start with "-"` }
+      // Prose fields (multiline: summary/body/query) keep tab/LF/CR; short
+      // token fields (tag, project, reason, ...) reject ALL control bytes so
+      // no embedded line break rides into episode metadata or index rows.
       // eslint-disable-next-line no-control-regex
-      if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(s)) return { error: `flag "${name}" contains control characters` }
+      const ctl = spec.multiline ? /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/ : /[\x00-\x1f\x7f]/
+      if (ctl.test(s)) return { error: `flag "${name}" contains control characters` }
     }
     args.push(`--${name}`, s)
   }
@@ -257,7 +264,7 @@ async function handle(req, res) {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:",
+      'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'",
     })
     return res.end(renderPage())
   }
@@ -319,13 +326,14 @@ server.listen(port, host === 'localhost' ? '127.0.0.1' : host, () => {
 })
 
 if (idleTimeoutMs > 0) {
+  // Check at min(30s, timeout) so sub-30s timeouts fire near when the flag says.
   const timer = setInterval(() => {
     if (Date.now() - lastActivity > idleTimeoutMs) {
       process.stderr.write(`em-console: idle for ${idleTimeoutMs / 1000}s — shutting down\n`)
       server.close(() => process.exit(0))
       setTimeout(() => process.exit(0), 2000).unref()
     }
-  }, 30_000)
+  }, Math.min(30_000, idleTimeoutMs))
   timer.unref()
 }
 
