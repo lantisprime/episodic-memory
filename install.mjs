@@ -31,7 +31,8 @@ import {
 import {
   perProjectArtifactPairs, globalArtifactPairs, buildArtifactEntries,
   mergeArtifactEntries, buildManifest, resolveSourceVersion, writeJsonAtomic,
-  readJsonSafe, projectManifestPath, globalManifestPath,
+  readJsonSafe, projectManifestPath, globalManifestPath, registryPath,
+  readRegistry, upsertRegistryEntries, normalizeProjectPath,
   PROJECT_MANIFEST_BASENAME,
 } from './scripts/lib/install-version.mjs'
 
@@ -2892,6 +2893,42 @@ try {
     sourceRepo: REPO_DIR,
     artifacts: projectArtifacts,
   }))
+
+  // 7c. Consumer registry (~/.episodic-memory/installs.json): one entry per
+  // (project_path, tool), deduped, degrade-not-throw on a malformed existing
+  // registry. enforcement_installed flips true when THIS run installs
+  // enforcement for the matching tool; otherwise the previous value is
+  // preserved, cross-checked against disk truth (an uninstall run cannot
+  // update the registry — global scope is off-limits to it — so the flag
+  // heals here on the next regular install: engine gone ⇒ false).
+  if (!uninstallEnforcement) {
+    const projectKey = normalizeProjectPath(projectAbs)
+    const { entries: existingEntries } = readRegistry(registryPath(GLOBAL_DIR))
+    const nowIso = new Date().toISOString()
+    const registryUpdates = tools.map((t) => {
+      const prev = existingEntries.find((e) => {
+        try { return normalizeProjectPath(e.project_path) === projectKey && e.tool === t } catch { return false }
+      })
+      // Enforcement rides the claude-code block for tool=claude-code/all; the
+      // opencode/codex/pi-agent layers install under their exact tool name.
+      const enforcementTool = (tool === 'opencode' || tool === 'codex' || tool === 'pi-agent')
+        ? tool : 'claude-code'
+      let enforcementInstalled = prev ? prev.enforcement_installed === true : false
+      if (t === 'claude-code' && enforcementInstalled &&
+          !fs.existsSync(path.join(projectAbs, '.claude', 'hooks', 'enforce-contract.mjs'))) {
+        enforcementInstalled = false // healed: a prior --uninstall-enforcement removed the engine
+      }
+      if (t === enforcementTool && installEnforcement) enforcementInstalled = true
+      return {
+        project_path: projectKey,
+        tool: t,
+        version: sourceVersion,
+        enforcement_installed: enforcementInstalled,
+        last_install_ts: nowIso,
+      }
+    })
+    upsertRegistryEntries(registryPath(GLOBAL_DIR), registryUpdates)
+  }
 } catch (e) {
   console.log(`WARNING: could not record install version manifests: ${e.message} (install itself is complete; --update-consumers and the drift notice need a successful manifest write)`)
 }

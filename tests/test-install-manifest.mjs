@@ -158,6 +158,67 @@ console.log('=== T3: source version degrades to a content hash without git ===')
   truthy('T3: content hash is deterministic', v === contentVersion(artifacts), 'nondeterministic')
 }
 
+// ===========================================================================
+console.log('=== T4: consumer registry — entry, dedupe, second tool, malformed degrade ===')
+// ===========================================================================
+{
+  const reg = readJson(registryFilePath(S1.home))
+  const ccEntries = reg.entries.filter((e) => e.tool === 'claude-code')
+  truthy('T4: exactly one claude-code entry after two installs (dedupe)', ccEntries.length === 1,
+    `count=${ccEntries.length}`)
+  const e = ccEntries[0]
+  truthy('T4: entry fields', e.project_path === S1.project && e.version === GIT_HEAD &&
+    e.enforcement_installed === true && typeof e.last_install_ts === 'string', JSON.stringify(e))
+
+  const r2 = runInstall({ home: S1.home, project: S1.project, tool: 'cursor' })
+  truthy('T4: cursor install exits 0', r2.status === 0, `status=${r2.status}`)
+  const reg2 = readJson(registryFilePath(S1.home))
+  truthy('T4: cursor adds a second (project, tool) entry', reg2.entries.length === 2 &&
+    reg2.entries.some((x) => x.tool === 'cursor'), JSON.stringify(reg2.entries.map((x) => x.tool)))
+  truthy('T4: claude-code entry keeps enforcement_installed=true across the cursor install',
+    reg2.entries.find((x) => x.tool === 'claude-code').enforcement_installed === true, 'flag lost')
+
+  fs.writeFileSync(registryFilePath(S1.home), '{{{ not json')
+  const r3 = runInstall({ home: S1.home, project: S1.project })
+  truthy('T4: install with malformed registry still exits 0', r3.status === 0, `status=${r3.status}`)
+  truthy('T4: malformed registry noted on stderr', /malformed/.test(r3.stderr || ''), (r3.stderr || '').slice(0, 200))
+  const reg3 = readJson(registryFilePath(S1.home))
+  truthy('T4: registry rebuilt from scratch (this run\'s entry present)',
+    Array.isArray(reg3.entries) && reg3.entries.length === 1 && reg3.entries[0].tool === 'claude-code',
+    JSON.stringify(reg3.entries))
+  truthy('T4: rebuild preserves enforcement_installed=false default only when unknown (prev entry lost with the malformed file)',
+    reg3.entries[0].enforcement_installed === false, JSON.stringify(reg3.entries[0]))
+}
+
+// ===========================================================================
+console.log('=== T8: --uninstall-enforcement never touches global Layer-1 state; flag heals on next install ===')
+// Regression (found by test-uninstall-enforcement t_no_global_touch during
+// Layer 1 implementation, 2026-07-08): the first cut wrote the global
+// manifest + registry + dist cache on EVERY run, so an uninstall run mutated
+// ~/.episodic-memory — violating the locked "uninstall never touches global
+// scope" REQ. Fix: all global-side Layer 1 writes are skipped for
+// --uninstall-enforcement; the registry's enforcement_installed flag heals
+// from disk truth (engine file gone) on the next regular install run.
+// ===========================================================================
+{
+  const S8 = mkSandbox('uninstall')
+  runInstall({ home: S8.home, project: S8.project, extra: ['--install-enforcement'] })
+  const preGlobal = snapshotTree(path.join(S8.home, '.episodic-memory'))
+  const u = runInstall({ home: S8.home, project: S8.project, extra: ['--uninstall-enforcement'] })
+  truthy('T8: uninstall run exits 0', u.status === 0, `status=${u.status}`)
+  truthy('T8: global ~/.episodic-memory byte-identical across the uninstall run',
+    snapshotsEqual(preGlobal, snapshotTree(path.join(S8.home, '.episodic-memory'))), 'global scope changed')
+  const pm = readJson(projManifestPath(S8.project))
+  truthy('T8: project manifest dropped the removed enforcement entries',
+    !pm.artifacts.some((a) => a.path === '.claude/hooks/checkpoint-gate.sh'), 'stale enforcement entry kept')
+  const r2 = runInstall({ home: S8.home, project: S8.project })
+  truthy('T8: next regular install exits 0', r2.status === 0, `status=${r2.status}`)
+  const reg = readJson(registryFilePath(S8.home))
+  truthy('T8: enforcement_installed healed to false from disk truth',
+    reg.entries.find((e) => e.tool === 'claude-code').enforcement_installed === false,
+    JSON.stringify(reg.entries))
+}
+
 for (const d of cleanups) { try { fs.rmSync(d, { recursive: true, force: true }) } catch {} }
 
 console.log(`\n${pass}/${pass + fail} pass`)

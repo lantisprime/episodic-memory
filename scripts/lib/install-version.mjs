@@ -55,12 +55,16 @@ import {
 
 export const PROJECT_MANIFEST_BASENAME = '.episodic-memory-install.json'
 export const GLOBAL_MANIFEST_BASENAME = 'install-manifest.json'
+export const REGISTRY_BASENAME = 'installs.json'
 
 export function projectManifestPath(projectDir) {
   return path.join(projectDir, PROJECT_MANIFEST_BASENAME)
 }
 export function globalManifestPath(globalDir) {
   return path.join(globalDir, GLOBAL_MANIFEST_BASENAME)
+}
+export function registryPath(globalDir) {
+  return path.join(globalDir, REGISTRY_BASENAME)
 }
 
 export function sha256File(p) {
@@ -294,4 +298,50 @@ export function buildManifest({ scope, tool, sourceVersion, sourceRepo, artifact
     installed_at: new Date().toISOString(),
     artifacts,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Consumer registry.
+// ---------------------------------------------------------------------------
+export function normalizeProjectPath(p) {
+  try { return fs.realpathSync(p) } catch { return path.resolve(p) }
+}
+
+// Degrade-not-throw: malformed/alien registry shape → rebuild from scratch
+// with a stderr note; never block the install.
+export function readRegistry(regPath) {
+  let raw
+  try { raw = fs.readFileSync(regPath, 'utf8') } catch { return { entries: [], rebuilt: false } }
+  let parsed
+  try { parsed = JSON.parse(raw) } catch { parsed = null }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.entries)) {
+    console.error(`episodic-memory: consumer registry at ${regPath} is malformed; rebuilding from scratch (old content ignored).`)
+    return { entries: [], rebuilt: true }
+  }
+  const entries = parsed.entries.filter((e) =>
+    e && typeof e === 'object' && !Array.isArray(e) &&
+    typeof e.project_path === 'string' && typeof e.tool === 'string')
+  if (entries.length !== parsed.entries.length) {
+    console.error(`episodic-memory: dropped ${parsed.entries.length - entries.length} malformed entr(y/ies) from ${regPath}.`)
+  }
+  return { entries, rebuilt: false }
+}
+
+export function writeRegistry(regPath, entries) {
+  const sorted = [...entries].sort((a, b) =>
+    a.project_path === b.project_path
+      ? a.tool.localeCompare(b.tool)
+      : a.project_path.localeCompare(b.project_path))
+  writeJsonAtomic(regPath, { schema_version: 1, entries: sorted })
+}
+
+// Upsert entries deduped by (project_path, tool). `updates` entries fully
+// replace matching existing entries.
+export function upsertRegistryEntries(regPath, updates) {
+  const { entries } = readRegistry(regPath)
+  const key = (e) => `${e.project_path} ${e.tool}`
+  const map = new Map(entries.map((e) => [key(e), e]))
+  for (const u of updates) map.set(key(u), u)
+  writeRegistry(regPath, [...map.values()])
+  return map.size
 }
