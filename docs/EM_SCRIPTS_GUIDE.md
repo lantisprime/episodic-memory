@@ -50,6 +50,8 @@ Match your intent to the command. The third column is the wrong habit it replace
 | "What is connected to this episode?" (lineage, clusters, hubs) | `em-graph --from <id>` / `--orphans` / `--hubs` | Manual joins across multiple searches |
 | Significant session ended, nothing stored yet | `em-capture extract` then `review` (or `em-capture list` when recall reports `pending_drafts`) | Reconstructing the session from memory, or silently storing without review |
 | Session start printed an install version-drift notice | `em-sync-install` (this project, from the dist cache) or `node <repo>/install.mjs --update-consumers` (all registered projects) | Hand-copying hook/skill files, or re-running full installs in every consuming project |
+| One view of EVERY registered project's store (analytics/health/fold) | `em-stats --all-projects`, `em-doctor --all-projects`, `em-consolidate --fold-superseded --all-projects --dry-run` | Cd-ing into each project and running per-store commands |
+| The same lesson keeps recurring across projects | `em-promote` (dry-run), then `em-promote --apply` (EXPERIMENTAL) | Re-learning it per project, or hand-copying lesson episodes to global |
 
 Default write scope is GLOBAL. Pass `--scope local` to keep an episode inside the
 current repo's `.episodic-memory/`. Searches read local and global together by
@@ -417,6 +419,8 @@ node ~/.episodic-memory/scripts/em-consolidate.mjs [--scope local|global] \
   [--include-pinned] [--apply] [--confirm]
 node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
   [--min-chain <n>] [--dry-run] [--scope local|global]
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
+  --all-projects [--min-chain <n>] [--dry-run] [--confirm]
 ```
 
 Clustering is body-token Jaccard within (project, category) groups; the
@@ -439,13 +443,28 @@ still-active members are kept and reported; forked/non-linear chains are
 skipped whole. `--dry-run` lists exactly what a real run would move. Output:
 `{"status":"ok","mode":"fold-superseded","dry_run":false,"chains":[{"terminal":"...","chain_length":12,"folded":[...],"kept":[...]}],"folded_total":11}`.
 
+`--all-projects` (fold mode only, mutually exclusive with `--scope`) folds
+every consumer-registry store in one pass; output gains a per-store `stores`
+array. A REAL multi-store run requires `--confirm` and fails closed before
+any move. R6 protection is unioned across cwd-local + global + ALL registered
+stores, so a referencer in any store protects a chain member in any other.
+Registrations whose substrate-resolved store is not `<project>/.episodic-memory`
+(git-nested paths, linked worktrees, symlinked store dirs) are reported
+`skipped_store: "non-root-store"` and never written.
+
 ### em-stats
 
 Read-only store analytics — never writes, never bumps access counters.
 
 ```
-node ~/.episodic-memory/scripts/em-stats.mjs [--scope local|global|all] [--top <n>]
+node ~/.episodic-memory/scripts/em-stats.mjs [--scope local|global|all] [--top <n>] [--all-projects]
 ```
+
+`--all-projects` appends one scope block per consumer-registry store (label
+`project:<basename>`; the `dir` field is the identity — labels can collide,
+dirs cannot). Stores already covered by the `--scope` blocks are skipped by
+realpath, so a symlink-aliased local store never double-counts. Totals include
+the appended blocks.
 
 Per scope: episode totals (active/superseded/pinned), archived count,
 category + project + tag distributions, age buckets, access/feedback
@@ -683,8 +702,18 @@ Health check + repair for the stores and the installation. One command answers
 - WHEN NOT TO USE: as a data query (use search/list/recall).
 
 ```
-node ~/.episodic-memory/scripts/em-doctor.mjs [--scope local|global|all] [--fix] [--strict] [--verbose]
+node ~/.episodic-memory/scripts/em-doctor.mjs [--scope local|global|all] [--fix] [--strict] [--verbose] [--all-projects]
 ```
+
+`--all-projects` additionally runs the store-class checks once per
+consumer-registry store (scope label `project:<basename>`; every store-class
+row carries `data_dir` — the identity, since labels can collide). `--fix`
+routes rebuilds by `data_dir` (spawning `em-rebuild-index --scope local` with
+`cwd` at that project's root) and reports `skipped: non-root-store` for
+registrations whose substrate-resolved store is not
+`<project>/.episodic-memory` (git-nested paths, linked worktrees) — a rebuild
+there would repair a different store than the one diagnosed. Non-store checks
+(gate friction, installs-drift, backup, drafts) still run exactly once.
 
 Checks: Node version, index.jsonl parse, index↔episode-file drift (both
 directions), tags.json + category-index.json consistency, tokens.json bloat
@@ -796,6 +825,38 @@ referencing episode is superseded or expires. Retained entries are counted in th
 `protected` output field; `--dry-run` lists them in `protected_episodes` as
 `{id, score, reason, via}` where `via` names the protecting episode. `remaining`
 includes protected entries; the `--check` exit code ignores them.
+
+### em-promote
+
+EXPERIMENTAL (promote-or-remove decision 2026-10-08) — cross-project
+recurring-lesson promotion, the first learning-strategy capability
+(CAPABILITIES.md experimental tier). Dry-run by DEFAULT — `--apply` writes.
+
+- WHEN TO USE: the same lesson keeps getting re-learned in different
+  registered projects; you want it surfaced globally with provenance.
+- WHEN NOT TO USE: near-duplicates inside ONE store (`em-consolidate`),
+  moving a single episode between scopes (`em-move`), or fewer than 2
+  registered projects (nothing to correlate).
+
+```
+node ~/.episodic-memory/scripts/em-promote.mjs [--min-sim <0..1>] [--apply]
+```
+
+Scans every consumer-registry store for active `lesson` episodes and clusters
+them by body-token Jaccard (default 0.35, same vocabulary as
+`em-consolidate`). A candidate must span >=2 distinct stores with >=2 distinct
+member identities: replicas (same id AND summary — clone/fork stores)
+collapse to one member and never count as recurrence, while a coincident id
+with different content stays two members. `--apply` writes ONE global lesson
+episode per candidate via `em-store` (never hand-written files): project
+`cross-project`, tags = member-tag union + `promoted-lesson` +
+`promoted:<sha8>` (the identity hash over sorted `<id>#<sha8(summary)>`
+member keys), body = per-member excerpts + a `## Sources` list. Source
+stores are NEVER written. Re-runs are idempotent by hash; a grown cluster
+promotes under its new hash with a `Supersedes-promotion:` back-reference.
+Malformed existing promoted episodes (bad hash tag, missing `## Sources`)
+are reported in `warnings`, never fatal. Exit 1 only when an `--apply` write
+failed; usage errors exit 2.
 
 ### em-pattern-health
 
