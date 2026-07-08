@@ -353,7 +353,7 @@ export function writeRegistry(regPath, entries) {
 // replace matching existing entries.
 export function upsertRegistryEntries(regPath, updates) {
   const { entries } = readRegistry(regPath)
-  const key = (e) => `${e.project_path} ${e.tool}`
+  const key = (e) => `${e.project_path}${String.fromCharCode(0)}${e.tool}`
   const map = new Map(entries.map((e) => [key(e), e]))
   for (const u of updates) map.set(key(u), u)
   writeRegistry(regPath, [...map.values()])
