@@ -132,7 +132,7 @@ test('status runs doctor + stats and renders summaries', () => {
     assert.strictEqual(r.status, 0, `exit ${r.status}; stderr: ${r.stderr}`)
     assert.ok(/doctor: /.test(r.stdout), `doctor summary missing:\n${r.stdout}`)
     assert.ok(/stats:/.test(r.stdout), 'stats summary missing')
-    assert.ok(/active=/.test(r.stdout), 'scope lines missing')
+    assert.ok(/active=\d/.test(r.stdout), `scope lines missing real counts:\n${r.stdout}`)
   } finally { s.cleanup() }
 })
 

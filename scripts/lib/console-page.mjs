@@ -159,15 +159,16 @@ function buildDashboard() {
 function renderStats(r) {
   if (!r.scopes) return '<p class="note">no scopes in output</p>';
   return r.scopes.map(s => {
-    const cats = (s.categories || []).slice ? s.categories : Object.entries(s.categories || {}).map(([key, count]) => ({ key, count }));
+    const ep = s.episodes || {};
+    const cats = Object.entries(s.by_category || {}).sort((a, b) => b[1] - a[1]).map(([key, count]) => ({ key, count }));
     return '<div class="panel"><h2>' + esc(s.scope || s.label || '') + (s.dir ? ' <span class="note">' + esc(s.dir) + '</span>' : '') + '</h2>' +
       '<div class="cards">' +
-      '<div class="card"><div class="k">active</div><div class="v">' + esc(s.active ?? s.total ?? '–') + '</div></div>' +
-      '<div class="card"><div class="k">superseded</div><div class="v">' + esc(s.superseded ?? '–') + '</div></div>' +
-      '<div class="card"><div class="k">pinned</div><div class="v">' + esc(s.pinned ?? '–') + '</div></div>' +
-      '<div class="card"><div class="k">prunable est.</div><div class="v">' + esc(s.prunable_estimate ?? s.prunable ?? '–') + '</div></div>' +
+      '<div class="card"><div class="k">active</div><div class="v">' + esc(ep.active ?? '–') + '</div></div>' +
+      '<div class="card"><div class="k">superseded</div><div class="v">' + esc(ep.superseded ?? '–') + '</div></div>' +
+      '<div class="card"><div class="k">pinned</div><div class="v">' + esc(ep.pinned ?? '–') + '</div></div>' +
+      '<div class="card"><div class="k">prunable est.</div><div class="v">' + esc(s.prunable_estimate ?? '–') + '</div></div>' +
       '</div>' +
-      (cats && cats.length ? '<p class="chips">' + cats.map(c => '<span>' + esc(c.key || c.category) + ' ' + esc(c.count) + '</span>').join('') + '</p>' : '') +
+      (cats.length ? '<p class="chips">' + cats.map(c => '<span>' + esc(c.key) + ' ' + esc(c.count) + '</span>').join('') + '</p>' : '') +
       '</div>';
   }).join('');
 }

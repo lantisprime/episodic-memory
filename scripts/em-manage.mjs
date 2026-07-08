@@ -121,7 +121,8 @@ async function actionStatus() {
   if (stats.json && stats.json.scopes) {
     console.log('  stats:')
     for (const s of stats.json.scopes) {
-      console.log(`    ${String(s.scope || s.label || '?').padEnd(24)} active=${s.active ?? '?'} superseded=${s.superseded ?? '?'} pinned=${s.pinned ?? '?'}`)
+      const ep = s.episodes || {}
+      console.log(`    ${String(s.scope || s.label || '?').padEnd(24)} active=${ep.active ?? '?'} superseded=${ep.superseded ?? '?'} pinned=${ep.pinned ?? '?'}`)
     }
   } else {
     printResult('stats', stats)
