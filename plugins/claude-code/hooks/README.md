@@ -60,7 +60,7 @@ key (existing markers keep hitting until TTL/`--vacuum` reaps them). Writes
 persist under the canonical key with the raw command preserved in the marker's
 `command_raw` field for audit. Tests: `tests/test-canonical-cache-key.mjs`.
 
-## Pre-hold consult order (E4 read-only manifest)
+## Pre-hold consult order (E4 read-only manifest + E2 LLM auto-classify)
 
 When a novel Bash command would otherwise be HELD for agent classification
 (LABEL=shared_write with an unevaluated-novel reason — the per-session marker
@@ -78,14 +78,27 @@ discipline: the common allow paths never pay the node spawn). Consult order:
    involvement and the command runs; nothing is persisted (the manifest is the
    durable authority). Matching runs on the canonical form, so a redirect or
    extra write-flag variant can never match.
-3. **Existing agent hold** (fail-closed): manifest miss, malformed manifest,
+3. **LLM auto-classify (E2)** `scripts/llm-classify.mjs --three-way`:
+   non-interactive only — it requires `ANTHROPIC_API_KEY` (skipped instantly
+   without one; a PreToolUse hook can never prompt for auth) and honors
+   `classifier-config.json` (`enabled:false` disables the stage; env/project/
+   global precedence via `classifier-config-loader.mjs`). Strict 3-way rubric
+   (`read_only` / `nonsrc_write` / `shared_write`), hard-killed at 10s. A
+   verdict with confidence >= 0.8 is persisted into the SAME per-session
+   verdict cache (`classifier-marker.mjs --write --source llm`, payload gains
+   `"source":"llm"`) and the command proceeds per verdict: read_only /
+   nonsrc_write run; shared_write falls through to the existing arm/block
+   branch.
+4. **Existing agent hold** (fail-closed): manifest miss + LLM
+   miss/failure/timeout/low-confidence/malformed output, malformed manifest,
    helper absent, or garbage output all fall through to
    `_block_needs_classification`.
 
 Installed layouts resolve the manifest from
 `~/.episodic-memory/patterns/readonly-commands.json` (deployed by
 `install.mjs`); repo-source runs use `patterns/` directly. Tests:
-`tests/test-readonly-manifest.mjs`.
+`tests/test-readonly-manifest.mjs` (E4),
+`tests/test-llm-hold-classify.mjs` (E2 — stubbed local API, never live).
 
 ## Installation
 

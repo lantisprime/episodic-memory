@@ -16,9 +16,12 @@
  *   exists or marker is stale/invalid.
  *
  * Mode: --write
- *   Args: above + --label <L> --confidence <N> --reason <S>
+ *   Args: above + --label <L> --confidence <N> --reason <S> [--source llm]
  *   Atomically writes to <project>/.checkpoints/classify/<sha>.json.
  *   Exits 0 on success; exits 2 on input/binding error.
+ *   --source llm (E2): marks the verdict as produced by the non-interactive
+ *   LLM hold consult (classifier-hold-consult.mjs) — payload gains
+ *   "source":"llm". Agent self-classifications omit the flag.
  *
  * Path-verdict subject (PR-B2 §11/§15-C2, #351): --target-path classifies a
  * Write/Edit TARGET path rather than a command. The Edit/Write pre-checkpoint
@@ -711,6 +714,12 @@ function mainWrite(argv) {
   const label = flag(argv, '--label')
   const confidenceStr = flag(argv, '--confidence')
   const reasonRaw = flag(argv, '--reason') || ''
+  const sourceArg = flag(argv, '--source')
+  // Closed vocabulary — an arbitrary source string in the payload would be an
+  // uncontrolled attacker-influenced field in a trust artifact.
+  if (sourceArg !== undefined && sourceArg !== 'llm') {
+    die(2, `invalid --source "${sourceArg}" (allowed: llm)`)
+  }
 
   if (!projectRootArg) die(2, '--project-root required')
   if (!callerCwd) die(2, '--caller-cwd required')
@@ -758,6 +767,8 @@ function mainWrite(argv) {
     ...(commandRaw !== undefined ? { command_raw: commandRaw } : {}),
     ...(keyForm ? { key_form: keyForm } : {}),
     ...(canonicalForm ? { command_canonical: canonicalForm } : {}),
+    // E2: LLM-produced verdicts carry "source":"llm" (agent writes omit it).
+    ...(sourceArg ? { source: sourceArg } : {}),
     _project_root_canonical: projectRoot,
     _cache_key: sha,
     _session_id: sessionId,
@@ -767,7 +778,7 @@ function mainWrite(argv) {
     _normalized_command_version: NORMALIZED_COMMAND_VERSION,
     recorded_at: nowIso,
     _expires_at: new Date(Date.now() + TTL_MS).toISOString(),
-    classified_by: 'agent_self'
+    classified_by: sourceArg === 'llm' ? 'llm' : 'agent_self'
   }
   const written = writeMarker(classifyDir, sha, payload)
 

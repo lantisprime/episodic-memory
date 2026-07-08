@@ -14,9 +14,17 @@
  *      matched on the canonical form from lib/command-canonical.mjs). A match
  *      classifies read_only with NO agent involvement and is NOT persisted —
  *      the manifest itself is the durable authority.
- *   2. (E2) LLM auto-classify — added in the E2 slice.
- *   3. Anything else emits {"decision":"hold"} and the gate falls through to
- *      the existing agent hold (fail-closed).
+ *   2. LLM auto-classify (scripts/llm-classify.mjs --three-way): non-
+ *      interactive, requires ANTHROPIC_API_KEY (skipped fast without one — no
+ *      interactive auth path exists, and the typical subscription-auth Claude
+ *      Code session has no key, so the consult degrades to the hold), honors
+ *      classifier-config.json (enabled:false disables), hard-killed at 10s.
+ *      A verdict with confidence >= 0.8 in {read_only, nonsrc_write,
+ *      shared_write} is persisted into the SAME per-session marker cache via
+ *      classifier-marker.mjs --write --source llm, then returned.
+ *   3. Anything else — manifest miss + LLM miss/failure/timeout/low
+ *      confidence/malformed output — emits {"decision":"hold"} and the gate
+ *      falls through to the existing agent hold (fail-closed).
  *
  * Output (stdout, single JSON line; ALWAYS exit 0 — the gate treats a
  * non-zero exit, empty output, or garbage as hold):
@@ -38,9 +46,15 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { fileURLToPath } from 'url'
+import { spawnSync } from 'child_process'
 import { canonicalizeCommand } from './lib/command-canonical.mjs'
+import { loadConfig } from './classifier-config-loader.mjs'
 
 const SELF_DIR = path.dirname(fileURLToPath(import.meta.url))
+const THREE_WAY_LABELS = new Set(['read_only', 'nonsrc_write', 'shared_write'])
+const LLM_HARD_TIMEOUT_MS = 10000
+const LLM_CONFIDENCE_FLOOR = 0.8
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
 
 function flag(argv, name) {
   const i = argv.indexOf(name)
@@ -138,12 +152,90 @@ function manifestConsult(canon) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 2 — LLM auto-classify (E2)
+// ---------------------------------------------------------------------------
+
+function resolveSibling(name) {
+  const p = path.join(SELF_DIR, name)
+  return fs.existsSync(p) ? p : null
+}
+
+function llmConsult({ projectRoot, callerCwd, command, sessionId }) {
+  // Non-interactive path requires an API key; skip fast without one (typical
+  // subscription-auth Claude Code sessions have none) — the hold is the
+  // fallback. There is no interactive-auth path here by design: a PreToolUse
+  // hook can never prompt.
+  if (!process.env.ANTHROPIC_API_KEY) return { skipped: 'no_api_key' }
+
+  let cfg
+  try { cfg = loadConfig({ projectRoot }) } catch { return { skipped: 'config_error' } }
+  if (!cfg.enabled) return { skipped: 'tier3_disabled' }
+
+  const llm = resolveSibling('llm-classify.mjs')
+  if (!llm) return { skipped: 'llm_classify_absent' }
+
+  // Hard 10s wall-clock kill regardless of the config's internal timeout_ms.
+  const r = spawnSync(process.execPath, [
+    llm,
+    '--project-root', projectRoot,
+    '--caller-cwd', callerCwd,
+    '--command', command,
+    '--three-way'
+  ], {
+    cwd: projectRoot,          // llm-classify verifies process.cwd() binding
+    encoding: 'utf8',
+    timeout: LLM_HARD_TIMEOUT_MS
+  })
+  if (r.error || r.signal) return { failed: `spawn_${r.signal || (r.error && r.error.code) || 'error'}` }
+
+  let parsed
+  try { parsed = JSON.parse((r.stdout || '').trim().split('\n').pop() || 'null') }
+  catch { return { failed: 'malformed_output' } }
+  if (!parsed || typeof parsed !== 'object') return { failed: 'malformed_output' }
+  if (!THREE_WAY_LABELS.has(parsed.label)) return { failed: `label_${parsed.label || 'none'}` }
+
+  const confidence = Number(parsed.confidence)
+  const floor = Math.max(LLM_CONFIDENCE_FLOOR,
+    Number.isFinite(cfg.confidence_threshold) ? cfg.confidence_threshold : 0)
+  if (!Number.isFinite(confidence) || confidence < floor) {
+    return { failed: `low_confidence_${confidence}` }
+  }
+
+  // Persist into the SAME per-session marker cache (source:"llm") so the
+  // retry — and every later canonical-form variant — resolves from cache
+  // without re-consulting. Best-effort: a persist failure never changes the
+  // verdict (the manifest/LLM re-consult is the fallback).
+  let persisted = false
+  if (SESSION_ID_RE.test(sessionId || '')) {
+    const marker = resolveSibling('classifier-marker.mjs')
+    if (marker) {
+      const w = spawnSync(process.execPath, [
+        marker, '--write',
+        '--project-root', projectRoot,
+        '--caller-cwd', callerCwd,
+        '--command', command,
+        '--session-id', sessionId,
+        '--label', parsed.label,
+        '--confidence', String(confidence),
+        '--reason', `llm auto-classify (hold consult): ${String(parsed.reason || '').slice(0, 200)}`,
+        '--source', 'llm'
+      ], { cwd: projectRoot, encoding: 'utf8', timeout: 15000 })
+      persisted = w.status === 0
+    }
+  }
+
+  return { label: parsed.label, confidence, persisted }
+}
+
+// ---------------------------------------------------------------------------
 
 function main() {
   const argv = process.argv.slice(2)
   const projectRootArg = flag(argv, '--project-root')
   const callerCwd = flag(argv, '--caller-cwd')
   const command = flag(argv, '--command')
+  const sessionId = flag(argv, '--session-id') || ''
+  const skipLlm = argv.includes('--skip-llm')
 
   if (!projectRootArg || !callerCwd || command === undefined) {
     hold('usage: --project-root, --caller-cwd, --command required')
@@ -164,6 +256,23 @@ function main() {
       manifest: m.file
     })
     process.exit(0)
+  }
+
+  // Stage 2: LLM auto-classify (E2). --skip-llm for callers/tests that only
+  // want the manifest answer.
+  if (!skipLlm) {
+    const l = llmConsult({ projectRoot, callerCwd: cwdCanon, command, sessionId })
+    if (l.label) {
+      emit({
+        decision: l.label,
+        source: 'llm',
+        confidence: l.confidence,
+        persisted: l.persisted,
+        canonical: canon.canonical
+      })
+      process.exit(0)
+    }
+    hold(`manifest_miss; llm_${l.skipped || l.failed || 'no_decision'}`)
   }
 
   hold('manifest_miss')

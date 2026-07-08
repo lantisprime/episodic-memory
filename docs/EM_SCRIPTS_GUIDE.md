@@ -104,6 +104,12 @@ PR; when a new read-only script ships, add an entry citing this guide. A stale
 manifest fails CLOSED (the hold returns) — never open. Tests:
 `tests/test-readonly-manifest.mjs`.
 
+On a manifest miss the gate additionally tries a non-interactive LLM
+auto-classify (`llm-classify.mjs --three-way`; requires `ANTHROPIC_API_KEY`,
+hard 10s timeout, confidence >= 0.8, verdict cached with `"source":"llm"`)
+before falling back to the agent hold. See
+`plugins/claude-code/hooks/README.md` for the full consult order.
+
 ---
 
 ## Category vocabulary (RFC-009 R10)
