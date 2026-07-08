@@ -59,8 +59,9 @@ import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { loadIndex, normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
+import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories } from './lib/categories.mjs'
+import { loadProtectionRows, computeProtectedIds } from './lib/protection.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -136,6 +137,20 @@ if (foldSuperseded) {
     if (typeof r.id === 'string' && !byId.has(r.id)) byId.set(r.id, r)
   }
 
+  // RFC-009 R6 archival protection — the SAME set em-prune honors, so a folded
+  // chain member that is evidence-linked, a trigger-bearing lesson, a
+  // consolidates-member, a latest run record, or in the chain-closure of any of
+  // those is NEVER archived by fold (review finding: fold bypassed this,
+  // archiving episodes em-prune guarantees are protected). The protection scan
+  // is cross-store (a global lesson's evidence can name a local violation), so
+  // it reads BOTH stores' index rows regardless of the fold's own scope.
+  const today = new Date().toISOString().slice(0, 10)
+  const protectionRows = [
+    ...loadProtectionRows(fs, path, LOCAL_DIR, 'local'),
+    ...loadProtectionRows(fs, path, GLOBAL_DIR, 'global')
+  ]
+  const protectedIds = computeProtectedIds(protectionRows, today)
+
   // Supersession edges only (supersedes back-pointers + explicit
   // superseded_by) — consolidates edges belong to digest clusters, not
   // revision chains, and are deliberately not followed here.
@@ -193,6 +208,7 @@ if (foldSuperseded) {
       const r = byId.get(id)
       if (r.pinned === true) kept.push({ id, reason: 'pinned' })
       else if (r.status !== 'superseded') kept.push({ id, reason: 'not-superseded' })
+      else if (protectedIds.has(id)) kept.push({ id, reason: `r6-protected:${protectedIds.get(id).reason}` })
       else folded.push(id)
     }
     folded.sort()
@@ -235,8 +251,10 @@ if (foldSuperseded) {
     fs.renameSync(tmpIndex, indexFile)
 
     const tagsFile = path.join(DATA_DIR, 'tags.json')
-    let tagsIndex = {}
-    try { tagsIndex = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
+    // Null-proto map (#469/#470): a tag literally named "constructor"/"__proto__"
+    // must not resolve to an inherited Object.prototype member. loadTagsIndex
+    // is the sanctioned reader; raw JSON.parse reintroduces the collision.
+    const tagsIndex = loadTagsIndex(DATA_DIR) || Object.create(null)
     for (const tag of Object.keys(tagsIndex)) {
       if (!Array.isArray(tagsIndex[tag])) continue
       tagsIndex[tag] = tagsIndex[tag].filter(id => !allFoldIds.has(id))

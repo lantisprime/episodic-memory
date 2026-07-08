@@ -87,27 +87,54 @@ console.log('# test-canonical-cache-key (E3 — conservative canonical cache key
 
 // ===== §K: command-canonical.mjs unit behavior =============================
 
-test('§K1 flag-value variants share ONE canonical form (order-independent)', () => {
+// Flag-value generalization is SAFE only for interpreter+script forms (the
+// em-* reader shape): there the SCRIPT determines behavior, not a positional.
+// Non-interpreter flag values are indistinguishable from write-target operands
+// (`sed -i EXPR FILE`), so those refuse — see §K7.
+test('§K1 interpreter flag-value variants share ONE canonical form (order-independent)', () => {
   const repo = mkrepo('k1')
-  const a = canonicalizeCommand({ command: 'mytool --alpha 1 --beta 2', projectRoot: repo, callerCwd: repo })
-  const b = canonicalizeCommand({ command: 'mytool  --beta 9   --alpha 7', projectRoot: repo, callerCwd: repo })
+  const a = canonicalizeCommand({ command: 'node app.mjs --alpha 1 --beta 2', projectRoot: repo, callerCwd: repo })
+  const b = canonicalizeCommand({ command: 'node app.mjs  --beta 9   --alpha 7', projectRoot: repo, callerCwd: repo })
   assert.ok(a.canonical, 'a should be canonicalizable')
   assert.strictEqual(a.canonical, b.canonical, `expected match: ${a.canonical} vs ${b.canonical}`)
 })
 
 test('§K2 different flag-NAME sets never share a canonical form', () => {
   const repo = mkrepo('k2')
-  const a = canonicalizeCommand({ command: 'mytool --alpha 1', projectRoot: repo, callerCwd: repo })
-  const b = canonicalizeCommand({ command: 'mytool --alpha 1 --gamma', projectRoot: repo, callerCwd: repo })
+  const a = canonicalizeCommand({ command: 'node app.mjs --alpha 1', projectRoot: repo, callerCwd: repo })
+  const b = canonicalizeCommand({ command: 'node app.mjs --alpha 1 --gamma', projectRoot: repo, callerCwd: repo })
   assert.ok(a.canonical && b.canonical)
   assert.notStrictEqual(a.canonical, b.canonical)
 })
 
 test('§K3 output redirect → NOT canonicalizable (conservative refusal)', () => {
   const repo = mkrepo('k3')
-  const r = canonicalizeCommand({ command: 'mytool --alpha 1 > out.txt', projectRoot: repo, callerCwd: repo })
+  const r = canonicalizeCommand({ command: 'node app.mjs --alpha 1 > out.txt', projectRoot: repo, callerCwd: repo })
   assert.strictEqual(r.canonical, null)
   assert.strictEqual(r.reason, 'shell_metachar')
+})
+
+test('§K7 non-interpreter positional operand → refused (sed -i / cp write-target bypass)', () => {
+  const repo = mkrepo('k7')
+  // Multi-operand and flag+operand forms drop a write-target operand → refuse.
+  // (A SINGLE bare operand becomes the path-distinct `subject`, which is safe:
+  //  `tee /repo/a` and `tee /repo/b` get distinct canonicals — see §K8.)
+  for (const cmd of ['sed -i s/a/b/g /repo/src.js', 'cp src dst', 'tee -a /repo/out.txt', 'mv a b']) {
+    const r = canonicalizeCommand({ command: cmd, projectRoot: repo, callerCwd: repo })
+    assert.strictEqual(r.canonical, null, `${cmd} must refuse (operand is a write target)`)
+    assert.strictEqual(r.reason, 'noninterpreter_positional_operand', `${cmd}: got ${r.reason}`)
+  }
+  // The confirmed bypass pair now canonicalizes to DIFFERENT (null) forms → no collision.
+  const harmless = canonicalizeCommand({ command: 'sed -i s/a/b/g /tmp/scratch.txt', projectRoot: repo, callerCwd: repo })
+  assert.strictEqual(harmless.canonical, null, 'harmless sibling also refuses → falls to literal key')
+})
+
+test('§K8 single bare operand is a path-distinct subject (no cross-path collision)', () => {
+  const repo = mkrepo('k8')
+  const a = canonicalizeCommand({ command: 'tee /repo/a.txt', projectRoot: repo, callerCwd: repo })
+  const b = canonicalizeCommand({ command: 'tee /repo/b.txt', projectRoot: repo, callerCwd: repo })
+  assert.ok(a.canonical && b.canonical, 'single-operand form canonicalizes (operand is the subject)')
+  assert.notStrictEqual(a.canonical, b.canonical, 'different target paths → different canonical → no shared verdict')
 })
 
 test('§K4 pipes / substitution / quotes / env-prefix / operand= all refused', () => {
@@ -148,11 +175,11 @@ test('§K6 flag-only interpreter form (node --version) IS canonicalizable', () =
 
 // ===== §G: marker-level generalization polarities ==========================
 
-test('§G1 HIT: verdict for `mytool --alpha 1 --beta 2` serves `mytool --beta 9 --alpha 7`', () => {
+test('§G1 HIT: interpreter verdict for `node app.mjs --alpha 1 --beta 2` serves `--beta 9 --alpha 7`', () => {
   const repo = mkrepo('g1')
   const sid = 's_g1'
-  markerWrite(repo, 'mytool --alpha 1 --beta 2', sid, 'read_only')
-  const r = markerRead(repo, 'mytool --beta 9 --alpha 7', sid)
+  markerWrite(repo, 'node app.mjs --alpha 1 --beta 2', sid, 'read_only')
+  const r = markerRead(repo, 'node app.mjs --beta 9 --alpha 7', sid)
   assert.strictEqual(r.json && r.json.status, 'hit', `expected hit, got ${JSON.stringify(r.json)}`)
   assert.strictEqual(r.json.label, 'read_only')
   assert.strictEqual(r.json.key_form, 'canonical')
@@ -161,17 +188,28 @@ test('§G1 HIT: verdict for `mytool --alpha 1 --beta 2` serves `mytool --beta 9 
 test('§G2 MISS: same command with an EXTRA flag name does not share the verdict', () => {
   const repo = mkrepo('g2')
   const sid = 's_g2'
-  markerWrite(repo, 'mytool --alpha 1 --beta 2', sid, 'read_only')
-  const r = markerRead(repo, 'mytool --alpha 1 --beta 2 --gamma', sid)
+  markerWrite(repo, 'node app.mjs --alpha 1 --beta 2', sid, 'read_only')
+  const r = markerRead(repo, 'node app.mjs --alpha 1 --beta 2 --gamma', sid)
   assert.notStrictEqual(r.json && r.json.status, 'hit', `must miss: ${JSON.stringify(r.json)}`)
 })
 
 test('§G3 MISS: redirect variant never hits the read_only verdict cached without it', () => {
   const repo = mkrepo('g3')
   const sid = 's_g3'
-  markerWrite(repo, 'mytool --alpha 1', sid, 'read_only')
-  const r = markerRead(repo, 'mytool --alpha 1 > out.txt', sid)
+  markerWrite(repo, 'node app.mjs --alpha 1', sid, 'read_only')
+  const r = markerRead(repo, 'node app.mjs --alpha 1 > out.txt', sid)
   assert.notStrictEqual(r.json && r.json.status, 'hit', `must miss: ${JSON.stringify(r.json)}`)
+})
+
+test('§G5 MISS: non-interpreter write-target sibling never rides a cached verdict', () => {
+  const repo = mkrepo('g5')
+  const sid = 's_g5'
+  // The confirmed bypass: `sed -i EXPR /tmp/x` (nonsrc) must NOT lend its
+  // verdict to `sed -i EXPR /repo/src`. Both refuse canonicalization → literal
+  // keys → distinct → no hit.
+  markerWrite(repo, 'sed -i s/a/b/g /tmp/scratch.txt', sid, 'nonsrc_write')
+  const r = markerRead(repo, 'sed -i s/a/b/g /repo/src.js', sid)
+  assert.notStrictEqual(r.json && r.json.status, 'hit', `write-target sibling must miss: ${JSON.stringify(r.json)}`)
 })
 
 test('§G4 script-identity keying (in-repo interpreter script) is unchanged by E3', () => {
@@ -229,7 +267,12 @@ test('§L1 pre-E3 legacy literal-key marker still hits (canonical-first, literal
   const r = markerRead(repo, cmd, sid)
   assert.strictEqual(r.json && r.json.status, 'hit', `expected legacy hit: ${JSON.stringify(r.json)}`)
   assert.strictEqual(r.json.label, 'read_only')
-  assert.strictEqual(r.json.key_form, 'legacy_literal')
+  // `mytool2 --alpha 1 --beta 2` refuses canonicalization (non-interpreter
+  // positional operands), so the read uses the LITERAL key directly — which is
+  // the pre-E3 key — and the pre-E3 marker hits. (When a command DOES
+  // canonicalize, a canonical miss falls back to the same literal key labeled
+  // `legacy_literal`; either way pre-E3 markers stay reachable.)
+  assert.strictEqual(r.json.key_form, 'literal')
   assert.strictEqual(r.json.cache_key, sha)
 })
 
@@ -246,13 +289,13 @@ test('§L2 legacy fallback polarity: DIFFERENT literal command does not hit the 
 test('§A1 marker preserves the RAW command + canonical form for audit', () => {
   const repo = mkrepo('a1')
   const sid = 's_a1'
-  const raw = 'mytool   --alpha 1   --beta 2'
+  const raw = 'node app.mjs   --alpha 1   --beta 2'
   const w = markerWrite(repo, raw, sid, 'read_only')
   const body = JSON.parse(fs.readFileSync(w.file, 'utf8'))
   assert.strictEqual(body.command_raw, raw, 'raw command must round-trip verbatim')
   assert.strictEqual(body.key_form, 'canonical')
-  assert.strictEqual(body.command_canonical, 'mytool --alpha --beta')
-  assert.strictEqual(body.command_normalized, 'mytool --alpha 1 --beta 2')
+  assert.strictEqual(body.command_canonical, 'node <REPO>/app.mjs --alpha --beta')
+  assert.strictEqual(body.command_normalized, 'node app.mjs --alpha 1 --beta 2')
 })
 
 // ===== §E: end-to-end through the REAL checkpoint-gate.sh ==================
@@ -281,9 +324,9 @@ test('§E1 gate E2E: cached read_only verdict generalizes to a flag-value varian
   const repo = mkrepo('e1')
   const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'canonkey-home-'))
   const sid = 's_e1'
-  // `craftool` is an unknown binary → shared_write/default_write → hold path.
-  markerWrite(repo, 'craftool --alpha 1', sid, 'read_only')
-  const r = runGate(repo, testHome, sid, 'craftool --alpha 2')
+  // Interpreter+script (out-of-repo, no digest) → canonical generalization.
+  markerWrite(repo, 'node craftool.mjs --alpha 1', sid, 'read_only')
+  const r = runGate(repo, testHome, sid, 'node craftool.mjs --alpha 2')
   assert.strictEqual(r.status, 0, `gate errored: ${r.stderr}`)
   assert.ok(!(r.stdout || '').includes('"block"'), `expected allow, got: ${r.stdout}`)
 })
@@ -292,8 +335,8 @@ test('§E2 gate E2E polarity: flag-set variant of the SAME binary is still held'
   const repo = mkrepo('e2')
   const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'canonkey-home-'))
   const sid = 's_e2'
-  markerWrite(repo, 'craftool --alpha 1', sid, 'read_only')
-  const r = runGate(repo, testHome, sid, 'craftool --alpha 2 --write-mode')
+  markerWrite(repo, 'node craftool.mjs --alpha 1', sid, 'read_only')
+  const r = runGate(repo, testHome, sid, 'node craftool.mjs --alpha 2 --write-mode')
   assert.ok((r.stdout || '').includes('"block"'), `expected block, got: ${r.stdout || r.stderr}`)
 })
 
@@ -301,8 +344,8 @@ test('§E3 gate E2E polarity: redirect variant of the SAME cached command is sti
   const repo = mkrepo('e3')
   const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'canonkey-home-'))
   const sid = 's_e3'
-  markerWrite(repo, 'craftool --alpha 1', sid, 'read_only')
-  const r = runGate(repo, testHome, sid, 'craftool --alpha 1 > out.txt')
+  markerWrite(repo, 'node craftool.mjs --alpha 1', sid, 'read_only')
+  const r = runGate(repo, testHome, sid, 'node craftool.mjs --alpha 1 > out.txt')
   assert.ok((r.stdout || '').includes('"block"'), `expected block, got: ${r.stdout || r.stderr}`)
 })
 

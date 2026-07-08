@@ -177,19 +177,45 @@ t('re-run finds nothing left to fold; post-fold em-doctor has no errors', () => 
   assert.deepEqual(errors, [], JSON.stringify(errors));
 });
 
-t('pinned intermediate is kept (reason: pinned); the rest folds; history still full', () => {
+t('pinned member anchors R6 chain-closure: whole chain kept, nothing folds (matches em-prune)', () => {
+  // A pin is an R6 anchor; computeProtectedIds' chain-closure then protects
+  // EVERY member of that supersession chain (em-prune's exact "never archive"
+  // contract — fold honors it verbatim now, review finding). So a chain that
+  // touches a pin folds nothing.
   const fx2 = mkFixture();
   const ids = mkChain(fx2, 'pinned-mid', 5);
   const pin = run('em-pin.mjs', ['--id', ids[1]], fx2.cwd, fx2.env);
   assert.equal(pin.json.status, 'ok', pin.stdout);
   const r = fold(fx2, ['--min-chain', '5']);
   assert.equal(r.code, 0, r.stdout);
-  assert.deepEqual(r.json.chains[0].kept, [{ id: ids[1], reason: 'pinned' }]);
-  assert.deepEqual(r.json.chains[0].folded, [ids[0], ids[2], ids[3]].sort());
-  assert.ok(fs.existsSync(path.join(fx2.store, 'episodes', `${ids[1]}.md`)), 'pinned member stays in episodes/');
-  const h = run('em-search.mjs', ['--history', ids[4], '--scope', 'local'], fx2.cwd, fx2.env);
-  assert.deepEqual(h.json.chain.map(e => e.id), ids, `mixed live/archived chain must resolve: ${h.stdout}`);
+  assert.deepEqual(r.json.chains[0].folded, [], `pinned-anchored chain must fold nothing: ${r.stdout}`);
+  const keptById = Object.fromEntries(r.json.chains[0].kept.map(k => [k.id, k.reason]));
+  assert.equal(keptById[ids[1]], 'pinned');
+  for (const i of [0, 2, 3]) assert.ok(/^r6-protected:/.test(keptById[ids[i]] || ''), `member ${i} should be r6-protected chain-member: ${keptById[ids[i]]}`);
+  for (const id of ids) assert.ok(fs.existsSync(path.join(fx2.store, 'episodes', `${id}.md`)), `${id} stays in episodes/`);
   rmFixture(fx2);
+});
+
+t('R6: evidence-linked violation in a chain is never archived (fold honors em-prune protection)', () => {
+  // The review finding: fold used to archive protected episodes. A violation
+  // named in an active lesson's `evidence` is R6-protected (evidence-linked),
+  // and its whole chain is closure-protected — fold must keep it all.
+  const fx4 = mkFixture();
+  const ids = mkChain(fx4, 'r6-evid', 5);
+  // Make ids[2] a violation; add a separate ACTIVE lesson row whose `evidence`
+  // names it (hand-crafted in the index — the P1b `--evidence` writer is not
+  // merged yet; fold reads index rows like the substrate readers do).
+  const indexFile = path.join(fx4.store, 'index.jsonl');
+  const rows = fs.readFileSync(indexFile, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  for (const e of rows) if (e.id === ids[2]) e.category = 'violation';
+  rows.push({ id: '20260101-000000-r6-lesson-aaaa', date: '2026-01-01', time: '00:00', project: 'fx', category: 'lesson', status: 'active', summary: 'lesson citing the violation', tags: [], evidence: [ids[2]] });
+  fs.writeFileSync(indexFile, rows.map(e => JSON.stringify(e)).join('\n') + '\n');
+  const r = fold(fx4, ['--min-chain', '5']);
+  assert.equal(r.code, 0, r.stdout);
+  const folded = r.json.chains[0]?.folded || [];
+  assert.ok(!folded.includes(ids[2]), `evidence-linked violation must NOT be folded: ${JSON.stringify(folded)}`);
+  assert.ok(fs.existsSync(path.join(fx4.store, 'episodes', `${ids[2]}.md`)), 'protected violation stays in episodes/');
+  rmFixture(fx4);
 });
 
 t('forked (non-linear) chain skips whole — nothing archived', () => {

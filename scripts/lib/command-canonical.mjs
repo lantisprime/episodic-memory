@@ -172,13 +172,26 @@ export function canonicalizeCommand({ command, projectRoot, callerCwd, homeDir =
       }
     }
   } else {
-    // Subcommand only when it IMMEDIATELY follows the executable. A non-flag
-    // token after any flag is a flag value / operand — dropped.
+    // Subcommand only when it IMMEDIATELY follows the executable.
     if (toks.length >= 2 && !toks[1].startsWith('-')) {
       subject = maybeNormalizePath(toks[1], callerCwd, projectRoot, homeDir)
       rest = toks.slice(2)
     } else {
       rest = toks.slice(1)
+    }
+    // Positional operands are WRITE TARGETS for external tools (`sed -i EXPR
+    // FILE`, `cp SRC DST`, `tee FILE`, `mv A B`): dropping them lets a
+    // repo-source write ride a verdict cached from a /tmp-target sibling of
+    // the same flag shape (review finding, runtime-confirmed sed -i bypass).
+    // Refuse → canonical null → the marker falls back to the exact literal
+    // key (pre-E3 safety; no cross-operand generalization). Interpreter+script
+    // forms keep generalizing (the em-* reader shape) — there the SCRIPT, not
+    // a positional, determines write behavior, and in-repo scripts are
+    // content-key-pinned anyway. A non-flag token after the subcommand is a
+    // positional operand (flag VALUES on external tools are the risky case too,
+    // so this is deliberately conservative for non-interpreters).
+    if (rest.some((t) => !t.startsWith('-'))) {
+      return none('noninterpreter_positional_operand')
     }
   }
 
