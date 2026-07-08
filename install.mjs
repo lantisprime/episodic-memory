@@ -498,6 +498,17 @@ if (fs.existsSync(repoCategories)) {
   console.log(`Installed categories.json to ${GLOBAL_DIR}`)
 }
 
+// 1b''. Copy activation-classes.json — the activity-class vocabulary for lesson
+// activation triggers (RFC-009 R1/P1b). Same substrate rule as categories.json:
+// DATA read via `../../activation-classes.json` from scripts/lib/, deployed at
+// the global root and NEVER under ~/.claude/ (P12).
+const repoActivationClasses = path.join(REPO_DIR, 'activation-classes.json')
+if (fs.existsSync(repoActivationClasses)) {
+  fs.mkdirSync(GLOBAL_DIR, { recursive: true })
+  fs.copyFileSync(repoActivationClasses, path.join(GLOBAL_DIR, 'activation-classes.json'))
+  console.log(`Installed activation-classes.json to ${GLOBAL_DIR}`)
+}
+
 // 1c. Copy the agent-facing per-script reference to the global root so any tool
 // can read it before first script use (deployed on every install, all tools).
 const repoScriptsGuide = path.join(REPO_DIR, 'docs', 'EM_SCRIPTS_GUIDE.md')

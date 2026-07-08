@@ -11,6 +11,11 @@ on:
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/validate-rfc-canonical-fields.mjs'
       - 'scripts/validate-rfc-contract-mirror.mjs'
+      - 'scripts/validate-rfc-009-contract-mirror.mjs'
+      - 'scripts/lib/activation.mjs'
+      - 'scripts/em-trigger-index.mjs'
+      - 'activation-classes.json'
+      - 'tests/test-contract-mirror-009.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
@@ -60,6 +65,11 @@ on:
       - 'scripts/validate-rfc-artifact-manifest.mjs'
       - 'scripts/validate-rfc-canonical-fields.mjs'
       - 'scripts/validate-rfc-contract-mirror.mjs'
+      - 'scripts/validate-rfc-009-contract-mirror.mjs'
+      - 'scripts/lib/activation.mjs'
+      - 'scripts/em-trigger-index.mjs'
+      - 'activation-classes.json'
+      - 'tests/test-contract-mirror-009.mjs'
       - 'scripts/lib/bp1-manifest.mjs'
       - 'scripts/lib/bp1-sweep.mjs'
       - 'scripts/lib/bp1-probe.mjs'
@@ -155,6 +165,12 @@ jobs:
 
       - name: Run RFC contract-mirror validator self-tests
         run: node tests/test-validate-rfc-contract-mirror.mjs
+
+      - name: Validate RFC-009 contract.json mirror (P1b)
+        run: node scripts/validate-rfc-009-contract-mirror.mjs
+
+      - name: Run RFC-009 contract-mirror validator self-tests
+        run: node tests/test-contract-mirror-009.mjs
 
       - name: Run bp1-hmac live tests (H1-H7 + I3a/b + TB1/TB2)
         run: node tests/test-bp1-hmac-live.mjs

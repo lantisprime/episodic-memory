@@ -232,15 +232,18 @@ script through `scripts/lib/categories.mjs`. Filter by category with `em-search 
 ├── episodes/                 # Global episode .md files
 ├── patterns/                 # Pattern registry (_index.json)
 ├── categories.json           # Category vocabulary (RFC-009 R10b)
+├── activation-classes.json   # Activity-class vocabulary for lesson triggers (RFC-009 R1)
 ├── index.jsonl               # Global index
 ├── tags.json                 # Inverted tag index
-└── category-index.json       # Category -> episode-ids index
+├── category-index.json       # Category -> episode-ids index
+└── trigger-index.json        # Derived lesson-activation index (RFC-009 R2, lazy-built)
 
 <project>/.episodic-memory/   # Per-project (local)
 ├── episodes/                 # Project-local episode .md files
 ├── index.jsonl               # Project-local index
 ├── tags.json                 # Inverted tag index
-└── category-index.json       # Category -> episode-ids index
+├── category-index.json       # Category -> episode-ids index
+└── trigger-index.json        # Derived lesson-activation index (RFC-009 R2, lazy-built)
 
 patterns/                     # Behavioral patterns (shipped with repo)
 ├── _index.json               # Machine-readable pattern registry
@@ -365,6 +368,14 @@ node ~/.episodic-memory/scripts/em-store.mjs \
 node ~/.episodic-memory/scripts/em-store.mjs \
   --project my-project --category decision --summary "..." \
   --body-file ./decision-body.md
+
+# Lesson activation (RFC-009 R1, lesson-only): triggers + scoping + declared priority 1-7
+# (8-9 is EARNED from linked violations, never declarable) + expiry + violation back-links
+node ~/.episodic-memory/scripts/em-store.mjs \
+  --project my-project --category lesson --summary "..." --body "..." \
+  --trigger "second opinion" --trigger "activity:review" \
+  --applies-to-project "*" --applies-to-tool claude-code \
+  --priority 6 --review-by 2027-01-01 --evidence <violation-episode-id>
 ```
 
 ### Revise
@@ -753,6 +764,24 @@ node ~/.episodic-memory/scripts/em-session-end-prompt.mjs
 ```bash
 node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
 ```
+
+### Trigger Index (RFC-009 R2)
+Derived lesson-activation index: one `trigger-index.json` per store, built lazily from
+`status: active` lessons carrying `--trigger` frontmatter. Entries carry an explicit
+`trigger_kind` (`phrase`|`tool`|`activity`) and a DERIVED `effective_priority` 1-9 —
+the 8-9 critical band is earned from linked violations (`em-violation --lesson` /
+`em-store --evidence`), never writer-declared. Freshness via an mtime+size+sha256
+fingerprint of `index.jsonl`; the `session_start` section (critical band, static-score
+top-10, `violated_pattern` preflight counts) is the artifact the P2 session-start hook reads.
+```bash
+node ~/.episodic-memory/scripts/em-trigger-index.mjs                     # build the local store's index
+node ~/.episodic-memory/scripts/em-trigger-index.mjs --scope all         # build both stores
+node ~/.episodic-memory/scripts/em-trigger-index.mjs --merged            # deduped local-precedence view
+node ~/.episodic-memory/scripts/em-trigger-index.mjs --project /path/to/repo   # PATH binding to another project's store
+```
+The `activation-classes.json` vocabulary (deployed to `~/.episodic-memory/`) closes the
+`activity:<class>` trigger set; `validate-rfc-009-contract-mirror.mjs` diffs the shipped
+surfaces against `docs/rfcs/RFC-009-lesson-activation.contract.json` in CI.
 
 ### BP-1 Auto-Pilot (RFC-004)
 
