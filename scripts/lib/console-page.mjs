@@ -392,8 +392,12 @@ function autoRender(v, depth = 0) {
   }
   const entries = Object.entries(v);
   if (!entries.length) return '<span class="note">empty</span>';
-  return '<table class="kv">' + entries.map(([k, val]) =>
-    '<tr><td class="k">' + esc(k) + '</td><td>' + autoRender(val, depth + 1) + '</td></tr>').join('') + '</table>';
+  // Same cap discipline as the array branches: a huge object (transcript-derived
+  // draft payloads) must not fan out unbounded table rows.
+  const shown = entries.slice(0, 40);
+  return '<table class="kv">' + shown.map(([k, val]) =>
+    '<tr><td class="k">' + esc(k) + '</td><td>' + autoRender(val, depth + 1) + '</td></tr>').join('') + '</table>' +
+    (entries.length > 40 ? '<p class="note">+' + (entries.length - 40) + ' more keys — see raw JSON</p>' : '');
 }
 
 // --- typed renderers: known command shapes -> calm human output --------------

@@ -294,6 +294,42 @@ await (async () => {
       const m = r.json.result.chain[0]
       assert.ok(m.id && m.summary && 'body' in m, `chain member missing id/summary/body: ${JSON.stringify(Object.keys(m))}`)
     })
+    await test('client render path: drawer resolves result.chain and miniMd neutralizes a hostile stored body', async () => {
+      // Store an episode whose BODY is hostile markdown, walk its history via
+      // the API, then drive the SERVED page's own esc/miniMd/autoRender on the
+      // real payload — the drawer path the server-level test never exercised.
+      const hostileBody = '# t <script>alert(1)</script>\n[x](javascript:alert(1)) [ok](https://example.com)\n<img src=x onerror=alert(2)>\n```\n<script>fence</script>\n```'
+      const st = await req(rw.port, '/api/run', {
+        method: 'POST', token: TOKEN,
+        body: { cmd: 'store', flags: { project: 'console-fixture', category: 'lesson', summary: 'hostile md body', body: hostileBody, scope: 'local' } },
+      })
+      assert.strictEqual(st.json.exit_code, 0, JSON.stringify(st.json).slice(0, 300))
+      const hist = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'history', flags: { history: st.json.result.id } } })
+      assert.ok(Array.isArray(hist.json.result.chain) && hist.json.result.chain.length === 1, 'chain missing for hostile episode')
+
+      const page = (await req(rw.port, `/?token=${TOKEN}`)).text
+      const script = page.match(/<script>([\s\S]*?)<\/script>/)[1]
+      // The drawer must resolve result.chain first (regression pin for the
+      // "no chain found" bug: the page read .episodes, which history never emits).
+      assert.ok(script.includes('res.body.result.chain ||'), 'drawer no longer resolves result.chain first')
+      const escSrc = script.slice(script.indexOf('function esc('), script.indexOf('function el('))
+      const mdSrc = script.slice(script.indexOf('function miniMd('), script.indexOf('// --- generic JSON humanizer'))
+      const autoSrc = script.slice(script.indexOf('function autoRender('), script.indexOf('// --- typed renderers'))
+      // eslint-disable-next-line no-eval
+      const harness = eval(`(function(){ ${escSrc} ${mdSrc} ${autoSrc} return { esc, miniMd, autoRender } })()`)
+      const html = harness.miniMd(hist.json.result.chain[0].body)
+      assert.ok(!/<script>alert/.test(html), 'raw script tag survived miniMd')
+      assert.ok(!/href="javascript/.test(html), 'javascript: href survived miniMd')
+      assert.ok(!/<img/.test(html), 'raw img tag survived miniMd')
+      assert.ok(/<a href="https:\/\/example.com"/.test(html), 'legitimate https link lost')
+      assert.ok(/<pre><code>&lt;script&gt;fence/.test(html), 'fence content not escaped')
+      // autoRender cap discipline (reviewer F2): huge objects render bounded.
+      const big = {}
+      for (let i = 0; i < 10000; i++) big['k' + i] = i
+      const rendered = harness.autoRender(big)
+      assert.ok((rendered.match(/<tr>/g) || []).length <= 40, 'object-entry rows uncapped')
+      assert.ok(/more keys/.test(rendered), 'truncation note missing')
+    })
     await test('write flag on wrong shape still validated (bad episode id → 400)', async () => {
       const r = await req(rw.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'pin', flags: { id: 'not-an-id' } } })
       assert.strictEqual(r.status, 400)
