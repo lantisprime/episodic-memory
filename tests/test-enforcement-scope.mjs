@@ -131,13 +131,18 @@ function t_nonsrc_carveouts_allowed() {
 }
 
 // ── t_empty_path_blocks_clean (REQ-12) ──────────────────────────────────────
+// The invariant is that a block leaks no MARKER state (nothing that alters a
+// later gate decision). gate-log.jsonl is E5 append-only telemetry — written
+// on every terminal decision by design, read by nothing on the decision path —
+// so it is excluded from the state comparison.
 function t_empty_path_blocks_clean() {
   const M = freshProject('esc-empty')
   armPlan(M)
   const ckDir = path.join(M.project, '.checkpoints')
-  const before = fs.readdirSync(ckDir).sort()
+  const markerState = () => fs.readdirSync(ckDir).filter(f => f !== 'gate-log.jsonl').sort()
+  const before = markerState()
   const o = fire(M, M.planGate, 'Write', {})
-  const after = fs.readdirSync(ckDir).sort()
+  const after = markerState()
   const unchanged = JSON.stringify(before) === JSON.stringify(after)
   if (isBlock(o) && unchanged) ok('t_empty_path_blocks_clean: empty path → block, no marker leaked')
   else bad('t_empty_path_blocks_clean', `block=${isBlock(o)} unchanged=${unchanged} before=${before} after=${after}`)
