@@ -207,11 +207,15 @@ await test('§P2 gate E2E retry: persisted LLM verdict serves from cache, no sec
   const sid = 's_p2'
   const stub = await startStub(() => ({ label: 'read_only', confidence: 0.95, reason: 'inspector' }))
   writeConfig(repo, stub.url)
-  const first = await runGate(repo, testHome, sid, 'frobtool --scan target')
+  const first = await runGate(repo, testHome, sid, 'node scanner.mjs --scan target')
   assert.ok(!(first.stdout || '').includes('"block"'), `first run must allow: ${first.stdout}`)
   const callsAfterFirst = stub.state.requests
-  // Canonical-key generalization (E3 x E2): the flag-VALUE variant also hits.
-  const second = await runGate(repo, testHome, sid, 'frobtool --scan other-target')
+  // Canonical-key generalization (E3 x E2): a flag-VALUE variant hits the same
+  // cached verdict — but ONLY for the interpreter+script shape. Non-interpreter
+  // external tools (frobtool --scan FILE) no longer generalize across operands
+  // (they are write targets — the sed -i bypass class, closed in this PR), so
+  // the generalization test must use the interpreter form.
+  const second = await runGate(repo, testHome, sid, 'node scanner.mjs --scan other-target')
   await stopStub(stub)
   assert.ok(!(second.stdout || '').includes('"block"'), `retry must allow: ${second.stdout}`)
   assert.strictEqual(stub.state.requests, callsAfterFirst,
