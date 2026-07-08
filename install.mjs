@@ -28,6 +28,13 @@ import {
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
 } from './scripts/lib/install-manifest.mjs'
+import {
+  perProjectArtifactPairs, globalArtifactPairs, buildArtifactEntries,
+  mergeArtifactEntries, buildManifest, resolveSourceVersion, writeJsonAtomic,
+  readJsonSafe, projectManifestPath, globalManifestPath, registryPath,
+  readRegistry, upsertRegistryEntries, updateConsumers, deployDistCache,
+  normalizeProjectPath, PROJECT_MANIFEST_BASENAME,
+} from './scripts/lib/install-version.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
@@ -129,6 +136,29 @@ if (bootstrapLastPrompt) {
   if (!tool) process.exit(0)
 }
 
+// ---------------------------------------------------------------------------
+// --update-consumers [--dry-run]: standalone operation, doesn't require --tool.
+// Layer 1 update sweep: iterate the consumer registry (~/.episodic-memory/
+// installs.json); for each registered project, refresh manifest-listed
+// artifacts whose on-disk sha256 still matches the manifest checksum
+// (unmodified) to the current repo version; skip user-MODIFIED artifacts with
+// a warning (Principle 10 — never silently overwritten); prune vanished
+// project paths. Projects not in the registry are NEVER touched (Principle 3),
+// and enforcement artifacts are never refreshed into a project whose registry
+// entry says enforcement_installed:false. Prints one JSON report:
+// { projects_scanned, refreshed, skipped_modified, pruned, ... }.
+// --dry-run computes the identical report and writes nothing.
+// ---------------------------------------------------------------------------
+if (argv.includes('--update-consumers')) {
+  const report = updateConsumers({
+    repoDir: REPO_DIR,
+    globalDir: GLOBAL_DIR,
+    dryRun: argv.includes('--dry-run'),
+  })
+  console.log(JSON.stringify(report, null, 2))
+  process.exit(0)
+}
+
 // --wizard: interactive guided setup (prereq checks → tool/project selection →
 // optional hooks/backup → verify with em-doctor; also drives migrate-from-backup
 // and health-check flows). Delegates to scripts/install-wizard.mjs, which
@@ -142,6 +172,7 @@ if (argv.includes('--wizard')) {
 if (!tool) {
   console.log(`Usage: node install.mjs --wizard   (interactive guided setup — recommended)
        node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+       node install.mjs --update-consumers [--dry-run]   (refresh registered consuming projects)
 
 Tools:
   claude-code  Install SKILL.md + plugin structure
@@ -202,6 +233,18 @@ Second-opinion harness:
                           not on PATH → skipped). Required for harness I-27a
                           gate (registry-stale-at-gate) + composer I-27b
                           (preamble-tamper-at-composer).
+
+Update distribution (Layer 1):
+  --update-consumers      Standalone (no --tool): sweep the consumer registry
+                          (~/.episodic-memory/installs.json) and refresh every
+                          registered project's UNMODIFIED installed artifacts
+                          (on-disk sha256 == manifest checksum) to this repo's
+                          current version. User-modified artifacts are skipped
+                          with a warning, vanished projects pruned from the
+                          registry. Prints one JSON report. Pair with
+                          --dry-run to see exactly what a real run would do
+                          without writing anything.
+  --dry-run               With --update-consumers: report only, change nothing.
 
 Pre-flight prompt-binding bootstrap:
   --bootstrap-last-prompt  Write a bootstrap sentinel at
@@ -512,6 +555,15 @@ const refreshed = fs.readFileSync(gitignorePath, 'utf8')
 if (!gitignoreHasPattern(refreshed, runKeyPattern)) {
   fs.appendFileSync(gitignorePath, `\n# BP-1 per-run HMAC key (RFC-004)\n${runKeyPattern}\n`)
   console.log(`Added ${runKeyPattern} to .gitignore`)
+}
+// Layer 1: the per-project install-version manifest is machine-local state
+// (per-checkout install record), like .episodic-memory/ itself.
+{
+  const refreshed2 = fs.readFileSync(gitignorePath, 'utf8')
+  if (!gitignoreHasPattern(refreshed2, PROJECT_MANIFEST_BASENAME)) {
+    fs.appendFileSync(gitignorePath, `\n# Episodic memory install-version manifest\n${PROJECT_MANIFEST_BASENAME}\n`)
+    console.log(`Added ${PROJECT_MANIFEST_BASENAME} to .gitignore`)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2830,6 +2882,100 @@ if (installSecondOpinion) {
   }
 
   if (installFailed) process.exitCode = 1
+}
+
+// ---------------------------------------------------------------------------
+// 7. Layer 1 update distribution: version manifests + consumer registry +
+//    dist cache. Runs LAST so the manifests record what this run actually
+//    left on disk (the artifact membership rule is byte-equality with the
+//    repo source, so skipped-divergent user files are never recorded as ours).
+//    Best-effort: a manifest failure must never fail an otherwise-good install.
+// ---------------------------------------------------------------------------
+try {
+  // 7a. Global manifest (~/.episodic-memory/install-manifest.json).
+  // REQ (--uninstall-enforcement, test-uninstall-enforcement t_no_global_touch):
+  // an uninstall run never touches ~/.claude or ~/.episodic-memory — so ALL
+  // global-side Layer 1 writes (global manifest, registry, dist cache) are
+  // skipped for it; only the per-project manifest (7b) is refreshed (its
+  // enforcement entries drop out via the merge because the files are gone).
+  // The registry's enforcement_installed flag heals from disk truth on the
+  // next regular install run (see 7c).
+  const globalArtifacts = buildArtifactEntries(globalArtifactPairs(REPO_DIR, GLOBAL_DIR))
+  const sourceVersion = resolveSourceVersion(REPO_DIR, globalArtifacts)
+  if (!uninstallEnforcement) {
+    writeJsonAtomic(globalManifestPath(GLOBAL_DIR), buildManifest({
+      scope: 'global',
+      tool,
+      sourceVersion,
+      sourceRepo: REPO_DIR,
+      artifacts: globalArtifacts,
+    }))
+  }
+
+  // 7b. Per-project manifest (<project>/.episodic-memory-install.json).
+  // Fresh equality-gated enumeration merged with the previous manifest so a
+  // skipped-divergent (user-modified) artifact keeps its original entry and
+  // stays visible to the update sweep as "modified".
+  const prevProjectManifest = readJsonSafe(projectManifestPath(projectAbs))
+  const projectArtifacts = mergeArtifactEntries(
+    prevProjectManifest,
+    buildArtifactEntries(perProjectArtifactPairs(REPO_DIR, projectAbs)),
+    projectAbs,
+  )
+  writeJsonAtomic(projectManifestPath(projectAbs), buildManifest({
+    scope: 'project',
+    tool,
+    sourceVersion,
+    sourceRepo: REPO_DIR,
+    artifacts: projectArtifacts,
+  }))
+
+  // 7c. Consumer registry (~/.episodic-memory/installs.json): one entry per
+  // (project_path, tool), deduped, degrade-not-throw on a malformed existing
+  // registry. enforcement_installed flips true when THIS run installs
+  // enforcement for the matching tool; otherwise the previous value is
+  // preserved, cross-checked against disk truth (an uninstall run cannot
+  // update the registry — global scope is off-limits to it — so the flag
+  // heals here on the next regular install: engine gone ⇒ false).
+  if (!uninstallEnforcement) {
+    const projectKey = normalizeProjectPath(projectAbs)
+    const { entries: existingEntries } = readRegistry(registryPath(GLOBAL_DIR))
+    const nowIso = new Date().toISOString()
+    const registryUpdates = tools.map((t) => {
+      const prev = existingEntries.find((e) => {
+        try { return normalizeProjectPath(e.project_path) === projectKey && e.tool === t } catch { return false }
+      })
+      // Enforcement rides the claude-code block for tool=claude-code/all; the
+      // opencode/codex/pi-agent layers install under their exact tool name.
+      const enforcementTool = (tool === 'opencode' || tool === 'codex' || tool === 'pi-agent')
+        ? tool : 'claude-code'
+      let enforcementInstalled = prev ? prev.enforcement_installed === true : false
+      if (t === 'claude-code' && enforcementInstalled &&
+          !fs.existsSync(path.join(projectAbs, '.claude', 'hooks', 'enforce-contract.mjs'))) {
+        enforcementInstalled = false // healed: a prior --uninstall-enforcement removed the engine
+      }
+      if (t === enforcementTool && installEnforcement) enforcementInstalled = true
+      return {
+        project_path: projectKey,
+        tool: t,
+        version: sourceVersion,
+        enforcement_installed: enforcementInstalled,
+        last_install_ts: nowIso,
+      }
+    })
+    upsertRegistryEntries(registryPath(GLOBAL_DIR), registryUpdates)
+  }
+
+  // 7d. Dist cache: mirror the current per-project payload SOURCES to
+  // ~/.episodic-memory/dist/<version>/ (copy source only, zero registrations —
+  // Principle 12 untouched) so the opt-in SessionStart auto-update can refresh
+  // consumers without this repo checkout present. Prunes superseded versions.
+  if (!uninstallEnforcement) {
+    const dist = deployDistCache(REPO_DIR, GLOBAL_DIR, sourceVersion)
+    console.log(`Recorded install version ${sourceVersion.slice(0, 12)} (manifests + registry); dist cache: ${dist.files} payload file(s) at ${dist.target}`)
+  }
+} catch (e) {
+  console.log(`WARNING: could not record install version manifests: ${e.message} (install itself is complete; --update-consumers and the drift notice need a successful manifest write)`)
 }
 
 if (!installFailed) console.log('\nDone! Episodic memory is ready.')

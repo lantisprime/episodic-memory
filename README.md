@@ -141,6 +141,21 @@ The installer:
 4. Copies the appropriate instruction file for your tool
 5. Copies `docs/EM_SCRIPTS_GUIDE.md` to `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` (all tools)
 6. With `--install-hooks`: copies `plugins/claude-code/hooks/*.sh` into `~/.claude/hooks/` and `plugins/claude-code/hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
+7. Records what it installed (Layer 1 update distribution): a **version manifest** at each target root — `~/.episodic-memory/install-manifest.json` for the global set, `<project>/.episodic-memory-install.json` per project — with the source version (git SHA of the repo the installer ran from; content hash when git is unavailable), timestamp, tool, and per-file sha256 checksums; a **consumer registry** entry in `~/.episodic-memory/installs.json` (`{project_path, tool, version, enforcement_installed, last_install_ts}`, deduped per project+tool); and a **dist cache** of the current artifact payloads at `~/.episodic-memory/dist/<version>/` (copy source only — nothing is registered or executed from there).
+
+**Keeping consuming projects up to date.** Copies used to fall behind silently on every repo update; now:
+
+```bash
+# Preview what would change across ALL registered projects (writes nothing)
+node install.mjs --update-consumers --dry-run
+
+# Refresh them: unmodified artifacts (on-disk sha256 == manifest checksum) are
+# updated to the current repo version; locally MODIFIED files are skipped with
+# a warning and never overwritten; vanished project paths are pruned
+node install.mjs --update-consumers
+```
+
+The per-project SessionStart hook (Claude Code, installed with `--install-enforcement`) prints a one-line notice when the project's manifest version differs from the global one — e.g. `episodic-memory: project artifacts at 111111111111, global at ef0d77166644 — run: node <repo>/install.mjs --update-consumers` — and stays silent when current. Opt in per project with `"auto_update": true` in `<project>/.episodic-memory/enforce-config.json` (never enabled automatically) to have that drift auto-refreshed at session start from the dist cache via `em-sync-install`, same checksum guard, modified files still untouched and reported. The sweep and the auto-update only ever touch projects in the registry, and never install enforcement where the registry says `enforcement_installed: false`. `em doctor` reports per-project drift under the `installs-drift` check.
 
 **Per-harness agent guides.** If you are an AI coding agent installing this for yourself, read the self-contained guide for your harness in [docs/install/](docs/install/) (one file each for Claude Code, Cursor, Codex, OpenCode, Pi Agent, Windsurf): exact commands, real expected output, artifact tables, and troubleshooting. The agent-facing per-script command reference is [docs/EM_SCRIPTS_GUIDE.md](docs/EM_SCRIPTS_GUIDE.md), also deployed to `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` on every install.
 
@@ -148,6 +163,7 @@ The installer:
 
 - `{"active": false}` — layer-wide **kill switch**: silences *all* episodic-memory gates (checkpoint, plan, stop, preflight, second-opinion) for that project only; your other repos keep their hooks (R5).
 - `{"bp-001": {"plan_approval": "MEDIUM"}}` — relax an individual gate (clamps tier DOWN only; never raises).
+- `{"auto_update": true}` — opt-in **session-start auto-update** (Layer 1): on version drift the SessionStart hook refreshes this project's unmodified installed artifacts from `~/.episodic-memory/dist/<version>/` instead of only printing the drift notice (locally modified files are always left untouched and reported). Never enabled automatically. Set it only after this project's deployed `enforce-config.schema.json` is current (an older deployed schema rejects the key, and validation failure fails closed to `{active: true}` — which would override a deliberate `"active": false`).
 
 Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON.
 
@@ -319,11 +335,18 @@ em doctor --fix
 ```
 
 ### Doctor
-Health check + repair for stores and installation: index parse/drift, tags + category inverted-index consistency, dangling supersedes pointers, stale `.tmp`/`.lock` litter, installed-script drift against the repo checkout, backup config presence.
+Health check + repair for stores and installation: index parse/drift, tags + category inverted-index consistency, dangling supersedes pointers, stale `.tmp`/`.lock` litter, installed-script drift against the repo checkout, consumer installs-drift (registered projects behind the global install version or with locally modified artifacts), backup config presence.
 ```bash
 node ~/.episodic-memory/scripts/em-doctor.mjs            # report (exit 1 on errors)
 node ~/.episodic-memory/scripts/em-doctor.mjs --fix      # rebuild indexes, clear litter
 node ~/.episodic-memory/scripts/em-doctor.mjs --strict   # CI mode: warns also fail
+```
+
+### Sync Install (per-project update from the dist cache)
+Checksum-guarded refresh of one project's installed artifacts from `~/.episodic-memory/dist/<version>/` — the apply-side of the SessionStart drift notice (and of the opt-in `"auto_update": true` flow). Unmodified files (on-disk sha256 == install-manifest checksum) are updated; locally modified files are left untouched and reported; unregistered projects are never touched. Degrades to a status token with exit 0 when the manifest/cache/registry entry is missing.
+```bash
+node ~/.episodic-memory/scripts/em-sync-install.mjs --project /path/to/my-project
+node ~/.episodic-memory/scripts/em-sync-install.mjs --dry-run   # current project, report only
 ```
 
 ### Store

@@ -258,6 +258,12 @@ jobs:
       - name: Run em-consolidate fold-superseded suite (S4)
         run: node tests/test-fold-superseded.mjs
 
+      - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
+        run: node tests/test-install-manifest.mjs
+
+      - name: Run SessionStart drift-notice + opt-in auto-update suite (Layer 1)
+        run: node tests/test-install-drift-notice.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code
