@@ -145,6 +145,77 @@ PRIMARY_DIR="$REPO_ROOT/$PRIMARY_MARKER_DIR"
 LEGACY_DIR="$REPO_ROOT/$LEGACY_MARKER_DIR"
 
 # ---------------------------------------------------------------------------
+# Gate decision telemetry (E5 — observability only, NEVER decision-bearing).
+#
+# Every terminal gate decision appends ONE JSON line to
+# <repo>/.checkpoints/gate-log.jsonl via pure-bash printf >> under `|| true`:
+# a telemetry failure can neither fail the hook nor alter its decision, and
+# no node process is ever spawned for logging. Quoting safety: the raw
+# command is NEVER embedded (bash-side JSON escaping of arbitrary command
+# text is a bug factory); instead we log sha256 of the WHITESPACE-NORMALIZED
+# command (runs of space/tab/CR/LF collapsed to one space, then trimmed —
+# the same collapse classifier-marker.mjs normalizeCommand applies, minus
+# its trailing-comment strip) plus controlled tokens sanitized to
+# [A-Za-z0-9._:-]. em-doctor's gate-friction section joins held decisions
+# against .checkpoints/classify/ verdicts by re-hashing each marker's
+# command_normalized field with the same collapse rules.
+#
+# Two decision sites are deliberately NOT logged: the read-only-tool early
+# exit below (pre-classification static tool allowlist — one line per
+# Read/Grep call would swamp the log with non-decisions) and the
+# hooks/lib-missing block above (these helpers are not defined yet there).
+# ---------------------------------------------------------------------------
+GATE_LOG_FILE="$PRIMARY_DIR/gate-log.jsonl"
+
+# Strip everything outside [A-Za-z0-9._:-] so a field can never break the
+# JSON line (all logged values are controlled tokens; this is belt+braces).
+_gate_log_sanitize() {
+  printf '%s' "${1//[!A-Za-z0-9._:-]/}"
+}
+
+# sha256 of the whitespace-normalized Bash command; empty for non-Bash tools
+# or when no sha utility exists. sha256sum (Linux) then shasum -a 256 (macOS).
+_gate_log_cmd_sha() {
+  local cmd="${COMMAND:-}" norm
+  [ -n "$cmd" ] || return 0
+  norm="$(printf '%s' "$cmd" | tr -s ' \t\n\r' ' ' 2>/dev/null)" || return 0
+  norm="${norm# }"; norm="${norm% }"
+  [ -n "$norm" ] || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$norm" | sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$norm" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  fi
+  return 0
+}
+
+# _gate_log <decision> <reason-token> — decision ∈ allow|silence|hold|block.
+# Reads TOOL_NAME / LABEL / MY_SID / COMMAND from the hook's globals.
+#
+# NEVER creates .checkpoints/ (append only when the dir already exists): a
+# fallback REPO_ROOT (non-git cwd, off-project hook invocation) must not grow
+# a marker dir — the SA-cwd-strict caller-leak class. Any project with gate
+# activity has .checkpoints/ (armed markers / classify verdicts create it);
+# until then telemetry is silently off, which is the safe direction.
+_gate_log() {
+  {
+    [ -n "$REPO_ROOT" ] || return 0
+    [ -d "$PRIMARY_DIR" ] || return 0
+    [ ! -L "$PRIMARY_DIR" ] || return 0
+    printf '{"ts":%s,"gate":"checkpoint","tool":"%s","label":"%s","reason":"%s","decision":"%s","sid":"%s","cmd_sha256":"%s"}\n' \
+      "$(date +%s 2>/dev/null || printf '0')" \
+      "$(_gate_log_sanitize "${TOOL_NAME:-}")" \
+      "$(_gate_log_sanitize "${LABEL:-}")" \
+      "$(_gate_log_sanitize "${2:-}")" \
+      "$(_gate_log_sanitize "${1:-}")" \
+      "$(_gate_log_sanitize "${MY_SID:-}")" \
+      "$(_gate_log_cmd_sha)" \
+      >> "$GATE_LOG_FILE" 2>/dev/null
+  } || true
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Dual-root marker helpers (burn-in only; collapse to primary-only when the
 # fallback branch is removed).
 # ---------------------------------------------------------------------------
@@ -523,6 +594,7 @@ _command_first_absolute_noncanonical_marker() {
 _block_wrong_root_marker() {
   local attempted="$1" basename="${1##*/}"
   local canonical="$PRIMARY_DIR/$basename"
+  _gate_log block wrong_root_marker
   jq -nc --arg attempted "$attempted" --arg canonical "$canonical" --arg basename "$basename" \
     '{decision: "block", reason: ("Marker write to non-canonical path. You wrote " + $attempted + " but " + $basename + " must live under the main repo at " + $canonical + ". In a git worktree, hooks resolve markers against the main repo root via git-common-dir — write the marker at the canonical absolute path instead. Hook: checkpoint-gate.sh.")}'
   exit 0
@@ -533,6 +605,7 @@ _block_wrong_root_marker() {
 # canonical primary marker dir.
 _block_relative_marker_in_worktree() {
   local cmd_excerpt="$1"
+  _gate_log block relative_marker_worktree
   jq -nc --arg cmd "$cmd_excerpt" --arg primary "$PRIMARY_DIR" \
     '{decision: "block", reason: ("Relative marker reference from worktree cwd. The classifier resolves relative paths against the main repo root, but the shell executes them under the worktree cwd. Command was: " + $cmd + ". Re-issue with an absolute path under " + $primary + " (or cd to the main repo first). Hook: checkpoint-gate.sh.")}'
   exit 0
@@ -559,11 +632,13 @@ esac
 # Reason strings include the canonical WRITE path (always primary —
 # .checkpoints/) so the agent writes to the new location.
 _block_pre() {
+  _gate_log block pre_checkpoint_required
   jq -nc --arg path "$PRE_DONE_W" \
     '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked. Hook: checkpoint-gate.sh.")}'
   exit 0
 }
 _block_post() {
+  _gate_log block post_checkpoint_required
   jq -nc --arg path "$POST_DONE_W" \
     '{decision: "block", reason: ("Post-implementation checkpoint required. Complete E2E testing and bug logging, then write the Rule 18 post-implementation checkpoint block to " + $path + " (must be non-empty) before pushing. Hook: checkpoint-gate.sh.")}'
   exit 0
@@ -590,6 +665,9 @@ _block_pre_with_hint() {
     hint="$(agent_classifier_deny_hint "$COMMAND" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
   fi
   if [ -n "$hint" ]; then
+    # Telemetry here covers only the hint-emit path; the fallback delegates to
+    # _block_pre, which logs itself (no double line).
+    _gate_log block pre_checkpoint_required
     jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
       '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
     exit 0
@@ -604,6 +682,9 @@ _block_pre_with_hint() {
 # hitting on read-only/novel commands). It emits ONLY the 3-way classify hint.
 # Falls back to a generic classify message if the deny-reason lib is unavailable.
 _block_needs_classification() {
+  # HOLD, not a checkpoint block: the command is parked awaiting an agent
+  # classification verdict. Logged once here (covers both emit paths below).
+  _gate_log hold needs_classification
   local hint=""
   if [ -z "${__AGENT_DENY_REASON_SOURCED:-}" ]; then
     if [ -f "$LIB_DIR/agent-classifier-deny-reason.sh" ]; then
@@ -645,6 +726,9 @@ _block_pre_with_path_hint() {
     hint="$(agent_classifier_path_deny_hint "$FILE_PATH" "$REPO_ROOT" "$CWD" "$MY_SID" 2>/dev/null)"
   fi
   if [ -n "$hint" ]; then
+    # Telemetry here covers only the hint-emit path; the fallback delegates to
+    # _block_pre, which logs itself (no double line).
+    _gate_log block pre_checkpoint_required
     jq -nc --arg path "$PRE_DONE_W" --arg hint "$hint" \
       '{decision: "block", reason: ("Checkpoint required. Write the Rule 18 pre-implementation checkpoint block to " + $path + " (must be non-empty) before write tools are unblocked.\n\n" + $hint + "\n\nHook: checkpoint-gate.sh.")}'
     exit 0
@@ -652,6 +736,7 @@ _block_pre_with_path_hint() {
   _block_pre
 }
 _block_plan_pending() {
+  _gate_log block plan_pending
   jq -nc --arg path "$PLAN_PENDING_W" \
     '{decision: "block", reason: ("Plan approval pending. Checkpoint marker writes are blocked while " + $path + " exists. Approve the plan first. Hook: checkpoint-gate.sh.")}'
   exit 0
@@ -665,6 +750,7 @@ _block_plan_pending() {
 # itself trusts. Reject the FORM (not the var name), independent of the
 # pre-checkpoint gate.
 _block_env_prefix_marker() {
+  _gate_log block env_prefix_marker
   jq -nc '{decision: "block", reason: "Env-prefix wrapper escape rejected. An environment-variable assignment before a classifier-marker.mjs invocation (e.g. BYPASS=1 node ... classifier-marker.mjs --write) is refused: env-prefix wrappers can carry gate-bypass payloads and poison the classifier cache. Re-invoke the helper with NO leading VAR=value prefix. Hook: checkpoint-gate.sh."}'
   exit 0
 }
@@ -1013,6 +1099,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
 
   # Read-only Bash → allow immediately (closes #89).
   if [ "$LABEL" = "read_only" ]; then
+    _gate_log allow read_only
     exit 0
   fi
 
@@ -1077,6 +1164,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # .plan-approval-pending AND .checkpoint-required.
     case "${TARGET##*/}" in
       .so-runbook-shown.*)
+        _gate_log allow marker_write_runbook
         exit 0
         ;;
     esac
@@ -1095,6 +1183,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
       own_session_basename="$(plan_marker_basename_for_session "$MY_SID")"
       if [ "$TARGET_BN" = "$PLAN_MARKER_LEGACY_BASENAME" ] || [ "$TARGET_BN" = "$own_session_basename" ]; then
         # Allow plan-marker removal/touch — plan-gate.sh decides.
+        _gate_log allow marker_write_plan_marker
         exit 0
       fi
       _block_plan_pending
@@ -1117,6 +1206,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         # boundary). No longer depends on a session-start arm.
         if ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
           _arm_checkpoint_required_if_missing
+          _gate_log allow marker_write_pre_done
           exit 0
         fi
         ;;
@@ -1133,6 +1223,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
           # non-empty is the load-bearing signal that implementation began;
           # push-gate (:1485) still independently self-arms POST_REQ and
           # :1525 still blocks push when POST_DONE is empty.
+          _gate_log allow marker_write_post_done
           exit 0
         fi
         # Neither POST_REQ nor PRE_DONE present → genuinely premature
@@ -1142,6 +1233,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         _block_pre
         ;;
       .plan-approval-pending|.plan-approval-pending.*)
+        _gate_log allow marker_write_plan_marker
         exit 0
         ;;
     esac
@@ -1166,6 +1258,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     #     runtime or repo-source location; shimmed `node /tmp/evil...` rejected.
     if [ "$REASON" = "interpreter_classifier_marker" ]; then
       if _validate_classifier_marker_helper "$COMMAND" "$REPO_ROOT"; then
+        _gate_log allow classifier_marker_helper
         exit 0
       fi
     fi
@@ -1261,6 +1354,7 @@ case "$TOOL_NAME" in
             # the Bash-branch counterpart above for rationale).
             if ! checkpoint_marker_nonempty_for_session .pre-checkpoint-done "$MY_SID"; then
               _arm_checkpoint_required_if_missing
+              _gate_log allow marker_write_pre_done
               exit 0
             fi
             ;;
@@ -1271,6 +1365,7 @@ case "$TOOL_NAME" in
               # THIS session → post-checkpoint write allowed (Edit/Write
               # counterpart of Bash branch above; issue #362 fix). Push-gate
               # at :1485/:1525 remains the independent push-time gate.
+              _gate_log allow marker_write_post_done
               exit 0
             fi
             # Neither POST_REQ nor PRE_DONE present → genuinely premature
@@ -1279,6 +1374,7 @@ case "$TOOL_NAME" in
             _block_pre
             ;;
           .plan-approval-pending|.plan-approval-pending.*)
+            _gate_log allow marker_write_plan_marker
             exit 0
             ;;
         esac
@@ -1318,6 +1414,7 @@ if [ "$TOOL_NAME" != "Bash" ] || [ "$LABEL" != "push_or_pr_create" ]; then
      && { checkpoint_marker_exists_for_session .checkpoint-required "$MY_SID" || _plan_approved_exists_for_session "$MY_SID"; }; then
     PRE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate pre_checkpoint --marker-root "$REPO_ROOT" 2>/dev/null)" || PRE_DISP=""
     if [ "$PRE_DISP" = "silence" ] || [ "$PRE_DISP" = "clamp-off" ]; then
+      _gate_log silence enforce_config_pre_checkpoint
       exit 0
     fi
   fi
@@ -1446,6 +1543,7 @@ case "$TOOL_NAME" in
         # falls through to the hold (B1).
         PRE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate pre_checkpoint --marker-root "$REPO_ROOT" 2>/dev/null)" || PRE_DISP=""
         if [ "$PRE_DISP" = "silence" ] || [ "$PRE_DISP" = "clamp-off" ]; then
+          _gate_log silence enforce_config_needs_classification
           exit 0
         fi
         _block_needs_classification
@@ -1602,6 +1700,14 @@ if [ "$TOOL_NAME" = "Bash" ] && [ "$LABEL" = "push_or_pr_create" ]; then
     done
     unset _m
   fi
+  # Push-gate terminal outcome (E5): a block above already logged + exited, so
+  # reaching here is either the F10 silenced path (cleanup ran, push allowed by
+  # clamp) or a genuinely-verified allowed push.
+  if [ "$POST_SILENCED" = "1" ]; then
+    _gate_log silence enforce_config_post_checkpoint
+  else
+    _gate_log allow push_verified
+  fi
   exit 0
 fi
 
@@ -1692,4 +1798,7 @@ case "$TOOL_NAME" in
     ;;
 esac
 
+# Terminal fall-through allow (E5): every blocking/holding/silencing path has
+# already logged + exited above.
+_gate_log allow fallthrough
 exit 0

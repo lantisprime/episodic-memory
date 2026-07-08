@@ -25,6 +25,47 @@ Phase 3b (RFC-002) introduces user-level hooks that need to be installed into `~
 | `lib/repo-root.sh` | sourced | `resolve_repo_root` git-common-dir walker (PR #105 / #85) |
 | `lib/command-classifier.sh` | sourced | Quote/heredoc-aware Bash classifier (#86 PR-B / #89 / #101) |
 
+## Gate decision telemetry (E5) — `.checkpoints/gate-log.jsonl`
+
+`checkpoint-gate.sh`, `plan-gate.sh`, and `stop-gate.sh` append one JSON line
+per terminal decision to `<repo>/.checkpoints/gate-log.jsonl`:
+
+```json
+{"ts":<epoch-s>,"gate":"checkpoint|plan|stop","tool":"Bash","label":"<classifier label>","reason":"<site token>","decision":"allow|silence|hold|block","sid":"<session>","cmd_sha256":"<sha256>"}
+```
+
+Design constraints (all load-bearing):
+
+- **Observability only, never decision-bearing.** Pure-bash `printf >>` under
+  `|| true`; a telemetry failure can neither fail the hook nor change its
+  decision, and no node process is spawned for logging.
+- **Quoting safety.** The raw command is NEVER embedded (bash-side JSON
+  escaping of arbitrary command text is a bug factory). `cmd_sha256` is the
+  sha256 of the WHITESPACE-NORMALIZED command (runs of space/tab/CR/LF
+  collapsed to one space, trimmed — the same collapse
+  `classifier-marker.mjs` `normalizeCommand` applies, minus its
+  trailing-comment strip). All other fields are controlled tokens sanitized
+  to `[A-Za-z0-9._:-]`.
+- **Never creates `.checkpoints/`.** Appends only when the dir already
+  exists — a fallback REPO_ROOT (non-git cwd, off-project invocation) must
+  not grow a marker dir (the SA-cwd-strict caller-leak class). Telemetry is
+  silently off until the project's first marker/classify activity creates
+  the dir.
+- **Decision vocabulary.** `hold` = novel Bash command parked for agent
+  classification (`_block_needs_classification`) — distinct from `block`
+  (checkpoint/plan/push/integrity blocks). `silence` = an enforce-config
+  consult (`active:false` / clamp) turned the gate off for this call.
+- **Deliberately unlogged sites**: the read-only-TOOL early exit (one line
+  per Read/Grep would swamp the log with non-decisions), the hooks/lib-missing
+  block (telemetry helpers not defined yet at that point), and plan-gate's
+  allow paths (its no-op common case; checkpoint-gate logs the allow story).
+
+Consumers: `em-doctor` gate-friction section (counts per decision,
+false-positive metric via the `.checkpoints/classify/` join, >5MB warning) —
+see `docs/EM_SCRIPTS_GUIDE.md`. Conformance: `tests/test-gate-conformance.mjs`
+asserts one line per decision with the expected `decision` values against the
+real installed gate.
+
 ## Marker storage (.checkpoints/ migration, 2026-05-09)
 
 Marker WRITES land at `<repo-root>/.checkpoints/.X` (PRIMARY); reads check
