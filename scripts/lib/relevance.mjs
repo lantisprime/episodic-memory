@@ -48,10 +48,20 @@ export function normalizeTags(raw) {
 // ---------------------------------------------------------------------------
 // loadTagsIndex(dataDir) / loadCategoryIndex(dataDir) — inverted indexes.
 // Return null when missing/corrupt (callers degrade to linear scan).
+//
+// Index maps are keyed by episode-derived strings (tags, tokens, categories),
+// so lookups must not see Object.prototype: a token/tag named "constructor"
+// on a plain {} returns the inherited Object function instead of undefined
+// (issue #469). Every map is rehydrated onto a null prototype after
+// JSON.parse; fresh maps are built with Object.create(null).
 // ---------------------------------------------------------------------------
+export function nullProtoIndex(parsed) {
+  return Object.assign(Object.create(null), parsed)
+}
+
 export function loadTagsIndex(dataDir) {
   try {
-    return JSON.parse(fs.readFileSync(path.join(dataDir, 'tags.json'), 'utf8'))
+    return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'tags.json'), 'utf8')))
   } catch {
     return null
   }
@@ -59,7 +69,7 @@ export function loadTagsIndex(dataDir) {
 
 export function loadCategoryIndex(dataDir) {
   try {
-    return JSON.parse(fs.readFileSync(path.join(dataDir, 'category-index.json'), 'utf8'))
+    return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'category-index.json'), 'utf8')))
   } catch {
     return null
   }
@@ -248,7 +258,7 @@ export function episodeTokens({ summary, tags, body }) {
 
 export function loadTokensIndex(dataDir) {
   try {
-    return JSON.parse(fs.readFileSync(path.join(dataDir, 'tokens.json'), 'utf8'))
+    return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'tokens.json'), 'utf8')))
   } catch {
     return null
   }
@@ -258,9 +268,9 @@ export function loadTokensIndex(dataDir) {
 // Shared here (not in em-store) because em-store executes top-level on import.
 export function updateTokensIndex(dataDir, episodeId, tokens) {
   const tokensFile = path.join(dataDir, 'tokens.json')
-  let index = {}
+  let index = Object.create(null)
   try {
-    index = JSON.parse(fs.readFileSync(tokensFile, 'utf8'))
+    index = nullProtoIndex(JSON.parse(fs.readFileSync(tokensFile, 'utf8')))
   } catch {}
   for (const tok of tokens) {
     if (!index[tok]) index[tok] = []

@@ -47,6 +47,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -476,8 +477,9 @@ fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
 function updateTagsIndex(dir, episodeId, tagList) {
   const tagsFile = path.join(dir, 'tags.json')
-  let idx = {}
-  try { idx = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
+  // Null-proto: a tag named "constructor" must not resolve to Object.prototype (issue #469)
+  let idx = Object.create(null)
+  try { idx = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8'))) } catch {}
   for (const t of tagList) {
     if (!idx[t]) idx[t] = []
     if (!idx[t].includes(episodeId)) idx[t].push(episodeId)

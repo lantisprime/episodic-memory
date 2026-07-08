@@ -29,7 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
-import { episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
+import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -155,9 +155,10 @@ function normalizeTags(raw, repeats = []) {
 
 function updateTagsIndex(dataDir, episodeId, tags) {
   const tagsFile = path.join(dataDir, 'tags.json')
-  let index = {}
+  // Null-proto: a tag named "constructor" must not resolve to Object.prototype (issue #469)
+  let index = Object.create(null)
   try {
-    index = JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+    index = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8')))
   } catch {}
   for (const tag of tags) {
     if (!index[tag]) index[tag] = []
@@ -220,9 +221,11 @@ console.log(JSON.stringify({ status: 'ok', id, file: filePath, scope }))
 // key; unknown names index under their literal key (canonicalCategory degrades, never throws).
 export function updateCategoryIndex(dataDir, episodeId, category) {
   const catFile = path.join(dataDir, 'category-index.json')
-  let index = {}
+  // Null-proto: unknown categories index under their literal key, which could
+  // collide with Object.prototype names (issue #469)
+  let index = Object.create(null)
   try {
-    index = JSON.parse(fs.readFileSync(catFile, 'utf8'))
+    index = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8')))
   } catch {}
   const key = canonicalCategory(category)
   if (!index[key]) index[key] = []

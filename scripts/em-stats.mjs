@@ -77,9 +77,11 @@ function statsFor(dataDir, label) {
   const rows = loadIndex(dataDir, label)
   const active = rows.filter(r => r.status !== 'superseded')
 
-  const byCategory = {}
-  const byProject = {}
-  const byTag = {}
+  // Null-proto: keys are episode-derived (a tag named "constructor" would
+  // otherwise tally onto Object.prototype's inherited function, issue #469)
+  const byCategory = Object.create(null)
+  const byProject = Object.create(null)
+  const byTag = Object.create(null)
   const age = { last_7d: 0, last_30d: 0, last_90d: 0, last_year: 0, older: 0, undated: 0 }
   let pinned = 0
   let accessTotal = 0
