@@ -1435,6 +1435,19 @@ case "$TOOL_NAME" in
         # Agent-classifier-first (#351): novel unevaluated command is HELD for
         # classification regardless of plan state — this is NOT a checkpoint
         # (it never arms) and is orthogonal to the planapproval redesign.
+        #
+        # R5 consult-gap fix (2026-07-08): the F11 consult above only runs when
+        # a pre-checkpoint block is imminent (armed / plan-approved), so with
+        # NO plan and nothing armed this hold still fired under active:false —
+        # contradicting the R5 scope note (the hold exists only to route
+        # would-be pre-checkpoint writes, so active:false must silence it too).
+        # Consult here as well; spawn discipline holds (node spawns only when
+        # the hold is already imminent). Fail-closed: empty/garbage disposition
+        # falls through to the hold (B1).
+        PRE_DISP="$(node "$ENFORCE_CONTRACT" --resolve-gate pre_checkpoint --marker-root "$REPO_ROOT" 2>/dev/null)" || PRE_DISP=""
+        if [ "$PRE_DISP" = "silence" ] || [ "$PRE_DISP" = "clamp-off" ]; then
+          exit 0
+        fi
         _block_needs_classification
       else
         # planapproval redesign: arm no-ops unless an approved-plan token exists
