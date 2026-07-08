@@ -469,6 +469,56 @@ function runSymlinkEscapeFixture(name, meta) {
 }
 
 // ===========================================================================
+// ===========================================================================
+// 10. RFC-009 P2 S1 — the `activation` plugin type (REQ-1/REQ-2/REQ-3).
+// ===========================================================================
+{
+  const actEntry = {
+    type: "activation", id: "claude-code", harness: "claude-code",
+    directory: "plugins/claude-code-activation", blocking: false,
+    capabilities: { user_prompt_submit: "STRONG", pre_tool_use: "STRONG", session_start: "STRONG" },
+    manifest: "plugins/claude-code-activation/manifest.json", status: "active",
+  };
+
+  // Post-amendment: a well-formed activation descriptor validates.
+  {
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [actEntry] }, SCHEMAS._index);
+    assert(r.valid, "activation descriptor validates against the amended _index schema", JSON.stringify(r.errors?.slice(0, 2)));
+  }
+
+  // REQ-3: the SAME entry is REJECTED by a reconstructed pre-amendment schema
+  // (enum without `activation`, plugins.items reverted to the single enforcement
+  // descriptor, activationDescriptor removed) — proving the bump is load-bearing.
+  {
+    const pre = structuredClone(SCHEMAS._index);
+    pre.$defs.pluginType.enum = pre.$defs.pluginType.enum.filter((t) => t !== "activation");
+    pre.properties.plugins.items = { $ref: "#/$defs/enforcementDescriptor" };
+    delete pre.$defs.activationDescriptor;
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [actEntry] }, pre);
+    assert(!r.valid, "activation entry REJECTED by the pre-amendment schema (amendment is load-bearing, not decorative)", "unexpectedly valid pre-amendment");
+  }
+
+  // blocking:true is rejected — advisory-only is a SCHEMA invariant, not just a test.
+  {
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [{ ...actEntry, blocking: true }] }, SCHEMAS._index);
+    assert(!r.valid, "activation with blocking:true rejected (blocking const false — advisory-only invariant)", "unexpectedly valid");
+  }
+
+  // enforcement + activation coexist in plugins[]; the type-discriminated oneOf resolves each.
+  {
+    const enf = readJson(path.join(REPO, "plugins/_index.json")).plugins.find((p) => p.type === "enforcement");
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [enf, actEntry] }, SCHEMAS._index);
+    assert(r.valid, "enforcement + activation entries coexist in plugins[] (oneOf discriminates by type)", JSON.stringify(r.errors?.slice(0, 2)));
+  }
+
+  // A live full-validator run treats a fixture activation entry as a KNOWN type
+  // (descriptor-only in S1) — not an unknown-type error.
+  {
+    const g = gateSchemaVersion("1.0.0");
+    assert(g.ok, "gate: activation-era registry still within MAX_SUPPORTED (no bump in S1)");
+  }
+}
+
 console.log(`\ntest-plugin-registry: ${pass} passed, ${fail} failed, ${skip} skipped`);
 if (fail > 0) {
   console.error("\nFAILURES:");

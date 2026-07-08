@@ -238,9 +238,9 @@ if (idxSchema && manSchema) {
   // --- typed-registry (R8 line 116): closed pluginType + per-type type discriminator
   const pt = idxSchema.$defs && idxSchema.$defs.pluginType;
   assert(
-    pt && Array.isArray(pt.enum) && pt.enum.length === 4 &&
-      ["enforcement", "recall-strategy", "store-strategy", "learning"].every((v) => pt.enum.includes(v)),
-    "_index $defs.pluginType is the closed 4-value type space (R8-116)",
+    pt && Array.isArray(pt.enum) && pt.enum.length === 5 &&
+      ["enforcement", "activation", "recall-strategy", "store-strategy", "learning"].every((v) => pt.enum.includes(v)),
+    "_index $defs.pluginType is the closed 5-value type space (R8-116; +activation RFC-009 P2)",
     `got ${pt && JSON.stringify(pt.enum)}`,
   );
   assert(

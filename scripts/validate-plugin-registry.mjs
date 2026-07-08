@@ -548,7 +548,10 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
       // per-type dispatch (R8): enforcement -> full manifest gauntlet; substrate
       // capability types -> descriptor-only (gauntlet deferred P9); unknown -> reject.
       if (entry.type !== "enforcement") {
-        if (!["recall-strategy", "store-strategy", "learning"].includes(entry.type)) {
+        // RFC-009 R3: `activation` is a known enforcement-LAYER type. S1 validates it
+        // descriptor-only (M1 schema, incl. the blocking:false invariant); the activation
+        // manifest sub-gauntlet wires in P2-S2 alongside the activation manifest schema.
+        if (!["activation", "recall-strategy", "store-strategy", "learning"].includes(entry.type)) {
           add("typed_versioned", "error", `entry ${JSON.stringify(entry.id)} has unknown type ${JSON.stringify(entry.type)}`);
         }
         continue; // descriptor-only types validated by the _index schema (M1); no manifest gauntlet
