@@ -30,13 +30,14 @@ workflow logic in the substrate).
 
 ## The capability families
 
-All three are ways of **using episodes**. None of them enforce workflows.
+All four are ways of **using episodes**. None of them enforce workflows.
 
 | Capability | What it does | Operates on | Substrate script | Plugin type | Default |
 |---|---|---|---|---|---|
 | **Memory-store strategy** | Persists episodes and builds derived indexes from them (e.g. knowledge graph) | episodes (write) + derived indexes | `em-store` | `store-strategy` | append-only log + lexical index |
 | **Recall strategy** | Retrieves + ranks episodes for use | episodes (read) | `em-recall` | `recall-strategy` | lexical tag-based (zero-dep) |
 | **Learning strategy** | Derives new knowledge from episodes + derived indexes, writes it back as global episodes | indexes (read) → episodes (write) | `em-store` (write-back) | `learning` | none (opt-in) |
+| **Curation strategy** | Maintains, reorganizes, and audits the corpus without deriving new knowledge (archive, fold, relocate, verify) | episodes + derived indexes (read/move/archive) | `em-prune`, `em-consolidate`, `em-doctor` | `curation` | manual opt-in commands |
 
 ### 1. Memory-store strategy
 How episodes are persisted, and what **derived** structures are built alongside them. Default:
@@ -55,18 +56,50 @@ How the system turns accumulated episodes (and the derived indexes a store strat
 into **new** knowledge, written back as new global episodes for future recall. Reads indexes,
 persists derived knowledge via `em-store`. Opt-in, substrate-side, enforcement-free.
 
+### 4. Curation strategy
+How the corpus stays healthy over time: pruning, backup and restore, relocation between
+scopes (`em-move`), superseded-chain folding (`em-consolidate`), integrity and staleness
+audits (`em-doctor`, `em-stats`, `em-check-stale`). Curation operates ON episodes and
+derived indexes but derives no new knowledge (that is learning) and changes no recall
+ranking (that is recall). Reversibility is the family invariant: archival moves, never
+deletes; destructive-looking operations offer `--dry-run`; `em-restore` undoes. Default:
+manual, explicitly invoked commands.
+
 ---
 
 ## The unifying invariant
 
-Every capability is **a way to use memory episodes** — storing them, recalling them, or
-learning from them. This is the test for "does X belong here":
+Every capability is **a way to use memory episodes** — storing them, recalling them,
+learning from them, or curating them. A capability may operate over a single store or
+across many registered stores (discovery via the consumer registry at
+`~/.episodic-memory/installs.json`); cross-store scope changes reach, not these rules.
+This is the test for "does X belong here":
 
 - X is an operation over episodes that **does not** enforce workflow → it is a substrate
   capability (this document).
 - X **enforces** workflow discipline → it belongs to **behavior patterns**, not here (below).
 - X **cannot** be expressed as episodes at all → it is the trigger for a new RFC
   ([Principle 1](PRINCIPLES.md#1-memory-is-the-substrate)).
+
+---
+
+## Adjacent layers (not capabilities)
+
+Three layers live in this repo, consume the substrate, and keep getting asked where they
+belong. They are **not** episode capabilities; naming them here stops the
+force-fit-or-ignore failure mode:
+
+- **Enforcement** — behavior patterns and gates; see the dedicated section below
+  (RFC-008; Principle 12).
+- **Distribution** — the installer, install manifests, the consumer registry, update
+  sweeps, and the payload/dist cache. Governed by Principles 3, 10, and 12; it moves
+  artifacts, it never touches episodes.
+- **Presentation** — skill wrappers, wizards, terminal and web consoles. Governed by
+  Principle 11: they spawn the same CLI contract and present its JSON; they never decide.
+
+The test stays sharp: if it operates ON episodes it belongs to a capability family above;
+if it moves code, gates workflow, or renders output, it is an adjacent layer with its own
+governing principles.
 
 ---
 
@@ -82,7 +115,7 @@ a way of using the memory substrate. RFC-008 exists precisely to keep these apar
   block / allow — it depends on the substrate, never the reverse (RFC-008 R2 / R6).
 
 The plugin manager *does* host an `enforcement` plugin type, but it lives in the enforcement
-layer alongside the three substrate-capability types — it is **not** a capability of the memory
+layer alongside the substrate-capability types — it is **not** a capability of the memory
 itself. Keep the boundary sharp: **a capability uses memory; behavior patterns enforce
 workflow.**
 
@@ -109,13 +142,22 @@ only when it satisfies all of the following:
    side-effects (Principles 3, 10); algorithm-heavy capabilities cross-reference their own RFC
    (this charter owns the *contract*; the RFC owns the *algorithm*).
 
+**Experimental tier.** An unproven capability may ship as `experimental` before satisfying
+criteria 2-3 in full, under a reduced contract: explicit opt-in only (never a default),
+declared side effects (Principle 10), an honest `EXPERIMENTAL` tier label (Principle 5),
+and at least a smoke test. The registry entry (or, pre-registry, the script header)
+carries the experimental marker and a decision date; by that date the capability is
+either promoted (full criteria 1-5) or removed. Experiments are how the charter stays a
+guide instead of a wall; the marker plus deadline is how they don't become permanent
+squatters.
+
 ---
 
 ## Relation to other docs
 
 - [PRINCIPLES.md](PRINCIPLES.md) — build constraints (*how*); Principle 1 is this charter's root.
 - [RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md) — **decouples enforcement
-  from the substrate** (R1) and provides the typed plugin manager that hosts both the three
+  from the substrate** (R1) and provides the typed plugin manager that hosts both the
   substrate-capability types and the separate `enforcement` type (R8).
 - RFC-001 (Intelligent Memory), RFC-007 (Graph Projection) — algorithms for specific recall /
   store / learning strategies.
