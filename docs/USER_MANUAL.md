@@ -17,6 +17,7 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 8: Switching Between Tools](#scenario-8-switching-between-tools)
 - [Scenario 8b: Running a Second-Opinion Review on a Plan or Diff](#scenario-8b-running-a-second-opinion-review-on-a-plan-or-diff)
 - [Scenario 8c: Running Routines on a Schedule (macOS)](#scenario-8c-running-routines-on-a-schedule-macos)
+- [Scenario 8d: One View Across Every Project](#scenario-8d-one-view-across-every-project)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
@@ -411,6 +412,51 @@ After install:
 Logs live at `~/Library/Logs/episodic-memory/`. If something looks off (digest didn't run, mining looks empty), `tail ~/Library/Logs/episodic-memory/em-daily-mining.log` is the first stop; `launchctl print gui/$(id -u)/com.charltonho.em-daily-mining` shows whether the job is loaded and when it last ran.
 
 **When you don't want this:** if you're on Linux/Windows or just prefer manual control, skip the install — the mining job has a direct CLI equivalent (`node scripts/em-mine-transcripts.mjs`), and the digest / hygiene jobs run their SKILLs, so you can trigger those by asking your AI assistant to run the weekly-digest / instruction-hygiene routine when you want one.
+
+---
+
+## Scenario 8d: One View Across Every Project
+
+**What happens:** Once episodic memory is installed in several projects, each project has its own
+local store, and checking on them one by one gets old. Every install is recorded in a consumer
+registry, and the maintenance commands can walk it: ask your assistant "how are all my memory
+stores doing?" and it runs the registry-wide forms instead of cd-ing around.
+
+```bash
+# Analytics for the global store PLUS every registered project store
+node ~/.episodic-memory/scripts/em-stats.mjs --all-projects
+
+# Health check across all of them (--fix repairs each store in place)
+node ~/.episodic-memory/scripts/em-doctor.mjs --all-projects
+
+# Preview folding long revision chains in every store (nothing is written)
+node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded --all-projects --dry-run
+```
+
+Each project shows up as its own block (`project:<name>` with the store path), so you can see at
+a glance which store is bloated, which has index drift, and which has a 40-revision chain worth
+folding. A real multi-store fold additionally requires `--confirm`, and stores whose layout the
+substrate can't safely write (a registered subfolder of a bigger repo, a linked worktree) are
+reported and skipped rather than touched.
+
+**Promoting lessons that keep recurring.** When the same lesson shows up independently in two or
+more projects ("always quote hook command paths" learned in project A, then learned again in
+project B), `em-promote` finds the recurrence and, on request, writes ONE global lesson episode
+with links back to its sources — so every future session in every project recalls it:
+
+```bash
+node ~/.episodic-memory/scripts/em-promote.mjs            # preview candidates
+node ~/.episodic-memory/scripts/em-promote.mjs --apply    # write the global lessons
+```
+
+Your project stores are never modified by promotion; only the global store gains an episode.
+Re-running it is safe — already-promoted recurrences are skipped. This command is EXPERIMENTAL
+(it either proves itself or is removed by 2026-10-08), so treat its suggestions as candidates to
+review, not gospel.
+
+**When you don't want this:** with a single registered project there is nothing to correlate —
+the commands say so and exit cleanly. Everything here is opt-in and manual; nothing scans your
+projects in the background.
 
 ---
 
