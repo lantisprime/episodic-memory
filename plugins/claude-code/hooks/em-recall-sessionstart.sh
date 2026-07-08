@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# episodic-memory-hook-version: 2026-06-18.1
+# episodic-memory-hook-version: 2026-07-08.1
 # em-recall-sessionstart.sh — RFC-002 Phase 3b SessionStart hook
 #
 # RFC-008 P3d (F38/F60): the SessionStart enforcement side-effects (the
@@ -117,6 +117,38 @@ warn_hook_freshness() {
 }
 
 warn_hook_freshness
+
+# ─── install-version drift notice (Layer 1) ──────────
+# Cheap happy path: two file reads + sed extraction of writer-controlled JSON
+# (install-version manifests are written by install.mjs with one key per line
+# and hex-ish values, so a line-oriented sed is reliable; no node spawn unless
+# drift is detected AND the operator opted in to auto-update). Silent when the
+# versions match, silent when either manifest is missing — degrade, never
+# block, never noisy.
+_manifest_field() {
+  # $1 = file, $2 = key. Writer-controlled JSON (2-space indent, key per line).
+  sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -n1
+}
+
+check_install_version_drift() {
+  local proj_manifest="$CWD/.episodic-memory-install.json"
+  local global_manifest="$HOME/.episodic-memory/install-manifest.json"
+  [ -f "$proj_manifest" ] || return 0
+  [ -f "$global_manifest" ] || return 0
+
+  local proj_ver global_ver
+  proj_ver="$(_manifest_field "$proj_manifest" source_version)"
+  global_ver="$(_manifest_field "$global_manifest" source_version)"
+  [ -n "$proj_ver" ] || return 0
+  [ -n "$global_ver" ] || return 0
+  [ "$proj_ver" = "$global_ver" ] && return 0
+
+  local repo_path
+  repo_path="$(_manifest_field "$global_manifest" source_repo)"
+  echo "episodic-memory: project artifacts at ${proj_ver:0:12}, global at ${global_ver:0:12} — run: node ${repo_path:-<episodic-memory-repo>}/install.mjs --update-consumers"
+}
+
+check_install_version_drift || true
 
 # ─── second-opinion runbook UX-marker cleanup ────────────────────────────
 # Glob-clear all `.checkpoints/.so-runbook-shown.*` files at canonical repo
