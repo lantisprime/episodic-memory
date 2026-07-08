@@ -226,5 +226,75 @@ t('testEvidenceCrossScopeResolves', () => {
   assert.deepEqual(row.evidence, [globalVid]);
 });
 
+// --- S7: REQ-18 R9a collision report ---
+
+t('testFirstLessonNoSelfCollision', () => {
+  // CX5: the post-write lazy rebuild contains the just-written episode; without
+  // self-exclusion the FIRST trigger-bearing lesson would collide with itself.
+  const { cwd, home } = mkStore();
+  const r = run(EM_STORE, [...LESSON, '--trigger', 'second opinion'], { cwd, home });
+  assert.equal(r.code, 0);
+  assert.ok(!/collision:/.test(r.stderr), `first trigger-bearing lesson emits NO collision: ${r.stderr}`);
+});
+
+t('testCollisionReportOnSharedTrigger', () => {
+  const { cwd, home } = mkStore();
+  const a = run(EM_STORE, [...LESSON, '--trigger', 'second opinion'], { cwd, home });
+  assert.equal(a.code, 0);
+  const b = run(EM_STORE, [...LESSON, '--trigger', 'second opinion'], { cwd, home });
+  assert.equal(b.code, 0, 'the write ALWAYS proceeds');
+  assert.match(b.stderr, /collision: trigger "second opinion" also on /, 'collision line on STDERR');
+  assert.ok(b.stderr.includes(a.json.id), "names the EXISTING lesson's id");
+  assert.ok(!b.stderr.includes(b.json.id), 'never names the just-written episode (self-exclusion)');
+});
+
+t('testCollisionStdoutUnchanged', () => {
+  const { cwd, home } = mkStore();
+  run(EM_STORE, [...LESSON, '--trigger', 'shared phrase'], { cwd, home });
+  const b = run(EM_STORE, [...LESSON, '--trigger', 'shared phrase'], { cwd, home });
+  assert.equal(b.code, 0);
+  const parsed = JSON.parse(b.stdout.trim()); // stdout is EXACTLY the normal success JSON
+  assert.equal(parsed.status, 'ok');
+  assert.ok(parsed.id && parsed.file);
+  assert.ok(!/collision/.test(b.stdout), 'report never leaks into stdout');
+});
+
+t('testNoCollisionNoReport', () => {
+  const { cwd, home } = mkStore();
+  run(EM_STORE, [...LESSON, '--trigger', 'phrase one'], { cwd, home });
+  const b = run(EM_STORE, [...LESSON, '--trigger', 'phrase two'], { cwd, home });
+  assert.equal(b.code, 0);
+  assert.ok(!/collision:/.test(b.stderr), 'disjoint triggers -> no report');
+});
+
+t('testCollisionWriteProceeds', () => {
+  // EC13: the collision READ fails (index.jsonl write-only -> the lazy build
+  // cannot read it) -> NO report, write proceeds, exit unchanged, stdout normal.
+  const { cwd, home } = mkStore();
+  run(EM_STORE, [...LESSON, '--trigger', 'shared phrase'], { cwd, home });
+  const idxPath = path.join(storeDir(cwd), 'index.jsonl');
+  fs.chmodSync(idxPath, 0o200); // append still works; reads fail
+  try {
+    const b = run(EM_STORE, [...LESSON, '--trigger', 'shared phrase'], { cwd, home });
+    assert.equal(b.code, 0, `write proceeds when the collision read fails: ${b.stdout}`);
+    assert.equal(b.json.status, 'ok');
+    assert.ok(!/collision:/.test(b.stderr), 'unreadable index -> no report, never fatal');
+  } finally {
+    fs.chmodSync(idxPath, 0o644);
+  }
+});
+
+t('testReviseCollisionReport', () => {
+  const { cwd, home } = mkStore();
+  const a = run(EM_STORE, [...LESSON, '--trigger', 'revise phrase'], { cwd, home });
+  const b = run(EM_STORE, [...LESSON], { cwd, home });
+  const rev = run(EM_REVISE, ['--original', b.json.id, '--project', 't', '--summary', 'r', '--body', 'c',
+    '--scope', 'local', '--trigger', 'revise phrase'], { cwd, home });
+  assert.equal(rev.code, 0, 'revise write proceeds');
+  assert.match(rev.stderr, /collision: trigger "revise phrase" also on /);
+  assert.ok(rev.stderr.includes(a.json.id));
+  assert.ok(!rev.stderr.includes(rev.json.id), 'self-excluded on the revise path too');
+});
+
 console.log(`\n${pass}/${pass + fail} pass`);
 process.exit(fail ? 1 : 0);

@@ -30,6 +30,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
+import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -382,6 +383,24 @@ if (original.dir !== dataDir) {
   updateTagsIndex(original.dir, id, mergedTags)
   updateCategoryIndex(original.dir, id, origCategory)
   updateTokensIndex(original.dir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
+}
+
+// R9a write-time collision report (REQ-18) — mirrors em-store's post-write
+// block (revise-side parity): stderr-only, self-excluded, never fatal.
+if (activation && Array.isArray(activation.triggers) && activation.triggers.length) {
+  try {
+    const merged = loadMergedTriggerIndex()
+    const mine = new Set(activation.triggers)
+    const reported = new Set()
+    for (const e of merged.entries) {
+      if (e.episode_id === id) continue // self-exclusion (CX5)
+      if (!mine.has(e.value)) continue
+      const key = `${e.episode_id} ${e.value}`
+      if (reported.has(key)) continue
+      reported.add(key)
+      process.stderr.write(`collision: trigger "${e.value}" also on ${e.episode_id}: ${e.summary}\n`)
+    }
+  } catch {}
 }
 
 console.log(JSON.stringify({

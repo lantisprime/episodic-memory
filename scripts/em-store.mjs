@@ -30,6 +30,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
+import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -309,6 +310,26 @@ updateCategoryIndex(dataDir, id, category)
 // Token source is the FULL FILE content (frontmatter + body): the search
 // body tier greps the whole file, so pruning must see the same text.
 updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeContent }))
+
+// R9a write-time collision report (REQ-18) — INFORMATIONAL, stderr-only, runs
+// AFTER the write so the lazy R2 rebuild it triggers already contains this
+// episode (self-excluded, CX5). Best-effort: any failure means NO report,
+// never a blocked write; stdout JSON below is untouched.
+if (activation && Array.isArray(activation.triggers) && activation.triggers.length) {
+  try {
+    const merged = loadMergedTriggerIndex()
+    const mine = new Set(activation.triggers)
+    const reported = new Set()
+    for (const e of merged.entries) {
+      if (e.episode_id === id) continue // self-exclusion: the just-written episode
+      if (!mine.has(e.value)) continue
+      const key = `${e.episode_id} ${e.value}`
+      if (reported.has(key)) continue
+      reported.add(key)
+      process.stderr.write(`collision: trigger "${e.value}" also on ${e.episode_id}: ${e.summary}\n`)
+    }
+  } catch {}
+}
 
 console.log(JSON.stringify({ status: 'ok', id, file: filePath, scope }))
 
