@@ -29,6 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
+import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -40,7 +41,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope local|global] [--pin]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...' }))
   process.exit(0)
 }
 
@@ -79,6 +80,16 @@ const bodyArg = flag('--body')
 const bodyFile = flag('--body-file')
 const url = flag('--url')
 const scope = flag('--scope') || 'global'
+// RFC-009 R1 activation flags (lesson-only; validated below via lib/activation.mjs)
+const triggers = flagAll('--trigger')
+const appliesToProjects = flagAll('--applies-to-project')
+const appliesToTools = flagAll('--applies-to-tool')
+const priorityFlag = flag('--priority')
+const reviewBy = flag('--review-by')
+const evidence = flagAll('--evidence')
+// Typed T6 passthrough scalar (REQ-8): set by em-violation's handoff; generic
+// flag, violation-only in practice.
+const violatedPattern = flag('--violated-pattern')
 // --pin: exempt from time decay (recall floor 0.6 instead of 0.1) and from
 // em-prune archival. For foundational decisions that must not fade.
 const pinned = argv.includes('--pin')
@@ -125,6 +136,38 @@ if (!catV.ok) {
     : `Invalid category "${category}". Must be one of: ${(() => { try { return loadCategories().categories.map(c => c.name).join(', ') } catch { return 'see categories.json' } })()}`
   console.log(JSON.stringify({ status: 'error', message }))
   process.exit(1)
+}
+
+// RFC-009 R1: validate activation fields BEFORE any write (I4 — a rejected
+// write leaves the store byte-unchanged). Present-only input; the lib applies
+// the priority default (5) only when activation is actually in play, so a
+// freeform write of ANY category carries no activation fields (EC15).
+const av = validateActivation({
+  ...(triggers.length ? { triggers } : {}),
+  ...(appliesToProjects.length ? { applies_to_projects: appliesToProjects } : {}),
+  ...(appliesToTools.length ? { applies_to_tools: appliesToTools } : {}),
+  ...(evidence.length ? { evidence } : {}),
+  ...(priorityFlag !== undefined ? { priority: Number(priorityFlag) } : {}),
+  ...(reviewBy !== undefined ? { review_by: reviewBy } : {}),
+}, { category })
+if (!av.ok) {
+  console.log(JSON.stringify({ status: 'error', errors: av.errors, message: av.errors.map(e => e.message).join('; ') }))
+  process.exit(1)
+}
+const activation = av.fields // null for freeform writes
+
+// REQ-6 (S3): each --evidence id must resolve to an EXISTING category:violation
+// episode in the MERGED (local+global) index — never per-active-scope (F1).
+if (activation && Array.isArray(activation.evidence) && activation.evidence.length) {
+  const lv = resolveLinkage(activation.evidence, { requireCategory: 'violation', index: loadMergedIndex() })
+  if (!lv.ok) {
+    console.log(JSON.stringify({
+      status: 'error',
+      message: `--evidence must name existing violation episodes; missing: [${lv.missing.join(', ')}] wrong-category: [${lv.wrongCategory.join(', ')}]`,
+      missing: lv.missing, wrong_category: lv.wrongCategory
+    }))
+    process.exit(1)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +225,20 @@ const fmLines = [
   `tags: [${tags.join(', ')}]`,
   `summary: ${summary}`,
 ]
+// RFC-009 R1 activation frontmatter — present-only, arrays UNQUOTED inline
+// (REQ-2/I4: items are char-rejected above, so the round-trip through
+// em-rebuild-index's generic parser needs no parser change).
+if (activation) {
+  for (const field of ACTIVATION_ARRAY_FIELDS) {
+    if (Array.isArray(activation[field]) && activation[field].length) {
+      fmLines.push(`${field}: [${serializeInlineArray(activation[field])}]`)
+    }
+  }
+  fmLines.push(`priority: ${activation.priority}`)
+  if (activation.review_by !== undefined) fmLines.push(`review_by: ${activation.review_by}`)
+}
+// T6 typed scalar (REQ-8): violation-side passthrough from em-violation's handoff.
+if (violatedPattern !== undefined) fmLines.push(`violated_pattern: ${violatedPattern}`)
 if (pinned) fmLines.push('pinned: true')
 if (url) {
   fmLines.push(`url: ${url}`)
@@ -200,9 +257,22 @@ fs.mkdirSync(episodesDir, { recursive: true })
 const filePath = path.join(episodesDir, `${id}.md`)
 fs.writeFileSync(filePath, episodeContent, 'utf8')
 
+// Activation/T6 index fields — keep this list in LOCKSTEP with
+// em-rebuild-index.mjs's emit object (present-only, same key names) so a
+// store-then-rebuild round-trip preserves the fields (REQ-9, step 2.3 parity note).
+const activationIndexFields = {
+  ...(activation ? Object.fromEntries(
+    ACTIVATION_ARRAY_FIELDS.filter(f => Array.isArray(activation[f]) && activation[f].length)
+      .map(f => [f, activation[f]])
+  ) : {}),
+  ...(activation ? { priority: activation.priority } : {}),
+  ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
+  ...(violatedPattern !== undefined ? { violated_pattern: violatedPattern } : {}),
+}
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project, category,
   status: 'active', supersedes: null, tags, summary,
+  ...activationIndexFields,
   ...(pinned ? { pinned: true } : {}),
   ...(url ? { url, fetched: dateStr } : {})
 })

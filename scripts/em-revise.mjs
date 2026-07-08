@@ -29,6 +29,7 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readBodyFile } from './lib/body-file.mjs'
 import { validateCategory, canonicalCategory } from './lib/categories.mjs'
+import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -40,7 +41,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global] [--pin]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...' }))
   process.exit(0)
 }
 
@@ -74,6 +75,14 @@ const summary = flag('--summary')
 const bodyArg = flag('--body')
 const bodyFile = flag('--body-file')
 const scope = flag('--scope') || 'inherit'
+// RFC-009 R1 activation flags (lesson-only; validated against the INHERITED
+// category below, before the supersede mutation, via lib/activation.mjs)
+const triggers = flagAll('--trigger')
+const appliesToProjects = flagAll('--applies-to-project')
+const appliesToTools = flagAll('--applies-to-tool')
+const priorityFlag = flag('--priority')
+const reviewBy = flag('--review-by')
+const evidence = flagAll('--evidence')
 
 const VALID_SCOPES_REVISE = ['inherit', 'local', 'global']
 if (!VALID_SCOPES_REVISE.includes(scope)) {
@@ -127,6 +136,7 @@ if (!original) {
 // must leave the store byte-unchanged; the original is marked superseded just below,
 // so validation has to precede that mutation, not follow the later metadata parse).
 // ---------------------------------------------------------------------------
+let activation = null // normalized RFC-009 activation fields (set in the block below)
 {
   const origRaw = fs.readFileSync(original.filePath, 'utf8')
   const fm = origRaw.match(/^---\n([\s\S]*?)\n---/)
@@ -151,6 +161,36 @@ if (!original) {
       : `Inherited category "${cat}" is not in the vocabulary`
     console.log(JSON.stringify({ status: 'error', message }))
     process.exit(1)
+  }
+
+  // RFC-009 R1: validate activation fields against the INHERITED category
+  // BEFORE the supersede mutation below (I4 — a rejected revise leaves the
+  // original active and the store byte-unchanged).
+  const av = validateActivation({
+    ...(triggers.length ? { triggers } : {}),
+    ...(appliesToProjects.length ? { applies_to_projects: appliesToProjects } : {}),
+    ...(appliesToTools.length ? { applies_to_tools: appliesToTools } : {}),
+    ...(evidence.length ? { evidence } : {}),
+    ...(priorityFlag !== undefined ? { priority: Number(priorityFlag) } : {}),
+    ...(reviewBy !== undefined ? { review_by: reviewBy } : {}),
+  }, { category: cat })
+  if (!av.ok) {
+    console.log(JSON.stringify({ status: 'error', errors: av.errors, message: av.errors.map(e => e.message).join('; ') }))
+    process.exit(1)
+  }
+  activation = av.fields // null when the revise carries no activation flags
+
+  // REQ-6 (revise-side parity): merged-index resolution, never per-active-scope (F1).
+  if (activation && Array.isArray(activation.evidence) && activation.evidence.length) {
+    const lv = resolveLinkage(activation.evidence, { requireCategory: 'violation', index: loadMergedIndex() })
+    if (!lv.ok) {
+      console.log(JSON.stringify({
+        status: 'error',
+        message: `--evidence must name existing violation episodes; missing: [${lv.missing.join(', ')}] wrong-category: [${lv.wrongCategory.join(', ')}]`,
+        missing: lv.missing, wrong_category: lv.wrongCategory
+      }))
+      process.exit(1)
+    }
   }
 }
 
@@ -277,6 +317,19 @@ const mergedTags = normalizeTags([...origTagsFromIndex, ...tags])
 // decision. --pin additionally pins an unpinned chain at revision time.
 const pinned = origPinned || argv.includes('--pin')
 
+// RFC-009 R1 activation frontmatter — present-only, arrays UNQUOTED inline
+// (REQ-2/I4); mirrors em-store's serialization (revise-side parity).
+const activationFmLines = []
+if (activation) {
+  for (const field of ACTIVATION_ARRAY_FIELDS) {
+    if (Array.isArray(activation[field]) && activation[field].length) {
+      activationFmLines.push(`${field}: [${serializeInlineArray(activation[field])}]`)
+    }
+  }
+  activationFmLines.push(`priority: ${activation.priority}`)
+  if (activation.review_by !== undefined) activationFmLines.push(`review_by: ${activation.review_by}`)
+}
+
 const frontmatter = [
   '---',
   `id: ${id}`,
@@ -288,6 +341,7 @@ const frontmatter = [
   `supersedes: ${originalId}`,
   `tags: [${mergedTags.join(', ')}]`,
   `summary: ${summary}`,
+  ...activationFmLines,
   ...(pinned ? ['pinned: true'] : []),
   '---',
 ].join('\n')
@@ -299,10 +353,20 @@ fs.mkdirSync(episodesDir, { recursive: true })
 const filePath = path.join(episodesDir, `${id}.md`)
 fs.writeFileSync(filePath, episodeContent, 'utf8')
 
+// Keep in LOCKSTEP with em-rebuild-index.mjs's emit (REQ-9 parity note).
+const activationIndexFields = {
+  ...(activation ? Object.fromEntries(
+    ACTIVATION_ARRAY_FIELDS.filter(f => Array.isArray(activation[f]) && activation[f].length)
+      .map(f => [f, activation[f]])
+  ) : {}),
+  ...(activation ? { priority: activation.priority } : {}),
+  ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
+}
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project: resolvedProject,
   category: origCategory, status: 'active', supersedes: originalId,
   tags: mergedTags, summary,
+  ...activationIndexFields,
   ...(pinned ? { pinned: true } : {})
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')

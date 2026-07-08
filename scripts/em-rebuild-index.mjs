@@ -178,6 +178,10 @@ function rebuildDir(dataDir, label) {
       }
     }
 
+    // RFC-009 P1b: numeric priority round-trip — the frontmatter parser yields a
+    // string; the writers index a Number. Malformed (hand-authored) values pass
+    // through raw so the row still mirrors the file.
+    const priorityNum = fm.priority !== undefined ? Number(fm.priority) : undefined
     entries.push(JSON.stringify({
       id: fm.id,
       date,
@@ -190,6 +194,17 @@ function rebuildDir(dataDir, label) {
       ...(typeof fm.superseded_by === 'string' ? { superseded_by: fm.superseded_by } : {}),
       tags: normalizedTags,
       summary: fm.summary,
+      // RFC-009 R1/R2/T6 activation + linkage carry (REQ-9) — present-only, no
+      // null spam; keep this list in LOCKSTEP with em-store/em-revise's
+      // activationIndexFields (step 2.3 parity note).
+      ...(Array.isArray(fm.triggers) ? { triggers: fm.triggers } : {}),
+      ...(Array.isArray(fm.applies_to_projects) ? { applies_to_projects: fm.applies_to_projects } : {}),
+      ...(Array.isArray(fm.applies_to_tools) ? { applies_to_tools: fm.applies_to_tools } : {}),
+      ...(Array.isArray(fm.evidence) ? { evidence: fm.evidence } : {}),
+      ...(Array.isArray(fm.lessons) ? { lessons: fm.lessons } : {}),
+      ...(fm.priority !== undefined ? { priority: Number.isFinite(priorityNum) ? priorityNum : fm.priority } : {}),
+      ...(typeof fm.review_by === 'string' ? { review_by: fm.review_by } : {}),
+      ...(typeof fm.violated_pattern === 'string' ? { violated_pattern: fm.violated_pattern } : {}),
       ...(fm.pinned === true || fm.pinned === 'true' ? { pinned: true } : {}),
       access_count: accessCount,
       last_accessed: lastAccessed,
