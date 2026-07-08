@@ -237,6 +237,9 @@ jobs:
       - name: Run em-capture session auto-capture suite (wave-6 second deliverable)
         run: node tests/test-em-capture.mjs
 
+      - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
+        run: node tests/test-install-manifest.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code

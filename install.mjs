@@ -28,6 +28,12 @@ import {
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
 } from './scripts/lib/install-manifest.mjs'
+import {
+  perProjectArtifactPairs, globalArtifactPairs, buildArtifactEntries,
+  mergeArtifactEntries, buildManifest, resolveSourceVersion, writeJsonAtomic,
+  readJsonSafe, projectManifestPath, globalManifestPath,
+  PROJECT_MANIFEST_BASENAME,
+} from './scripts/lib/install-version.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPTS_DIR = path.join(GLOBAL_DIR, 'scripts')
@@ -512,6 +518,15 @@ const refreshed = fs.readFileSync(gitignorePath, 'utf8')
 if (!gitignoreHasPattern(refreshed, runKeyPattern)) {
   fs.appendFileSync(gitignorePath, `\n# BP-1 per-run HMAC key (RFC-004)\n${runKeyPattern}\n`)
   console.log(`Added ${runKeyPattern} to .gitignore`)
+}
+// Layer 1: the per-project install-version manifest is machine-local state
+// (per-checkout install record), like .episodic-memory/ itself.
+{
+  const refreshed2 = fs.readFileSync(gitignorePath, 'utf8')
+  if (!gitignoreHasPattern(refreshed2, PROJECT_MANIFEST_BASENAME)) {
+    fs.appendFileSync(gitignorePath, `\n# Episodic memory install-version manifest\n${PROJECT_MANIFEST_BASENAME}\n`)
+    console.log(`Added ${PROJECT_MANIFEST_BASENAME} to .gitignore`)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2830,6 +2845,55 @@ if (installSecondOpinion) {
   }
 
   if (installFailed) process.exitCode = 1
+}
+
+// ---------------------------------------------------------------------------
+// 7. Layer 1 update distribution: version manifests + consumer registry +
+//    dist cache. Runs LAST so the manifests record what this run actually
+//    left on disk (the artifact membership rule is byte-equality with the
+//    repo source, so skipped-divergent user files are never recorded as ours).
+//    Best-effort: a manifest failure must never fail an otherwise-good install.
+// ---------------------------------------------------------------------------
+try {
+  // 7a. Global manifest (~/.episodic-memory/install-manifest.json).
+  // REQ (--uninstall-enforcement, test-uninstall-enforcement t_no_global_touch):
+  // an uninstall run never touches ~/.claude or ~/.episodic-memory — so ALL
+  // global-side Layer 1 writes (global manifest, registry, dist cache) are
+  // skipped for it; only the per-project manifest (7b) is refreshed (its
+  // enforcement entries drop out via the merge because the files are gone).
+  // The registry's enforcement_installed flag heals from disk truth on the
+  // next regular install run (see 7c).
+  const globalArtifacts = buildArtifactEntries(globalArtifactPairs(REPO_DIR, GLOBAL_DIR))
+  const sourceVersion = resolveSourceVersion(REPO_DIR, globalArtifacts)
+  if (!uninstallEnforcement) {
+    writeJsonAtomic(globalManifestPath(GLOBAL_DIR), buildManifest({
+      scope: 'global',
+      tool,
+      sourceVersion,
+      sourceRepo: REPO_DIR,
+      artifacts: globalArtifacts,
+    }))
+  }
+
+  // 7b. Per-project manifest (<project>/.episodic-memory-install.json).
+  // Fresh equality-gated enumeration merged with the previous manifest so a
+  // skipped-divergent (user-modified) artifact keeps its original entry and
+  // stays visible to the update sweep as "modified".
+  const prevProjectManifest = readJsonSafe(projectManifestPath(projectAbs))
+  const projectArtifacts = mergeArtifactEntries(
+    prevProjectManifest,
+    buildArtifactEntries(perProjectArtifactPairs(REPO_DIR, projectAbs)),
+    projectAbs,
+  )
+  writeJsonAtomic(projectManifestPath(projectAbs), buildManifest({
+    scope: 'project',
+    tool,
+    sourceVersion,
+    sourceRepo: REPO_DIR,
+    artifacts: projectArtifacts,
+  }))
+} catch (e) {
+  console.log(`WARNING: could not record install version manifests: ${e.message} (install itself is complete; --update-consumers and the drift notice need a successful manifest write)`)
 }
 
 if (!installFailed) console.log('\nDone! Episodic memory is ready.')
