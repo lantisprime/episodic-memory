@@ -76,6 +76,8 @@ node ~/.episodic-memory/scripts/em-store.mjs --project global --category decisio
 
 Review session for 0-3 significant events, store them, then proceed with normal session handoff. Also examine project-specific decisions for potential promotion to global behavioral patterns.
 
+After writing the handoff (or a PR body), scan it so cited episodes earn recall weight: `node ~/.episodic-memory/scripts/em-feedback.mjs --scan-text <file>` records one +1 per resolved episode id it finds.
+
 ## Maintenance
 
 Rebuild index if corrupted: `node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all`

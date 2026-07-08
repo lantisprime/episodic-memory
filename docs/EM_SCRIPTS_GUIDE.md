@@ -328,10 +328,21 @@ so consistently useful episodes rise and consistently irrelevant ones sink.
 
 ```
 node ~/.episodic-memory/scripts/em-feedback.mjs --id <episode-id> (--useful | --noise)
+node ~/.episodic-memory/scripts/em-feedback.mjs --scan-text <file> [--scope local|global|all] [--dry-run]
 ```
 
 Output: `{"status":"ok","id":"...","feedback":3,"scope":"global"}`. Counter
 clamps to [-10, 10] and survives index rebuilds.
+
+`--scan-text` is batch inference: an episode id cited in a session handoff,
+PR body, or lessons write-up demonstrably shaped that artifact, which is the
+`--useful` signal without the typing. It extracts episode-id patterns (shape
+derived from em-store's generator), dedupes, skips ids that do not resolve in
+the selected scope(s), and records ONE +1 per resolved id. `--dry-run`
+previews without writing. Wrap-up habit: scan the handoff/PR body so cited
+episodes earn recall weight.
+
+Output: `{"status":"ok","mode":"scan-text","scope":"all","scanned":1,"matched":5,"resolved":4,"recorded":4,"skipped_unresolved":1,...}`
 
 ### em-move
 
