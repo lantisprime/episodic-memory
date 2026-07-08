@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory.dev/schemas/readonly-commands.schema.json",
+  "title": "Read-only command manifest (patterns/readonly-commands.json)",
+  "description": "First-party manifest of canonical command shapes that are read-only BY DESIGN (E4, gate-classifier UX). checkpoint-gate.sh consults it via scripts/classifier-hold-consult.mjs ONLY when an agent-classification hold is otherwise imminent; a match classifies read_only with no agent involvement. Matching runs on the canonical form from scripts/lib/command-canonical.mjs, so redirect/metachar/env-prefix variants can never match. Derive entries from docs/EM_SCRIPTS_GUIDE.md + the scripts themselves; a stale entry fails CLOSED (hold returns).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "entries"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "default_script_locations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "flagName": {
+      "type": "string",
+      "pattern": "^--?[A-Za-z][A-Za-z0-9._-]*$"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "exec", "notes"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "exec": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "script": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "script_locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "subcommand": { "type": "string", "minLength": 1 },
+        "allow_flags": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flagName" }
+        },
+        "deny_flags": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/flagName" }
+        },
+        "require_flags": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/flagName" }
+        },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

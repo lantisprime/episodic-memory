@@ -172,6 +172,7 @@ const ENFORCEMENT_ENTRY_EXPLICIT = new Set([
   'enforce-contract.mjs',
   'agent-classifier-dispatch.mjs', 'classifier-config-loader.mjs', 'classifier-marker.mjs',
   'classifier-override-lookup.mjs', 'classifier-override-persist.mjs', 'classify-correction.mjs',
+  'classifier-hold-consult.mjs',
   'llm-classify.mjs',
   'checkpoint-marker.mjs', 'plan-marker.mjs', 'preflight-marker-write.mjs',
 ])
@@ -438,6 +439,19 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
       relativePath: 'patterns/_index.json',
       repoPath: repoPatternsIndex,
       installedPath: path.join(homeDir, '.episodic-memory', 'patterns', '_index.json'),
+      kind: 'pattern'
+    })
+  }
+
+  // Read-only command manifest (E4) — copied into the global patterns dir so
+  // classifier-hold-consult.mjs (installed co-located under
+  // <project>/.claude/hooks/) can resolve it via its $HOME fallback.
+  const repoReadonlyManifest = path.join(repoDir, 'patterns', 'readonly-commands.json')
+  if (fs.existsSync(repoReadonlyManifest)) {
+    entries.push({
+      relativePath: 'patterns/readonly-commands.json',
+      repoPath: repoReadonlyManifest,
+      installedPath: path.join(homeDir, '.episodic-memory', 'patterns', 'readonly-commands.json'),
       kind: 'pattern'
     })
   }

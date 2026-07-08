@@ -60,6 +60,33 @@ key (existing markers keep hitting until TTL/`--vacuum` reaps them). Writes
 persist under the canonical key with the raw command preserved in the marker's
 `command_raw` field for audit. Tests: `tests/test-canonical-cache-key.mjs`.
 
+## Pre-hold consult order (E4 read-only manifest)
+
+When a novel Bash command would otherwise be HELD for agent classification
+(LABEL=shared_write with an unevaluated-novel reason — the per-session marker
+cache already missed), `checkpoint-gate.sh` consults
+`scripts/classifier-hold-consult.mjs` BEFORE emitting the hold (spawn
+discipline: the common allow paths never pay the node spawn). Consult order:
+
+1. **Per-session marker cache** (already consulted inside the classifier —
+   the miss is what made the reason unevaluated-novel).
+2. **First-party read-only manifest** `patterns/readonly-commands.json`
+   (schema: `patterns/readonly-commands.schema.json`): canonical command
+   shapes that are read-only BY DESIGN (em-* readers, `em-doctor` without
+   `--fix`, `em-pattern-health --check`, `em-recall` with its documented read
+   flags, `node --version`). A match classifies `read_only` with no agent
+   involvement and the command runs; nothing is persisted (the manifest is the
+   durable authority). Matching runs on the canonical form, so a redirect or
+   extra write-flag variant can never match.
+3. **Existing agent hold** (fail-closed): manifest miss, malformed manifest,
+   helper absent, or garbage output all fall through to
+   `_block_needs_classification`.
+
+Installed layouts resolve the manifest from
+`~/.episodic-memory/patterns/readonly-commands.json` (deployed by
+`install.mjs`); repo-source runs use `patterns/` directly. Tests:
+`tests/test-readonly-manifest.mjs`.
+
 ## Installation
 
 `install.mjs --install-hooks` (PR-B per #59 + PR-A per #86):

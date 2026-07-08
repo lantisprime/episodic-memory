@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "description": "Canonical command shapes that are read-only BY DESIGN (E4). Consulted by checkpoint-gate.sh (via scripts/classifier-hold-consult.mjs) ONLY when an agent-classification hold is otherwise imminent — i.e. for shapes the structural classifier could not label (reason default_write / interpreter_other). em-* scripts already hardcoded read_only in command-classifier.sh (em-search, em-list, em-watch-codex, em-pattern-health, em-check-stale, em-rebuild-index, em-workflow-validate) never reach the hold, but are listed anyway so this file is the complete by-design reader registry; git read subcommands (status/log/diff/show) are auto-classified by the git case-arm and are deliberately NOT duplicated here. Reader/writer facts derive from docs/EM_SCRIPTS_GUIDE.md and the scripts themselves. Matching is on the canonical form (scripts/lib/command-canonical.mjs): flag NAMES only, values dropped; redirect/metachar/env-prefix forms never canonicalize and therefore never match.",
+  "default_script_locations": ["<REPO>/scripts", "<HOME>/.episodic-memory/scripts"],
+  "entries": [
+    {
+      "id": "em-search",
+      "exec": ["node"],
+      "script": "em-search.mjs",
+      "notes": "Keyword/tag/category search. Reads episode stores; access-count tracking writes stay inside the episode store (nonsrc by design). Already hardcoded read_only in command-classifier.sh — listed for registry completeness."
+    },
+    {
+      "id": "em-list",
+      "exec": ["node"],
+      "script": "em-list.mjs",
+      "notes": "Pure recency list (EM_SCRIPTS_GUIDE.md). Already hardcoded read_only in command-classifier.sh."
+    },
+    {
+      "id": "em-stats",
+      "exec": ["node"],
+      "script": "em-stats.mjs",
+      "notes": "Read-only store analytics — never writes, never bumps access counters (EM_SCRIPTS_GUIDE.md em-stats section)."
+    },
+    {
+      "id": "em-graph",
+      "exec": ["node"],
+      "script": "em-graph.mjs",
+      "notes": "Typed-edge traversal, projection over file storage built fresh per query — no sidecar DB, no writes (EM_SCRIPTS_GUIDE.md em-graph section)."
+    },
+    {
+      "id": "em-doctor",
+      "exec": ["node"],
+      "script": "em-doctor.mjs",
+      "deny_flags": ["--fix"],
+      "notes": "Health check is report-only; --fix rebuilds indexes and removes .tmp/.lock litter, so the --fix form must NOT match (EM_SCRIPTS_GUIDE.md: 'Everything else stays report-only')."
+    },
+    {
+      "id": "em-check-stale",
+      "exec": ["node"],
+      "script": "em-check-stale.mjs",
+      "notes": "Stale-research report, writes nothing (EM_SCRIPTS_GUIDE.md). Already hardcoded read_only in command-classifier.sh."
+    },
+    {
+      "id": "em-pattern-health",
+      "exec": ["node"],
+      "script": "em-pattern-health.mjs",
+      "require_flags": ["--check"],
+      "notes": "--check is a read-only drift report: 'It writes nothing' (EM_SCRIPTS_GUIDE.md RFC-009 R10f). Other forms are not asserted read-only by this manifest."
+    },
+    {
+      "id": "em-recall-no-store-flags",
+      "exec": ["node"],
+      "script": "em-recall.mjs",
+      "allow_flags": ["--project", "--task-type", "--scope", "--limit", "--days", "--no-track"],
+      "notes": "Session-start recall with its documented read flags only (EM_SCRIPTS_GUIDE.md em-recall section). Access tracking (absent --no-track) writes inside the episode store — nonsrc by design. Closed allow-list: any new/unknown flag falls back to the hold."
+    },
+    {
+      "id": "em-workflow-validate",
+      "exec": ["node"],
+      "script": "em-workflow-validate.mjs",
+      "notes": "Pure validator — 'does NOT modify episodes, write markers, or call hooks' (command-classifier.sh PR #336 relabel). Already hardcoded read_only."
+    },
+    {
+      "id": "node-version-help",
+      "exec": ["node"],
+      "allow_flags": ["--version", "-v", "--help", "-h"],
+      "notes": "Bare interpreter version/help probes. The classifier's help/version carve-out requires a script token, so `node --version` alone otherwise falls to interpreter_other and holds — a by-design false positive this entry closes."
+    }
+  ]
+}
