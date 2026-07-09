@@ -1,0 +1,64 @@
+{
+  "$id": "https://episodic-memory/schemas/trigger-index.schema.json",
+  "title": "Trigger index (per-store <store>/trigger-index.json) — RFC-009 R2 / #487",
+  "description": "Closed, versioned contract for the DERIVED trigger index emitted by em-trigger-index.mjs. schema_version is const 2 (the live producer, em-trigger-index.mjs TRIGGER_INDEX_SCHEMA_VERSION); a new top-level field or entry field is an additive schema_version bump, not a silent extension. review_by is emitted only when the lesson carries one (em-trigger-index.mjs:262), so it is optional.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "build_report", "entries", "activity_phrases", "session_start"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_mtime_ms", "index_size", "index_sha256"],
+      "properties": {
+        "index_mtime_ms": { "type": "number" },
+        "index_size": { "type": "integer", "minimum": 0 },
+        "index_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "build_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["excluded_activity_classes"],
+      "properties": {
+        "excluded_activity_classes": { "type": "object" }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/triggerEntry" }
+    },
+    "activity_phrases": {
+      "type": "object",
+      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+    },
+    "session_start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["critical_entries", "entries", "preflight"],
+      "properties": {
+        "critical_entries": { "type": "array" },
+        "entries": { "type": "array" },
+        "preflight": { "type": "object" }
+      }
+    }
+  },
+  "$defs": {
+    "triggerEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trigger_kind", "value", "episode_id", "summary", "effective_priority", "applies_to_projects", "applies_to_tools"],
+      "properties": {
+        "trigger_kind": { "enum": ["phrase", "tool", "activity"] },
+        "value": { "type": "string" },
+        "episode_id": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "effective_priority": { "type": "integer", "minimum": 1 },
+        "applies_to_projects": { "type": "array", "items": { "type": "string" } },
+        "applies_to_tools": { "type": "array", "items": { "type": "string" } },
+        "review_by": { "type": "string" }
+      }
+    }
+  }
+}
