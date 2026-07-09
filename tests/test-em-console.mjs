@@ -425,6 +425,22 @@ await (async () => {
       const headerNonceB = b.csp.match(/script-src 'nonce-([^']+)'/)[1]
       assert.notStrictEqual(headerNonceB, headerNonce, 'nonce reused across loads (not per-request)')
     })
+    await test('CSP style nonce: style-src is nonce-based with no unsafe-inline, and the served <style> nonce matches the header (#494)', async () => {
+      // Raw fetch — the CSP header and the served <style> tag are the artifacts.
+      const r = await fetch(`http://127.0.0.1:${rw.port}/?token=${TOKEN}`)
+      const csp = r.headers.get('content-security-policy') || ''
+      const body = await r.text()
+      // 1. style-src is nonce-based and carries NO 'unsafe-inline'.
+      const styleSrc = (csp.match(/style-src ([^;]*)/) || [])[1] || ''
+      assert.ok(/'nonce-[^']+'/.test(styleSrc), `style-src not nonce-based: ${styleSrc}`)
+      assert.ok(!/'unsafe-inline'/.test(styleSrc), `style-src still allows unsafe-inline: ${styleSrc}`)
+      // 2. The header nonce equals the nonce on the served <style> tag.
+      const headerNonce = csp.match(/style-src 'nonce-([^']+)'/)[1]
+      const tagNonce = body.match(/<style nonce="([^"]+)">/)[1]
+      assert.strictEqual(tagNonce, headerNonce, 'served <style> nonce != CSP header nonce')
+      // 3. No inline style= attributes survive to trip the tightened policy.
+      assert.ok(!/ style="/.test(body), 'served page still carries inline style= attributes')
+    })
     await test('nonce edit did not disturb the escaping sink: served <script> still defines esc() and carries the nonce (#484 REQ-2)', async () => {
       const page = (await req(rw.port, `/?token=${TOKEN}`)).text
       assert.ok(/<script nonce="[^"]+">/.test(page), 'nonce attribute missing on served <script>')
