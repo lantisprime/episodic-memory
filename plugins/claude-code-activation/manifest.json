@@ -1,0 +1,26 @@
+{
+  "type": "activation",
+  "schema_version": "1.0.0",
+  "id": "claude-code",
+  "harness": "claude-code",
+  "version": "1.0.0",
+  "blocking": false,
+  "capabilities": {
+    "user_prompt_submit": "STRONG",
+    "pre_tool_use": "STRONG",
+    "session_start": "STRONG"
+  },
+  "registrations": [
+    { "id": "rfc-009-activation-user-prompt-submit", "file": "activation-prompt.sh", "event": "UserPromptSubmit", "timeout": 5, "checksum": "sha256:c71563f484a73532b199048183bae67d04fb6dbd5f40ba16c2eff5e0d58a0fb7" },
+    { "id": "rfc-009-activation-pre-tool-use", "file": "activation-tool.sh", "event": "PreToolUse", "timeout": 5, "checksum": "sha256:779a278459351ae2ae80c47882470e0dd007ffbad04a44d2662d6890f050e3b3" },
+    { "id": "rfc-009-activation-session-start", "file": "activation-sessionstart.sh", "event": "SessionStart", "timeout": 10, "checksum": "sha256:b3db3db55f11dbeeed04fc0314e286d6cd37de27af260ef23909b58129a32667" }
+  ],
+  "support_files": [
+    { "file": "activation-hook-run.mjs", "checksum": "sha256:ad84501bb7c02f1083dacb8580888d92a8782dd214851069a8288a50b7ed65bc" }
+  ],
+  "io_schema": "schemas/runtime/activation-io.schema.json",
+  "runbook": {
+    "full": "plugins/claude-code-activation/runbooks/activation.md",
+    "quickref": "plugins/claude-code-activation/runbooks/activation.quickref.md"
+  }
+}

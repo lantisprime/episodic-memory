@@ -71,6 +71,16 @@ Add these only if you want them. They are Claude Code only and never write to
   the enforce-contract config set under `<project>/.claude/`, and seed
   `<project>/.episodic-memory/enforce-config.json` = `{"active": true}` (create if
   absent; never overwritten).
+- `--install-activation`: install the per-project **advisory activation adapter**
+  (RFC-009 R3/R4) under `<project>/.claude/` — the three thin hooks (`activation-prompt`
+  UserPromptSubmit, `activation-tool` PreToolUse, `activation-sessionstart` SessionStart),
+  the shared `activation-hook-run.mjs` runner, and a co-located `manifest.json` carrying the
+  project scope identity — and register them in `<project>/.claude/settings.json`.
+  Advisory-only: the hooks emit `additionalContext` and always exit 0 (no gate, no block).
+  Independent of `--install-enforcement`; never writes to `~/.claude`.
+- `--uninstall-activation`: reverse `--install-activation` for this project (prune the three
+  registrations, delete the adapter files + manifest; a user-modified owned file is preserved
+  with a stderr diff).
 - `--install-second-opinion`: write the second-opinion provider snapshot to
   `~/.claude/hooks/second-opinion-providers.json` and gate direct provider calls.
 - `--install-hooks-force`: overwrite locally edited hook files.
@@ -97,6 +107,13 @@ empty, or malformed file leaves enforcement fully ON (fail-closed).
 With `--install-enforcement` you additionally get `<project>/.claude/hooks/`
 checkpoint-gate.sh, plan-gate.sh, preflight-gate.sh, stop-gate.sh, their `hooks/lib`
 closure, `hooks/patterns/`, and `<project>/.episodic-memory/enforce-config.json`.
+
+With `--install-activation` you additionally get `<project>/.claude/hooks/`
+activation-prompt.sh, activation-tool.sh, activation-sessionstart.sh, the shared
+activation-hook-run.mjs runner, and a co-located manifest.json; the three registrations
+land in `<project>/.claude/settings.json`. Advisory-only; nothing lands in `~/.claude`.
+Per-project lesson muting is the optional, hand-authored
+`<project>/.episodic-memory/lesson-suppress.json` (fail-open).
 
 ## Post-install verify
 

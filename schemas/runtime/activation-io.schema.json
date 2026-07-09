@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/activation-io.schema.json",
+  "title": "Activation-adapter hook-payload IO schema (RFC-009 R3/R4, P2-S2)",
+  "description": "The JSON an activation hook emits on stdout. additionalProperties:false at every level is the advisory invariant: a payload carrying `decision`/`block`/`permissionDecision` at the top level, or any key besides `hookSpecificOutput`, FAILS validation (plan REQ-20). `hookSpecificOutput` is the only permitted top-level key.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hookSpecificOutput"],
+  "properties": {
+    "hookSpecificOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hookEventName", "additionalContext"],
+      "properties": {
+        "hookEventName": { "type": "string", "enum": ["UserPromptSubmit", "PreToolUse", "SessionStart"] },
+        "additionalContext": { "type": "string" }
+      }
+    }
+  }
+}

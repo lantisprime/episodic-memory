@@ -4,37 +4,94 @@
     {
       "name": "plan",
       "description": "planning / plan-approval work mode",
-      "phrases": []
+      "phrases": [
+        "plan",
+        "planning",
+        "plan approval",
+        "implementation plan",
+        "draft a plan",
+        "write a plan",
+        "slice ladder",
+        "token budget"
+      ]
     },
     {
       "name": "design",
       "description": "architecture and design discussion, trade-off weighing",
-      "phrases": []
+      "phrases": [
+        "design",
+        "architecture",
+        "architect",
+        "trade-off",
+        "tradeoff",
+        "design decision",
+        "component diagram",
+        "sequence diagram"
+      ]
     },
     {
       "name": "review",
       "description": "code, plan, or PR review activity",
-      "phrases": []
+      "phrases": [
+        "review",
+        "code review",
+        "second opinion",
+        "pr review",
+        "adversarial review",
+        "review the plan",
+        "review the diff"
+      ]
     },
     {
       "name": "troubleshoot",
       "description": "debugging, failure diagnosis, root-cause work",
-      "phrases": []
+      "phrases": [
+        "troubleshoot",
+        "debug",
+        "root cause",
+        "failure diagnosis",
+        "diagnose",
+        "stack trace",
+        "why is this failing"
+      ]
     },
     {
       "name": "implement",
       "description": "writing or modifying code against a plan or spec",
-      "phrases": []
+      "phrases": [
+        "implement",
+        "implementation",
+        "write the code",
+        "build the feature",
+        "code up",
+        "wire up"
+      ]
     },
     {
       "name": "push",
       "description": "commit, merge, release, or deploy activity",
-      "phrases": []
+      "phrases": [
+        "commit",
+        "merge",
+        "release",
+        "deploy",
+        "open a pr",
+        "push the branch",
+        "ship it"
+      ]
     },
     {
       "name": "rule",
       "description": "rule, enforcement, or behavioral-pattern work",
-      "phrases": []
+      "phrases": [
+        "enforcement",
+        "behavior pattern",
+        "behavioral pattern",
+        "checkpoint gate",
+        "plan gate",
+        "pre-tool hook",
+        "rule check"
+      ]
     }
   ]
 }

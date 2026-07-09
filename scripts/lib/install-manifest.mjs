@@ -467,3 +467,44 @@ export function buildInstallManifest(repoDir, homeDir = os.homedir()) {
 export function sessionEndHookCommand(homeDir = os.homedir()) {
   return `node ${path.join(HOME_SCRIPTS(homeDir), SESSION_END_SCRIPT)}`
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// RFC-009 R3 — activation adapter (P2). ACTIVATION_HOOK_SPECS is the
+// SOURCE OF TRUTH for the claude-code-activation plugin's per-project hook
+// registrations (mirrors the enforcement HOOK_SPECS / enforcementRegistrations
+// pattern above). `plugins/claude-code-activation/manifest.json` declares the
+// SAME three registrations (id/file/event/timeout) plus a sha256 checksum of
+// each hook file; tests/test-activation-manifest.mjs asserts this array
+// agrees with the manifest on {file, event, timeout} AND that the manifest's
+// declared checksum matches the on-disk hook file bytes. install.mjs wiring
+// (project-side deploy/registration) and the plugins/_index.json entry land
+// in P2-S6 — this is declaration-only for S2.
+// ───────────────────────────────────────────────────────────────────────────
+export const ACTIVATION_HOOK_SPECS = [
+  { file: 'activation-prompt.sh', event: 'UserPromptSubmit', timeout: 5 },
+  { file: 'activation-tool.sh', event: 'PreToolUse', timeout: 5 },
+  { file: 'activation-sessionstart.sh', event: 'SessionStart', timeout: 10 },
+]
+
+export function activationRegistrations() {
+  return ACTIVATION_HOOK_SPECS.map((s) => ({ file: s.file, event: s.event, timeout: s.timeout }))
+}
+
+export function activationHookFileBasenames() {
+  return [...new Set(ACTIVATION_HOOK_SPECS.map((s) => s.file))]
+}
+
+// ACTIVATION_SUPPORT_FILES — non-registration OWNED artifacts the activation
+// hooks depend on and that S6 install must deploy alongside the .sh entry
+// points. `activation-hook-run.mjs` is the R3 event-plane runner the two .sh
+// wrappers (activation-prompt.sh / activation-tool.sh) exec — ALL the matcher/
+// freshness/identity/suppress logic lives there, so it is a tamper-covered
+// artifact (codex P2-S4 review F1): the manifest declares a sha256 of it under
+// `support_files` and validate-plugin-registry's A-support-checksum verifies it,
+// exactly as the 3 registrations are checksum-guarded. Not an event
+// registration (no event/timeout), hence a SEPARATE array, not a fake reg.
+export const ACTIVATION_SUPPORT_FILES = ['activation-hook-run.mjs']
+
+export function activationSupportFiles() {
+  return [...ACTIVATION_SUPPORT_FILES]
+}

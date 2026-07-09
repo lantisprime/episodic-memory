@@ -210,27 +210,41 @@ _shell_quote() {
   esac
 }
 
-# Mechanical em-search command (cd-bound; codex F11). Both paths are
-# shell-quoted for path-with-spaces / shell-metachar safety.
+# Mechanical em-trigger-index command (cd-bound; codex F11 pattern preserved).
 #
-# em-search.mjs resolution (#440): probe the in-repo dev copy first (resolves
-# only inside the episodic-memory repo itself), then the global substrate —
-# mirrors the gates' engine resolution pattern (#441). REPO_ROOT stays as the
-# cd target so --scope all picks up the project-local episode store. If no
-# candidate resolves, EM_SEARCH_CMD stays empty and the directive omits the
-# em-search step instead of emitting a MODULE_NOT_FOUND command.
-EM_SEARCH_SCRIPT=""
+# REQ-26 (RFC-009 P2-S5): the lesson load switches from a live, recency-only
+# `em-search --no-score` invocation to the precomputed `session_start` STATIC
+# BLEND (RFC-009 R2/R4) — the SAME artifact the R4 SessionStart activation
+# hook reads (plugins/claude-code-activation/hooks/activation-hook-run.mjs).
+# `--merged` prints the local+global dedup-by-id merged view
+# (scripts/em-trigger-index.mjs loadMergedTriggerIndex); the jq filter below
+# renders tier 1 (critical_entries, imperative) then tier 2 (entries, plain,
+# cross-tier deduped — tier 1 wins) with the same two-tier contract the R4
+# hook applies, so this hook and R4 never drift into two different
+# lesson-loading rules. Still advisory/mechanical: this composes a shell
+# command string for the agent to RUN, this hook itself performs no
+# additional read beyond resolving the script path.
+#
+# em-trigger-index.mjs resolution (mirrors the #440 em-search resolution):
+# probe the in-repo dev copy first (resolves only inside the episodic-memory
+# repo itself), then the global substrate. REPO_ROOT stays as both the cd
+# target and the --project binding so the local store is this project's,
+# never inherited cwd. If no candidate resolves, EM_SEARCH_CMD stays empty
+# and the directive omits the lesson-load step instead of emitting a
+# MODULE_NOT_FOUND command.
+TRIGGER_INDEX_SCRIPT=""
 for cand in \
-  "${REPO_ROOT}/scripts/em-search.mjs" \
-  "${HOME}/.episodic-memory/scripts/em-search.mjs"
+  "${REPO_ROOT}/scripts/em-trigger-index.mjs" \
+  "${HOME}/.episodic-memory/scripts/em-trigger-index.mjs"
 do
-  if [ -f "$cand" ]; then EM_SEARCH_SCRIPT="$cand"; break; fi
+  if [ -f "$cand" ]; then TRIGGER_INDEX_SCRIPT="$cand"; break; fi
 done
+JQ_SESSION_START_FILTER='.session_start as $s | ($s.critical_entries | map(.episode_id)) as $crit | ($s.critical_entries[] | "READ " + .episode_id + " (band " + (.effective_priority|tostring) + "): " + .summary), ($s.entries[] | select(.episode_id as $id | ($crit | index($id)) | not) | "lesson " + .episode_id + ": " + .summary)'
 EM_SEARCH_CMD=""
-if [ -n "$EM_SEARCH_SCRIPT" ]; then
+if [ -n "$TRIGGER_INDEX_SCRIPT" ]; then
   _quoted_root="$(_shell_quote "${REPO_ROOT}")"
-  _quoted_emsearch="$(_shell_quote "${EM_SEARCH_SCRIPT}")"
-  EM_SEARCH_CMD="cd ${_quoted_root} && node ${_quoted_emsearch} --category lesson --scope all --limit 10 --no-track --no-score"
+  _quoted_trigger="$(_shell_quote "${TRIGGER_INDEX_SCRIPT}")"
+  EM_SEARCH_CMD="cd ${_quoted_root} && node ${_quoted_trigger} --project ${_quoted_root} --merged | jq -r '${JQ_SESSION_START_FILTER}'"
 fi
 
 # Q2 payload (#440): compose from whichever parts resolved. Empty when there

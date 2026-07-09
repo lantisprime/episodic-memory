@@ -142,7 +142,7 @@ every script through `scripts/lib/categories.mjs`. Do not hardcode category name
 
 ---
 
-## Lesson activation (RFC-009 R1/R2, shipped in P1b)
+## Lesson activation (RFC-009 R1/R2 write + index, R3/R4 event plane)
 
 Lesson episodes may carry OPTIONAL activation frontmatter, written through flags on
 `em-store`/`em-revise` (lesson-only; any other category rejects them):
@@ -175,6 +175,33 @@ entry); writes of trigger-bearing lessons print an informational R9a collision r
 on stderr when another active lesson shares a trigger phrase (the write always proceeds).
 The `RFC-009-lesson-activation.contract.json` mirror + `validate-rfc-009-contract-mirror.mjs`
 diff these surfaces against code in CI.
+
+### Event plane — the advisory activation adapter (R3/R4, P2)
+
+The adapter is the CONSUMER half: a Claude-Code-only, per-project, opt-in set of three thin
+hooks installed by `install.mjs --install-activation` (reverse with `--uninstall-activation`).
+It never enforces — every hook exits 0 and emits no decision/block field — and reads ONLY the
+purpose-built derived indexes, never `index.jsonl`, episode bodies, or environment:
+
+- `activation-prompt` (UserPromptSubmit) and `activation-tool` (PreToolUse) match the merged
+  `trigger-index.json` against the event and inject up to `max_matches` bounded lesson pointers
+  as `additionalContext` (band 8-9 rendered imperatively; ≤7 plain).
+- `activation-sessionstart` (SessionStart) renders the precomputed `session_start` blend:
+  tier-1 `critical_entries` (every active band 8-9 lesson, trigger-independent) then tier-2
+  `entries` (static-score top-N, cross-tier deduped) plus the violation preflight (per-task-type
+  counts derived from the `violated_pattern` field).
+- All three share `activation-hook-run.mjs` and a co-located `manifest.json` carrying the
+  project scope identity (slug + resolved root); the hook filters `applies_to_*` against THAT
+  identity, never inherited cwd or environment.
+
+Per-project suppression: a hand-authored `<project>/.episodic-memory/lesson-suppress.json`
+(`{ "schema_version": 1, "suppress": [{ "episode_id", "reason", "added" }] }`, schema
+`schemas/lesson-suppress.schema.json`) mutes lessons by id across ALL bands. The whole-file
+load is fail-open: a **missing** file yields no suppression **silently** (no note — the common
+case); a present-but-unreadable, syntax-malformed, or shape-malformed file yields no suppression
+plus exactly one stderr note. Injection always proceeds — never fatal. There is no `em-suppress` writer
+this phase; the file is hand-authored (RFC-009 R1). Suppression is for SCOPE errors; correct a
+WRONG lesson via `em-revise` supersession instead (the superseded version drops from the index).
 
 ---
 

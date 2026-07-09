@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/lesson-suppress.schema.json",
+  "title": "Per-project lesson-suppression mute list (RFC-009 R1, plan REQ-13/14)",
+  "description": "Schema for <project>/.episodic-memory/lesson-suppress.json — a per-project, hand-authored mute list consulted by the activation event plane (P2 R3/R4). Mutes by EPISODE ID ONLY, across ALL bands including earned 8-9 (RFC-009 line 61). Read-side whole-file validation is fail-open at the hook (P2-S4): missing OR syntax-malformed OR shape-malformed (this schema failing) all degrade to an empty mute set with one stderr note, never fatal. No `em-suppress` writer ships this phase (RFC-009 line 61); the file is hand-edited by the project operator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "suppress"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "suppress": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/muteEntry"
+      }
+    }
+  },
+  "$defs": {
+    "muteEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id"],
+      "properties": {
+        "episode_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The lesson episode id to mute in THIS project, any band."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Operator-facing rationale for the mute (a scope call, not a content correction — RFC-009 line 61)."
+        },
+        "added": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "YYYY-MM-DD the mute was added."
+        }
+      }
+    }
+  }
+}

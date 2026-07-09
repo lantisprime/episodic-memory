@@ -24,7 +24,7 @@
 # Foreign-project generalization (#440):
 #   T440-1 foreign repo + substrate em-search → global substrate path emitted,
 #          cd stays repo-bound, only existing memory files listed
-#   T440-2 in-repo scripts/em-search.mjs wins over substrate (probe order)
+#   T440-2 in-repo scripts/em-trigger-index.mjs wins over substrate (probe order)
 #   T440-3 no em-search anywhere → directive omits the em-search step
 #   T440-4 nothing to load (no handoff/files/em-search) → NO directive + stderr
 #   T440-5 handoff only → Q1-only directive, no Q2
@@ -201,7 +201,7 @@ echo '{"claude_memory_root":"/this/path/does/not/exist"}' > "${TMP_REPO}/.episod
 # Plant an in-repo em-search so a directive is emitted regardless of whether
 # this machine has the global substrate (#440 made emission conditional).
 mkdir -p "${TMP_REPO}/scripts"
-: > "${TMP_REPO}/scripts/em-search.mjs"
+: > "${TMP_REPO}/scripts/em-trigger-index.mjs"
 _out=$(_run_hook /private/tmp "{\"cwd\":\"${TMP_REPO}\"}")
 _assert_contains "C8 malformed config falls back to canonical" "BLOCKING:" "$_out"
 _assert_not_contains "C8 does NOT use the invalid config path" "/this/path/does/not/exist" "$_out"
@@ -220,7 +220,7 @@ TMP_REPO_T7_REAL="$(cd -P "${TMP_REPO_T7}" && pwd)"
 # has no memory files anywhere, so the always-tier list must be EMPTY — the
 # hook must NOT surface any ~/.claude/projects path (no sibling-project scan).
 mkdir -p "${TMP_REPO_T7_REAL}/scripts"
-: > "${TMP_REPO_T7_REAL}/scripts/em-search.mjs"
+: > "${TMP_REPO_T7_REAL}/scripts/em-trigger-index.mjs"
 _out=$(_run_hook /private/tmp "{\"cwd\":\"${TMP_REPO_T7_REAL}\"}")
 _assert_contains "T7 bounded: cd stays bound to orphan repo" "cd ${TMP_REPO_T7_REAL} && node" "$_out"
 _assert_not_contains "T7 bounded: no memory path leaks for orphan repo" "${HOME}/.claude/projects" "$_out"
@@ -239,11 +239,11 @@ TMP_REPO_T14_REAL="$(cd -P "${TMP_REPO_T14}" && pwd)"
 # Plant an in-repo em-search so the spaced path is the one emitted (#440
 # made the in-repo copy a probe, not an assumption).
 mkdir -p "${TMP_REPO_T14_REAL}/scripts"
-: > "${TMP_REPO_T14_REAL}/scripts/em-search.mjs"
+: > "${TMP_REPO_T14_REAL}/scripts/em-trigger-index.mjs"
 _out=$(_run_hook /private/tmp "{\"cwd\":\"${TMP_REPO_T14_REAL}\"}")
 # Emitted cd should be single-quoted (path has spaces).
 _assert_contains "T14 path-with-spaces: cd is single-quoted" "cd '${TMP_REPO_T14_REAL}'" "$_out"
-_assert_contains "T14 path-with-spaces: em-search.mjs path single-quoted" "node '${TMP_REPO_T14_REAL}/scripts/em-search.mjs'" "$_out"
+_assert_contains "T14 path-with-spaces: em-search.mjs path single-quoted" "node '${TMP_REPO_T14_REAL}/scripts/em-trigger-index.mjs'" "$_out"
 # Negative: no bare unquoted "cd /path with spaces" segment.
 _assert_not_contains "T14 no unquoted space in cd" "cd ${TMP_REPO_T14_REAL} && node" "$_out"
 rm -rf "${TMP_REPO_T14_PARENT}"
@@ -252,7 +252,7 @@ rm -rf "${TMP_REPO_T14_PARENT}"
 # T14a: clean path stays UNQUOTED (no churn on safe paths)
 # ---------------------------------------------------------------------------
 _out=$(_run_hook /private/tmp "{\"cwd\":\"${MAIN_REPO}\"}")
-_assert_contains "T14a clean path stays unquoted" "cd ${MAIN_REPO} && node ${MAIN_REPO}/scripts/em-search.mjs" "$_out"
+_assert_contains "T14a clean path stays unquoted" "cd ${MAIN_REPO} && node ${MAIN_REPO}/scripts/em-trigger-index.mjs" "$_out"
 
 # ---------------------------------------------------------------------------
 # T14b: path with internal apostrophe — single-quote escape (s/'/'\''/g)
@@ -265,7 +265,7 @@ mkdir -p "${TMP_REPO_T14B}"
 git -C "${TMP_REPO_T14B}" init -q >/dev/null 2>&1
 TMP_REPO_T14B_REAL="$(cd -P "${TMP_REPO_T14B}" && pwd)"
 mkdir -p "${TMP_REPO_T14B_REAL}/scripts"
-: > "${TMP_REPO_T14B_REAL}/scripts/em-search.mjs"
+: > "${TMP_REPO_T14B_REAL}/scripts/em-trigger-index.mjs"
 _out=$(_run_hook /private/tmp "{\"cwd\":\"${TMP_REPO_T14B_REAL}\"}")
 # The POSIX escape sequence in the actual emitted command is `'\''` (4 chars:
 # quote, backslash, quote, quote). The hook returns its directive as a JSON
@@ -304,7 +304,7 @@ for f in feedback_send_grep_artifact.md feedback_three_state_review_verdict.md; 
 done
 
 # em-search emitted with mechanical cd-binding (in-repo dev copy wins at MAIN)
-_assert_contains "em-search emitted with cd-binding" "cd ${MAIN_REPO} && node ${MAIN_REPO}/scripts/em-search.mjs" "$_out"
+_assert_contains "em-search emitted with cd-binding" "cd ${MAIN_REPO} && node ${MAIN_REPO}/scripts/em-trigger-index.mjs" "$_out"
 
 # ---------------------------------------------------------------------------
 # T440-*: foreign-project generalization (issue #440). All hermetic via fake
@@ -313,7 +313,7 @@ _assert_contains "em-search emitted with cd-binding" "cd ${MAIN_REPO} && node ${
 T440_HOME="$(mktemp -d /tmp/em-440-home.XXXXXX)"
 T440_HOME_REAL="$(cd -P "${T440_HOME}" && pwd)"
 mkdir -p "${T440_HOME_REAL}/.episodic-memory/scripts"
-: > "${T440_HOME_REAL}/.episodic-memory/scripts/em-search.mjs"
+: > "${T440_HOME_REAL}/.episodic-memory/scripts/em-trigger-index.mjs"
 
 T440_REPO_PARENT="$(mktemp -d /tmp/em-440-repo.XXXXXX)"
 T440_REPO="${T440_REPO_PARENT}/foreign-project"
@@ -331,20 +331,20 @@ printf '{"claude_memory_root":"%s"}' "${T440_MEM_REAL}" > "${T440_REPO_REAL}/.ep
 # stays repo-bound, only MEMORY.md listed, no absent feedback files.
 _out=$(_run_hook_home "${T440_HOME_REAL}" /private/tmp "{\"cwd\":\"${T440_REPO_REAL}\"}")
 _assert_contains "T440-1 substrate em-search path emitted" \
-  "node ${T440_HOME_REAL}/.episodic-memory/scripts/em-search.mjs" "$_out"
+  "node ${T440_HOME_REAL}/.episodic-memory/scripts/em-trigger-index.mjs" "$_out"
 _assert_contains "T440-1 cd stays bound to foreign repo" "cd ${T440_REPO_REAL} && node" "$_out"
 _assert_not_contains "T440-1 repo-relative em-search NOT emitted" \
-  "${T440_REPO_REAL}/scripts/em-search.mjs" "$_out"
+  "${T440_REPO_REAL}/scripts/em-trigger-index.mjs" "$_out"
 _assert_contains "T440-1 existing MEMORY.md listed" "- ${T440_MEM_REAL}/MEMORY.md" "$_out"
 _assert_not_contains "T440-1 absent feedback file NOT listed" "feedback_verify_by_artifact.md" "$_out"
 _assert_contains "T440-1 count reflects filtered list" "these 1 absolute path" "$_out"
 
 # T440-2: in-repo copy wins over substrate (probe order).
 mkdir -p "${T440_REPO_REAL}/scripts"
-: > "${T440_REPO_REAL}/scripts/em-search.mjs"
+: > "${T440_REPO_REAL}/scripts/em-trigger-index.mjs"
 _out=$(_run_hook_home "${T440_HOME_REAL}" /private/tmp "{\"cwd\":\"${T440_REPO_REAL}\"}")
 _assert_contains "T440-2 in-repo em-search wins" \
-  "node ${T440_REPO_REAL}/scripts/em-search.mjs" "$_out"
+  "node ${T440_REPO_REAL}/scripts/em-trigger-index.mjs" "$_out"
 rm -rf "${T440_REPO_REAL}/scripts"
 
 # T440-3: no em-search anywhere → directive still emitted, em-search omitted.
@@ -352,7 +352,7 @@ T440_HOME_EMPTY="$(mktemp -d /tmp/em-440-home-empty.XXXXXX)"
 T440_HOME_EMPTY_REAL="$(cd -P "${T440_HOME_EMPTY}" && pwd)"
 _out=$(_run_hook_home "${T440_HOME_EMPTY_REAL}" /private/tmp "{\"cwd\":\"${T440_REPO_REAL}\"}")
 _assert_contains "T440-3 files still listed without em-search" "- ${T440_MEM_REAL}/MEMORY.md" "$_out"
-_assert_not_contains "T440-3 no em-search command emitted" "em-search.mjs" "$_out"
+_assert_not_contains "T440-3 no trigger-index command emitted" "em-trigger-index.mjs" "$_out"
 
 # T440-5: handoff only (no always-tier files, no em-search) → Q1-only.
 printf 'handoff\n' > "${T440_MEM_REAL}/session_handoff.md"
@@ -368,7 +368,7 @@ printf '# mem\n' > "${T440_MEM_REAL}/MEMORY.md"
 _out=$(_run_hook_home "${T440_HOME_EMPTY_REAL}" /private/tmp "{\"cwd\":\"${T440_REPO_REAL}\"}")
 _assert_contains "T440-6 both questions emitted" "Q2 (verbatim, after Q1 is answered)" "$_out"
 _assert_contains "T440-6 files-only Q2 lists MEMORY.md" "- ${T440_MEM_REAL}/MEMORY.md" "$_out"
-_assert_not_contains "T440-6 no em-search command emitted" "em-search.mjs" "$_out"
+_assert_not_contains "T440-6 no trigger-index command emitted" "em-trigger-index.mjs" "$_out"
 
 # T440-4: nothing to load at all → exit 0, NO directive, stderr log.
 rm -f "${T440_MEM_REAL}/session_handoff.md" "${T440_MEM_REAL}/MEMORY.md"

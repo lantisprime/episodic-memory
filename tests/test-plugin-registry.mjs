@@ -47,6 +47,7 @@ const CONTEXT_FILES = [
   "plugins/_index.schema.json", "plugins/manifest.schema.json", "plugins/bypass_known.schema.json",
   "plugins/installed-state.schema.json", "schemas/runtime/structured-alert.schema.json",
   "schemas/runbook-agent-manifest.schema.json", // M7e context schema (P1c)
+  "plugins/activation-manifest.schema.json", // RFC-009 P2-S2 activation sub-gauntlet context schema
   "patterns/taxonomy.json", "patterns/events.json", "plugins/bypass_known.json",
 ];
 
@@ -192,24 +193,27 @@ const CONTEXT_FILES = [
 
     // reserved on-disk absent -> reserved_absent (stale exemption risk).
     const tmp2 = mkdtemp();
-    fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory / second-opinion dirs
+    fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory / second-opinion / claude-code-activation dirs
     c = collect();
     checkBidirectionalDirs(tmp2, [{ directory: "plugins/claude-code" }], c.add, []);
     assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "episodic-memory"), "M8: an on-disk reserved dir that is absent fails (typo can't silently exempt a real orphan)");
     // RFC-008 Follow (R10): second-opinion is now on-disk reserved, so its
     // absence is likewise reserved_absent — the carrier can't be silently exempt.
     assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "second-opinion"), "M8: second-opinion on-disk reserved dir absent -> reserved_absent (Follow/R10)");
+    // RFC-009 P2-S6: claude-code-activation is NO LONGER reserved — it is a real
+    // _index.json activation entry now, so its dir is governed by the normal
+    // entry↔dir rule (present-with-entry passes; the reserved exemption is gone).
     rmrf(tmp2);
 
-    // positive: BOTH on-disk reserved dirs present -> no reserved_absent (the
-    // exemption is honest, not stale). Mirrors the live tree post-Follow.
+    // positive: ALL on-disk reserved dirs present -> no reserved_absent (the
+    // exemption is honest, not stale). Mirrors the live tree post-Follow/R10.
     const tmp3 = mkdtemp();
     fs.mkdirSync(path.join(tmp3, "plugins/claude-code"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/episodic-memory"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/second-opinion/runbooks"), { recursive: true });
     c = collect();
     checkBidirectionalDirs(tmp3, [{ directory: "plugins/claude-code" }], c.add, []);
-    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: both on-disk reserved dirs present -> no reserved_absent (Follow/R10)");
+    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: all on-disk reserved dirs present -> no reserved_absent (Follow/R10)");
     assert(!c.vs.some((v) => v.dir === "second-opinion"), "M8: present second-opinion carrier raises no orphan/absent violation");
     rmrf(tmp3);
   } finally { rmrf(tmp); }
@@ -427,6 +431,21 @@ function buildLiveProject() {
     "plugins/pi-agent/manifest.json",
     "plugins/pi-agent/runbooks/enforcement.md",
     "plugins/pi-agent/runbooks/enforcement.quickref.md",
+    // RFC-009 P2-S6: claude-code-activation is now a live _index.json entry — its
+    // manifest + runbooks must be on disk too, else A2/M8 fire (entry manifest
+    // unreadable / entry dir missing).
+    "plugins/claude-code-activation/manifest.json",
+    "plugins/claude-code-activation/runbooks/activation.md",
+    "plugins/claude-code-activation/runbooks/activation.quickref.md",
+    // RFC-009 P2-S6: the activation manifest's registrations + support_files
+    // reference these hook files; the validator's A-checksum / A-support-checksum
+    // checks read them off disk, so the live temp project must carry them.
+    "plugins/claude-code-activation/hooks/activation-prompt.sh",
+    "plugins/claude-code-activation/hooks/activation-tool.sh",
+    "plugins/claude-code-activation/hooks/activation-sessionstart.sh",
+    "plugins/claude-code-activation/hooks/activation-hook-run.mjs",
+    // A-io-schema reads the manifest's io_schema off disk.
+    "schemas/runtime/activation-io.schema.json",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {
@@ -469,6 +488,56 @@ function runSymlinkEscapeFixture(name, meta) {
 }
 
 // ===========================================================================
+// ===========================================================================
+// 10. RFC-009 P2 S1 — the `activation` plugin type (REQ-1/REQ-2/REQ-3).
+// ===========================================================================
+{
+  const actEntry = {
+    type: "activation", id: "claude-code", harness: "claude-code",
+    directory: "plugins/claude-code-activation", blocking: false,
+    capabilities: { user_prompt_submit: "STRONG", pre_tool_use: "STRONG", session_start: "STRONG" },
+    manifest: "plugins/claude-code-activation/manifest.json", status: "active",
+  };
+
+  // Post-amendment: a well-formed activation descriptor validates.
+  {
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [actEntry] }, SCHEMAS._index);
+    assert(r.valid, "activation descriptor validates against the amended _index schema", JSON.stringify(r.errors?.slice(0, 2)));
+  }
+
+  // REQ-3: the SAME entry is REJECTED by a reconstructed pre-amendment schema
+  // (enum without `activation`, plugins.items reverted to the single enforcement
+  // descriptor, activationDescriptor removed) — proving the bump is load-bearing.
+  {
+    const pre = structuredClone(SCHEMAS._index);
+    pre.$defs.pluginType.enum = pre.$defs.pluginType.enum.filter((t) => t !== "activation");
+    pre.properties.plugins.items = { $ref: "#/$defs/enforcementDescriptor" };
+    delete pre.$defs.activationDescriptor;
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [actEntry] }, pre);
+    assert(!r.valid, "activation entry REJECTED by the pre-amendment schema (amendment is load-bearing, not decorative)", "unexpectedly valid pre-amendment");
+  }
+
+  // blocking:true is rejected — advisory-only is a SCHEMA invariant, not just a test.
+  {
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [{ ...actEntry, blocking: true }] }, SCHEMAS._index);
+    assert(!r.valid, "activation with blocking:true rejected (blocking const false — advisory-only invariant)", "unexpectedly valid");
+  }
+
+  // enforcement + activation coexist in plugins[]; the type-discriminated oneOf resolves each.
+  {
+    const enf = readJson(path.join(REPO, "plugins/_index.json")).plugins.find((p) => p.type === "enforcement");
+    const r = validateInstance({ schema_version: "1.0.0", plugins: [enf, actEntry] }, SCHEMAS._index);
+    assert(r.valid, "enforcement + activation entries coexist in plugins[] (oneOf discriminates by type)", JSON.stringify(r.errors?.slice(0, 2)));
+  }
+
+  // A live full-validator run treats a fixture activation entry as a KNOWN type
+  // (descriptor-only in S1) — not an unknown-type error.
+  {
+    const g = gateSchemaVersion("1.0.0");
+    assert(g.ok, "gate: activation-era registry still within MAX_SUPPORTED (no bump in S1)");
+  }
+}
+
 console.log(`\ntest-plugin-registry: ${pass} passed, ${fail} failed, ${skip} skipped`);
 if (fail > 0) {
   console.error("\nFAILURES:");

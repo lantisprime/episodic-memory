@@ -46,7 +46,10 @@ import { loadActivationClasses, parseTriggerKind } from './lib/activation.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
-export const TRIGGER_INDEX_SCHEMA_VERSION = 1
+// v2 (RFC-009 P2): added the top-level `activity_phrases` map (build-time-baked
+// activity-class phrase sets for event-plane matching). The bump invalidates every
+// store's cache so consumers see the new field immediately rather than on next write.
+export const TRIGGER_INDEX_SCHEMA_VERSION = 2
 export const TRIGGER_ENTRY_FIELDS = ['trigger_kind', 'value', 'episode_id', 'summary', 'effective_priority', 'applies_to_projects', 'applies_to_tools', 'review_by']
 export const TRIGGER_KIND_ENUM = ['phrase', 'tool', 'activity']
 
@@ -261,11 +264,29 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date() }
     }
   }
 
+  // REQ-9 (RFC-009 P2): bake the ACTIVE activity-class phrase sets into the index
+  // so the event plane matches `activity:<class>` triggers by reading ONLY this
+  // derived artifact — it never reads activation-classes.json (which honors the
+  // EM_ACTIVATION_CLASSES_PATH env override, an event-plane read-boundary escape)
+  // at event time. One copy per class (DRY, not denormalized onto every entry, so
+  // the contract-mirror's pinned `entry_fields` is untouched). Deprecated classes
+  // are omitted (they are excluded from entries too). Consumers MUST look this up
+  // with Object.hasOwn (JSON round-trip reintroduces Object.prototype).
+  const activityPhrases = {}
+  if (classNames) {
+    for (const [name, member] of classNames) {
+      if (member && !member.deprecated_for && Array.isArray(member.phrases)) {
+        activityPhrases[name] = member.phrases
+      }
+    }
+  }
+
   const index = {
     schema_version: TRIGGER_INDEX_SCHEMA_VERSION,
     source: fingerprint,
     build_report: { excluded_activity_classes: { ...excludedActivity } },
     entries,
+    activity_phrases: activityPhrases,
     session_start: buildSessionStart(rows, now),
   }
 

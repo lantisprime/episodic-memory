@@ -29,6 +29,18 @@ node ~/.episodic-memory/scripts/em-store.mjs --project <name> --category <decisi
 
 Project name: cwd basename or git remote name. Default scope is global (available to all projects).
 
+### Lessons that activate (RFC-009)
+
+Store a durable lesson with `--category lesson` plus activation flags so it resurfaces
+automatically instead of only on search: `--trigger "<phrase>"` / `--trigger tool:Bash:git*` /
+`--trigger activity:plan` (repeatable), `--applies-to-project <slug|*>`, `--applies-to-tool
+claude-code`, `--priority <1-7>` (the 8-9 critical band is EARNED from linked violations, never
+declared). When the advisory activation adapter is installed (`install.mjs --install-activation`,
+Claude Code, per-project), these lessons surface as advisory context at prompt / tool /
+session-start events — exit 0, never a block. Mute a lesson for one project by id via a
+hand-authored `<project>/.episodic-memory/lesson-suppress.json` (fail-open). Full flag reference:
+"Lesson activation" in `EM_SCRIPTS_GUIDE.md`.
+
 ## Research (web search + store)
 
 When researching from the web: first check `em-search.mjs --category research --query "<topic>"` to avoid duplicates. Distill findings into body with enough detail to be useful without revisiting the URL. Add `--url` and `--category research`.

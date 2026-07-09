@@ -40,7 +40,8 @@ function assert(cond, name, detail) {
 }
 
 // ---------------------------------------------------------------------------
-// The 17 schema docs (linted as 2020-12) + 3 data files (existence/parse only).
+// The 19 schema docs (linted as 2020-12) + 3 data files (existence/parse only).
+// (+2 RFC-009 P2-S2: plugins/activation-manifest.schema.json + schemas/runtime/activation-io.schema.json)
 // ---------------------------------------------------------------------------
 const SCHEMA_DOCS = [
   "patterns/taxonomy.schema.json",
@@ -60,6 +61,8 @@ const SCHEMA_DOCS = [
   "schemas/runtime/adapter-response.schema.json",
   "schemas/runtime/structured-alert.schema.json",
   "schemas/runbook-agent-manifest.schema.json",
+  "plugins/activation-manifest.schema.json",
+  "schemas/runtime/activation-io.schema.json",
 ];
 
 const DATA_FILES = [
@@ -97,7 +100,7 @@ assert(
 // 2. All 20 P0 files exist and parse as JSON.
 // ---------------------------------------------------------------------------
 const allFiles = [...SCHEMA_DOCS, ...DATA_FILES];
-assert(allFiles.length === 20, "P0 file count is 20 (17 schemas + 3 data)", `got ${allFiles.length}`);
+assert(allFiles.length === 22, "P0 file count is 22 (19 schemas + 3 data; +2 RFC-009 P2-S2 activation-manifest.schema.json + activation-io.schema.json)", `got ${allFiles.length}`);
 
 const parsed = {};
 for (const rel of allFiles) {
@@ -238,9 +241,9 @@ if (idxSchema && manSchema) {
   // --- typed-registry (R8 line 116): closed pluginType + per-type type discriminator
   const pt = idxSchema.$defs && idxSchema.$defs.pluginType;
   assert(
-    pt && Array.isArray(pt.enum) && pt.enum.length === 4 &&
-      ["enforcement", "recall-strategy", "store-strategy", "learning"].every((v) => pt.enum.includes(v)),
-    "_index $defs.pluginType is the closed 4-value type space (R8-116)",
+    pt && Array.isArray(pt.enum) && pt.enum.length === 5 &&
+      ["enforcement", "activation", "recall-strategy", "store-strategy", "learning"].every((v) => pt.enum.includes(v)),
+    "_index $defs.pluginType is the closed 5-value type space (R8-116; +activation RFC-009 P2)",
     `got ${pt && JSON.stringify(pt.enum)}`,
   );
   assert(

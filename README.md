@@ -243,7 +243,8 @@ script through `scripts/lib/categories.mjs`. Filter by category with `em-search 
 ├── index.jsonl               # Project-local index
 ├── tags.json                 # Inverted tag index
 ├── category-index.json       # Category -> episode-ids index
-└── trigger-index.json        # Derived lesson-activation index (RFC-009 R2, lazy-built)
+├── trigger-index.json        # Derived lesson-activation index (RFC-009 R2, lazy-built)
+└── lesson-suppress.json      # Optional, hand-authored: mute lessons by id (RFC-009 R3, fail-open)
 
 patterns/                     # Behavioral patterns (shipped with repo)
 ├── _index.json               # Machine-readable pattern registry
@@ -782,6 +783,22 @@ node ~/.episodic-memory/scripts/em-trigger-index.mjs --project /path/to/repo   #
 The `activation-classes.json` vocabulary (deployed to `~/.episodic-memory/`) closes the
 `activity:<class>` trigger set; `validate-rfc-009-contract-mirror.mjs` diffs the shipped
 surfaces against `docs/rfcs/RFC-009-lesson-activation.contract.json` in CI.
+
+### Activation adapter (RFC-009 R3/R4, event plane)
+The **advisory activation adapter** is the event-plane consumer of the trigger index
+(Claude Code only, per-project, opt-in via `install.mjs --install-activation`). It installs
+three thin hooks under `<project>/.claude/` — `activation-prompt` (UserPromptSubmit),
+`activation-tool` (PreToolUse), and `activation-sessionstart` (SessionStart) — sharing one
+`activation-hook-run.mjs` runner. They surface bounded lesson pointers as `additionalContext`:
+prompt/tool events match the merged `trigger-index.json` against the event; session start
+renders the precomputed `session_start` blend (tier-1 critical band + tier-2 static-score top
+lessons + violation preflight). The adapter is **advisory-only** — every hook exits 0 and
+emits no decision/block field — and reads ONLY the purpose-built derived indexes (never
+`index.jsonl`, episode bodies, or environment). A per-project, hand-authored
+`<project>/.episodic-memory/lesson-suppress.json` mutes lessons by episode id across all
+bands; a missing or malformed file fails open (injection proceeds). Reverse with
+`--uninstall-activation`. Enforcement is a separate, independently installed layer
+(`--install-enforcement`).
 
 ### BP-1 Auto-Pilot (RFC-004)
 

@@ -30,6 +30,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { validateInstance, assertAllSchemasModeled } from "./lib/json-instance-validate.mjs";
@@ -42,7 +43,7 @@ import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs"
 import { TIER_RANK, effectiveTier, eventActionId, GATE_CONTRACT_KEY } from "./lib/effective-tier.mjs";
 
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
-export const MAX_SUPPORTED = "1.0.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality)
+export const MAX_SUPPORTED = "1.1.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality). RFC-009 P2-S6 MINOR bump: registry gains the `activation` plugin type.
 const HARNESS_IDS = ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"];
 export const EVENT_IDS = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"]; // exported for the Rule-14 binding check in tests/test-validate-bp-contract.mjs (EVENT_IDS ≡ live events[].id)
 const TIERS = ["STRONG", "MEDIUM", "WEAK", "TBD"];
@@ -76,6 +77,9 @@ const RESOLUTION_GATES = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 export const RESERVED_DIRS = {
   "episodic-memory": { presence: "on-disk", why: "Claude-Code plugin packaging (.claude-plugin/, scripts/, skills/); exists on main." },
   "second-opinion": { presence: "on-disk", why: "RFC-008 L1257/R10 second-opinion runbooks fork; runbook-carrier (NOT an enforcement plugin — manifest.schema is enforcement-only), authored on disk by the Follow move." },
+  // RFC-009 P2-S6: claude-code-activation is no longer a RESERVED (entry-less)
+  // dir — plugins/_index.json now carries its real `activation` descriptor, so
+  // the bidirectional dir↔entry check (M8) resolves it as a normal plugin dir.
 };
 
 // ---------------------------------------------------------------------------
@@ -138,6 +142,7 @@ function loadContext(root, readJson, bypassKnownPath) {
     installed_state: readJson(path.join(root, "plugins/installed-state.schema.json")),
     structured_alert: readJson(path.join(root, "schemas/runtime/structured-alert.schema.json")),
     runbook_agent_manifest: readJson(path.join(root, "schemas/runbook-agent-manifest.schema.json")),
+    activation_manifest: readJson(path.join(root, "plugins/activation-manifest.schema.json")),
   };
   assertAllSchemasModeled(schemas); // throws SchemaModelingError if any schema escapes the modeled subset
   const taxonomy = readJson(path.join(root, "patterns/taxonomy.json"));
@@ -145,6 +150,47 @@ function loadContext(root, readJson, bypassKnownPath) {
   const bypassAbs = bypassKnownPath != null ? resolveContained(root, bypassKnownPath, "bypass-known") : path.join(root, "plugins/bypass_known.json");
   const bypassKnown = readJson(bypassAbs);
   return { schemas, taxonomy, events, bypassKnown };
+}
+
+// ---------------------------------------------------------------------------
+// Two-stage path-authority resolver — the SINGLE resolver shared by M7b
+// (enforcement runbook/override_path authority) AND the activation A-runbook /
+// A-io-schema checks. Extracted so the enforcement and activation surfaces
+// CANNOT diverge (RFC-009 P2-S2 review F1/F2: a hand-rolled second resolver in
+// validateActivationManifest followed symlinks that resolved outside the
+// authority — asymmetric with M7b, which does NOT). Stage 1: lexical
+// containment (catches ../ + absolute + out-of-authority in-repo). Stage 2:
+// realpath resolution (catches loop / dangling / symlink-escape) WITHOUT
+// following an escaping link. Emits violations via `add` under the caller's
+// `check` name (M7b vs A-runbook/A-io-schema) with keyword-EXACT strings
+// (path_outside_authority / symlink_loop / dangling_symlink / symlink_escape),
+// so both surfaces classify identically. Returns a status the caller uses to
+// decide whether to read the target and (for M7b) whether to mark it escaped:
+//   "outside" | "loop" | "dangling"  -> violation added, DO NOT read
+//   "escape"                          -> violation added, DO NOT read (+real)
+//   "absent"                          -> no violation (a truly-missing NON-symlink;
+//                                        the caller's own existence read reports it)
+//   "ok"                              -> resolves inside authority (+real); read OK
+function resolveAuthorityPath(absLex, authorityReal, dispPath, add, check, key, authorityDesc) {
+  if (!contained(absLex, authorityReal)) {
+    add(check, "error", `${key} path ${JSON.stringify(dispPath)} escapes ${authorityDesc}`, { keyword: "path_outside_authority", key });
+    return { status: "outside" };
+  }
+  let real;
+  try { real = fs.realpathSync(absLex); }
+  catch (e) {
+    if (e.code === "ELOOP") { add(check, "error", `${key} path ${JSON.stringify(dispPath)} is a symlink loop`, { keyword: "symlink_loop", key }); return { status: "loop" }; }
+    // ENOENT (or other): distinguish a dangling SYMLINK from a plain missing file.
+    let isLink = false;
+    try { isLink = fs.lstatSync(absLex).isSymbolicLink(); } catch { /* truly absent */ }
+    if (isLink) { add(check, "error", `${key} path ${JSON.stringify(dispPath)} is a dangling/unresolvable symlink`, { keyword: "dangling_symlink", key }); return { status: "dangling" }; }
+    return { status: "absent" };
+  }
+  if (!contained(real, authorityReal)) {
+    add(check, "error", `${key} path ${JSON.stringify(dispPath)} symlink-resolves outside ${authorityDesc}`, { keyword: "symlink_escape", key });
+    return { status: "escape", real };
+  }
+  return { status: "ok", real };
 }
 
 // ---------------------------------------------------------------------------
@@ -250,31 +296,17 @@ function validateManifest(ctx, manifest, root, readMaybe, add, opts = {}) {
   // override_path (when present) is authority-checked too, but not content-checked.
   const authorityPaths = [...runbookPaths.map(([k, p]) => [k, p]), ...(cls.override_path ? [["override_path", cls.override_path]] : [])];
 
-  // M7b — authority. Lexical containment first (catches ../traversal + absolute
-  // + out-of-authority in-repo paths); then symlink resolution (catches symlink
-  // escape / loop / dangling) WITHOUT following an escaping link.
+  // M7b — authority. Delegates to the shared two-stage resolver (extracted P2-S2
+  // review F1/F2 so activation reuses the SAME branches, never a parallel one).
+  // A loop/dangling/escape status marks the key escaped so the M7 read loop below
+  // refuses to read the target; outside/absent are left for M7's own read.
+  const authorityDesc = `plugin authority ${path.relative(root, pluginDirReal)}`;
   const symlinkEscaped = new Set();
   for (const [key, p] of authorityPaths) {
     if (typeof p !== "string" || p.length === 0) continue;
     const absLex = path.resolve(root, p);
-    if (!contained(absLex, pluginDirReal)) {
-      add("M7b", "error", `${key} path ${JSON.stringify(p)} escapes plugin authority ${path.relative(root, pluginDirReal)}`, { keyword: "path_outside_authority", key });
-      continue; // out of authority; do not resolve/read it
-    }
-    let real;
-    try { real = fs.realpathSync(absLex); }
-    catch (e) {
-      if (e.code === "ELOOP") { add("M7b", "error", `${key} path ${JSON.stringify(p)} is a symlink loop`, { keyword: "symlink_loop", key }); symlinkEscaped.add(key); continue; }
-      // ENOENT (or other): distinguish a dangling SYMLINK (M7b) from a plain missing file (left to M7).
-      let isLink = false;
-      try { isLink = fs.lstatSync(absLex).isSymbolicLink(); } catch { /* truly absent */ }
-      if (isLink) { add("M7b", "error", `${key} path ${JSON.stringify(p)} is a dangling/unresolvable symlink`, { keyword: "dangling_symlink", key }); symlinkEscaped.add(key); }
-      continue;
-    }
-    if (!contained(real, pluginDirReal)) {
-      add("M7b", "error", `${key} path ${JSON.stringify(p)} symlink-resolves outside plugin authority`, { keyword: "symlink_escape", key });
-      symlinkEscaped.add(key);
-    }
+    const res = resolveAuthorityPath(absLex, pluginDirReal, p, add, "M7b", key, authorityDesc);
+    if (res.status === "loop" || res.status === "dangling" || res.status === "escape") symlinkEscaped.add(key);
   }
 
   // M7 — presence + byte-floor + sentinel + §-headers (existence only in P1b).
@@ -337,6 +369,131 @@ function validateManifest(ctx, manifest, root, readMaybe, add, opts = {}) {
       const cfgBlock = extractBetween(fullText, CONFIG_BEGIN, CONFIG_END);
       if (cfgBlock == null) add("M7f", "error", `runbook §10 missing CONFIG block (${CONFIG_BEGIN} … ${CONFIG_END})`, { keyword: "config_block" });
       else if (cfgBlock !== renderConfigBlock(manifest)) add("M7f", "error", "runbook §10 config/taxonomy block does not byte-match the derived source-of-truth (manifest)", { keyword: "config_drift" });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Activation-manifest sub-gauntlet (RFC-009 R3, P2-S2). Mirrors validateManifest's
+// shape but for the advisory activation adapter: schema check first (A2, the
+// M2-analog — return early on failure since later checks assume valid shape),
+// then content checks (id==harness, blocking==false re-assert, registration id
+// uniqueness, checksum==file bytes, io_schema/runbook existence + path-authority
+// containment under the PLUGIN dir `plugins/<harness>-activation`). Check names
+// are A-prefixed (A2/A3/A4/A5/A-checksum/A-io-schema/A-runbook/A-plugin-dir) so
+// they are distinguishable from the enforcement M-checks in one violations list.
+// ---------------------------------------------------------------------------
+// No `opts`/contentChecks param (P2-S2 review F4): activation carries no
+// M7-style content-derivation gating, so there is nothing to gate — the dead
+// param is removed rather than left as a misleading no-op. `readBytes` returns
+// a raw Buffer (F3) so A-checksum hashes the exact on-disk bytes, not a
+// UTF-8-re-encoded string (a non-UTF-8 hook body would otherwise false-mismatch).
+function validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, add) {
+  const { schemas } = ctx;
+
+  // A2 — schema (additionalProperties:false everywhere, incl. the blocking:false
+  // const invariant). A schema failure means later checks may crash on missing
+  // fields, so guard them here (mirrors M2).
+  const a2 = validateInstance(manifest, schemas.activation_manifest);
+  if (!a2.valid) {
+    for (const e of a2.errors) add("A2", "error", `${e.path}: ${e.keyword} — ${e.detail}`, { keyword: e.keyword });
+    return; // structure not trustworthy; do not run semantic checks
+  }
+
+  const harness = manifest.harness;
+
+  // A3 — stable identity: id==harness (schema already closes both to the same
+  // enum; re-assert the CROSS-field relationship, same discipline as M3).
+  if (manifest.id !== harness) add("A3", "error", `id ${JSON.stringify(manifest.id)} must equal harness ${JSON.stringify(harness)}`);
+
+  // A4 — advisory-only invariant re-assert. Schema already pins `blocking` to a
+  // const false, so this can only fire if the schema check above were somehow
+  // bypassed; kept as defense-in-depth (mirrors the M3 HARNESS_IDS re-assert).
+  if (manifest.blocking !== false) add("A4", "error", `blocking must be false (advisory-only invariant), got ${JSON.stringify(manifest.blocking)}`);
+
+  // A5 — registration ids unique (schema pins the per-id PATTERN; this is the SET check).
+  const regs = Array.isArray(manifest.registrations) ? manifest.registrations : [];
+  const ids = regs.map((r) => r.id).filter((id) => typeof id === "string" && id.length > 0);
+  if (new Set(ids).size !== ids.length) add("A5", "error", `registration ids are not unique: ${JSON.stringify(ids)}`);
+
+  // Plugin dir authority: plugins/<harness>-activation (RFC-009 activation
+  // plugin directory naming — sibling to, not the same as, plugins/<harness>).
+  const pluginDirLex = path.join(root, "plugins", `${harness}-activation`);
+  let pluginDirReal;
+  try { pluginDirReal = fs.realpathSync(pluginDirLex); }
+  catch { pluginDirReal = pluginDirLex; add("A-plugin-dir", "error", `plugin dir ${path.relative(root, pluginDirLex)} does not exist`, { keyword: "plugin_dir_missing" }); }
+
+  // A-checksum — each registration's declared checksum matches the on-disk hook
+  // file bytes (the S2 ordering-decision guardrail: S4/S5 replace hook bodies
+  // and must refresh these 3 checksums, or this check reddens). Hashes the raw
+  // Buffer from readBytes (F3) — NOT a UTF-8-decoded string — so a future
+  // non-UTF-8 hook body cannot false-mismatch via U+FFFD re-encoding. Single
+  // read (readBytes), never a double-read.
+  for (const r of regs) {
+    if (typeof r.file !== "string" || r.file.length === 0) continue; // shape already flagged by A2
+    const absLex = path.join(pluginDirReal, "hooks", r.file);
+    if (!contained(absLex, pluginDirReal)) { add("A-checksum", "error", `registration ${JSON.stringify(r.id)} file ${JSON.stringify(r.file)} escapes plugin authority`, { keyword: "path_outside_authority" }); continue; }
+    let buf;
+    try { buf = readBytes(absLex); }
+    catch (e) { add("A-checksum", "error", `registration ${JSON.stringify(r.id)} hook file ${JSON.stringify(r.file)} unreadable: ${e.message}`, { keyword: "missing" }); continue; }
+    const actual = "sha256:" + crypto.createHash("sha256").update(buf).digest("hex");
+    if (actual !== r.checksum) add("A-checksum", "error", `registration ${JSON.stringify(r.id)} checksum mismatch: manifest=${JSON.stringify(r.checksum)} actual=${actual}`, { keyword: "checksum_mismatch" });
+  }
+
+  // A-support-checksum — OWNED but non-registration hook artifacts declared in
+  // `support_files` (the R3 runner activation-hook-run.mjs the .sh wrappers
+  // exec). ALL the event-plane logic lives in the runner, so tampering with it
+  // must redden a checksum (codex P2-S4 review F1) exactly like a .sh body would.
+  // Same authority/containment/readBytes path as A-checksum (not hand-rolled).
+  // Optional: an absent `support_files` runs no check.
+  const supportFiles = Array.isArray(manifest.support_files) ? manifest.support_files : [];
+  for (const sf of supportFiles) {
+    if (typeof sf.file !== "string" || sf.file.length === 0) continue; // shape already flagged by A2
+    const absLex = path.join(pluginDirReal, "hooks", sf.file);
+    if (!contained(absLex, pluginDirReal)) { add("A-support-checksum", "error", `support file ${JSON.stringify(sf.file)} escapes plugin authority`, { keyword: "path_outside_authority" }); continue; }
+    let buf;
+    try { buf = readBytes(absLex); }
+    catch (e) { add("A-support-checksum", "error", `support file ${JSON.stringify(sf.file)} unreadable: ${e.message}`, { keyword: "missing" }); continue; }
+    const actual = "sha256:" + crypto.createHash("sha256").update(buf).digest("hex");
+    if (actual !== sf.checksum) add("A-support-checksum", "error", `support file ${JSON.stringify(sf.file)} checksum mismatch: manifest=${JSON.stringify(sf.checksum)} actual=${actual}`, { keyword: "checksum_mismatch" });
+  }
+
+  // A-io-schema — io_schema resolves to an EXISTING file, contained under the
+  // PROJECT root (it lives at schemas/runtime/, outside the plugin dir). Uses
+  // the shared two-stage resolver (F2) so a symlink at that path escaping the
+  // project root is caught (symlink_escape), not silently followed. rootReal is
+  // the canonical project root the resolver contains against.
+  if (typeof manifest.io_schema === "string" && manifest.io_schema.length > 0) {
+    const absLex = path.resolve(root, manifest.io_schema);
+    let rootReal;
+    try { rootReal = fs.realpathSync(root); } catch { rootReal = root; }
+    const res = resolveAuthorityPath(absLex, rootReal, manifest.io_schema, add, "A-io-schema", "io_schema", "project authority");
+    // "ok" -> exists inside authority; "absent" -> a truly-missing non-symlink,
+    // which we surface as the plain missing-file error via the existence read.
+    // outside/loop/dangling/escape were already flagged by the resolver — refuse to read.
+    if (res.status === "ok" || res.status === "absent") {
+      try { readMaybe(absLex); }
+      catch { add("A-io-schema", "error", `io_schema ${JSON.stringify(manifest.io_schema)} does not exist`, { keyword: "missing" }); }
+    }
+  }
+
+  // A-runbook — full+quickref exist, path-authority CONTAINED UNDER THE PLUGIN
+  // DIR, resolved through the SAME two-stage resolver M7b uses (F1): a runbook
+  // path that is a symlink living inside the plugin dir but resolving OUTSIDE it
+  // is caught (symlink_escape), never followed. Existence-only (no byte-floor /
+  // sentinel) — the activation runbook carries no M7-style content-derivation.
+  const runbookPaths = [
+    ["full", manifest.runbook && manifest.runbook.full],
+    ["quickref", manifest.runbook && manifest.runbook.quickref],
+  ];
+  const runbookAuthorityDesc = `plugin authority ${path.relative(root, pluginDirReal)}`;
+  for (const [key, p] of runbookPaths) {
+    if (typeof p !== "string" || p.length === 0) { add("A-runbook", "error", `runbook.${key} missing from manifest`); continue; }
+    const absLex = path.resolve(root, p);
+    const res = resolveAuthorityPath(absLex, pluginDirReal, p, add, "A-runbook", key, runbookAuthorityDesc);
+    if (res.status === "ok" || res.status === "absent") {
+      try { readMaybe(absLex); }
+      catch { add("A-runbook", "error", `runbook.${key} ${JSON.stringify(p)} does not exist`, { keyword: "missing", key }); }
     }
   }
 }
@@ -512,6 +669,9 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
 
   const readJson = (abs) => { const text = fs.readFileSync(abs, "utf8"); read_trace.push(abs); return JSON.parse(text); };
   const readMaybe = (abs) => { const text = fs.readFileSync(abs, "utf8"); read_trace.push(abs); return text; };
+  // readBytes returns the raw Buffer (no utf8 decode) so the activation
+  // A-checksum hashes exact on-disk bytes (P2-S2 review F3).
+  const readBytes = (abs) => { const buf = fs.readFileSync(abs); read_trace.push(abs); return buf; };
 
   let ctx;
   try { ctx = loadContext(root, readJson, bypassKnownPath); }
@@ -525,7 +685,8 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
     let manifest;
     try { manifest = readJson(resolveContained(root, manifestPath, "manifest")); }
     catch (e) { return { status: "usage_error", project_root: root, checks: 0, violations: [{ check: "manifest", severity: "error", detail: e.message }], read_trace, exit: 2 }; }
-    validateManifest(ctx, manifest, root, readMaybe, add);
+    if (manifest.type === "activation") validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, add);
+    else validateManifest(ctx, manifest, root, readMaybe, add);
   } else {
     // --- live registry mode: version gate -> M1 -> per-entry type switch -> M-cross -> M8.
     let index;
@@ -545,9 +706,26 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
 
     const plugins = Array.isArray(index.plugins) ? index.plugins : [];
     for (const entry of plugins) {
-      // per-type dispatch (R8): enforcement -> full manifest gauntlet; substrate
-      // capability types -> descriptor-only (gauntlet deferred P9); unknown -> reject.
+      // per-type dispatch (R8): enforcement -> full manifest gauntlet; activation
+      // (RFC-009 R3, P2-S2) -> activation sub-gauntlet; other substrate capability
+      // types -> descriptor-only (gauntlet deferred P9); unknown -> reject.
+      if (entry.type === "activation") {
+        const manAbs = path.join(root, entry.manifest);
+        let manifest;
+        try { manifest = readJson(manAbs); }
+        catch (e) { add("A2", "error", `entry ${entry.id} manifest unreadable: ${e.message}`); continue; }
+        validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, add);
+
+        // A-cross (M-cross analog): registry entry must mirror the manifest's
+        // declared capabilities — single-source-of-truth (R8 L114).
+        if (!deepEqualJson(entry.capabilities, manifest.capabilities)) {
+          add("A-cross", "error", `entry ${entry.id} capabilities differ from manifest capabilities`, { keyword: "capabilities" });
+        }
+        continue;
+      }
       if (entry.type !== "enforcement") {
+        // Substrate capability types (recall-strategy/store-strategy/learning):
+        // descriptor-only (gauntlet deferred, P9); unknown type -> reject.
         if (!["recall-strategy", "store-strategy", "learning"].includes(entry.type)) {
           add("typed_versioned", "error", `entry ${JSON.stringify(entry.id)} has unknown type ${JSON.stringify(entry.type)}`);
         }
