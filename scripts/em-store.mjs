@@ -5,7 +5,7 @@
  * Usage:
  *   node em-store.mjs --project <name> --category <cat>
  *                     (--tags <t1,t2> | --tag <t1> --tag <t2> | both)
- *                     --summary <text> (--body <text> | --body-file <path>)
+ *                     --summary <text> (--body <text> | --body-file <path|->)
  *                     [--scope local|global]
  *
  * Tag forms (any combination accepted; merged + deduplicated + sorted):
@@ -14,9 +14,12 @@
  *   --tags a,b --tag c — mixed
  *
  * `--body-file` reads body content from a file (UTF-8, BOM stripped, exactly
- * one trailing newline stripped). Mutually exclusive with `--body`. Use it
- * when the body is long enough that `--body "$(cat …)"` would trigger
- * Claude Code's unsafe-substitution permission gate.
+ * one trailing newline stripped), or from stdin when the path is `-`. Mutually
+ * exclusive with `--body`. Prefer it over inline `--body` for any body with
+ * backticks / `$(...)` / `$VAR`: the shell command-substitutes those inside a
+ * double-quoted `--body "…"` BEFORE this script runs, silently corrupting the
+ * stored body. `--body-file - <<'EOF' … EOF` (quoted heredoc) is the safe,
+ * temp-file-free form. See lib/body-file.mjs for details.
  *
  * Writes a markdown episode file and appends an index entry.
  * Outputs JSON: { status, id, file, scope }
@@ -42,7 +45,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 
@@ -105,7 +108,7 @@ const pinned = argv.includes('--pin')
 let catNames
 try { catNames = loadCategories().categories.map(c => c.name).join('|') } catch { catNames = 'see categories.json' }
 
-const USAGE = `--project <name> --category <${catNames}> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope local|global]`
+const USAGE = `--project <name> --category <${catNames}> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path|->) [--scope local|global]`
 
 if (bodyArg !== undefined && bodyFile !== undefined) {
   console.log(JSON.stringify({

@@ -5,7 +5,7 @@
  * Usage:
  *   node em-revise.mjs --original <id> --project <name>
  *                      (--tags <t1,t2> | --tag <t1> --tag <t2> | both)
- *                      --summary <text> (--body <text> | --body-file <path>)
+ *                      --summary <text> (--body <text> | --body-file <path|->)
  *                      [--scope inherit|local|global]
  *
  * Tag forms accepted (merged + deduplicated; mirrors em-store):
@@ -15,7 +15,10 @@
  * original). Pass "local" or "global" only to force a cross-scope revision.
  *
  * `--body-file` reads body content from a file (UTF-8, BOM stripped, exactly
- * one trailing newline stripped). Mutually exclusive with `--body`.
+ * one trailing newline stripped), or from stdin when the path is `-`. Mutually
+ * exclusive with `--body`. Prefer it over inline `--body` for bodies with
+ * backticks / `$(...)` / `$VAR` (the shell corrupts those inside --body "…"
+ * before this script runs); safe form: `--body-file - <<'EOF' … EOF`.
  *
  * Creates a new episode that supersedes the original. Marks the original
  * episode as superseded in both its file and the index.
@@ -42,7 +45,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path>) [--scope inherit|local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 

@@ -4,17 +4,21 @@
  *
  * Usage:
  *   node em-violation.mjs --pattern <pattern_id> --summary "<text>"
- *                         (--body "<text>" | --body-file <path>)
+ *                         (--body "<text>" | --body-file <path|->)
  *                         [--sequence "<action1,action2>"] [--correct "<action1,action2>"]
  *                         [--project <name>] [--tags "<extra_tags>"] [--scope global|local]
  *
  * `--body-file` reads the "what happened" body from a file (UTF-8, BOM stripped,
- * exactly one trailing newline stripped). Mutually exclusive with `--body`.
+ * exactly one trailing newline stripped), or from stdin when the path is `-`.
+ * Mutually exclusive with `--body`. Prefer it over inline `--body` for bodies
+ * with backticks / `$(...)` / `$VAR` (the shell corrupts those inside
+ * --body "…" before this script runs); safe form: `--body-file - <<'EOF' … EOF`.
  *
  * Validates pattern exists in patterns/_index.json, auto-tags with
  * violation + behavioral-pattern + violated:<pattern_id>, builds structured
- * body, then delegates to em-store.mjs (always via `--body`, never forwards
- * `--body-file` to the subprocess).
+ * body, then delegates to em-store.mjs, piping the structured body to the
+ * child over stdin (`--body-file -` + execFileSync `input`) so a near-1 MB
+ * body cannot overflow the OS argv limit (spawnSync E2BIG).
  *
  * Outputs JSON: { status, id, violated_pattern, file, scope }
  */
@@ -35,7 +39,7 @@ const STORE_SCRIPT = path.join(SCRIPTS_DIR, 'em-store.mjs')
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-violation.mjs', usage: 'node em-violation.mjs --pattern <pattern_id> --summary <text> (--body <text> | --body-file <path>) [--sequence <a,b>] [--correct <a,b>] [--project <name>] [--tags <extra>] [--scope global|local] [--lesson <lesson-episode-id>]...' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-violation.mjs', usage: 'node em-violation.mjs --pattern <pattern_id> --summary <text> (--body <text> | --body-file <path|->) [--sequence <a,b>] [--correct <a,b>] [--project <name>] [--tags <extra>] [--scope global|local] [--lesson <lesson-episode-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 
@@ -196,7 +200,11 @@ const args = [
   `--category`, `violation`,
   `--tags`, tagsStr,
   `--summary`, summary,
-  `--body`, structuredBody,
+  // Deliver the structured body over the child's STDIN (`--body-file -`), not as
+  // an argv value: a body near MAX_BODY_BYTES (1 MB) as `--body <text>` blows
+  // past the OS argv ceiling (macOS ARG_MAX = 1 MB, shared with env + the other
+  // flags) and the child dies with spawnSync E2BIG. stdin has no such limit.
+  `--body-file`, `-`,
   `--scope`, scope,
   // T6 (REQ-8): typed scalar — em-recall preflight + em-pattern-health strikes
   // read THIS field (dual-read with the legacy tag during burn-in).
@@ -206,7 +214,7 @@ const args = [
 for (const l of lessons) args.push('--lesson', l)
 
 try {
-  const result = execFileSync('node', [STORE_SCRIPT, ...args], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+  const result = execFileSync('node', [STORE_SCRIPT, ...args], { input: structuredBody, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
   const parsed = JSON.parse(result)
 
   if (parsed.status === 'ok') {
@@ -223,9 +231,22 @@ try {
     process.exit(1)
   }
 } catch (e) {
+  // execFileSync throws on a non-zero child exit; the child's structured error
+  // envelope is on e.stdout, not e.message (which is a generic "Command failed:
+  // node …"). Surface the child's message so failures are self-explanatory —
+  // e.g. when the wrapped structuredBody exceeds em-store's 1 MB stored-body cap
+  // (a near-1 MB violation body plus the section headers), the user sees
+  // "stdin exceeds max …" rather than an opaque "Command failed".
+  let childMsg = null
+  if (e.stdout) {
+    try {
+      const p = JSON.parse(String(e.stdout).trim())
+      if (p && p.message) childMsg = p.message
+    } catch { /* child stdout was not a JSON envelope; fall back to e.message */ }
+  }
   console.log(JSON.stringify({
     status: 'error',
-    message: `em-store.mjs failed: ${e.message}`
+    message: childMsg ? `em-store.mjs rejected the violation body: ${childMsg}` : `em-store.mjs failed: ${e.message}`
   }))
   process.exit(1)
 }
