@@ -493,3 +493,18 @@ export function activationRegistrations() {
 export function activationHookFileBasenames() {
   return [...new Set(ACTIVATION_HOOK_SPECS.map((s) => s.file))]
 }
+
+// ACTIVATION_SUPPORT_FILES — non-registration OWNED artifacts the activation
+// hooks depend on and that S6 install must deploy alongside the .sh entry
+// points. `activation-hook-run.mjs` is the R3 event-plane runner the two .sh
+// wrappers (activation-prompt.sh / activation-tool.sh) exec — ALL the matcher/
+// freshness/identity/suppress logic lives there, so it is a tamper-covered
+// artifact (codex P2-S4 review F1): the manifest declares a sha256 of it under
+// `support_files` and validate-plugin-registry's A-support-checksum verifies it,
+// exactly as the 3 registrations are checksum-guarded. Not an event
+// registration (no event/timeout), hence a SEPARATE array, not a fake reg.
+export const ACTIVATION_SUPPORT_FILES = ['activation-hook-run.mjs']
+
+export function activationSupportFiles() {
+  return [...ACTIVATION_SUPPORT_FILES]
+}

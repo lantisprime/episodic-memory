@@ -41,6 +41,11 @@
     },
     "io_schema": { "type": "string", "const": "schemas/runtime/activation-io.schema.json" },
     "runbook": { "$ref": "#/$defs/runbook" },
+    "support_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/supportFile" }
+    },
     "project_identity": { "$ref": "#/$defs/projectIdentity" },
     "installed_state": {
       "type": "object",
@@ -79,6 +84,15 @@
       "properties": {
         "full": { "type": "string", "minLength": 1 },
         "quickref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "supportFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "checksum"],
+      "properties": {
+        "file": { "type": "string", "pattern": "^[a-z0-9-]+\\.mjs$" },
+        "checksum": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
       }
     },
     "projectIdentity": {

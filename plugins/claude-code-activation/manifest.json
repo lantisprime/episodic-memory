@@ -11,9 +11,12 @@
     "session_start": "STRONG"
   },
   "registrations": [
-    { "id": "rfc-009-activation-user-prompt-submit", "file": "activation-prompt.sh", "event": "UserPromptSubmit", "timeout": 5, "checksum": "sha256:48459bca35d14d15d9002cbd3be087f028e2d9b743b029be6f3540c5db0053b8" },
-    { "id": "rfc-009-activation-pre-tool-use", "file": "activation-tool.sh", "event": "PreToolUse", "timeout": 5, "checksum": "sha256:8fa37129f0bfac71073dd82d8e841d439032eff09338b0ec53a7adb62d191536" },
+    { "id": "rfc-009-activation-user-prompt-submit", "file": "activation-prompt.sh", "event": "UserPromptSubmit", "timeout": 5, "checksum": "sha256:c71563f484a73532b199048183bae67d04fb6dbd5f40ba16c2eff5e0d58a0fb7" },
+    { "id": "rfc-009-activation-pre-tool-use", "file": "activation-tool.sh", "event": "PreToolUse", "timeout": 5, "checksum": "sha256:779a278459351ae2ae80c47882470e0dd007ffbad04a44d2662d6890f050e3b3" },
     { "id": "rfc-009-activation-session-start", "file": "activation-sessionstart.sh", "event": "SessionStart", "timeout": 10, "checksum": "sha256:51b83750662e7ab9a0115aefeb4f793589bc3d168b800da58b3febfe15ce822e" }
+  ],
+  "support_files": [
+    { "file": "activation-hook-run.mjs", "checksum": "sha256:e2657f99ffbc028a0d6d3a1a0bc2c8106887ef1df7d2c0976cc713ff8aa1cffa" }
   ],
   "io_schema": "schemas/runtime/activation-io.schema.json",
   "runbook": {

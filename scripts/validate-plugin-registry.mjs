@@ -438,6 +438,24 @@ function validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, a
     if (actual !== r.checksum) add("A-checksum", "error", `registration ${JSON.stringify(r.id)} checksum mismatch: manifest=${JSON.stringify(r.checksum)} actual=${actual}`, { keyword: "checksum_mismatch" });
   }
 
+  // A-support-checksum — OWNED but non-registration hook artifacts declared in
+  // `support_files` (the R3 runner activation-hook-run.mjs the .sh wrappers
+  // exec). ALL the event-plane logic lives in the runner, so tampering with it
+  // must redden a checksum (codex P2-S4 review F1) exactly like a .sh body would.
+  // Same authority/containment/readBytes path as A-checksum (not hand-rolled).
+  // Optional: an absent `support_files` runs no check.
+  const supportFiles = Array.isArray(manifest.support_files) ? manifest.support_files : [];
+  for (const sf of supportFiles) {
+    if (typeof sf.file !== "string" || sf.file.length === 0) continue; // shape already flagged by A2
+    const absLex = path.join(pluginDirReal, "hooks", sf.file);
+    if (!contained(absLex, pluginDirReal)) { add("A-support-checksum", "error", `support file ${JSON.stringify(sf.file)} escapes plugin authority`, { keyword: "path_outside_authority" }); continue; }
+    let buf;
+    try { buf = readBytes(absLex); }
+    catch (e) { add("A-support-checksum", "error", `support file ${JSON.stringify(sf.file)} unreadable: ${e.message}`, { keyword: "missing" }); continue; }
+    const actual = "sha256:" + crypto.createHash("sha256").update(buf).digest("hex");
+    if (actual !== sf.checksum) add("A-support-checksum", "error", `support file ${JSON.stringify(sf.file)} checksum mismatch: manifest=${JSON.stringify(sf.checksum)} actual=${actual}`, { keyword: "checksum_mismatch" });
+  }
+
   // A-io-schema — io_schema resolves to an EXISTING file, contained under the
   // PROJECT root (it lives at schemas/runtime/, outside the plugin dir). Uses
   // the shared two-stage resolver (F2) so a symlink at that path escaping the

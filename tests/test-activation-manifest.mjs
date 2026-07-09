@@ -16,7 +16,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { validateInstance } from "../scripts/lib/json-instance-validate.mjs";
 import { validateRegistry } from "../scripts/validate-plugin-registry.mjs";
-import { activationRegistrations, activationHookFileBasenames } from "../scripts/lib/install-manifest.mjs";
+import { activationRegistrations, activationHookFileBasenames, activationSupportFiles } from "../scripts/lib/install-manifest.mjs";
 
 const REPO = fs.realpathSync(path.join(path.dirname(fileURLToPath(import.meta.url)), ".."));
 const PLUGIN_DIR = path.join(REPO, "plugins/claude-code-activation");
@@ -186,6 +186,50 @@ const OUTSIDE_TARGET = "/etc/hosts";
 }
 
 // ===========================================================================
+// 8b. support_files (codex P2-S4 review F1) — activation-hook-run.mjs, where ALL
+//     the R3 logic lives, is tamper-covered exactly like the 3 .sh registrations.
+// ===========================================================================
+{
+  // (a) support_files_agreement — install-manifest source-of-truth basenames
+  //     equal the manifest's declared support_files basenames.
+  const specSupport = new Set(activationSupportFiles());
+  const manifestSupport = new Set((manifest.support_files || []).map((s) => s.file));
+  assert(specSupport.size === manifestSupport.size && [...specSupport].every((f) => manifestSupport.has(f)),
+    "support_files_agreement: activationSupportFiles() equals the manifest's support_files basenames",
+    JSON.stringify({ spec: [...specSupport], manifest: [...manifestSupport] }));
+
+  // (b) support_file_checksum_matches — declared checksum == sha256(on disk);
+  //     the list must be non-empty (the runner MUST be covered).
+  let allMatch = (manifest.support_files || []).length > 0;
+  for (const sf of manifest.support_files || []) {
+    const abs = path.join(PLUGIN_DIR, "hooks", sf.file);
+    const actual = "sha256:" + sha256(fs.readFileSync(abs));
+    if (actual !== sf.checksum) allMatch = false;
+  }
+  assert(allMatch, "support_file_checksum_matches: every support_files checksum matches its file's sha256 (and the list is non-empty)", "mismatch or empty support_files");
+
+  // (c) support_file_tamper_detected — copy the plugin dir into a temp project,
+  //     append a byte to the runner, assert the validator now FAILS
+  //     A-support-checksum (the regression the drift probe would have caught).
+  const tmp = mkdtemp();
+  try {
+    buildActivationProject(tmp);
+    fs.writeFileSync(path.join(tmp, "m.json"), JSON.stringify(manifest));
+    const clean = validateRegistry({ projectRoot: tmp, manifestPath: "m.json" });
+    assert(clean.status === "ok", "support_file_tamper_detected: clean copy WITH support_files passes (isolates the mutation)", JSON.stringify(clean.violations.slice(0, 4)));
+
+    const runnerCopy = path.join(tmp, "plugins/claude-code-activation/hooks", manifest.support_files[0].file);
+    fs.appendFileSync(runnerCopy, "\n// tamper byte\n");
+    const tampered = validateRegistry({ projectRoot: tmp, manifestPath: "m.json" });
+    assert(tampered.status === "fail" && tampered.violations.some((v) => v.check === "A-support-checksum" && v.keyword === "checksum_mismatch"),
+      "support_file_tamper_detected: a mutated runner fails A-support-checksum",
+      JSON.stringify(tampered.violations.slice(0, 6)));
+  } finally {
+    rmrf(tmp);
+  }
+}
+
+// ===========================================================================
 // 9. io_schema_path_exists
 // ===========================================================================
 {
@@ -341,6 +385,11 @@ function buildActivationProject(tmp) {
   fs.mkdirSync(path.join(pd, "runbooks"), { recursive: true });
   for (const h of manifest.registrations.map((r) => r.file)) {
     fs.copyFileSync(path.join(PLUGIN_DIR, "hooks", h), path.join(pd, "hooks", h));
+  }
+  // support_files (the R3 runner) live in hooks/ too — copy so A-support-checksum
+  // finds them; without this the baseline full-project would now redden.
+  for (const sf of (manifest.support_files || []).map((s) => s.file)) {
+    fs.copyFileSync(path.join(PLUGIN_DIR, "hooks", sf), path.join(pd, "hooks", sf));
   }
   for (const rb of ["activation.md", "activation.quickref.md"]) {
     fs.copyFileSync(path.join(PLUGIN_DIR, "runbooks", rb), path.join(pd, "runbooks", rb));
