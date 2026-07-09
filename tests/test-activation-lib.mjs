@@ -47,7 +47,14 @@ t('testActivationClassesValidates', () => {
   assert.equal(doc.classes.length, 7, 'exactly the 7 launch classes');
   const names = doc.classes.map(c => c.name).sort();
   assert.deepEqual(names, ['design', 'implement', 'plan', 'push', 'review', 'rule', 'troubleshoot']);
-  for (const c of doc.classes) assert.deepEqual(c.phrases, [], `phrases EMPTY in P1b (F5c): ${c.name}`);
+  // P2-S0 (REQ-8/9) populated ALL 7 launch classes' phrase sets — the event plane
+  // reads phrases BAKED into the trigger index at build time. Was empty in P1b (F5c);
+  // this assertion flipped when S0 populated the vocabulary (CI regression: the P1b
+  // empty-phrases invariant went stale against the P2 populate step).
+  for (const c of doc.classes) {
+    assert.ok(Array.isArray(c.phrases) && c.phrases.length > 0, `phrases POPULATED in P2 (REQ-8): ${c.name}`);
+    for (const p of c.phrases) assert.ok(typeof p === 'string' && p.length > 0, `each phrase a non-empty string: ${c.name}`);
+  }
 });
 
 t('testActivationLibValidators', () => {
