@@ -25,7 +25,7 @@ export function renderPage(nonce = '') {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>em-console</title>
-<style>
+<style nonce="${nonce}">
 :root {
   --accent: #0071e3; --accent-soft: #e8f0fd; --accent-dark: #0058b0;
   --bg: #f5f5f7; --card: #ffffff; --line: #e8e8ed; --line-2: #e2e2e7;
@@ -258,6 +258,33 @@ details.more summary { color: var(--accent-dark); font-size: 13px; cursor: point
   background: var(--dark); color: var(--on-dark); border-radius: 12px; padding: 12px 18px;
   font-size: 14px; box-shadow: 0 12px 32px rgba(0,0,0,.24); max-width: 380px;
 }
+
+/* ---- utility classes (folded from former inline style= attrs, #494) --------
+   Appended last so a single-class utility wins ties over earlier single-class
+   rules (e.g. .fs-12 over .note's font-size). Each reproduces one former
+   inline declaration verbatim to preserve rendered appearance exactly. */
+.m-4-0-0 { margin: 4px 0 0; }
+.m-8-0-0 { margin: 8px 0 0; }
+.m-6-0-0 { margin: 6px 0 0; }
+.m-4-0-2 { margin: 4px 0 2px; }
+.m-6-0-2 { margin: 6px 0 2px; }
+.m-8-2-0 { margin: 8px 2px 0; }
+.m-0-0-12 { margin: 0 0 12px; }
+.m-0 { margin: 0; }
+.mt-4 { margin-top: 4px; }
+.mt-6 { margin-top: 6px; }
+.mt-8 { margin-top: 8px; }
+.mt-10 { margin-top: 10px; }
+.mb-8 { margin-bottom: 8px; }
+.mb-12 { margin-bottom: 12px; }
+.fs-12 { font-size: 12px; }
+.fs-12-wb { font-size: 12px; word-break: break-all; }
+.fs-13-b { font-size: 13px; font-weight: 600; }
+.fs-13-b-wb { font-size: 13px; font-weight: 600; word-break: break-all; }
+.sc-30 { max-height: 30vh; overflow-y: auto; }
+.sc-22 { max-height: 22vh; overflow-y: auto; }
+.flex-1 { flex: 1; }
+.w-100 { width: 100%; }
 </style>
 </head>
 <body>
@@ -384,7 +411,7 @@ function autoRender(v, depth = 0) {
   if (Array.isArray(v)) {
     if (!v.length) return '<span class="note">none</span>';
     if (v.every(x => typeof x !== 'object' || x === null)) {
-      return '<p class="chips" style="margin:4px 0 0">' + v.slice(0, 60).map(x => '<span>' + esc(String(x)) + '</span>').join('') +
+      return '<p class="chips m-4-0-0">' + v.slice(0, 60).map(x => '<span>' + esc(String(x)) + '</span>').join('') +
         (v.length > 60 ? '<span>+' + (v.length - 60) + ' more</span>' : '') + '</p>';
     }
     return v.slice(0, 30).map(x => '<div class="sub-card">' + autoRender(x, depth + 1) + '</div>').join('') +
@@ -419,10 +446,10 @@ function renderDoctorReport(r) {
     '<div class="s"><div class="v lvl-warn">' + esc(sum.warn ?? '—') + '</div><div class="k">warn</div></div>' +
     '<div class="s"><div class="v lvl-error">' + esc(sum.error ?? '—') + '</div><div class="k">error</div></div></div>';
   if (bad.length) {
-    html += '<div style="max-height:30vh;overflow-y:auto"><table class="checks"><tr><th>level</th><th>check</th><th>message</th></tr>' +
-      bad.map(c => '<tr><td class="lvl-' + esc(c.level) + '">' + esc(c.level) + '</td><td class="mono" style="font-size:12px">' + esc(c.id) + (c.scope && c.scope !== '-' ? ':' + esc(c.scope) : '') + '</td><td>' + esc(c.message) + '</td></tr>').join('') + '</table></div>';
+    html += '<div class="sc-30"><table class="checks"><tr><th>level</th><th>check</th><th>message</th></tr>' +
+      bad.map(c => '<tr><td class="lvl-' + esc(c.level) + '">' + esc(c.level) + '</td><td class="mono fs-12">' + esc(c.id) + (c.scope && c.scope !== '-' ? ':' + esc(c.scope) : '') + '</td><td>' + esc(c.message) + '</td></tr>').join('') + '</table></div>';
   } else {
-    html += '<p class="note" style="margin-top:8px">Every check passes.</p>';
+    html += '<p class="note mt-8">Every check passes.</p>';
   }
   return html;
 }
@@ -430,15 +457,15 @@ function renderStatsReport(r) {
   return (r.scopes || []).map(s => {
     const ep = s.episodes || {};
     const cats = Object.entries(s.by_category || {}).sort((a, b) => b[1] - a[1]);
-    return '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600">' + esc(s.scope || '') + '</div>' +
-      (s.dir ? '<div class="note" style="font-size:12px;word-break:break-all">' + esc(s.dir) + '</div>' : '') +
+    return '<div class="sub-card"><div class="mono fs-13-b">' + esc(s.scope || '') + '</div>' +
+      (s.dir ? '<div class="note fs-12-wb">' + esc(s.dir) + '</div>' : '') +
       '<div class="stat-line">' +
       '<div class="s"><div class="v">' + esc(ep.active ?? '—') + '</div><div class="k">active</div></div>' +
       '<div class="s"><div class="v">' + esc(ep.superseded ?? '—') + '</div><div class="k">superseded</div></div>' +
       '<div class="s"><div class="v">' + esc(ep.pinned ?? '—') + '</div><div class="k">pinned</div></div>' +
       '<div class="s"><div class="v">' + esc(s.prunable_estimate ?? '—') + '</div><div class="k">prunable est.</div></div>' +
       '</div>' +
-      (cats.length ? '<p class="chips" style="margin:8px 0 0">' + cats.map(([k, c]) => '<span>' + esc(k) + ' ' + esc(c) + '</span>').join('') + '</p>' : '') +
+      (cats.length ? '<p class="chips m-8-0-0">' + cats.map(([k, c]) => '<span>' + esc(k) + ' ' + esc(c) + '</span>').join('') + '</p>' : '') +
       '</div>';
   }).join('') || '<p class="note">no scopes reported</p>';
 }
@@ -446,10 +473,10 @@ function renderFold(r) {
   const chains = r.chains || [];
   const verb = r.dry_run ? 'would fold' : 'folded';
   let html = countLine(r.folded_total ?? 0, 'revision' + ((r.folded_total ?? 0) === 1 ? '' : 's'), verb + ' across ' + chains.length + ' chain' + (chains.length === 1 ? '' : 's') + (r.scope ? ' in the ' + r.scope + ' store' : ''));
-  if (r.dry_run && chains.length) html += '<p class="note" style="margin-top:4px">This is a preview — nothing was written. Terminals are always kept.</p>';
+  if (r.dry_run && chains.length) html += '<p class="note mt-4">This is a preview — nothing was written. Terminals are always kept.</p>';
   html += chains.slice(0, 12).map(c =>
-    '<div class="sub-card"><div class="note" style="font-size:12px">chain of ' + esc(c.chain_length) + ' · keeps terminal</div>' +
-    '<div style="margin:4px 0 2px">' + epId(c.terminal) + '</div>' +
+    '<div class="sub-card"><div class="note fs-12">chain of ' + esc(c.chain_length) + ' · keeps terminal</div>' +
+    '<div class="m-4-0-2">' + epId(c.terminal) + '</div>' +
     idList(c.folded, (r.dry_run ? 'members that would fold' : 'folded members')) + '</div>').join('');
   if (chains.length > 12) html += '<p class="note">+' + (chains.length - 12) + ' more chains — see raw JSON</p>';
   return html;
@@ -457,7 +484,7 @@ function renderFold(r) {
 function renderPrune(r) {
   const results = r.results || [];
   return results.map(s =>
-    '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600">' + esc(s.scope || '') + '</div>' +
+    '<div class="sub-card"><div class="mono fs-13-b">' + esc(s.scope || '') + '</div>' +
     '<div class="stat-line">' +
     '<div class="s"><div class="v">' + esc(s.prunable ?? s.archived ?? 0) + '</div><div class="k">' + (r.dry_run === false || s.archived !== undefined ? 'archived' : 'prunable') + '</div></div>' +
     '<div class="s"><div class="v">' + esc(s.remaining ?? '—') + '</div><div class="k">remaining</div></div>' +
@@ -472,7 +499,7 @@ function renderRebuild(r) {
     const drift = s.category_drift || {};
     const unknown = Object.keys(drift.unknown || {}).length;
     const deprecated = Object.keys(drift.deprecated || {}).length;
-    return '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600">' + esc(s.scope || '') + '</div>' +
+    return '<div class="sub-card"><div class="mono fs-13-b">' + esc(s.scope || '') + '</div>' +
       countLine(s.count ?? 0, 'episode' + ((s.count ?? 0) === 1 ? '' : 's'), 'reindexed') +
       (unknown || deprecated ? '<p class="note">category drift: ' + unknown + ' unknown · ' + deprecated + ' deprecated</p>'
         : '<p class="note">no category drift</p>') + '</div>';
@@ -483,24 +510,24 @@ function renderDrafts(r) {
   if (!drafts.length) return '<div class="ledger"><p class="empty">No pending drafts — sessions with auto-capture enabled will queue candidates here.</p></div>';
   return countLine(drafts.length, 'draft' + (drafts.length === 1 ? '' : 's'), 'waiting for review') +
     drafts.map(d =>
-      '<div class="sub-card"><div class="mono" style="font-size:13px;font-weight:600;word-break:break-all">' + esc(d.id || '') + '</div>' +
-      '<div class="note" style="font-size:12px">' + esc(d.project || '') + (d.session_id ? ' · session ' + esc(String(d.session_id).slice(0, 12)) : '') + (d.ts ? ' · ' + esc(d.ts) : '') + '</div>' +
+      '<div class="sub-card"><div class="mono fs-13-b-wb">' + esc(d.id || '') + '</div>' +
+      '<div class="note fs-12">' + esc(d.project || '') + (d.session_id ? ' · session ' + esc(String(d.session_id).slice(0, 12)) : '') + (d.ts ? ' · ' + esc(d.ts) : '') + '</div>' +
       '<div class="stat-line">' +
       '<div class="s"><div class="v lvl-warn">' + esc(d.pending ?? 0) + '</div><div class="k">pending</div></div>' +
       '<div class="s"><div class="v lvl-ok">' + esc(d.accepted ?? 0) + '</div><div class="k">accepted</div></div>' +
       '<div class="s"><div class="v">' + esc(d.rejected ?? 0) + '</div><div class="k">rejected</div></div>' +
       '</div>' +
       ((d.summaries || []).length ? '<ul class="idlist">' + d.summaries.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '') +
-      (d.id ? '<p class="note" style="margin-top:8px">Review: <span class="mono">em capture review --draft ' + esc(d.id) + '</span></p>' : '') +
+      (d.id ? '<p class="note mt-8">Review: <span class="mono">em capture review --draft ' + esc(d.id) + '</span></p>' : '') +
       '</div>').join('');
 }
 function renderRecall(r) {
   let extras = '';
   if (r.pending_drafts > 0) extras += '<p class="count-line"><span class="n">' + esc(r.pending_drafts) + '</span> capture draft(s) pending — see the Drafts tab.</p>';
   for (const w of r.preflight_warnings || []) {
-    extras += '<p class="note" style="margin-top:6px"><span class="lvl-warn">warning</span> ' + esc(typeof w === 'string' ? w : (w.message || JSON.stringify(w))) + '</p>';
+    extras += '<p class="note mt-6"><span class="lvl-warn">warning</span> ' + esc(typeof w === 'string' ? w : (w.message || JSON.stringify(w))) + '</p>';
   }
-  if (r.prune_suggestion) extras += '<p class="note" style="margin-top:6px">prune suggestion: ' + esc(typeof r.prune_suggestion === 'string' ? r.prune_suggestion : JSON.stringify(r.prune_suggestion)) + '</p>';
+  if (r.prune_suggestion) extras += '<p class="note mt-6">prune suggestion: ' + esc(typeof r.prune_suggestion === 'string' ? r.prune_suggestion : JSON.stringify(r.prune_suggestion)) + '</p>';
   return renderEpisodes(r) + extras;
 }
 const HUMANIZE = {
@@ -578,9 +605,9 @@ async function showEpisode(id) {
   el('d-body').innerHTML = (eps.length ? eps.map(e =>
     '<div class="d-ep">' +
     '<div class="id">' + esc(e.id) + '</div>' +
-    '<div style="margin:6px 0 2px">' + catBadge(e.category) + (e.status ? ' <span class="badge neutral">' + esc(e.status) + '</span>' : '') + '</div>' +
+    '<div class="m-6-0-2">' + catBadge(e.category) + (e.status ? ' <span class="badge neutral">' + esc(e.status) + '</span>' : '') + '</div>' +
     '<div class="sum">' + esc(e.summary) + '</div>' +
-    (e.tags && e.tags.length ? '<p class="chips" style="margin:6px 0 0">' + e.tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</p>' : '') +
+    (e.tags && e.tags.length ? '<p class="chips m-6-0-0">' + e.tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</p>' : '') +
     (e.body ? miniMd(e.body) : '') +
     '</div>').join('') : '<p class="empty">no chain found</p>') + raw(res.body);
 }
@@ -599,7 +626,7 @@ function renderEpisodes(r) {
     '<div class="lsum">' + esc(e.summary) + '</div>' +
     catBadge(e.category) +
     '</div>').join('') + '</div></div>' +
-    '<p class="note" style="margin:8px 2px 0">' + eps.length + ' shown — tap a row for its full revision chain.</p>';
+    '<p class="note m-8-2-0">' + eps.length + ' shown — tap a row for its full revision chain.</p>';
 }
 
 // --- overview ----------------------------------------------------------------------
@@ -680,11 +707,11 @@ async function refreshOverview() {
   for (const s of scopes) for (const [k, v] of Object.entries(s.by_category || {})) cats[k] = (cats[k] || 0) + v;
   const catList = Object.entries(cats).sort((a, b) => b[1] - a[1]);
   el('ov-cats').innerHTML = catList.length
-    ? '<p class="chips" style="margin:4px 0 0">' + catList.map(([k, v]) => '<span>' + esc(k) + ' ' + esc(v) + '</span>').join('') + '</p>'
+    ? '<p class="chips m-4-0-0">' + catList.map(([k, v]) => '<span>' + esc(k) + ' ' + esc(v) + '</span>').join('') + '</p>'
     : 'nothing stored yet';
   el('ov-doctor').innerHTML = bad.length
-    ? '<div style="max-height:22vh;overflow-y:auto"><table class="checks"><tr><th>level</th><th>check</th><th>message</th></tr>' +
-      bad.map(c => '<tr><td class="lvl-' + esc(c.level) + '">' + esc(c.level) + '</td><td class="mono" style="font-size:12px">' + esc(c.id) + '</td><td>' + esc(c.message) + '</td></tr>').join('') + '</table></div>'
+    ? '<div class="sc-22"><table class="checks"><tr><th>level</th><th>check</th><th>message</th></tr>' +
+      bad.map(c => '<tr><td class="lvl-' + esc(c.level) + '">' + esc(c.level) + '</td><td class="mono fs-12">' + esc(c.id) + '</td><td>' + esc(c.message) + '</td></tr>').join('') + '</table></div>'
     : '<span class="lvl-ok">All ' + esc(sum.ok ?? '') + ' checks pass.</span>';
 }
 
@@ -693,7 +720,7 @@ function buildBrowse() {
   el('tab-browse').innerHTML =
     guide('Why this page exists', 'Everything your assistant remembered, searchable. Tap any row for its full revision chain — detail opens beside the list, so you never lose your place.') +
     '<h1 class="view-title">Browse</h1>' +
-    '<div class="card" style="margin-bottom:12px"><div class="row">' +
+    '<div class="card mb-12"><div class="row">' +
     '<label class="field">query<input id="q-query" size="22"></label>' +
     '<label class="field">tag<input id="q-tag" size="12"></label>' +
     '<label class="field">category<input id="q-cat" size="11" list="cats"></label>' +
@@ -724,7 +751,7 @@ function buildRecall() {
   el('tab-recall').innerHTML =
     guide('Why this page exists', 'A preview of exactly what your assistant is told at session start — the episodes recall would surface for a project right now.') +
     '<h1 class="view-title">Recall</h1>' +
-    '<div class="card" style="margin-bottom:12px"><div class="row">' +
+    '<div class="card mb-12"><div class="row">' +
     '<label class="field">project<input id="rc-proj" size="18"></label>' +
     '<label class="field">task type<select id="rc-task"><option value="">(default)</option><option>implementation</option><option>push</option><option>rule</option><option>general</option></select></label>' +
     '<button class="btn sm" id="rc-run">Preview recall</button>' +
@@ -742,7 +769,7 @@ function buildDrafts() {
   el('tab-drafts').innerHTML =
     guide('Why this page exists', 'Sessions can draft candidate episodes automatically, but nothing is stored without your confirmation. Confirm or discard from the CLI: em capture review --draft <id>.') +
     '<h1 class="view-title">Drafts</h1>' +
-    '<div class="row" style="margin-bottom:12px"><button class="btn sm secondary" id="cp-run">Refresh</button></div>' +
+    '<div class="row mb-12"><button class="btn sm secondary" id="cp-run">Refresh</button></div>' +
     '<div id="cp-out"></div>';
   el('cp-run').onclick = async () => {
     resultOrError(await run('capture-list', {}), r => humanize('capture-list', r), el('cp-out'));
@@ -758,30 +785,30 @@ function writeBtn(id, label) {
 }
 function buildMaintenance() {
   const ro = META.allow_write ? '' :
-    '<p class="note" style="margin:0 0 12px">Read-only launch — previews work; fix/apply buttons need a relaunch with <span class="mono">--allow-write</span>.</p>';
+    '<p class="note m-0-0-12">Read-only launch — previews work; fix/apply buttons need a relaunch with <span class="mono">--allow-write</span>.</p>';
   el('tab-maintenance').innerHTML =
     guide('Why this page exists', 'Store hygiene without memorizing flags. Every destructive-looking action previews first; nothing applies without the preview in front of you.') +
     '<h1 class="view-title">Maintenance</h1>' + ro +
     '<div class="grid-2">' +
     '<div class="card"><h2 class="card-title">Index & health</h2>' +
     '<p class="note">Regenerate the derived indexes, or let doctor repair what it can.</p>' +
-    '<div class="row" style="margin-top:10px">' + writeBtn('m-rebuild', 'Rebuild index') + writeBtn('m-fix', 'Doctor --fix') + '</div>' +
+    '<div class="row mt-10">' + writeBtn('m-rebuild', 'Rebuild index') + writeBtn('m-fix', 'Doctor --fix') + '</div>' +
     '<div class="out" id="m-idx-out"></div></div>' +
     '<div class="card"><h2 class="card-title">Fold superseded chains</h2>' +
     '<p class="note">Archive old revision-chain members. Reversible; terminals untouched.</p>' +
-    '<div class="row" style="margin-top:10px">' +
+    '<div class="row mt-10">' +
     '<label class="field">scope<select id="m-fold-scope"><option>local</option><option>global</option></select></label>' +
     '<button class="btn sm secondary" id="m-fold-dry">Preview</button>' + writeBtn('m-fold-apply', 'Apply fold') +
     '</div><div class="out" id="m-fold-out"></div></div>' +
     '<div class="card"><h2 class="card-title">Prune stale episodes</h2>' +
     '<p class="note">Archive low-relevance episodes past their useful life. Protected classes are never touched.</p>' +
-    '<div class="row" style="margin-top:10px">' +
+    '<div class="row mt-10">' +
     '<label class="field">scope<select id="m-prune-scope"><option>local</option><option>global</option><option>all</option></select></label>' +
     '<button class="btn sm secondary" id="m-prune-dry">Preview</button>' + writeBtn('m-prune-apply', 'Apply prune') +
     '</div><div class="out" id="m-prune-out"></div></div>' +
     '<div class="card"><h2 class="card-title">All projects</h2>' +
     '<p class="note">One view across every registered project store.</p>' +
-    '<div class="row" style="margin-top:10px">' +
+    '<div class="row mt-10">' +
     '<button class="btn sm secondary" id="m-ap-stats">Stats</button>' +
     '<button class="btn sm secondary" id="m-ap-doctor">Doctor</button>' +
     '</div><div class="out" id="m-ap-out"></div></div>' +
@@ -806,7 +833,7 @@ function buildNew() {
     el('tab-new').innerHTML =
       guide('Why this page exists', 'Store a decision, lesson, or discovery by hand — or correct one via a revision chain. This launch is read-only.') +
       '<h1 class="view-title">New episode</h1>' +
-      '<div class="card"><p class="note" style="margin:0">Relaunch the console with <span class="mono">--allow-write</span> to store or revise episodes here.</p></div>';
+      '<div class="card"><p class="note m-0">Relaunch the console with <span class="mono">--allow-write</span> to store or revise episodes here.</p></div>';
     return;
   }
   const catOpts = META.categories.map(c => '<option>' + esc(c) + '</option>').join('');
@@ -814,22 +841,22 @@ function buildNew() {
     guide('Why this page exists', 'Store a decision, lesson, or discovery by hand — or correct a past one. Corrections never edit history; they add a new revision to the chain.') +
     '<h1 class="view-title">New episode</h1>' +
     '<div class="grid-2"><div class="card"><h2 class="card-title">Store</h2>' +
-    '<div class="row" style="margin-bottom:8px">' +
+    '<div class="row mb-8">' +
     '<label class="field">project<input id="n-proj" size="13"></label>' +
     '<label class="field">category<select id="n-cat">' + catOpts + '</select></label>' +
     '<label class="field">scope<select id="n-scope"><option>global</option><option>local</option></select></label>' +
     '<label class="field"><span>pin</span><input type="checkbox" id="n-pin"></label></div>' +
-    '<div class="row" style="margin-bottom:8px"><label class="field" style="flex:1">summary<input id="n-sum" style="width:100%"></label></div>' +
-    '<div class="row" style="margin-bottom:8px"><label class="field" style="flex:1">tags (comma-sep)<input id="n-tags" style="width:100%"></label></div>' +
+    '<div class="row mb-8"><label class="field flex-1">summary<input id="n-sum" class="w-100"></label></div>' +
+    '<div class="row mb-8"><label class="field flex-1">tags (comma-sep)<input id="n-tags" class="w-100"></label></div>' +
     '<label class="field">body<textarea id="n-body"></textarea></label>' +
-    '<div class="row" style="margin-top:10px"><button class="btn sm" id="n-store">Store episode</button></div>' +
+    '<div class="row mt-10"><button class="btn sm" id="n-store">Store episode</button></div>' +
     '<div class="out" id="n-out"></div></div>' +
     '<div class="card"><h2 class="card-title">Revise</h2>' +
-    '<div class="row" style="margin-bottom:8px"><label class="field" style="flex:1">original id<input id="v-orig" class="mono" style="width:100%"></label></div>' +
-    '<div class="row" style="margin-bottom:8px"><label class="field">project<input id="v-proj" size="13"></label></div>' +
-    '<div class="row" style="margin-bottom:8px"><label class="field" style="flex:1">summary<input id="v-sum" style="width:100%"></label></div>' +
+    '<div class="row mb-8"><label class="field flex-1">original id<input id="v-orig" class="mono w-100"></label></div>' +
+    '<div class="row mb-8"><label class="field">project<input id="v-proj" size="13"></label></div>' +
+    '<div class="row mb-8"><label class="field flex-1">summary<input id="v-sum" class="w-100"></label></div>' +
     '<label class="field">body<textarea id="v-body"></textarea></label>' +
-    '<div class="row" style="margin-top:10px"><button class="btn sm" id="v-run">Add revision</button></div>' +
+    '<div class="row mt-10"><button class="btn sm" id="v-run">Add revision</button></div>' +
     '<div class="out" id="v-out"></div></div></div>';
   el('n-store').onclick = async () => {
     const flags = { project: el('n-proj').value.trim(), category: el('n-cat').value, summary: el('n-sum').value.trim(), body: el('n-body').value, scope: el('n-scope').value };
