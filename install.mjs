@@ -71,8 +71,9 @@ const installEnforcement = argv.includes('--install-enforcement')
 const uninstallEnforcement = argv.includes('--uninstall-enforcement')
 const purgeConfig = argv.includes('--purge-config')
 // RFC-009 P2-S6: the advisory activation adapter (R3 UserPromptSubmit/PreToolUse
-// + R4 SessionStart hooks) installs PER-PROJECT (Principle 12) under
-// <authorityRoot>/.claude/, NEVER global, and NEVER touches enforcement.
+// + R4 SessionStart hooks) installs PER-PROJECT (Principle 12) under the literal
+// <project>/.claude/ (the resolved --project; store identity resolves up), NEVER
+// global, and NEVER touches enforcement.
 // Advisory-only: the hooks emit additionalContext and always exit 0 — no gate,
 // no block. Independent of --install-enforcement (separate capability family).
 const installActivation = argv.includes('--install-activation')
@@ -241,13 +242,15 @@ Hook flags (claude-code / RFC-008 P4d — enforcement is PER-PROJECT, never glob
 
 Activation flags (claude-code / RFC-009 P2 — advisory, PER-PROJECT, never global):
   --install-activation    Install the PER-PROJECT advisory activation adapter
-                          under <authorityRoot>/.claude/ (NEVER ~/.claude): the
-                          3 thin hooks (activation-prompt UserPromptSubmit,
+                          under the literal <project>/.claude/ (the resolved
+                          --project, same root as enforcement; NEVER ~/.claude):
+                          the 3 thin hooks (activation-prompt UserPromptSubmit,
                           activation-tool PreToolUse, activation-sessionstart
                           SessionStart) + the shared activation-hook-run.mjs
                           runner + a co-located manifest.json carrying the
-                          project scope identity (slug + resolved root), and
-                          register them in <authorityRoot>/.claude/settings.json.
+                          project scope identity (slug + RESOLVED store root,
+                          which for a worktree stays the main checkout), and
+                          register them in <project>/.claude/settings.json.
                           Advisory-ONLY: the hooks emit additionalContext and
                           always exit 0 — no gate, no block. Independent of
                           --install-enforcement. Skips divergent local hook
@@ -1655,13 +1658,19 @@ function activationOwnedFiles() {
 // { root, slug, installedFiles, registrations, manifest, withheld, warnings }.
 function runInstallActivation(projectDir) {
   const report = { root: null, slug: null, installedFiles: [], registrations: [], manifest: null, withheld: [], warnings: [], runnerReady: false }
+  // Registration binds to the LITERAL --project (registrationRoot = the resolved
+  // --project path), exactly like enforcement + em-sync-install (#490/#491): a
+  // worktree --project installs at the worktree (and fires there), a nested
+  // --project at the subdir. Store IDENTITY stays on the resolved authority root
+  // (authorityRoot) so a worktree still shares main's episodic store.
+  const registrationRoot = path.resolve(projectDir)
   const authorityRoot = resolveRepoRoot(projectDir)
   const slug = path.basename(authorityRoot)
-  report.root = authorityRoot
+  report.root = registrationRoot
   report.slug = slug
 
-  const userHooksDir = path.join(authorityRoot, '.claude', 'hooks')
-  const settingsPath = path.join(authorityRoot, '.claude', 'settings.json')
+  const userHooksDir = path.join(registrationRoot, '.claude', 'hooks')
+  const settingsPath = path.join(registrationRoot, '.claude', 'settings.json')
   const srcHooksDir = path.join(REPO_DIR, 'plugins', 'claude-code-activation', 'hooks')
   const srcManifest = path.join(REPO_DIR, 'plugins', 'claude-code-activation', 'manifest.json')
 
@@ -1783,10 +1792,14 @@ function runInstallActivation(projectDir) {
 // warn (never delete unverifiable files). Throws ONLY on a containment violation.
 function runUninstallActivation(projectDir) {
   const report = { removedRegistrations: [], removedFiles: [], preserved: [], warnings: [] }
-  const authorityRoot = resolveRepoRoot(projectDir)
-  const userHooksDir = path.join(authorityRoot, '.claude', 'hooks')
+  // Root-symmetric with install (#490/#491 B1): registration was installed at the
+  // LITERAL --project (registrationRoot), so uninstall must target the same root,
+  // NOT resolveRepoRoot — else a worktree/nested uninstall would look at the wrong
+  // tree and orphan the registration it was asked to remove.
+  const registrationRoot = path.resolve(projectDir)
+  const userHooksDir = path.join(registrationRoot, '.claude', 'hooks')
   const hooksRoot = userHooksDir
-  const settingsPath = path.join(authorityRoot, '.claude', 'settings.json')
+  const settingsPath = path.join(registrationRoot, '.claude', 'settings.json')
   const realpathOrLexical = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
 
   // (a) PARSE FIRST — atomic on malformed settings. On SyntaxError, abort the
@@ -1839,17 +1852,17 @@ function runUninstallActivation(projectDir) {
         const cmds = (entry && Array.isArray(entry.hooks)) ? entry.hooks : []
         for (const h of cmds) {
           if (!h || typeof h.command !== 'string') continue
-          // (F3) Resolve a legacy RELATIVE command against authorityRoot — the
+          // (F3) Resolve a legacy RELATIVE command against registrationRoot — the
           //      root whose settings.json we are editing and the SAME base the
           //      install side builds the canonical command from (userHooksDir =
-          //      authorityRoot/.claude/hooks). Using projectDir here mis-resolved
-          //      a nested `--project <subdir>` invocation: the legacy relative
-          //      `.claude/hooks/activation-prompt.sh` bound under the subdir,
-          //      compared unequal to the canonical path, was judged foreign and
-          //      LEFT — yet its canonical file was still deleted below, stranding
-          //      a dangling registration. A genuinely foreign absolute path still
-          //      resolves ELSEWHERE → warn + leave (operator's own hook).
-          const tgt = hookCommandTargetPath(h.command, authorityRoot)
+          //      registrationRoot/.claude/hooks). The base MUST match install's
+          //      registration root exactly, else a legacy relative
+          //      `.claude/hooks/activation-prompt.sh` resolves elsewhere, compares
+          //      unequal to the canonical path, is judged foreign and LEFT — yet
+          //      its canonical file is still deleted below, stranding a dangling
+          //      registration. A genuinely foreign absolute path still resolves
+          //      ELSEWHERE → warn + leave (operator's own hook).
+          const tgt = hookCommandTargetPath(h.command, registrationRoot)
           if (!tgt || path.basename(tgt) !== reg.file) continue
           if (realpathOrLexical(tgt) === canonicalResolved) {
             if (removeHookCommandFromEvent(settings.hooks, reg.event, h.command) > 0) {
@@ -2466,8 +2479,8 @@ if (uninstallActivation && (tool === 'claude-code' || tool === 'all')) {
 }
 
 if (installActivation && (tool === 'claude-code' || tool === 'all')) {
-  // RFC-009 P2-S6: deploy the per-project advisory activation adapter under
-  // <authorityRoot>/.claude/. Independent of --install-enforcement.
+  // RFC-009 P2-S6: deploy the per-project advisory activation adapter under the
+  // literal <project>/.claude/. Independent of --install-enforcement.
   const rep = runInstallActivation(projectDir)
   // (F1) Carry INSTALL-TIME truth to the registry companion gate below: it must
   //      record activation_installed:true ONLY when this run actually wired the
@@ -3333,9 +3346,12 @@ try {
   // heals here on the next regular install: engine gone ⇒ false).
   if (!uninstallEnforcement && !uninstallActivation) {
     const projectKey = normalizeProjectPath(projectAbs)
-    // Activation binds to the resolved authority root (may differ from projectAbs
-    // for a nested/worktree --project); heal its flag from disk truth there.
-    const activationRoot = resolveRepoRoot(projectAbs)
+    // Activation binds to the LITERAL --project (projectAbs) — the SAME root as
+    // the row key + enforcement + em-sync-install (#490). Heal its flag from disk
+    // truth there, so key == artifacts == heal with no nested/worktree divergence
+    // (was resolveRepoRoot(projectAbs), which mistargeted the flag and duplicated
+    // the row for a nested/worktree --project).
+    const activationRoot = projectAbs
     const { entries: existingEntries } = readRegistry(registryPath(GLOBAL_DIR))
     const nowIso = new Date().toISOString()
     const registryUpdates = tools.map((t) => {
