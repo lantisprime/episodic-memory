@@ -430,8 +430,10 @@ test('cwd_independent', () => {
   ok('cwd_independent — caller cwd ≠ project ≠ repo; activation delta lands in the mock project')
 })
 
-// ── authority_root_linked_worktree: --project=worktree binds to MAIN checkout ─
-test('authority_root_linked_worktree', () => {
+// ── worktree_local_registration: --project=worktree installs AT the worktree ──
+//    (#491 — was authority_root_linked_worktree, which asserted converge-on-main;
+//    the projectAbs design installs registration where Claude Code reads it.)
+test('worktree_local_registration', () => {
   const M = mkMock('act-wt')
   const mainRepo = path.join(M.base, 'wt-main')
   mkGitRepo(mainRepo)
@@ -439,31 +441,47 @@ test('authority_root_linked_worktree', () => {
   const w = git(mainRepo, ['worktree', 'add', '-q', wt])
   assert.strictEqual(w.status, 0, `git worktree add must succeed: ${w.stderr}`)
   installActivation(M, wt)
-  const resolved = resolveRepoRoot(wt)
-  assert.notStrictEqual(resolved, wt, 'authority root must resolve UP to the main checkout, not the worktree')
-  const m = readParsed(MANIFEST(resolved))
-  assert.ok(m, `manifest must land under the resolved main root ${resolved}/.claude/hooks/`)
-  assert.strictEqual(m.project_identity.root, resolved, 'manifest project_identity.root == resolved main checkout')
-  assert.ok(fs.existsSync(path.join(HOOKS(resolved), 'activation-hook-run.mjs')), 'hooks deployed under the resolved main root')
-  ok('authority_root_linked_worktree — --project=worktree deploys under the MAIN checkout (resolveRepoRoot)')
+  const wtReal = fs.realpathSync(wt)
+  const mainReal = resolveRepoRoot(wt)
+  assert.notStrictEqual(mainReal, wtReal, 'sanity: resolveRepoRoot(worktree) converges to the main checkout')
+  // Registration + hooks land AT the worktree (the literal --project), where
+  // Claude Code run from the worktree reads settings.json — NOT under main (#491).
+  assert.ok(fs.existsSync(path.join(HOOKS(wtReal), 'activation-hook-run.mjs')),
+    'hooks must deploy under the worktree, not the main checkout')
+  const s = readParsed(SETTINGS(wtReal))
+  assert.ok(s && hasActivationCommand(s), 'settings.json at the worktree carries the activation registrations')
+  assert.ok(!fs.existsSync(path.join(HOOKS(mainReal), 'activation-hook-run.mjs')),
+    'nothing activation lands under the main checkout')
+  // But store IDENTITY stays main so the worktree still shares main's episodic store.
+  const m = readParsed(MANIFEST(wtReal))
+  assert.ok(m, `manifest must land at the worktree ${wtReal}/.claude/hooks/`)
+  assert.strictEqual(m.project_identity.root, mainReal, 'project_identity.root stays the resolved main checkout (shared store)')
+  ok('worktree_local_registration — --project=worktree installs at the worktree; identity stays main')
 })
 
-// ── authority_root_nested_cwd: --project=subdir resolves UP to the git toplevel ─
-test('authority_root_nested_cwd', () => {
+// ── nested_local_registration: --project=subdir installs AT the subdir ────────
+//    (#490 — was authority_root_nested_cwd, which asserted walk-up; the projectAbs
+//    design honors the literal --project, consistent with enforcement.)
+test('nested_local_registration', () => {
   const M = mkMock('act-nested')
   const gitRoot = path.join(M.base, 'nested-main')
   mkGitRepo(gitRoot)
   const sub = path.join(gitRoot, 'a', 'b')
   fs.mkdirSync(sub, { recursive: true })
   installActivation(M, sub)
-  const resolved = resolveRepoRoot(sub)
-  assert.notStrictEqual(resolved, sub, 'authority root must resolve UP to the git toplevel, not the nested subdir')
-  const m = readParsed(MANIFEST(resolved))
-  assert.ok(m, `manifest must land under the git toplevel ${resolved}/.claude/hooks/`)
-  assert.strictEqual(m.project_identity.root, resolved, 'manifest project_identity.root == git toplevel')
-  assert.strictEqual(resolved, fs.realpathSync(gitRoot), 'resolved root == the repo toplevel')
-  assert.ok(fs.existsSync(path.join(HOOKS(resolved), 'activation-hook-run.mjs')), 'hooks deployed under the git toplevel')
-  ok('authority_root_nested_cwd — --project=subdir deploys under the git toplevel (resolveRepoRoot)')
+  const subReal = fs.realpathSync(sub)
+  const toplevel = resolveRepoRoot(sub)
+  assert.notStrictEqual(toplevel, subReal, 'sanity: resolveRepoRoot(subdir) resolves UP to the git toplevel')
+  // Registration + hooks land AT the literal --project subdir, not walked up.
+  assert.ok(fs.existsSync(path.join(HOOKS(subReal), 'activation-hook-run.mjs')),
+    'hooks must deploy under the literal --project subdir')
+  const s = readParsed(SETTINGS(subReal))
+  assert.ok(s && hasActivationCommand(s), 'settings.json at the subdir carries the activation registrations')
+  // Store IDENTITY stays the git toplevel (shared repo store).
+  const m = readParsed(MANIFEST(subReal))
+  assert.ok(m, `manifest must land at the subdir ${subReal}/.claude/hooks/`)
+  assert.strictEqual(m.project_identity.root, toplevel, 'project_identity.root stays the git toplevel (shared store)')
+  ok('nested_local_registration — --project=subdir installs at the subdir; identity stays git toplevel')
 })
 
 // ── authority_root_non_git_cwd: --project=plain dir binds to the dir itself ───
@@ -479,6 +497,82 @@ test('authority_root_non_git_cwd', () => {
   assert.strictEqual(m.project_identity.root, resolved, 'manifest project_identity.root == the plain dir')
   assert.ok(fs.existsSync(path.join(HOOKS(plain), 'activation-hook-run.mjs')), 'hooks deployed under the plain dir')
   ok('authority_root_non_git_cwd — --project=non-git dir deploys under the dir itself (resolveRepoRoot)')
+})
+
+// ── single_row_per_project: one --project → one row, keyed + healed there ─────
+//    (#490 core: key == artifacts == heal at projectAbs; re-install is idempotent,
+//    the flag is never mistargeted, and there is no duplicate row.)
+test('single_row_per_project', () => {
+  const M = mkMock('act-onerow')
+  const gitRoot = path.join(M.base, 'onerow-main')
+  mkGitRepo(gitRoot)
+  const sub = path.join(gitRoot, 'x', 'y')
+  fs.mkdirSync(sub, { recursive: true })
+  installActivation(M, sub)
+  installActivation(M, sub) // idempotent — same literal --project
+  const reg = readParsed(path.join(M.home, '.episodic-memory', 'installs.json'))
+  const subReal = fs.realpathSync(sub)
+  const rows = reg.entries.filter((e) => e.tool === 'claude-code')
+  assert.strictEqual(rows.length, 1, `exactly one claude-code row for one --project, got ${rows.length}: ${JSON.stringify(rows.map((r) => r.project_path))}`)
+  assert.strictEqual(rows[0].project_path, subReal, 'row keyed at the literal --project (realpath), not the git toplevel')
+  assert.strictEqual(rows[0].activation_installed, true, 'activation_installed healed true at the row-key root')
+  ok('single_row_per_project — one --project → one row keyed there, activation_installed true (#490)')
+})
+
+// ── one_row_both_adapters: activation + enforcement share ONE row (both projectAbs)
+//    (B2 dissolved: both adapters key on the same literal --project.)
+test('one_row_both_adapters', () => {
+  const M = mkMock('act-bothrow')
+  const r = runInstall({ home: M.home, project: M.project, callerCwd: M.callerCwd, flags: ['--install-activation', '--install-enforcement'] })
+  assert.strictEqual(r.status, 0, `install must succeed: ${r.stderr}`)
+  const reg = readParsed(path.join(M.home, '.episodic-memory', 'installs.json'))
+  const rows = reg.entries.filter((e) => e.tool === 'claude-code')
+  assert.strictEqual(rows.length, 1, `both adapters must share ONE claude-code row, got ${rows.length}`)
+  assert.strictEqual(rows[0].activation_installed, true, 'activation_installed:true on the shared row')
+  assert.strictEqual(rows[0].enforcement_installed, true, 'enforcement_installed:true on the SAME row (no split)')
+  ok('one_row_both_adapters — activation + enforcement carried on one row (B2)')
+})
+
+// ── em_sync_recognizes_registered: the row stays findable by em-sync-install ───
+//    (codex-B1 guard: em-sync-install matches the row by the literal --project;
+//    keying activation there — not at a resolved root — keeps it recognizable.)
+test('em_sync_recognizes_registered', () => {
+  const M = mkMock('act-emsync')
+  const gitRoot = path.join(M.base, 'emsync-main')
+  mkGitRepo(gitRoot)
+  const sub = path.join(gitRoot, 'p', 'q')
+  fs.mkdirSync(sub, { recursive: true })
+  installActivation(M, sub)
+  const r = spawnSync('node', [path.join(REPO_ROOT, 'scripts', 'em-sync-install.mjs'), '--project', sub, '--dry-run'],
+    { cwd: M.callerCwd, env: { ...process.env, HOME: M.home }, encoding: 'utf8' })
+  const out = JSON.parse(r.stdout.trim().split('\n').pop())
+  assert.notStrictEqual(out.status, 'unregistered',
+    `em-sync-install must recognize the activation-registered nested project, got status=${out.status}`)
+  ok(`em_sync_recognizes_registered — em-sync-install found the row (status=${out.status}, not unregistered)`)
+})
+
+// ── worktree_roundtrip: install then uninstall at the worktree restores it ─────
+//    (B1: uninstall binds to the same literal --project install used — the
+//    worktree, NOT main — so nothing is orphaned.)
+test('worktree_roundtrip', () => {
+  const M = mkMock('act-wt-rt')
+  const mainRepo = path.join(M.base, 'rt-main')
+  mkGitRepo(mainRepo)
+  const wt = path.join(M.base, 'rt-wt')
+  const w = git(mainRepo, ['worktree', 'add', '-q', wt])
+  assert.strictEqual(w.status, 0, `git worktree add must succeed: ${w.stderr}`)
+  const wtReal = fs.realpathSync(wt)
+  installActivation(M, wt)
+  assert.ok(fs.existsSync(path.join(HOOKS(wtReal), 'activation-hook-run.mjs')), 'runner deployed at the worktree pre-uninstall')
+  const u = uninstallActivation(M, wt)
+  assert.strictEqual(u.status, 0, `uninstall must exit cleanly: ${u.stderr}`)
+  // Registration + runner removed FROM the worktree (uninstall targeted the same
+  // root install used, not main).
+  assert.ok(!fs.existsSync(path.join(HOOKS(wtReal), 'activation-hook-run.mjs')),
+    'runner must be removed from the worktree by uninstall (B1: no orphan)')
+  const s = readParsed(SETTINGS(wtReal))
+  assert.ok(!s || !hasActivationCommand(s), 'no activation registration left in the worktree settings.json')
+  ok('worktree_roundtrip — install+uninstall at the worktree round-trips cleanly (B1)')
 })
 
 // ── pre_amendment_schema_rejects: the 1.1.0 MINOR bump is load-bearing ───────
@@ -596,28 +690,29 @@ test('install_nonobject_settings_atomic', () => {
   ok('install_nonobject_settings_atomic — settings=[] on install AND uninstall: clean exit, ZERO footprint, byte-identical (F2)')
 })
 
-// ── uninstall_legacy_relative_nested_project (Finding F3) ─────────────────────
+// ── uninstall_legacy_relative_registration (Finding F3, projectAbs) ───────────
 //    A legacy RELATIVE activation command (`.claude/hooks/activation-prompt.sh`)
-//    in the authority-root settings.json must resolve against the AUTHORITY ROOT
-//    whose settings.json is being edited — NOT projectDir. Under a nested
-//    `--project <subdir>` uninstall, resolving against projectDir bound the
-//    relative command under the subdir, judged it foreign, LEFT the registration
-//    — yet still DELETED the canonical file → a dangling registration. The fix
-//    makes registration-removal and file-deletion AGREE.
-test('uninstall_legacy_relative_nested_project', () => {
+//    must resolve against the SAME registration root install used — the literal
+//    --project (projectAbs) — so uninstall REMOVES it instead of judging it
+//    foreign, leaving the registration while deleting the canonical file (a
+//    dangling registration). Under the projectAbs design install+uninstall both
+//    bind to the literal --project, so registration-removal and file-deletion
+//    AGREE. (Nested inside a git repo to prove the resolution is projectAbs, not
+//    the git toplevel.)
+test('uninstall_legacy_relative_registration', () => {
   const M = mkMock('act-legacy-nested')
   const gitRoot = path.join(M.base, 'legacy-main')
   mkGitRepo(gitRoot)
-  const resolved = resolveRepoRoot(gitRoot)
   const sub = path.join(gitRoot, 'a', 'b')
   fs.mkdirSync(sub, { recursive: true })
-  // Install activation (authority root = gitRoot): absolute canonical commands +
-  // files + manifest land under the resolved main root.
+  // Install activation at the literal --project sub: canonical commands + files +
+  // manifest land under sub (NOT the git toplevel).
   installActivation(M, sub)
-  const canonical = path.join(HOOKS(resolved), 'activation-prompt.sh')
-  assert.ok(fs.existsSync(canonical), 'precondition: canonical hook file deployed')
+  const subReal = fs.realpathSync(sub)
+  const canonical = path.join(HOOKS(subReal), 'activation-prompt.sh')
+  assert.ok(fs.existsSync(canonical), 'precondition: canonical hook file deployed under the literal --project')
   // Rewrite the UserPromptSubmit registration to the LEGACY RELATIVE spelling.
-  const s = readParsed(SETTINGS(resolved))
+  const s = readParsed(SETTINGS(subReal))
   let rewrote = false
   for (const m of (s.hooks.UserPromptSubmit || [])) {
     for (const h of (m.hooks || [])) {
@@ -628,18 +723,17 @@ test('uninstall_legacy_relative_nested_project', () => {
     }
   }
   assert.ok(rewrote, 'precondition: rewrote the UserPromptSubmit registration to legacy relative spelling')
-  fs.writeFileSync(SETTINGS(resolved), JSON.stringify(s, null, 2))
-  // Uninstall via the NESTED subdir — authority root still resolves to gitRoot.
+  fs.writeFileSync(SETTINGS(subReal), JSON.stringify(s, null, 2))
   const u = uninstallActivation(M, sub)
-  assert.strictEqual(u.status, 0, `nested uninstall must exit 0 (got ${u.status}: ${u.stderr})`)
+  assert.strictEqual(u.status, 0, `uninstall must exit 0 (got ${u.status}: ${u.stderr})`)
   // (a) the legacy relative registration is REMOVED (not left dangling)…
-  const after = readParsed(SETTINGS(resolved)) || { hooks: {} }
+  const after = readParsed(SETTINGS(subReal)) || { hooks: {} }
   assert.ok(!commandsForEvent(after, 'UserPromptSubmit').some((c) => c.includes('activation-prompt.sh')),
-    'the legacy relative registration must be REMOVED under a nested-project uninstall (F3)')
-  assert.ok(!hasActivationCommand(after), 'no activation registration may survive the nested uninstall')
+    'the legacy relative registration must be REMOVED (F3)')
+  assert.ok(!hasActivationCommand(after), 'no activation registration may survive the uninstall')
   // (b) …AND its canonical file is deleted — removal and deletion AGREE.
   assert.ok(!fs.existsSync(canonical), 'the canonical hook file must be deleted (agrees with registration removal)')
-  ok('uninstall_legacy_relative_nested_project — legacy relative reg removed + file deleted agree under nested --project (F3)')
+  ok('uninstall_legacy_relative_registration — legacy relative reg removed + file deleted agree at the literal --project (F3)')
 })
 
 console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`)
