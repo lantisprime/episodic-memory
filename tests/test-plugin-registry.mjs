@@ -47,6 +47,7 @@ const CONTEXT_FILES = [
   "plugins/_index.schema.json", "plugins/manifest.schema.json", "plugins/bypass_known.schema.json",
   "plugins/installed-state.schema.json", "schemas/runtime/structured-alert.schema.json",
   "schemas/runbook-agent-manifest.schema.json", // M7e context schema (P1c)
+  "plugins/activation-manifest.schema.json", // RFC-009 P2-S2 activation sub-gauntlet context schema
   "patterns/taxonomy.json", "patterns/events.json", "plugins/bypass_known.json",
 ];
 
@@ -192,25 +193,30 @@ const CONTEXT_FILES = [
 
     // reserved on-disk absent -> reserved_absent (stale exemption risk).
     const tmp2 = mkdtemp();
-    fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory / second-opinion dirs
+    fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory / second-opinion / claude-code-activation dirs
     c = collect();
     checkBidirectionalDirs(tmp2, [{ directory: "plugins/claude-code" }], c.add, []);
     assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "episodic-memory"), "M8: an on-disk reserved dir that is absent fails (typo can't silently exempt a real orphan)");
     // RFC-008 Follow (R10): second-opinion is now on-disk reserved, so its
     // absence is likewise reserved_absent — the carrier can't be silently exempt.
     assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "second-opinion"), "M8: second-opinion on-disk reserved dir absent -> reserved_absent (Follow/R10)");
+    // RFC-009 P2-S2: claude-code-activation is now on-disk reserved, so its
+    // absence is likewise reserved_absent.
+    assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "claude-code-activation"), "M8: claude-code-activation on-disk reserved dir absent -> reserved_absent (RFC-009 P2-S2)");
     rmrf(tmp2);
 
-    // positive: BOTH on-disk reserved dirs present -> no reserved_absent (the
-    // exemption is honest, not stale). Mirrors the live tree post-Follow.
+    // positive: ALL on-disk reserved dirs present -> no reserved_absent (the
+    // exemption is honest, not stale). Mirrors the live tree post-Follow/P2-S2.
     const tmp3 = mkdtemp();
     fs.mkdirSync(path.join(tmp3, "plugins/claude-code"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/episodic-memory"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/second-opinion/runbooks"), { recursive: true });
+    fs.mkdirSync(path.join(tmp3, "plugins/claude-code-activation"), { recursive: true });
     c = collect();
     checkBidirectionalDirs(tmp3, [{ directory: "plugins/claude-code" }], c.add, []);
-    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: both on-disk reserved dirs present -> no reserved_absent (Follow/R10)");
+    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: all on-disk reserved dirs present -> no reserved_absent (Follow/R10, RFC-009 P2-S2)");
     assert(!c.vs.some((v) => v.dir === "second-opinion"), "M8: present second-opinion carrier raises no orphan/absent violation");
+    assert(!c.vs.some((v) => v.dir === "claude-code-activation"), "M8: present claude-code-activation dir raises no orphan/absent violation");
     rmrf(tmp3);
   } finally { rmrf(tmp); }
 }
@@ -436,6 +442,7 @@ function buildLiveProject() {
   }
   fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true }); // on-disk reserved (M8)
   fs.mkdirSync(path.join(tmp, "plugins/second-opinion/runbooks"), { recursive: true }); // on-disk reserved (M8, Follow/R10)
+  fs.mkdirSync(path.join(tmp, "plugins/claude-code-activation"), { recursive: true }); // on-disk reserved (M8, RFC-009 P2-S2)
   return tmp;
 }
 

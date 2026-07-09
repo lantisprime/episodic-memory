@@ -1,0 +1,23 @@
+{
+  "type": "activation",
+  "schema_version": "1.0.0",
+  "id": "claude-code",
+  "harness": "claude-code",
+  "version": "1.0.0",
+  "blocking": false,
+  "capabilities": {
+    "user_prompt_submit": "STRONG",
+    "pre_tool_use": "STRONG",
+    "session_start": "STRONG"
+  },
+  "registrations": [
+    { "id": "rfc-009-activation-user-prompt-submit", "file": "activation-prompt.sh", "event": "UserPromptSubmit", "timeout": 5, "checksum": "sha256:48459bca35d14d15d9002cbd3be087f028e2d9b743b029be6f3540c5db0053b8" },
+    { "id": "rfc-009-activation-pre-tool-use", "file": "activation-tool.sh", "event": "PreToolUse", "timeout": 5, "checksum": "sha256:8fa37129f0bfac71073dd82d8e841d439032eff09338b0ec53a7adb62d191536" },
+    { "id": "rfc-009-activation-session-start", "file": "activation-sessionstart.sh", "event": "SessionStart", "timeout": 10, "checksum": "sha256:51b83750662e7ab9a0115aefeb4f793589bc3d168b800da58b3febfe15ce822e" }
+  ],
+  "io_schema": "schemas/runtime/activation-io.schema.json",
+  "runbook": {
+    "full": "plugins/claude-code-activation/runbooks/activation.md",
+    "quickref": "plugins/claude-code-activation/runbooks/activation.quickref.md"
+  }
+}

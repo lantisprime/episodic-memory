@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/plugins/activation-manifest.schema.json",
+  "title": "Activation-plugin manifest meta-schema (RFC-009 R3, P2-S2)",
+  "description": "plugins/<harness>-activation/manifest.json — the advisory activation-adapter descriptor. additionalProperties:false at every level; closed enums for harness/id, hook events, capability tiers. `blocking` is a const false so 'never gates' is a schema invariant, not just a conformance test. Sibling to plugins/manifest.schema.json (enforcement-only, type const enforcement) — this schema is the activation-only counterpart, dispatched by validate-plugin-registry.mjs's validateActivationManifest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "schema_version",
+    "id",
+    "harness",
+    "version",
+    "blocking",
+    "capabilities",
+    "registrations",
+    "io_schema",
+    "runbook"
+  ],
+  "properties": {
+    "type": { "const": "activation" },
+    "schema_version": { "$ref": "#/$defs/semver" },
+    "id": { "$ref": "#/$defs/harnessId" },
+    "harness": { "$ref": "#/$defs/harnessId" },
+    "version": { "$ref": "#/$defs/semver" },
+    "blocking": { "const": false },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "user_prompt_submit": { "$ref": "#/$defs/tier" },
+        "pre_tool_use": { "$ref": "#/$defs/tier" },
+        "session_start": { "$ref": "#/$defs/tier" }
+      }
+    },
+    "registrations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/registration" }
+    },
+    "io_schema": { "type": "string", "const": "schemas/runtime/activation-io.schema.json" },
+    "runbook": { "$ref": "#/$defs/runbook" },
+    "project_identity": { "$ref": "#/$defs/projectIdentity" },
+    "installed_state": {
+      "type": "object",
+      "description": "Optional. When present, validated against installed-state.schema.json by validate-plugin-registry.mjs."
+    }
+  },
+  "$defs": {
+    "harnessId": {
+      "type": "string",
+      "enum": ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"]
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["STRONG", "MEDIUM", "WEAK", "TBD"]
+    },
+    "registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "file", "event", "timeout", "checksum"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "file": { "type": "string", "pattern": "^[a-z0-9-]+\\.sh$" },
+        "event": { "type": "string", "enum": ["UserPromptSubmit", "PreToolUse", "SessionStart"] },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "checksum": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "runbook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full", "quickref"],
+      "properties": {
+        "full": { "type": "string", "minLength": 1 },
+        "quickref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "projectIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "root"],
+      "properties": {
+        "slug": { "type": "string", "minLength": 1 },
+        "root": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
