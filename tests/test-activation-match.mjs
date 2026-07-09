@@ -423,6 +423,196 @@ for (const cls of LAUNCH_CLASSES) {
 }
 
 // ===========================================================================
+// R4 SessionStart (RFC-009 REQ-18, P2-S5): matchActivation kind='session_start'
+// reads index.session_start (caller-merged) via the pure renderSessionStart
+// path -- covered here as core cases; the S5 hook E2E fan-out lives in
+// tests/test-activation-sessionstart.mjs (Group 3).
+// ===========================================================================
+const sessionStartEvent = { kind: "session_start" };
+function criticalEntry(overrides) {
+  return {
+    episode_id: "20260701-000000-critical-aaaa",
+    summary: "critical fixture",
+    category: "lesson",
+    effective_priority: 9,
+    applies_to_projects: ["acme"],
+    applies_to_tools: ["claude-code"],
+    ...overrides,
+  };
+}
+function plainEntry(overrides) {
+  return {
+    episode_id: "20260701-000000-plain-aaaa",
+    summary: "plain fixture",
+    static_score: 0.5,
+    applies_to_projects: ["acme"],
+    applies_to_tools: ["claude-code"],
+    ...overrides,
+  };
+}
+function idxSS(sessionStart) {
+  return { entries: [], activity_phrases: {}, session_start: sessionStart };
+}
+
+// render_plain_band7 -- tier 2 renders PLAIN regardless of any (malformed/
+// forged) effective_priority smuggled onto an `entries` row; the renderer
+// must never read that field for tier 2 (REQ-18/§8.2).
+{
+  const index = idxSS({
+    critical_entries: [],
+    entries: [plainEntry({ episode_id: "id-forged-hi", effective_priority: 9, summary: "forged-high plain" })],
+    preflight: {},
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 1 && r.lines[0] === "lesson id-forged-hi: forged-high plain",
+    "render_plain_band7: tier 2 renders plain-only even when effective_priority is (illegally) present on the entry", JSON.stringify(r));
+}
+
+// tier1_critical_loads -- a band-9 critical entry always renders imperative.
+{
+  const index = idxSS({ critical_entries: [criticalEntry({ episode_id: "id-crit-1" })], entries: [], preflight: {} });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 1 && r.lines[0].startsWith("READ id-crit-1"),
+    "tier1_critical_loads: critical_entries render imperative, trigger-independent", JSON.stringify(r));
+}
+
+// tier1_determinism -- stable priority-desc/id-desc ordering across calls.
+{
+  const index = idxSS({
+    critical_entries: [
+      criticalEntry({ episode_id: "id-b", effective_priority: 8 }),
+      criticalEntry({ episode_id: "id-a", effective_priority: 9 }),
+      criticalEntry({ episode_id: "id-c", effective_priority: 9 }),
+    ],
+    entries: [],
+    preflight: {},
+  });
+  const r1 = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  const r2 = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(JSON.stringify(r1) === JSON.stringify(r2), "tier1_determinism: repeated calls on the same index yield byte-identical output");
+  assert(r1.lines[0].includes("id-c") && r1.lines[1].includes("id-a") && r1.lines[2].includes("id-b"),
+    "tier1_determinism: priority-desc then episode_id-desc (recency) tie-break", JSON.stringify(r1));
+}
+
+// tier1_band_overflow_noted -- excess critical entries beyond max_matches
+// drop with the state-H/I overflow note (every tier-1 drop is critical by
+// construction). STRENGTHENED (F1): the SAME critical ids also live in tier 2
+// `entries`; a dropped (overflowed) critical must NOT resurface as a plain
+// `lesson <id>:` line — the exclusion is by tier-1 CANDIDACY, not by rendering.
+{
+  const ids = ["id-1", "id-2", "id-3", "id-4"].map((id) => `20260701-000000-${id}-aaaa`);
+  const critical = ids.map((id) => criticalEntry({ episode_id: id, effective_priority: 9 }));
+  const entries = ids.map((id) => plainEntry({ episode_id: id, summary: `plain twin of ${id}` }));
+  const index = idxSS({ critical_entries: critical, entries, preflight: {} });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 3, "tier1_band_overflow_noted: bounded to max_matches", JSON.stringify(r));
+  assert(typeof r.overflowNote === "string" && r.overflowNote.includes("incl. critical"),
+    "tier1_band_overflow_noted: overflow note names a suppressed critical id", JSON.stringify(r));
+  const noteId = (r.overflowNote.match(/incl\. critical (\S+)/) || [])[1];
+  const droppedIds = ids.filter((id) => !r.lines.some((l) => l.startsWith(`READ ${id}`)));
+  assert(droppedIds.length > 0 && droppedIds.every((id) => !r.lines.some((l) => l === `lesson ${id}: plain twin of ${id}`)),
+    "tier1_band_overflow_noted (F1): a count-overflow-dropped critical never resurfaces as a plain tier-2 line", `dropped=${JSON.stringify(droppedIds)} lines=${JSON.stringify(r.lines)}`);
+  assert(!!noteId && !r.lines.some((l) => l === `lesson ${noteId}: plain twin of ${noteId}`),
+    "tier1_band_overflow_noted (F1): the exact id named 'suppressed' in the note is not simultaneously injected plain", `note=${r.overflowNote} lines=${JSON.stringify(r.lines)}`);
+}
+
+// tier1_token_overflow_dropped_critical_not_plain (F1, token-overflow variant)
+// -- a band-9 critical whose OWN imperative line exceeds max_tokens is dropped
+// WHOLE (state I); it must not then leak into tier 2 as a plain line either.
+{
+  const bigId = "20260701-000000-huge-crit-aaaa";
+  const smallId = "20260701-000000-small-crit-aaaa";
+  const index = idxSS({
+    critical_entries: [
+      criticalEntry({ episode_id: bigId, effective_priority: 9, summary: "X".repeat(400) }), // imperative line > 50 tokens
+      criticalEntry({ episode_id: smallId, effective_priority: 9, summary: "small" }),
+    ],
+    entries: [plainEntry({ episode_id: bigId, summary: "plain twin big" }), plainEntry({ episode_id: smallId, summary: "plain twin small" })],
+    preflight: {},
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, { max_matches: 3, max_tokens: 50 });
+  assert(!r.lines.some((l) => l === "lesson " + bigId + ": plain twin big"),
+    "tier1_token_overflow_dropped_critical_not_plain (F1): a token-overflow-dropped critical does not resurface plain in tier 2", JSON.stringify(r));
+  assert(typeof r.overflowNote === "string" && r.overflowNote.includes(bigId),
+    "tier1_token_overflow_dropped_critical_not_plain: the oversize critical is named in the overflow note", JSON.stringify(r));
+}
+
+// tier_dedup_cross_tier (EC13) -- a band lesson present in BOTH tiers only
+// renders once, from tier 1 (imperative), never duplicated plain in tier 2.
+{
+  const id = "20260701-000000-dupe-aaaa";
+  const index = idxSS({
+    critical_entries: [criticalEntry({ episode_id: id })],
+    entries: [plainEntry({ episode_id: id, summary: "should not render (tier-1 wins)" })],
+    preflight: {},
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 1 && r.lines[0].startsWith("READ " + id),
+    "tier_dedup_cross_tier: tier 2 excludes an id already emitted by tier 1 (tier 1 wins)", JSON.stringify(r));
+}
+
+// tier2_static_order_plain_only -- tier 2 preserves the caller's pre-sorted
+// (static_score desc) order and renders every entry plain.
+{
+  const index = idxSS({
+    critical_entries: [],
+    entries: [plainEntry({ episode_id: "id-first", summary: "first" }), plainEntry({ episode_id: "id-second", summary: "second" })],
+    preflight: {},
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 2 && r.lines[0] === "lesson id-first: first" && r.lines[1] === "lesson id-second: second",
+    "tier2_static_order_plain_only: preserves pre-sorted order, plain rendering", JSON.stringify(r));
+}
+
+// preflight_advisory_derived -- count=sum(values), ids=keys, generic (no
+// hardcoded pattern-id knowledge in the matcher).
+{
+  const index = idxSS({
+    critical_entries: [],
+    entries: [],
+    preflight: { implementation: { "bp-001-implementation-workflow": 2, "bp-006-push-after-verify": 1 }, push: {}, rule: {} },
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 1 && r.lines[0].includes("3 recent implementation violation(s)") &&
+    r.lines[0].includes("bp-001-implementation-workflow") && r.lines[0].includes("bp-006-push-after-verify"),
+    "preflight_advisory_derived: count=sum(values), ids=keys, empty task types contribute nothing", JSON.stringify(r));
+}
+
+// scope_filter_foreign_project -- applies_to mismatch never renders, both tiers.
+{
+  const index = idxSS({
+    critical_entries: [criticalEntry({ episode_id: "id-foreign-crit", applies_to_projects: ["other-project"] })],
+    entries: [plainEntry({ episode_id: "id-foreign-plain", applies_to_projects: ["other-project"] })],
+    preflight: {},
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 0, "scope_filter_foreign_project: neither tier renders when applies_to excludes the identity's project", JSON.stringify(r));
+}
+
+// degraded_missing_section / degraded_partial_section -- pure-core side:
+// missing session_start -> empty; entries-only-missing -> critical_entries alone.
+{
+  const r = matchActivation(idxSS(undefined), sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 0 && r.overflowNote === null, "degraded_missing_section: undefined session_start yields no lines, no throw", JSON.stringify(r));
+}
+{
+  const index = idxSS({ critical_entries: [criticalEntry({ episode_id: "id-alone" })] }); // entries + preflight absent
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, undefined, BOUNDS);
+  assert(r.lines.length === 1 && r.lines[0].includes("id-alone"), "degraded_partial_section: entries missing -> critical_entries alone renders", JSON.stringify(r));
+}
+
+// sessionstart_suppress -- suppression mutes an id in EITHER tier.
+{
+  const index = idxSS({
+    critical_entries: [criticalEntry({ episode_id: "id-suppressed-crit" })],
+    entries: [plainEntry({ episode_id: "id-suppressed-plain" })],
+    preflight: {},
+  });
+  const r = matchActivation(index, sessionStartEvent, IDENTITY, new Set(["id-suppressed-crit", "id-suppressed-plain"]), BOUNDS);
+  assert(r.lines.length === 0, "sessionstart_suppress: suppression mutes an id in either tier", JSON.stringify(r));
+}
+
+// ===========================================================================
 // Garbage-input fail-open (advisory invariant: throws nothing, ever)
 // ===========================================================================
 {

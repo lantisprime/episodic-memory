@@ -329,6 +329,128 @@ function selectAndBound(candidates, bounds) {
 }
 
 // ---------------------------------------------------------------------------
+// R4 SessionStart (RFC-009 REQ-18) — two-tier blend + preflight advisory,
+// rendered from the caller-merged `index.session_start` (local+global,
+// dedup-by-id LOCAL precedence — done by the S5 hook BEFORE calling this
+// pure function, mirroring how R3's `index.entries` is already merged).
+//
+// Tier 1 = `critical_entries` (band 8/9, TRIGGER-INDEPENDENT): scope+suppress
+// filtered, sorted priority-desc/recency-desc (same tie-break as
+// selectAndBound), bounded by `max_matches`/`max_tokens` with the SAME
+// overflow-note contract as states H/I (every dropped tier-1 entry is by
+// construction band 8-9, so any drop is a critical drop) — REQ-18 test
+// `tier1_band_overflow_noted`.
+//
+// Tier 2 = `entries` (the static blend), rendered PLAIN-ONLY — REQ-18/§8.2
+// pins that tier 2 entries carry NO `effective_priority` and no code may read
+// one even if a malformed/forged input smuggled it in; `renderPlainLine`
+// below never inspects that field. Cross-tier dedup: any id already emitted
+// in tier 1 is excluded from tier 2 (tier 1 wins, REQ-18/EC13). Oversize/
+// over-budget tier-2 entries are dropped silently (never a critical entry by
+// construction, so never an overflow note — mirrors state I').
+//
+// Preflight advisory is derived GENERICALLY (REQ-18): for each task type key
+// in `preflight` (em-recall TASK TYPES — implementation/push/rule — never
+// activity classes), `ids = Object.keys(counts)` and `count = sum(values)`;
+// a task with no positive-count ids contributes no line. `Object.keys`/
+// `Object.entries` only ever return OWN enumerable keys (proto-key safe by
+// construction — no `obj[key]`-as-membership check is used here).
+// ---------------------------------------------------------------------------
+function renderPlainLine(entry) {
+  return `lesson ${entry.episode_id}: ${String(entry.summary ?? "")}`;
+}
+
+function tieBreakDesc(a, b) {
+  if (b.effective_priority !== a.effective_priority) return b.effective_priority - a.effective_priority;
+  return a.episode_id < b.episode_id ? 1 : a.episode_id > b.episode_id ? -1 : 0;
+}
+
+function renderSessionStart(sessionStart, identity, suppress, bounds) {
+  const ss = sessionStart && typeof sessionStart === "object" && !Array.isArray(sessionStart) ? sessionStart : {};
+  const criticalRaw = Array.isArray(ss.critical_entries) ? ss.critical_entries : [];
+  const entriesRaw = Array.isArray(ss.entries) ? ss.entries : [];
+  const preflightRaw = ss.preflight && typeof ss.preflight === "object" && !Array.isArray(ss.preflight) ? ss.preflight : {};
+
+  const s = suppress instanceof Set ? suppress : new Set();
+  const maxMatches = Number.isInteger(bounds && bounds.max_matches) && bounds.max_matches > 0 ? bounds.max_matches : 3;
+  const maxTokens = Number.isInteger(bounds && bounds.max_tokens) && bounds.max_tokens > 0 ? bounds.max_tokens : 500;
+
+  // ---- Tier 1: critical_entries -------------------------------------------
+  const tier1Candidates = criticalRaw.filter((e) =>
+    e && typeof e === "object" &&
+    typeof e.episode_id === "string" && e.episode_id &&
+    Number.isInteger(e.effective_priority) &&
+    scopeOk(e, identity) &&
+    !s.has(e.episode_id));
+
+  const sortedTier1 = [...tier1Candidates].sort(tieBreakDesc);
+
+  // Cross-tier exclusion set (F1, review-confirmed): tier 2 must exclude EVERY
+  // scope+suppress-surviving tier-1 CANDIDATE id — the rendered ones AND the
+  // ones dropped by count- or token-overflow. A dropped band-8/9 critical is
+  // already accounted for by the overflow note ("…incl. critical <id>"); if it
+  // were only the RENDERED ids here, that same dropped critical would resurface
+  // as a PLAIN `lesson <id>:` line in tier 2 — simultaneously "suppressed" per
+  // the note and re-injected demoted, the single most-important overflowed
+  // lesson silently downgraded. The exclusion is by tier-1 CANDIDACY, not by
+  // rendering.
+  const tier1CandidateIds = new Set(tier1Candidates.map((e) => e.episode_id));
+
+  const tier1Lines = [];
+  const droppedTier1 = [];
+  let totalTokens = 0;
+  for (const e of sortedTier1) {
+    if (tier1Lines.length >= maxMatches) { droppedTier1.push(e); continue; }
+    const line = renderLine(e); // tier 1 always carries effective_priority>=8 -> always imperative
+    const t = estimateTokens(line);
+    if (t > maxTokens || totalTokens + t > maxTokens) { droppedTier1.push(e); continue; }
+    tier1Lines.push(line);
+    totalTokens += t;
+  }
+
+  // ---- Tier 2: entries (plain-only, cross-tier dedup) ----------------------
+  const tier2Candidates = entriesRaw.filter((e) =>
+    e && typeof e === "object" &&
+    typeof e.episode_id === "string" && e.episode_id &&
+    !tier1CandidateIds.has(e.episode_id) &&
+    scopeOk(e, identity) &&
+    !s.has(e.episode_id));
+  // entriesRaw is already pre-sorted by static_score desc (buildSessionStart);
+  // preserve that order rather than re-sorting on a field tier 2 must not read.
+
+  const tier2Lines = [];
+  for (const e of tier2Candidates) {
+    const line = renderPlainLine(e);
+    const t = estimateTokens(line);
+    if (t > maxTokens || totalTokens + t > maxTokens) continue; // state I' — silent, never critical
+    tier2Lines.push(line);
+    totalTokens += t;
+  }
+
+  // ---- Preflight advisory (generic derivation) -----------------------------
+  const preflightLines = [];
+  for (const [taskType, counts] of Object.entries(preflightRaw)) {
+    if (!counts || typeof counts !== "object" || Array.isArray(counts)) continue;
+    const ids = Object.keys(counts);
+    if (ids.length === 0) continue;
+    let total = 0;
+    for (const id of ids) {
+      const v = counts[id];
+      if (Number.isFinite(v)) total += v;
+    }
+    if (total <= 0) continue;
+    preflightLines.push(`preflight: ${total} recent ${taskType} violation(s) (${ids.join(", ")})`);
+  }
+
+  const criticalDropped = droppedTier1.find((e) => Number(e.effective_priority) >= 8);
+  const overflowNote = criticalDropped
+    ? `+${droppedTier1.length} more matches suppressed, incl. critical ${criticalDropped.episode_id}`
+    : null;
+
+  return { lines: [...tier1Lines, ...tier2Lines, ...preflightLines], overflowNote };
+}
+
+// ---------------------------------------------------------------------------
 // PUBLIC: matchActivation
 // ---------------------------------------------------------------------------
 
@@ -358,12 +480,20 @@ function selectAndBound(candidates, bounds) {
  */
 export function matchActivation(index, event, identity, suppress, bounds) {
   try {
+    const kind = event && event.kind;
+
+    // R4/S5: session_start is a distinct rendering path (two-tier blend +
+    // preflight advisory from index.session_start), not the prompt/tool
+    // trigger-matching path below.
+    if (kind === "session_start") {
+      return renderSessionStart(index && index.session_start, identity, suppress, bounds);
+    }
+
     const entries = sanitizeEntries(index);
     if (entries.length === 0) return { lines: [], overflowNote: null };
 
-    const kind = event && event.kind;
     if (kind !== "prompt" && kind !== "tool") {
-      // session_start (R4/S5) and any unknown kind: S3 stub — empty, advisory.
+      // any other/unknown kind: empty, advisory (fail open).
       return { lines: [], overflowNote: null };
     }
 
@@ -380,4 +510,4 @@ export function matchActivation(index, event, identity, suppress, bounds) {
 // Exported for the test file's direct unit coverage of the parsing/escape
 // helpers (word-boundary/regex-metachar/tool-glob edge cases) without
 // re-deriving them through full matchActivation fixtures.
-export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, renderLine, estimateTokens };
+export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, renderLine, renderPlainLine, estimateTokens, renderSessionStart };

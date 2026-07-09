@@ -135,6 +135,11 @@ function buildEvent(payload) {
     const prompt = typeof payload.prompt === 'string' ? payload.prompt : ''
     return { kind: 'prompt', prompt }
   }
+  if (EVENT_NAME === 'SessionStart') {
+    // R4/S5: no phrase/tool/target on the event -- the two-tier blend is
+    // read from merged.session_start, not matched against a prompt/target.
+    return { kind: 'session_start' }
+  }
   if (EVENT_NAME === 'PreToolUse') {
     const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : ''
     const ti = payload.tool_input && typeof payload.tool_input === 'object' && !Array.isArray(payload.tool_input)
@@ -247,6 +252,100 @@ function mergeIndexes(local, global) {
 }
 
 // ---------------------------------------------------------------------------
+// REQ-19/21 (R4/S5 SessionStart only -- never computed for the R3 hooks, so
+// their behavior/timing is byte-identical to before this slice): merge each
+// store's `session_start` section, dedup by episode_id with LOCAL precedence
+// (same rule as mergeIndexes' `entries`), and classify each store's section
+// as present-and-ok / present-but-malformed / absent so main() can emit the
+// single REQ-21 stderr note when a LOADED trigger-index.json lacks a usable
+// session_start (never when the store itself is simply absent -- that is the
+// separate, already-tested "missing index" path).
+// ---------------------------------------------------------------------------
+function sessionStartStatus(idx) {
+  if (!idx) return { present: false, ok: true, value: null } // store not built/absent -- not an error
+  const raw = idx.session_start
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { present: true, ok: false, value: null }
+  return { present: true, ok: true, value: raw }
+}
+
+function dedupByEpisodeId(lists) {
+  const out = []
+  const seen = new Set()
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue
+    for (const e of list) {
+      if (!e || typeof e.episode_id !== 'string' || !e.episode_id || seen.has(e.episode_id)) continue
+      seen.add(e.episode_id)
+      out.push(e)
+    }
+  }
+  return out
+}
+
+// F3 (review-confirmed): merged tier-2 must be re-sorted by static_score DESC
+// (tie-break episode_id asc for determinism) after the local-precedence dedup.
+// dedupByEpisodeId preserves local-list-then-global ORDER, but the pure
+// renderer documents its precondition as "entriesRaw is already pre-sorted by
+// static_score desc" and preserves whatever order it receives. Without this
+// re-sort a high-static_score GLOBAL lesson renders after / is token-budgeted
+// out behind low-score LOCAL ones, diverging from the union-top-N-by-score that
+// `entries` represents (and that `em-trigger-index --merged` produces for the
+// handoff path). This reads static_score only (NOT effective_priority), so the
+// REQ-18 plain-only tier-2 invariant is unaffected. Non-numeric static_score
+// sorts last (treated as -Infinity) rather than throwing.
+function sortEntriesByStaticScore(entries) {
+  const scoreOf = (e) => (Number.isFinite(e.static_score) ? e.static_score : -Infinity)
+  return [...entries].sort((a, b) => {
+    const sa = scoreOf(a)
+    const sb = scoreOf(b)
+    if (sb !== sa) return sb - sa
+    return a.episode_id < b.episode_id ? -1 : a.episode_id > b.episode_id ? 1 : 0
+  })
+}
+
+// F2 (review-confirmed): merge the preflight per task-type key across BOTH
+// stores — union of task keys; for each, union of pattern_ids; SUM the numeric
+// counts. The prior `local || global || {}` took local wholesale and dropped
+// global counts entirely (or a local {} shadowed a populated global). Summing
+// matches what `em-trigger-index --merged` (loadMergedTriggerIndex over the
+// union of both stores' rows) produces, so the R4 hook and the REQ-26 handoff
+// path stay consistent. Non-finite counts are skipped; a pattern surviving
+// with a >0 summed count is kept.
+function mergePreflight(localVal, globalVal) {
+  const validMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null)
+  const merged = {}
+  for (const val of [localVal, globalVal]) {
+    const pf = val && validMap(val.preflight)
+    if (!pf) continue
+    for (const [taskType, counts] of Object.entries(pf)) {
+      if (!counts || typeof counts !== 'object' || Array.isArray(counts)) continue
+      if (!Object.hasOwn(merged, taskType)) merged[taskType] = {}
+      const bucket = merged[taskType]
+      for (const [patternId, n] of Object.entries(counts)) {
+        if (!Number.isFinite(n)) continue
+        bucket[patternId] = (Object.hasOwn(bucket, patternId) ? bucket[patternId] : 0) + n
+      }
+    }
+  }
+  return merged
+}
+
+function mergeSessionStart(localStatus, globalStatus) {
+  const localVal = localStatus.ok ? localStatus.value : null
+  const globalVal = globalStatus.ok ? globalStatus.value : null
+  const critical_entries = dedupByEpisodeId([
+    localVal ? localVal.critical_entries : null,
+    globalVal ? globalVal.critical_entries : null,
+  ])
+  const entries = sortEntriesByStaticScore(dedupByEpisodeId([
+    localVal ? localVal.entries : null,
+    globalVal ? globalVal.entries : null,
+  ]))
+  const preflight = mergePreflight(localVal, globalVal)
+  return { critical_entries, entries, preflight }
+}
+
+// ---------------------------------------------------------------------------
 // Suppress (REQ-13/14): whole-file, whole-document fail-open. Missing OR
 // syntax-malformed OR shape-malformed (schema-invalid) -> empty Set + ONE
 // stderr note, injection proceeds. Schema validation is attempted via the
@@ -356,6 +455,20 @@ async function main() {
   const local = loadStoreIndex({ scope: 'local', root: identity.root })
   const global = loadStoreIndex({ scope: 'global', root: identity.root })
   const merged = mergeIndexes(local, global)
+
+  if (EVENT_NAME === 'SessionStart') {
+    // Computed ONLY on this branch -- the R3 hooks' merged shape/timing is
+    // byte-identical to before this slice (§8.2 SYMMETRY: no cross-hook
+    // side effect from adding R4).
+    const localSS = sessionStartStatus(local)
+    const globalSS = sessionStartStatus(global)
+    if ((localSS.present && !localSS.ok) || (globalSS.present && !globalSS.ok)) {
+      // REQ-21: missing/malformed session_start -> exactly one stderr note.
+      process.stderr.write('activation-hook: session_start section missing or malformed in a trigger-index.json; rendering from available data\n')
+    }
+    merged.session_start = mergeSessionStart(localSS, globalSS)
+  }
+
   const suppress = await loadSuppressSet(identity.root)
 
   let matchActivation
