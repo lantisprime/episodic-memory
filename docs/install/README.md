@@ -83,9 +83,11 @@ project path; abbreviated as `<HOME>` here.)
 3. Codex and Pi Agent share the same destination:
    `.agents/skills/episodic-memory/SKILL.md`. Installing one then the other reports
    "already current" for the second (this is fine).
-4. The hook / enforcement flags `--install-hooks`, `--install-enforcement`, and
-   `--install-second-opinion` are Claude Code only. Enforcement is per-project, never
-   written to `~/.claude`. Plain installs for the other tools must OMIT these flags.
+4. The hook / enforcement / activation flags `--install-hooks`, `--install-enforcement`,
+   `--install-activation` (the advisory lesson-activation adapter, RFC-009 R3/R4;
+   `--uninstall-activation` reverses it), and `--install-second-opinion` are Claude Code
+   only. Enforcement and activation are per-project, never written to `~/.claude`. Plain
+   installs for the other tools must OMIT these flags.
 5. The installer creates or appends the target project's `.gitignore`
    (`.episodic-memory/` plus a `run.key` pattern). This is expected, not a bug.
 6. The installer is idempotent. Re-run it to refresh scripts after pulling a new

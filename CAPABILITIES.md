@@ -51,6 +51,13 @@ Alternatives — semantic (embeddings), graph traversal, hybrid (RRF) — are op
 `recall-strategy` plugins. Algorithms live in their own RFCs (RFC-001 Intelligent Memory,
 RFC-007 Graph Projection); this charter owns only the capability contract.
 
+**Advisory activation** (RFC-009 R3/R4) is the recall-side event plane: a per-project,
+opt-in adapter that surfaces bounded lesson pointers at prompt / tool / session-start events
+from the purpose-built trigger index, registered as the `activation` plugin type (RFC-008 R8,
+an additive MINOR bump). It is **advisory, never enforcement** — it exits 0 and emits no
+gate / block / decision, staying inside the substrate boundary (criterion 4). Surfacing lessons
+is using memory, not enforcing workflow.
+
 ### 3. Learning strategy
 How the system turns accumulated episodes (and the derived indexes a store strategy builds)
 into **new** knowledge, written back as new global episodes for future recall. Reads indexes,

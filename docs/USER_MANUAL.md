@@ -78,6 +78,8 @@ The checkpoint / plan / stop / preflight / second-opinion gates are opt-in via `
 
 Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON. (`enforce-config.json` is operator-owned — `--install-enforcement` **seeds** a default `{"active": true}`, create-if-absent, and never overwrites your edits; a deliberate `{"active": false}` survives reinstalls, even with `--install-hooks-force`.)
 
+The **advisory lesson-activation adapter** (RFC-009 R3/R4) is a separate, opt-in Claude Code install: `--install-activation` (reverse with `--uninstall-activation`). Unlike enforcement it never blocks — its three per-project hooks (UserPromptSubmit / PreToolUse / SessionStart) surface bounded lesson pointers as advisory context and always exit 0. Mute a lesson for one project by editing `<project>/.episodic-memory/lesson-suppress.json` (hand-authored, fail-open).
+
 ### Instruction-only skill adapters
 
 OpenCode and Pi Agent support is instruction-only in this installer slice. The installer writes skill files that tell the agent how to call the existing `~/.episodic-memory/scripts/*.mjs` commands; it does not install hooks, MCP servers, live dispatch, proactive session-start automation, or global tool config for these tools.
