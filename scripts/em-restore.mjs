@@ -1118,6 +1118,7 @@ function run(opts) {
 
   // Index merge per target dir
   const indexResults = []
+  const warnings = []
   if (rebuildIndex !== false) {
     const writtenByTarget = new Map()
     for (const w of epResult.written) {
@@ -1159,6 +1160,30 @@ function run(opts) {
       fs.renameSync(catTmp, catFile)
       indexResults.push({ targetDir, merged: restoredEntries.length })
     }
+  } else {
+    // #495 review finding (codex + negative-scenario-reviewer, converged):
+    // --no-rebuild-index skips the merge block above, so index.jsonl is never
+    // written (applyDocWrites also skips it — single-writer discipline). Since
+    // backups now EXCLUDE index.jsonl (#495 never carries it), a restore into a
+    // target that ends up with NO index.jsonl leaves a store em-list/em-search
+    // read as EMPTY (count:0) — silently unreadable, with no backup artifact to
+    // recover from. Warn LOUDLY per such target, naming the recovery command.
+    // A target that already carries its own index.jsonl is legitimate (the
+    // operator opted out to preserve it), so it draws no warning. Warn, not
+    // hard-error: --no-rebuild-index is a deliberate opt-out and the
+    // already-indexed path is a valid workflow that a hard error would break.
+    const targetDirs = new Set()
+    for (const w of epResult.written) {
+      const t = sourceMap.get(w.label)
+      if (t) targetDirs.add(t)
+    }
+    for (const targetDir of targetDirs) {
+      if (!fs.existsSync(path.join(targetDir, 'index.jsonl'))) {
+        const msg = `em-restore: --no-rebuild-index left ${targetDir} with NO index.jsonl (backups exclude derived indexes since #495); em-list/em-search will read this store as EMPTY. Recover with: node em-rebuild-index.mjs, or re-run restore WITHOUT --no-rebuild-index.`
+        warnings.push(msg)
+        process.stderr.write(msg + '\n')
+      }
+    }
   }
 
   return {
@@ -1167,7 +1192,8 @@ function run(opts) {
     summary,
     written: { episodes: epResult.written.length, docs: docResult.written.length, sidecars: epResult.sidecarsWritten.length + docResult.sidecarsWritten.length },
     skipped: { episodes: epResult.skipped.length, docs: docResult.skipped.length },
-    indexes: indexResults
+    indexes: indexResults,
+    ...(warnings.length ? { warnings } : {})
   }
 }
 
@@ -1528,6 +1554,96 @@ function selfTest() {
     assert('e2e_apply_index_has_id', idx.includes('id-1'))
     fs.rmSync(root, { recursive: true, force: true })
   } catch (e) { bad('e2e_apply', e.message) }
+
+  // T15b (#495): backups now EXCLUDE the derived indexes (em-backup drops
+  // index.jsonl et al.), so a restore starts from episodes ONLY. Assert the
+  // restored store carries a VALID index.jsonl rebuilt from the episode
+  // frontmatter: every JSONL line parses, and the restored id round-trips.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const ep = makeEpisode('id-derived', { id: 'id-derived', date: '2026-06-02', time: '"11:30"', project: 't', category: 'discovery', status: 'active', tags: ['alpha', 'beta'], summary: 'derived-index restore' })
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-derived.md'), ep)
+    // NB: the backup intentionally has NO index.jsonl (em-backup excludes it).
+    commitBackup(backupDir)
+    const target = path.join(root, 'target')
+    fs.mkdirSync(target, { recursive: true })
+    const r = run({
+      backupDir, sourceMap: new Map([['lab', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: true
+    })
+    assert('e2e_derived_status', r.status === 'ok' && r.mode === 'apply')
+    const indexPath = path.join(target, 'index.jsonl')
+    assert('e2e_derived_index_exists', fs.existsSync(indexPath))
+    // Parse each JSONL line; assert validity + id round-trip.
+    const raw = fs.readFileSync(indexPath, 'utf8')
+    const lines = raw.split('\n').filter(l => l.trim().length > 0)
+    let allParse = lines.length > 0
+    let foundId = false
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line)
+        if (entry.id === 'id-derived') foundId = true
+      } catch { allParse = false }
+    }
+    assert('e2e_derived_index_all_lines_valid', allParse, `lines=${JSON.stringify(lines)}`)
+    assert('e2e_derived_index_id_roundtrip', foundId, `no id-derived in ${raw}`)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('e2e_derived_index', e.message) }
+
+  // T15c (#495 review finding): --apply --no-rebuild-index on an index-free
+  // backup (what the #495 exclusion always produces) must NOT silently leave an
+  // unreadable store. Assert it emits a LOUD warning (no index.jsonl written),
+  // while the SAME index-free backup restored with the default rebuild-on path
+  // round-trips clean (valid index.jsonl, no warning).
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const ep = makeEpisode('id-nr', { id: 'id-nr', date: '2026-06-03', time: '"09:15"', project: 't', category: 'context', status: 'active', tags: ['z'], summary: 'no-rebuild warn' })
+    fs.mkdirSync(path.join(backupDir, 'lab', 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(backupDir, 'lab', 'episodes', 'id-nr.md'), ep)
+    // Index-free backup (em-backup excludes index.jsonl since #495).
+    commitBackup(backupDir)
+
+    // (a) --no-rebuild-index into a FRESH target → warn, no index.jsonl written.
+    const tNo = path.join(root, 'target-norebuild')
+    fs.mkdirSync(tNo, { recursive: true })
+    const rNo = run({
+      backupDir, sourceMap: new Map([['lab', tNo]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: false
+    })
+    const warnedNo = Array.isArray(rNo.warnings) && rNo.warnings.some(w => /no index\.jsonl/i.test(w) && /em-rebuild-index/.test(w))
+    assert('e2e_norebuild_warns', warnedNo, `warnings=${JSON.stringify(rNo.warnings)}`)
+    assert('e2e_norebuild_no_index_written', !fs.existsSync(path.join(tNo, 'index.jsonl')))
+    assert('e2e_norebuild_wrote_episode', fs.existsSync(path.join(tNo, 'episodes', 'id-nr.md')))
+
+    // (b) default (rebuild on) into a fresh target → clean, valid index, no warn.
+    const tYes = path.join(root, 'target-rebuild')
+    fs.mkdirSync(tYes, { recursive: true })
+    const rYes = run({
+      backupDir, sourceMap: new Map([['lab', tYes]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: true, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: true
+    })
+    assert('e2e_norebuild_default_no_warn', rYes.warnings === undefined)
+    const idxYes = path.join(tYes, 'index.jsonl')
+    let defaultClean = fs.existsSync(idxYes)
+    if (defaultClean) {
+      const yesLines = fs.readFileSync(idxYes, 'utf8').split('\n').filter(l => l.trim())
+      defaultClean = yesLines.length > 0 && yesLines.every(l => { try { return JSON.parse(l).id != null } catch { return false } })
+      defaultClean = defaultClean && yesLines.some(l => JSON.parse(l).id === 'id-nr')
+    }
+    assert('e2e_norebuild_default_roundtrips', defaultClean)
+
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('e2e_norebuild_guard', e.message) }
 
   // T16: --include-docs + staging + atomic per-file rename + CLAUDE.md gate
   try {
