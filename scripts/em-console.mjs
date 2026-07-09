@@ -289,13 +289,20 @@ async function handle(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/') {
     const { renderPage } = await import('./lib/console-page.mjs')
+    // Per-load CSP script nonce (#484): the page ships inline JS, so instead of
+    // `script-src 'unsafe-inline'` we mint a fresh nonce per request and admit
+    // ONLY `script-src 'nonce-<v>'`. A future missed sink is then inert (not
+    // executable) because it lacks the nonce — esc() stays the first line of
+    // defense, the nonce is the backstop. Page render is fresh per GET, so the
+    // nonce is never reused across loads.
+    const nonce = crypto.randomBytes(16).toString('base64')
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'",
+      'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'`,
     })
-    return res.end(renderPage())
+    return res.end(renderPage(nonce))
   }
 
   if (req.method === 'GET' && url.pathname === '/api/meta') {
