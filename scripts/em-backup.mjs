@@ -184,14 +184,54 @@ const SKIP_FRAGMENTS = [
 const SKIP_FILE_PATTERNS = [/\.tmp$/, /\.log$/, /\.swp$/, /^\..*\.swp$/]
 const MAX_FILE_BYTES = 1024 * 1024 // 1 MB
 
-// DERIVED-INDEX BACKUP POSTURE (#487): the derived indexes — index.jsonl,
-// tags.json, tokens.json, category-index.json, trigger-index.json — are
-// intentionally backed up as-is (not excluded here). They are deterministically
-// rebuilt from the episodes on the next consumer read (via the fingerprint /
-// em-rebuild-index), so a stale derived file in a backup is harmless, and
-// index.jsonl is required for a clean restore. Excluding trigger-index.json in
-// isolation would make it the odd one out; a full derived-file exclude sweep
-// (coupled with a restore-time rebuild) is tracked separately, not done here.
+// DERIVED-INDEX BACKUP EXCLUSION (#495): the five derived indexes are
+// EXCLUDED from backups — they are deterministically reproduced from the
+// episodes, so backing them up only stores stale, re-derivable state. Verified
+// 2026-07-10 by deleting each from a live fixture store and re-running the read
+// paths (em-search / em-list / em-trigger-index --merged):
+//   - index.jsonl        — does NOT self-heal on read (em-search/em-list return
+//                          empty), so it is the one correctness-critical file.
+//                          em-restore's mergeIndexes REBUILDS it from the
+//                          restored episode frontmatter (default on --apply), so
+//                          a restored store is correct without it in the backup.
+//   - tags.json          — reads fall back to an index.jsonl scan (warning);
+//                          em-restore also rebuilds it in mergeIndexes.
+//   - category-index.json— reads fall back to a linear scan (warning);
+//                          em-restore also rebuilds it.
+//   - tokens.json        — reads fall back to a full-scan (warning); not
+//                          required for a correct store.
+//   - trigger-index.json — self-heals on the next merged read via
+//                          buildTriggerIndex's fingerprint miss (given
+//                          index.jsonl exists).
+// Restore with --no-rebuild-index skips the index rebuild; that opt-out path
+// then relies on the read-time fallbacks above rather than a backed-up copy.
+const DERIVED_INDEX_FILES = new Set([
+  'index.jsonl', 'tags.json', 'tokens.json',
+  'category-index.json', 'trigger-index.json',
+])
+
+// True iff `p` is one of the derived index artifacts sitting at the root of an
+// episodic store (its parent dir contains an `episodes/` subdir). The store
+// scope keeps an unrelated file that merely shares a basename (e.g. some other
+// project's tags.json) from being dropped.
+//
+// lstat (NOT stat): walk() rejects a source-side symlinked episodes/ via
+// readdir's lstat-based isSymbolicLink() and never recurses into it (no episode
+// files copied). If this check followed the symlink (stat), it would treat such
+// a store as valid and exclude its derived indexes too — netting a SILENTLY
+// EMPTY backup for that store. lstat keeps the two consistent: a symlinked
+// episodes/ fails isDirectory() here, so the derived files are NOT excluded and
+// are carried (pre-#495 parity for the symlink case). A normal real-dir
+// episodes/ still passes (lstat isDirectory() === true), so exclusion is
+// unchanged for normal stores.
+function isDerivedIndexPath(p) {
+  if (!DERIVED_INDEX_FILES.has(path.basename(p))) return false
+  try {
+    return fs.lstatSync(path.join(path.dirname(p), 'episodes')).isDirectory()
+  } catch {
+    return false
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Redaction patterns
@@ -336,7 +376,7 @@ function classifyFileBytes(filePath) {
   return 'text'
 }
 
-function walk(dir, out = [], symlinkLog = null) {
+function walk(dir, out = [], symlinkLog = null, derivedLog = null) {
   let entries
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -345,6 +385,12 @@ function walk(dir, out = [], symlinkLog = null) {
   }
   for (const e of entries) {
     const full = path.join(dir, e.name)
+    // Derived indexes (#495): never backed up; re-derived from the episodes.
+    // Recorded in derivedLog for the manifest when one is passed.
+    if (e.isFile() && isDerivedIndexPath(full)) {
+      if (derivedLog) derivedLog.push(full)
+      continue
+    }
     if (shouldSkipPath(full)) continue
     if (e.isSymbolicLink()) {
       // Reviewer P0 #2: explicit symlink rejection. Source-side symlinks are
@@ -352,7 +398,7 @@ function walk(dir, out = [], symlinkLog = null) {
       if (symlinkLog) symlinkLog.push(full)
       continue
     }
-    if (e.isDirectory()) walk(full, out, symlinkLog)
+    if (e.isDirectory()) walk(full, out, symlinkLog, derivedLog)
     else if (e.isFile()) out.push(full)
   }
   return out
@@ -545,6 +591,7 @@ function syncToBackup({ verbose = false } = {}) {
   const skippedSymlinks = []
   const skippedOversized = []
   const skippedBinary = [] // Codex F3: track skipped binaries explicitly.
+  const skippedDerived = [] // #495: derived indexes excluded from backup.
   for (const s of SOURCES) {
     if (!fs.existsSync(s.src)) continue
     // Codex round-3: use the pre-validated absDest from resolveConfig. This
@@ -552,11 +599,13 @@ function syncToBackup({ verbose = false } = {}) {
     // thrown at config-load time, before any disk I/O).
     const destBase = s.absDest || path.join(BACKUP_DIR, s.dest)
     const sourceLog = []
-    const files = walk(s.src, [], sourceLog)
+    const derivedLog = []
+    const files = walk(s.src, [], sourceLog, derivedLog)
     // Codex PR-#137 round-1: manifest entries leak raw paths.
     // Codex PR-#137 round-2 F1: `source` field (= s.label) leaks too.
     const safeLabel = redactArtifactString(s.label)
     for (const sym of sourceLog) skippedSymlinks.push({ source: safeLabel, path: redactArtifactString(sym) })
+    for (const d of derivedLog) skippedDerived.push({ source: safeLabel, path: redactArtifactString(d) })
 
     // Codex PR-#137 round-3 F2: PRE-WALK ALL files in this source FIRST,
     // build the source→dest mapping, detect collisions BEFORE touching disk.
@@ -618,6 +667,7 @@ function syncToBackup({ verbose = false } = {}) {
     skipped_symlinks: skippedSymlinks,
     skipped_oversized: skippedOversized.map(x => ({ ...x, max_bytes: MAX_FILE_BYTES })),
     skipped_binary: skippedBinary,
+    skipped_derived_index: skippedDerived, // #495
   }
   fs.writeFileSync(path.join(BACKUP_DIR, '.skipped-files.json'), JSON.stringify(manifest, null, 2) + '\n')
   return {
@@ -626,6 +676,7 @@ function syncToBackup({ verbose = false } = {}) {
     skippedSymlinks: skippedSymlinks.length,
     skippedOversized: skippedOversized.length,
     skippedBinary: skippedBinary.length,
+    skippedDerived: skippedDerived.length,
   }
 }
 
@@ -1674,6 +1725,107 @@ function selfTest() {
   } catch (e) {
     fail++
     results.push({ name: 'extra_redact_longest_first', pass: false, why: `test infrastructure error: ${e.message}` })
+  }
+
+  // #495: the five derived indexes must be EXCLUDED from a backup and recorded
+  // in the manifest, while real episode files still land. Build a fixture store
+  // (episodes/ + the five derived files at store root), sync it, and assert.
+  try {
+    const tmpBackup = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-derived-'))
+    execFileSync('git', ['init', '-b', 'main'], { cwd: tmpBackup, stdio: ['ignore', 'pipe', 'pipe'] })
+    const tmpSrc = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-derived-src-'))
+    // A store looks like: <store>/episodes/*.md + the derived indexes at root.
+    fs.mkdirSync(path.join(tmpSrc, 'episodes'), { recursive: true })
+    fs.writeFileSync(path.join(tmpSrc, 'episodes', 'ep-one.md'), '---\nid: ep-one\n---\nreal episode body\n')
+    const derivedNames = ['index.jsonl', 'tags.json', 'tokens.json', 'category-index.json', 'trigger-index.json']
+    fs.writeFileSync(path.join(tmpSrc, 'index.jsonl'), '{"id":"ep-one"}\n')
+    fs.writeFileSync(path.join(tmpSrc, 'tags.json'), '{}\n')
+    fs.writeFileSync(path.join(tmpSrc, 'tokens.json'), '{}\n')
+    fs.writeFileSync(path.join(tmpSrc, 'category-index.json'), '{}\n')
+    fs.writeFileSync(path.join(tmpSrc, 'trigger-index.json'), '{"entries":[]}\n')
+
+    const savedBackupDir = BACKUP_DIR
+    const savedSources = [...SOURCES]
+    BACKUP_DIR = tmpBackup
+    SOURCES.length = 0
+    SOURCES.push({ src: tmpSrc, dest: 'd', absDest: path.join(tmpBackup, 'd'), label: 'd' })
+
+    const res = syncToBackup({})
+
+    // None of the five derived files may exist anywhere under the backup dest.
+    const destFiles = walkForPrune(tmpBackup, tmpBackup) // skips .git/
+    const destBasenames = destFiles.map(f => path.basename(f))
+    const noDerivedInBackup = derivedNames.every(n => !destBasenames.includes(n))
+    // The real episode must still have been copied.
+    const episodeCopied = destBasenames.includes('ep-one.md')
+    // Manifest records all five exclusions.
+    let manifest = {}
+    try { manifest = JSON.parse(fs.readFileSync(path.join(tmpBackup, '.skipped-files.json'), 'utf8')) } catch {}
+    const manifestNames = (manifest.skipped_derived_index || []).map(x => path.basename(x.path))
+    const manifestHasAll = derivedNames.every(n => manifestNames.includes(n))
+    const manifestCount = (manifest.skipped_derived_index || []).length === 5
+    const resCount = res && res.skippedDerived === 5
+
+    BACKUP_DIR = savedBackupDir
+    SOURCES.length = 0
+    for (const s of savedSources) SOURCES.push(s)
+    fs.rmSync(tmpBackup, { recursive: true, force: true })
+    fs.rmSync(tmpSrc, { recursive: true, force: true })
+
+    const ok495 = noDerivedInBackup && episodeCopied && manifestHasAll && manifestCount && resCount
+    if (ok495) pass++; else fail++
+    results.push({ name: 'issue495_derived_indexes_excluded_from_backup', pass: ok495, ...(ok495 ? {} : { why: `noDerived=${noDerivedInBackup} episodeCopied=${episodeCopied} manifestHasAll=${manifestHasAll} manifestCount=${manifestCount} resCount=${resCount} destBasenames=${JSON.stringify(destBasenames)} manifestNames=${JSON.stringify(manifestNames)}` }) })
+  } catch (e) {
+    fail++
+    results.push({ name: 'issue495_derived_indexes_excluded_from_backup', pass: false, why: `test infrastructure error: ${e.message}` })
+  }
+
+  // #495 review finding (GLM lens): a store whose episodes/ is a SYMLINK must
+  // NOT end up with a silently-EMPTY backup. walk() rejects the symlinked
+  // episodes/ (no episodes copied); if isDerivedIndexPath followed the symlink
+  // (stat), it would ALSO exclude the derived indexes, backing up nothing.
+  // lstat keeps them consistent: symlinked episodes/ fails the store-root test,
+  // so the derived indexes are CARRIED (not excluded) for that store.
+  try {
+    const tmpBackup = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-symeps-'))
+    execFileSync('git', ['init', '-b', 'main'], { cwd: tmpBackup, stdio: ['ignore', 'pipe', 'pipe'] })
+    const tmpSrc = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-symeps-src-'))
+    // episodes/ is a SYMLINK to a real dir elsewhere.
+    const realEps = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-symeps-real-'))
+    fs.writeFileSync(path.join(realEps, 'ep-x.md'), '---\nid: ep-x\n---\nbody\n')
+    fs.symlinkSync(realEps, path.join(tmpSrc, 'episodes'))
+    const derivedNames = ['index.jsonl', 'tags.json', 'tokens.json', 'category-index.json', 'trigger-index.json']
+    for (const n of derivedNames) fs.writeFileSync(path.join(tmpSrc, n), '{}\n')
+
+    const savedBackupDir = BACKUP_DIR
+    const savedSources = [...SOURCES]
+    BACKUP_DIR = tmpBackup
+    SOURCES.length = 0
+    SOURCES.push({ src: tmpSrc, dest: 'd', absDest: path.join(tmpBackup, 'd'), label: 'd' })
+
+    const res = syncToBackup({})
+
+    const destFiles = walkForPrune(tmpBackup, tmpBackup)
+    const destBasenames = destFiles.map(f => path.basename(f))
+    // The five derived indexes must be CARRIED (backup not silently empty).
+    const derivedCarried = derivedNames.every(n => destBasenames.includes(n))
+    const noneExcluded = res && res.skippedDerived === 0
+    // episodes/ symlink is still rejected by walk (unchanged behavior).
+    const symlinkRejected = res && res.skippedSymlinks === 1
+
+    BACKUP_DIR = savedBackupDir
+    SOURCES.length = 0
+    for (const s of savedSources) SOURCES.push(s)
+    fs.rmSync(tmpBackup, { recursive: true, force: true })
+    fs.rmSync(tmpSrc, { recursive: true, force: true })
+    fs.rmSync(realEps, { recursive: true, force: true })
+
+    const okSym = derivedCarried && noneExcluded && symlinkRejected
+    if (okSym) pass++; else fail++
+    results.push({ name: 'issue495_symlinked_episodes_not_silently_empty', pass: okSym, ...(okSym ? {} : { why: `derivedCarried=${derivedCarried} noneExcluded=${noneExcluded} symlinkRejected=${symlinkRejected} skippedDerived=${res && res.skippedDerived} skippedSymlinks=${res && res.skippedSymlinks} destBasenames=${JSON.stringify(destBasenames)}` }) })
+  } catch (e) {
+    fail++
+    results.push({ name: 'issue495_symlinked_episodes_not_silently_empty', pass: false, why: `test infrastructure error: ${e.message}` })
   }
 
   return { pass, fail, total: pass + fail, results }
