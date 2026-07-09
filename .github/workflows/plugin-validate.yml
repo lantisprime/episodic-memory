@@ -49,6 +49,9 @@ jobs:
       - name: Run P0 schema gate (corpus co-consumer — #368 divergence lock)
         run: node tests/test-p0-schemas.mjs
 
+      - name: Run consumer-registry schema gate (#492 — installs.json flag family)
+        run: node tests/test-consumer-registry-schema.mjs
+
       - name: Run path-contain axis tests
         run: node tests/test-path-contain.mjs
 

@@ -1,0 +1,30 @@
+{
+  "$id": "https://episodic-memory/plugins/consumer-registry.schema.json",
+  "title": "Consumer registry (~/.episodic-memory/installs.json) — RFC-009 P2 / #492",
+  "description": "Closed, versioned contract for the consumer registry rows that carry the enforcement_installed / activation_installed install flags. installed-state.schema.json covers a DIFFERENT artifact (the per-project installed_state block); this schema covers the registry rows. schema_version is const 1; a new row field is an additive schema_version bump, not a silent extension (not future-tolerant by design).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/registryEntry" }
+    }
+  },
+  "$defs": {
+    "registryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_path", "tool", "version", "enforcement_installed", "activation_installed", "last_install_ts"],
+      "properties": {
+        "project_path": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "version": { "type": "string" },
+        "enforcement_installed": { "type": "boolean" },
+        "activation_installed": { "type": "boolean" },
+        "last_install_ts": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

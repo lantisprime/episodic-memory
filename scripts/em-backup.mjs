@@ -184,6 +184,15 @@ const SKIP_FRAGMENTS = [
 const SKIP_FILE_PATTERNS = [/\.tmp$/, /\.log$/, /\.swp$/, /^\..*\.swp$/]
 const MAX_FILE_BYTES = 1024 * 1024 // 1 MB
 
+// DERIVED-INDEX BACKUP POSTURE (#487): the derived indexes — index.jsonl,
+// tags.json, tokens.json, category-index.json, trigger-index.json — are
+// intentionally backed up as-is (not excluded here). They are deterministically
+// rebuilt from the episodes on the next consumer read (via the fingerprint /
+// em-rebuild-index), so a stale derived file in a backup is harmless, and
+// index.jsonl is required for a clean restore. Excluding trigger-index.json in
+// isolation would make it the odd one out; a full derived-file exclude sweep
+// (coupled with a restore-time rebuild) is tracked separately, not done here.
+
 // ---------------------------------------------------------------------------
 // Redaction patterns
 //

@@ -297,6 +297,9 @@ jobs:
       - name: Run trigger-index core suite (RFC-009 P1b S5)
         run: node tests/test-trigger-index.mjs
 
+      - name: Run trigger-index schema gate (#487 — derived-file schema)
+        run: node tests/test-trigger-index-schema.mjs
+
       - name: Run trigger-index session_start suite (RFC-009 P1b S6)
         run: node tests/test-trigger-session-start.mjs
 
