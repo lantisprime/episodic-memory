@@ -564,8 +564,10 @@ function rebuildFreshGlobal(home, proj) {
 
 // ===========================================================================
 // 14. handoff_consumes_blend (REQ-26) — the SEPARATE session-handoff hook
-//     (.claude/hooks/session-handoff-prompt.sh), not the activation adapter.
-//     Drives the REAL committed hook file end-to-end against an isolated
+//     (plugins/claude-code/hooks/session-handoff-prompt.sh), not the activation
+//     adapter. Drives the TRACKED canonical hook source (NOT the untracked,
+//     install-generated REPO_ROOT/.claude/hooks/ runtime copy, whose freshness
+//     is per-machine install state — issue #496) end-to-end against an isolated
 //     git-initialized fixture project + a scratch HOME, and proves the
 //     mechanical em-search command it emits has switched to the
 //     `session_start` static blend (no `--no-score` recency-only load) by
@@ -601,7 +603,7 @@ function rebuildFreshGlobal(home, proj) {
   if (storeResult.status !== 0) throw new Error(`handoff_consumes_blend: em-store failed: ${storeResult.stdout}\n${storeResult.stderr}`);
   const ep = JSON.parse(storeResult.stdout.trim().split("\n").pop());
 
-  const hookPath = path.join(REPO_ROOT, ".claude/hooks/session-handoff-prompt.sh");
+  const hookPath = path.join(REPO_ROOT, "plugins/claude-code/hooks/session-handoff-prompt.sh");
   const r = spawnSync("bash", [hookPath], {
     cwd: proj,
     env,
