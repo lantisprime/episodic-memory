@@ -43,7 +43,7 @@ import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs"
 import { TIER_RANK, effectiveTier, eventActionId, GATE_CONTRACT_KEY } from "./lib/effective-tier.mjs";
 
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
-export const MAX_SUPPORTED = "1.0.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality)
+export const MAX_SUPPORTED = "1.1.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality). RFC-009 P2-S6 MINOR bump: registry gains the `activation` plugin type.
 const HARNESS_IDS = ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"];
 export const EVENT_IDS = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"]; // exported for the Rule-14 binding check in tests/test-validate-bp-contract.mjs (EVENT_IDS ≡ live events[].id)
 const TIERS = ["STRONG", "MEDIUM", "WEAK", "TBD"];
@@ -77,7 +77,9 @@ const RESOLUTION_GATES = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 export const RESERVED_DIRS = {
   "episodic-memory": { presence: "on-disk", why: "Claude-Code plugin packaging (.claude-plugin/, scripts/, skills/); exists on main." },
   "second-opinion": { presence: "on-disk", why: "RFC-008 L1257/R10 second-opinion runbooks fork; runbook-carrier (NOT an enforcement plugin — manifest.schema is enforcement-only), authored on disk by the Follow move." },
-  "claude-code-activation": { presence: "on-disk", why: "RFC-009 R3 advisory activation adapter; _index.json entry + MAX_SUPPORTED/oracle MINOR bump land in P2-S6." },
+  // RFC-009 P2-S6: claude-code-activation is no longer a RESERVED (entry-less)
+  // dir — plugins/_index.json now carries its real `activation` descriptor, so
+  // the bidirectional dir↔entry check (M8) resolves it as a normal plugin dir.
 };
 
 // ---------------------------------------------------------------------------

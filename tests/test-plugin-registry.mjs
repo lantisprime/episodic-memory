@@ -200,23 +200,21 @@ const CONTEXT_FILES = [
     // RFC-008 Follow (R10): second-opinion is now on-disk reserved, so its
     // absence is likewise reserved_absent — the carrier can't be silently exempt.
     assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "second-opinion"), "M8: second-opinion on-disk reserved dir absent -> reserved_absent (Follow/R10)");
-    // RFC-009 P2-S2: claude-code-activation is now on-disk reserved, so its
-    // absence is likewise reserved_absent.
-    assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "claude-code-activation"), "M8: claude-code-activation on-disk reserved dir absent -> reserved_absent (RFC-009 P2-S2)");
+    // RFC-009 P2-S6: claude-code-activation is NO LONGER reserved — it is a real
+    // _index.json activation entry now, so its dir is governed by the normal
+    // entry↔dir rule (present-with-entry passes; the reserved exemption is gone).
     rmrf(tmp2);
 
     // positive: ALL on-disk reserved dirs present -> no reserved_absent (the
-    // exemption is honest, not stale). Mirrors the live tree post-Follow/P2-S2.
+    // exemption is honest, not stale). Mirrors the live tree post-Follow/R10.
     const tmp3 = mkdtemp();
     fs.mkdirSync(path.join(tmp3, "plugins/claude-code"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/episodic-memory"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/second-opinion/runbooks"), { recursive: true });
-    fs.mkdirSync(path.join(tmp3, "plugins/claude-code-activation"), { recursive: true });
     c = collect();
     checkBidirectionalDirs(tmp3, [{ directory: "plugins/claude-code" }], c.add, []);
-    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: all on-disk reserved dirs present -> no reserved_absent (Follow/R10, RFC-009 P2-S2)");
+    assert(!c.vs.some((v) => v.keyword === "reserved_absent"), "M8: all on-disk reserved dirs present -> no reserved_absent (Follow/R10)");
     assert(!c.vs.some((v) => v.dir === "second-opinion"), "M8: present second-opinion carrier raises no orphan/absent violation");
-    assert(!c.vs.some((v) => v.dir === "claude-code-activation"), "M8: present claude-code-activation dir raises no orphan/absent violation");
     rmrf(tmp3);
   } finally { rmrf(tmp); }
 }
@@ -433,6 +431,21 @@ function buildLiveProject() {
     "plugins/pi-agent/manifest.json",
     "plugins/pi-agent/runbooks/enforcement.md",
     "plugins/pi-agent/runbooks/enforcement.quickref.md",
+    // RFC-009 P2-S6: claude-code-activation is now a live _index.json entry — its
+    // manifest + runbooks must be on disk too, else A2/M8 fire (entry manifest
+    // unreadable / entry dir missing).
+    "plugins/claude-code-activation/manifest.json",
+    "plugins/claude-code-activation/runbooks/activation.md",
+    "plugins/claude-code-activation/runbooks/activation.quickref.md",
+    // RFC-009 P2-S6: the activation manifest's registrations + support_files
+    // reference these hook files; the validator's A-checksum / A-support-checksum
+    // checks read them off disk, so the live temp project must carry them.
+    "plugins/claude-code-activation/hooks/activation-prompt.sh",
+    "plugins/claude-code-activation/hooks/activation-tool.sh",
+    "plugins/claude-code-activation/hooks/activation-sessionstart.sh",
+    "plugins/claude-code-activation/hooks/activation-hook-run.mjs",
+    // A-io-schema reads the manifest's io_schema off disk.
+    "schemas/runtime/activation-io.schema.json",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {
@@ -442,7 +455,6 @@ function buildLiveProject() {
   }
   fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true }); // on-disk reserved (M8)
   fs.mkdirSync(path.join(tmp, "plugins/second-opinion/runbooks"), { recursive: true }); // on-disk reserved (M8, Follow/R10)
-  fs.mkdirSync(path.join(tmp, "plugins/claude-code-activation"), { recursive: true }); // on-disk reserved (M8, RFC-009 P2-S2)
   return tmp;
 }
 

@@ -27,7 +27,10 @@ import {
   enforcementHookFileBasenames, enforcementRegistrations, enforcementHookLibBasenames,
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
+  ACTIVATION_HOOK_SPECS, activationRegistrations, activationHookFileBasenames,
+  activationSupportFiles,
 } from './scripts/lib/install-manifest.mjs'
+import { resolveRepoRoot } from './scripts/lib/local-dir.mjs'
 import {
   perProjectArtifactPairs, globalArtifactPairs, buildArtifactEntries,
   mergeArtifactEntries, buildManifest, resolveSourceVersion, writeJsonAtomic,
@@ -67,6 +70,17 @@ const installEnforcement = argv.includes('--install-enforcement')
 // --purge-config additionally deletes the operator switch (explicit opt-in).
 const uninstallEnforcement = argv.includes('--uninstall-enforcement')
 const purgeConfig = argv.includes('--purge-config')
+// RFC-009 P2-S6: the advisory activation adapter (R3 UserPromptSubmit/PreToolUse
+// + R4 SessionStart hooks) installs PER-PROJECT (Principle 12) under
+// <authorityRoot>/.claude/, NEVER global, and NEVER touches enforcement.
+// Advisory-only: the hooks emit additionalContext and always exit 0 — no gate,
+// no block. Independent of --install-enforcement (separate capability family).
+const installActivation = argv.includes('--install-activation')
+const uninstallActivation = argv.includes('--uninstall-activation')
+// (F1) Install-time truth from runInstallActivation, consulted by the registry
+// companion gate so activation_installed reflects what was actually WIRED (runner
+// ours + registered), not merely that the runner file exists on disk.
+let lastActivationInstallReport = null
 const installSecondOpinion = argv.includes('--install-second-opinion')
 // Scheduled maintenance routines (em-routines.mjs): sync routines.json to the
 // platform scheduler (launchd/systemd/cron) right after the substrate deploys.
@@ -171,7 +185,7 @@ if (argv.includes('--wizard')) {
 
 if (!tool) {
   console.log(`Usage: node install.mjs --wizard   (interactive guided setup — recommended)
-       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-activation] [--uninstall-activation] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
        node install.mjs --update-consumers [--dry-run]   (refresh registered consuming projects)
 
 Tools:
@@ -224,6 +238,27 @@ Hook flags (claude-code / RFC-008 P4d — enforcement is PER-PROJECT, never glob
   --purge-config          With --uninstall-enforcement, ALSO delete the operator
                           switch <project>/.episodic-memory/enforce-config.json
                           (explicit destructive opt-in; default leaves it).
+
+Activation flags (claude-code / RFC-009 P2 — advisory, PER-PROJECT, never global):
+  --install-activation    Install the PER-PROJECT advisory activation adapter
+                          under <authorityRoot>/.claude/ (NEVER ~/.claude): the
+                          3 thin hooks (activation-prompt UserPromptSubmit,
+                          activation-tool PreToolUse, activation-sessionstart
+                          SessionStart) + the shared activation-hook-run.mjs
+                          runner + a co-located manifest.json carrying the
+                          project scope identity (slug + resolved root), and
+                          register them in <authorityRoot>/.claude/settings.json.
+                          Advisory-ONLY: the hooks emit additionalContext and
+                          always exit 0 — no gate, no block. Independent of
+                          --install-enforcement. Skips divergent local hook
+                          files AND withholds their registration (re-run with
+                          --install-hooks-force to accept).
+  --uninstall-activation  Reverse --install-activation for THIS project: prune
+                          the 3 activation registrations and delete the adapter
+                          files + manifest, PRESERVING any user-modified owned
+                          file (on-disk sha256 diverges from the manifest
+                          checksum → kept with a stderr diff, PRINCIPLES P10).
+                          Never touches ~/.claude or ~/.episodic-memory.
 
 Second-opinion harness:
   --install-second-opinion Write install snapshot at
@@ -1204,6 +1239,13 @@ function writeJSONAtomic(filePath, obj) {
   }
 }
 
+// A JSON value that behaves as an object literal (map): not null, not an array,
+// not a primitive. JSON.parse only ever yields object/array/primitive/null, so
+// this is the exact "is settings a usable object" predicate (Finding F2).
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
 function writeJSONAtomicIfChanged(filePath, obj) {
   const next = JSON.stringify(obj, null, 2)
   if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8') === next) {
@@ -1575,6 +1617,327 @@ function runUninstallEnforcement(projectDir, { purgeConfig = false } = {}) {
     }
   } else if (fs.existsSync(switchPath)) {
     report.preserved.push(switchPath)
+  }
+
+  return report
+}
+
+// ---------------------------------------------------------------------------
+// RFC-009 P2-S6 — advisory activation adapter install/uninstall (REQ-23/28).
+//
+// AUTHORITY ROOT (§7.1, codex B2): every activation surface — the hook files,
+// the settings.json registrations, the co-located manifest, AND the baked
+// scope identity — binds to ONE resolved root: resolveRepoRoot(projectDir).
+// For --project == the repo root that is the dir itself; for a nested cwd it
+// resolves UP to the git toplevel; for a linked worktree it converges on the
+// MAIN checkout (same root em-store's resolveLocalDir uses, so the hook reads
+// the SAME per-project store the user's episodes live in); for a non-git dir it
+// is the dir itself. Binding identity.root to this resolved root is what makes
+// the runtime store lookup (path.join(root, '.episodic-memory')) agree with
+// where episodes were actually written — the whole point of the explicit
+// root-binding codex asked for over enforcement's literal-projectDir posture.
+//
+// DEPLOY LAYOUT: the 3 thin .sh hooks + the shared activation-hook-run.mjs
+// runner land flat in <root>/.claude/hooks/ (HOOK_DIR at runtime), and the
+// manifest.json — with project_identity:{slug,root} INJECTED (the repo template
+// omits it, degrading to no-injection) — lands beside them at
+// <root>/.claude/hooks/manifest.json, which is exactly resolveIdentity()'s
+// first candidate (HOOK_DIR/manifest.json). Advisory-only, claude-code-only,
+// per-project — NEVER ~/.claude.
+
+// The owned-file set whose bytes we verify against the manifest checksums at
+// uninstall time (REQ-28 / PRINCIPLES P10): the 3 registered .sh + the runner.
+function activationOwnedFiles() {
+  return [...activationHookFileBasenames(), ...activationSupportFiles()]
+}
+
+// Install the advisory activation adapter for ONE project. Returns a report
+// { root, slug, installedFiles, registrations, manifest, withheld, warnings }.
+function runInstallActivation(projectDir) {
+  const report = { root: null, slug: null, installedFiles: [], registrations: [], manifest: null, withheld: [], warnings: [], runnerReady: false }
+  const authorityRoot = resolveRepoRoot(projectDir)
+  const slug = path.basename(authorityRoot)
+  report.root = authorityRoot
+  report.slug = slug
+
+  const userHooksDir = path.join(authorityRoot, '.claude', 'hooks')
+  const settingsPath = path.join(authorityRoot, '.claude', 'settings.json')
+  const srcHooksDir = path.join(REPO_DIR, 'plugins', 'claude-code-activation', 'hooks')
+  const srcManifest = path.join(REPO_DIR, 'plugins', 'claude-code-activation', 'manifest.json')
+
+  // (a) PARSE FIRST — atomic on malformed settings, mirroring runUninstallActivation.
+  //     The path computations above are pure; NOTHING is created on disk until we
+  //     have proven settings.json parses. On SyntaxError, abort the WHOLE op:
+  //     no mkdir, no copies, no manifest, no registration, registry untouched
+  //     (Finding A — a bare JSON.parse here previously threw AFTER the mkdir +
+  //     4 copies + manifest write, leaving a half-installed footprint).
+  let settings = {}
+  if (fs.existsSync(settingsPath)) {
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    } catch (e) {
+      const msg = `settings.json is not valid JSON (${e.message}); aborted — nothing changed`
+      report.warnings.push(msg)
+      console.log(`Activation install aborted: ${msg}`)
+      return report
+    }
+    // (a.1) SHAPE GUARD (Finding F2) — valid JSON of the WRONG SHAPE is as
+    //       unusable as malformed. `settings.json = []` parses fine, but
+    //       `settings.hooks = {}` sets a NAMED prop on the array that
+    //       JSON.stringify silently drops → registrations lost yet files/manifest
+    //       already written (half-install). `null`/`42`/`"x"` throw on the first
+    //       `settings.hooks` access AFTER the on-disk writes. Require a plain
+    //       object with `hooks` absent or a plain object; else abort atomically
+    //       here — BEFORE any mkdir/copy/manifest — for zero on-disk footprint.
+    if (!isPlainObject(parsed) || (parsed.hooks !== undefined && !isPlainObject(parsed.hooks))) {
+      const msg = 'settings.json is not a JSON object; aborted — nothing changed'
+      report.warnings.push(msg)
+      console.log(`Activation install aborted: ${msg}`)
+      return report
+    }
+    settings = parsed
+  }
+
+  fs.mkdirSync(userHooksDir, { recursive: true })
+
+  // Copy the 3 .sh hooks + the shared runner. installHookFile is byte-hash
+  // aware (copied/unchanged/forced/skipped-divergent/missing-source) so a
+  // divergent local edit is preserved unless --install-hooks-force.
+  const fileResults = {}
+  for (const f of activationOwnedFiles()) {
+    const src = path.join(srcHooksDir, f)
+    const dst = path.join(userHooksDir, f)
+    const result = installHookFile(src, dst, installHooksForce)
+    fileResults[f] = result
+    switch (result) {
+      case 'copied': console.log(`Installed activation hook: ${dst}`); report.installedFiles.push(dst); break
+      case 'forced': console.log(`Force-overwrote activation hook: ${dst}`); report.installedFiles.push(dst); break
+      case 'unchanged': console.log(`Activation hook already current: ${dst}`); break
+      case 'skipped-divergent': console.log(`Skipped activation hook (divergent local edit): ${dst} — re-run with --install-hooks-force`); report.warnings.push(`skipped-divergent ${f}`); break
+      case 'missing-source': console.log(`Note: ${src} not found in repo, skipped`); report.warnings.push(`missing-source ${f}`); break
+    }
+  }
+
+  // Write the co-located manifest with project_identity INJECTED. The repo
+  // template lacks project_identity (degrades to no-injection); install is the
+  // one place that binds it, from the resolved authority root (§7.1 REQ-4).
+  const manifest = JSON.parse(fs.readFileSync(srcManifest, 'utf8'))
+  manifest.project_identity = { slug, root: authorityRoot }
+  const manifestDst = path.join(userHooksDir, 'manifest.json')
+  writeJSONAtomic(manifestDst, manifest)
+  report.manifest = manifestDst
+  console.log(`Wrote activation manifest (project_identity: ${slug}): ${manifestDst}`)
+
+  // Register the 3 matcher-less hooks. Withhold NEW registration of a hook whose
+  // file was skipped-divergent (mirror enforcement: never point Claude at
+  // unreviewed content); a pre-existing registration for the canonical path is
+  // preserved. (settings was parsed atomically at the top — Finding A.)
+  if (!settings.hooks) settings.hooks = {}
+  migrateMalformedEntries(settings.hooks)
+  const eligibleForReg = new Set(['copied', 'unchanged', 'forced'])
+
+  // (F1) RUNNER-READY GATE — the 3 .sh wrappers are inert shells; ALL matcher/
+  //      freshness/identity/suppress logic lives in the shared runner
+  //      activation-hook-run.mjs, which they exec. A DIVERGENT/absent runner
+  //      (skipped-divergent / missing-source) is unreviewed content: registering
+  //      the .sh would point Claude AT it. So the runner's readiness is
+  //      load-bearing for the WHOLE adapter — if it is not ours, WITHHOLD ALL 3
+  //      registrations (mirror the per-.sh withhold, applied whole-adapter) and
+  //      surface runnerReady=false so the caller never records
+  //      activation_installed:true. The divergent runner itself is PRESERVED
+  //      (installHookFile already skipped it), just never wired.
+  const runnerReady = activationSupportFiles().every((f) => eligibleForReg.has(fileResults[f]))
+  report.runnerReady = runnerReady
+  if (!runnerReady) {
+    for (const spec of ACTIVATION_HOOK_SPECS) {
+      console.log(`${spec.event} ${spec.file}: registration withheld (activation runner not ready — divergent/missing; re-run with --install-hooks-force)`)
+      report.withheld.push(`${spec.event} → ${spec.file}`)
+    }
+    writeJSONAtomic(settingsPath, settings)
+    return report
+  }
+
+  for (const spec of ACTIVATION_HOOK_SPECS) {
+    const canonicalCmd = shellQuote(path.join(userHooksDir, spec.file))
+    if (!eligibleForReg.has(fileResults[spec.file])) {
+      const already = (settings.hooks[spec.event] || []).some((e) => entryHasExactCommand(e, canonicalCmd))
+      console.log(`${spec.event} ${spec.file}: registration withheld (${already ? 'existing preserved' : 'file install skipped'})`)
+      report.withheld.push(`${spec.event} → ${spec.file}`)
+      continue
+    }
+    const result = addHookEntry(settings.hooks, spec.event, canonicalCmd, { timeout: spec.timeout })
+    console.log(`${spec.event} ${spec.file}: ${result}`)
+    if (result === 'added') report.registrations.push(`${spec.event} → ${spec.file}`)
+  }
+  writeJSONAtomic(settingsPath, settings)
+  return report
+}
+
+// Reverse the activation install for ONE project. Returns an UninstallReport
+// { removedRegistrations, removedFiles, preserved, warnings }. Atomic on
+// malformed settings (parse first). REQ-28 (PRINCIPLES P10): an owned hook file
+// whose on-disk sha256 DIVERGES from the manifest-declared checksum is a
+// user-modified file — preserved with a stderr diff, never silently deleted. A
+// missing/unreadable manifest means we cannot prove ownership → preserve all +
+// warn (never delete unverifiable files). Throws ONLY on a containment violation.
+function runUninstallActivation(projectDir) {
+  const report = { removedRegistrations: [], removedFiles: [], preserved: [], warnings: [] }
+  const authorityRoot = resolveRepoRoot(projectDir)
+  const userHooksDir = path.join(authorityRoot, '.claude', 'hooks')
+  const hooksRoot = userHooksDir
+  const settingsPath = path.join(authorityRoot, '.claude', 'settings.json')
+  const realpathOrLexical = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+
+  // (a) PARSE FIRST — atomic on malformed settings. On SyntaxError, abort the
+  //     WHOLE op: delete nothing, write nothing.
+  let settings = {}
+  let settingsPresent = false
+  if (fs.existsSync(settingsPath)) {
+    settingsPresent = true
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    } catch (e) {
+      report.warnings.push(`settings.json is not valid JSON (${e.message}); aborted — nothing changed`)
+      return report
+    }
+    // (a.1) SHAPE GUARD (Finding F2) — mirror the install-side guard. `[]` parses
+    //       but `settings.hooks = {}` sets a dropped array prop; `null` throws on
+    //       the `!settings.hooks` access below. Abort atomically (delete nothing,
+    //       write nothing) on any non-object / non-object-hooks shape.
+    if (!isPlainObject(parsed) || (parsed.hooks !== undefined && !isPlainObject(parsed.hooks))) {
+      report.warnings.push('settings.json is not a JSON object; aborted — nothing changed')
+      return report
+    }
+    settings = parsed
+  }
+  if (!settings.hooks) settings.hooks = {}
+
+  // (b) PRUNE the 3 activation registrations (all matcher-less, bare-path). Then
+  //     remove any remaining same-event entry whose target realpath-resolves to
+  //     the canonical file (legacy relative spelling); a same-basename entry
+  //     resolving ELSEWHERE is the operator's own hook → warn + leave. Drop any
+  //     event key left empty.
+  //     Finding F (by-design): registrations are pruned UNCONDITIONALLY — even for
+  //     an owned file that step (c) later checksum-PRESERVES. REQ-28 preserves
+  //     FILES on disk, not their settings.json WIRING; a preserved-but-unwired
+  //     hook is the intended end state (not a bug). The settings write is deferred
+  //     until after the containment gate (Finding C) so it stays atomic.
+  let settingsChanged = false
+  for (const reg of activationRegistrations()) {
+    const canonicalFile = path.join(userHooksDir, reg.file)
+    const canonicalCmd = shellQuote(canonicalFile)
+    if (removeHookCommandFromEvent(settings.hooks, reg.event, canonicalCmd) > 0) {
+      settingsChanged = true
+      report.removedRegistrations.push(`${reg.event} → ${reg.file}`)
+    }
+    const arr = settings.hooks[reg.event]
+    if (Array.isArray(arr)) {
+      const canonicalResolved = realpathOrLexical(canonicalFile)
+      for (const entry of [...arr]) {
+        const cmds = (entry && Array.isArray(entry.hooks)) ? entry.hooks : []
+        for (const h of cmds) {
+          if (!h || typeof h.command !== 'string') continue
+          // (F3) Resolve a legacy RELATIVE command against authorityRoot — the
+          //      root whose settings.json we are editing and the SAME base the
+          //      install side builds the canonical command from (userHooksDir =
+          //      authorityRoot/.claude/hooks). Using projectDir here mis-resolved
+          //      a nested `--project <subdir>` invocation: the legacy relative
+          //      `.claude/hooks/activation-prompt.sh` bound under the subdir,
+          //      compared unequal to the canonical path, was judged foreign and
+          //      LEFT — yet its canonical file was still deleted below, stranding
+          //      a dangling registration. A genuinely foreign absolute path still
+          //      resolves ELSEWHERE → warn + leave (operator's own hook).
+          const tgt = hookCommandTargetPath(h.command, authorityRoot)
+          if (!tgt || path.basename(tgt) !== reg.file) continue
+          if (realpathOrLexical(tgt) === canonicalResolved) {
+            if (removeHookCommandFromEvent(settings.hooks, reg.event, h.command) > 0) {
+              settingsChanged = true
+              report.removedRegistrations.push(`${reg.event} → ${reg.file} (legacy spelling)`)
+            }
+          } else {
+            report.warnings.push(`left non-canonical ${reg.event} hook ${h.command} (resolves outside the canonical path)`)
+          }
+        }
+      }
+    }
+  }
+  for (const event of Object.keys(settings.hooks)) {
+    const list = settings.hooks[event]
+    if (Array.isArray(list) && list.length === 0) { delete settings.hooks[event]; settingsChanged = true }
+  }
+  // NOTE (Finding C): the settings write is DEFERRED to after the containment gate
+  // below — do NOT write here.
+
+  // (c) FILE removal, REQ-28 checksum-gated. Read the DEPLOYED manifest for the
+  //     declared checksums BEFORE removing anything. For each owned file: bytes
+  //     match the declared checksum → ours, unmodified → delete; bytes diverge →
+  //     user-modified → PRESERVE + stderr diff. No manifest / no declared
+  //     checksum for a file → cannot prove ownership → preserve + warn.
+  const manifestPath = path.join(userHooksDir, 'manifest.json')
+  let checksums = null
+  if (fs.existsSync(manifestPath)) {
+    try {
+      const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+      checksums = {}
+      for (const r of [...(Array.isArray(m.registrations) ? m.registrations : []), ...(Array.isArray(m.support_files) ? m.support_files : [])]) {
+        if (r && typeof r.file === 'string' && typeof r.checksum === 'string') {
+          checksums[r.file] = r.checksum.replace(/^sha256:/, '')
+        }
+      }
+    } catch (e) {
+      report.warnings.push(`activation manifest is not valid JSON (${e.message}); owned files preserved (cannot verify ownership)`)
+    }
+  } else {
+    report.warnings.push('activation manifest absent; owned files preserved (cannot verify ownership)')
+  }
+
+  // (c.1) Classify: build the checksum-gated DELETE SET (owned files that are
+  //       unmodified/ours). A divergent or unverifiable file is PRESERVED here —
+  //       no disk mutation yet (stderr diffs are informational only).
+  const deleteTargets = []
+  for (const f of activationOwnedFiles()) {
+    const target = path.join(userHooksDir, f)
+    if (!fs.existsSync(target)) continue
+    const declared = checksums ? checksums[f] : undefined
+    if (!declared) {
+      report.preserved.push(target)
+      process.stderr.write(`activation uninstall: preserved ${target} (no manifest checksum to verify ownership)\n`)
+      continue
+    }
+    const actual = sha256File(target)
+    if (actual !== declared) {
+      report.preserved.push(target)
+      process.stderr.write(`activation uninstall: preserved ${target} (on-disk sha256 ${actual.slice(0, 12)} != manifest ${declared.slice(0, 12)}; user-modified)\n`)
+      continue
+    }
+    deleteTargets.push(target)
+  }
+  // The co-located manifest.json is install-generated metadata (carries the
+  // injected project_identity) — unambiguously ours; deleted last.
+  const manifestPresent = fs.existsSync(manifestPath)
+
+  // (c.2) CONTAINMENT GATE (Finding C) — assert EVERY delete target resolves
+  //       inside the hooks tree BEFORE any settings mutation. assertContained
+  //       THROWS on a containment escape, so a planted escaping symlink aborts the
+  //       WHOLE op: settings.json stays byte-identical and nothing is deleted,
+  //       matching the malformed-settings atomicity. (Previously the settings
+  //       write preceded these checks, so an escape left partial state.)
+  for (const target of deleteTargets) assertContained(target, hooksRoot)
+  if (manifestPresent) assertContained(manifestPath, hooksRoot)
+
+  // (c.3) All delete targets are containment-verified — now it is safe to persist
+  //       the pruned settings and execute the deletes.
+  if (settingsPresent && settingsChanged) writeJSONAtomic(settingsPath, settings)
+  for (const target of deleteTargets) {
+    fs.rmSync(target, { force: true })
+    report.removedFiles.push(target)
+  }
+  // (d) Remove the manifest last (it was the checksum source for (c)).
+  if (manifestPresent) {
+    fs.rmSync(manifestPath, { force: true })
+    report.removedFiles.push(manifestPath)
   }
 
   return report
@@ -2091,6 +2454,26 @@ if (uninstallEnforcement) {
       : tool === 'pi-agent'
         ? uninstallPiAgentEnforcement(projectDir)
         : runUninstallEnforcement(projectDir, { purgeConfig })
+  console.log(JSON.stringify(rep, null, 2))
+}
+
+if (uninstallActivation && (tool === 'claude-code' || tool === 'all')) {
+  // RFC-009 P2-S6: reverse the per-project advisory activation adapter. Never
+  // touches ~/.claude or ~/.episodic-memory (the global-side Layer-1 writes
+  // below are gated off for this run). Advisory-only, claude-code-only.
+  const rep = runUninstallActivation(projectDir)
+  console.log(JSON.stringify(rep, null, 2))
+}
+
+if (installActivation && (tool === 'claude-code' || tool === 'all')) {
+  // RFC-009 P2-S6: deploy the per-project advisory activation adapter under
+  // <authorityRoot>/.claude/. Independent of --install-enforcement.
+  const rep = runInstallActivation(projectDir)
+  // (F1) Carry INSTALL-TIME truth to the registry companion gate below: it must
+  //      record activation_installed:true ONLY when this run actually wired the
+  //      registrations (runner ours + settings updated), never on a bare
+  //      fs.existsSync of the runner — a preserved DIVERGENT runner also exists.
+  lastActivationInstallReport = rep
   console.log(JSON.stringify(rep, null, 2))
 }
 
@@ -2913,7 +3296,7 @@ try {
   // next regular install run (see 7c).
   const globalArtifacts = buildArtifactEntries(globalArtifactPairs(REPO_DIR, GLOBAL_DIR))
   const sourceVersion = resolveSourceVersion(REPO_DIR, globalArtifacts)
-  if (!uninstallEnforcement) {
+  if (!uninstallEnforcement && !uninstallActivation) {
     writeJsonAtomic(globalManifestPath(GLOBAL_DIR), buildManifest({
       scope: 'global',
       tool,
@@ -2948,8 +3331,11 @@ try {
   // preserved, cross-checked against disk truth (an uninstall run cannot
   // update the registry — global scope is off-limits to it — so the flag
   // heals here on the next regular install: engine gone ⇒ false).
-  if (!uninstallEnforcement) {
+  if (!uninstallEnforcement && !uninstallActivation) {
     const projectKey = normalizeProjectPath(projectAbs)
+    // Activation binds to the resolved authority root (may differ from projectAbs
+    // for a nested/worktree --project); heal its flag from disk truth there.
+    const activationRoot = resolveRepoRoot(projectAbs)
     const { entries: existingEntries } = readRegistry(registryPath(GLOBAL_DIR))
     const nowIso = new Date().toISOString()
     const registryUpdates = tools.map((t) => {
@@ -2966,11 +3352,37 @@ try {
         enforcementInstalled = false // healed: a prior --uninstall-enforcement removed the engine
       }
       if (t === enforcementTool && installEnforcement) enforcementInstalled = true
+      // RFC-009 P2-S6: activation is claude-code-only + per-project. Same
+      // heal-from-disk-truth posture as enforcement (an --uninstall-activation
+      // run cannot touch the registry, so the flag heals here on the next
+      // regular install: runner gone on disk ⇒ false).
+      let activationInstalled = prev ? prev.activation_installed === true : false
+      if (t === 'claude-code' && activationInstalled &&
+          !fs.existsSync(path.join(activationRoot, '.claude', 'hooks', 'activation-hook-run.mjs'))) {
+        activationInstalled = false // healed: a prior --uninstall-activation removed the runner
+      }
+      // Finding A: gate the flag on the runner actually landing on disk. A
+      // malformed-settings abort in runInstallActivation returns without writing
+      // anything, so activation_installed must stay disk-truth (false), matching
+      // the heal posture above — never record an install that did not happen.
+      // Finding F1: fs.existsSync alone is INSUFFICIENT — a preserved DIVERGENT
+      // runner also exists on disk, yet its registrations were WITHHELD (never
+      // wired). Require install-time truth (runInstallActivation surfaced
+      // runnerReady:true, meaning the runner is ours AND the registrations were
+      // wired) in addition to the existsSync disk check. A malformed/shape abort
+      // returns runnerReady:false, and a divergent-runner install returns
+      // runnerReady:false — both correctly leave the flag false.
+      if (t === 'claude-code' && installActivation &&
+          lastActivationInstallReport && lastActivationInstallReport.runnerReady === true &&
+          fs.existsSync(path.join(activationRoot, '.claude', 'hooks', 'activation-hook-run.mjs'))) {
+        activationInstalled = true
+      }
       return {
         project_path: projectKey,
         tool: t,
         version: sourceVersion,
         enforcement_installed: enforcementInstalled,
+        activation_installed: activationInstalled,
         last_install_ts: nowIso,
       }
     })
@@ -2981,7 +3393,7 @@ try {
   // ~/.episodic-memory/dist/<version>/ (copy source only, zero registrations —
   // Principle 12 untouched) so the opt-in SessionStart auto-update can refresh
   // consumers without this repo checkout present. Prunes superseded versions.
-  if (!uninstallEnforcement) {
+  if (!uninstallEnforcement && !uninstallActivation) {
     const dist = deployDistCache(REPO_DIR, GLOBAL_DIR, sourceVersion)
     console.log(`Recorded install version ${sourceVersion.slice(0, 12)} (manifests + registry); dist cache: ${dist.files} payload file(s) at ${dist.target}`)
   }

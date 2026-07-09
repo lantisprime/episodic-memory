@@ -3,8 +3,8 @@
   "_routing_note": "P1b (R0c) routing fields, consumed by tests/test-plugin-registry.mjs: `target_schema` = which P0 schema the fixture is shaped as (manifest|_index|structured-alert|bypass_known); `inject` = how the corpus runner feeds it (schema=validate directly vs target_schema; manifest|index|bypass-known=inject into validate-plugin-registry; symlink-temp=temp-dir symlink plant; deferred=p3, recorded NOT run); `attributed_check`/`attributed_reason` = the M-check (and reason code) that MUST appear in violations for a p1 fail-fixture (the F1 'fails at the ATTRIBUTED check, not merely non-zero' stop-rule).",
   "detected_by_vocabulary": ["p0-schema", "p1-registry-validator", "p2-cross-file-validator", "p3-runtime"],
   "current_schema_version": {
-    "_note": "CURRENT_SCHEMA_VERSION — single P0 oracle (R8 versioned-contract, RFC-008 L118). Every fixture INSTANCE declaring schema_version MUST byte-equal this value; test-p0-schemas.mjs asserts that equality non-vacuously (>=1 manifest instance). P1 promotes this to a production constant (validate-plugin-registry.mjs MAX_SUPPORTED) byte-equal'd against this oracle, and adds a non-vacuous REGISTRY-instance assertion once plugins/_index.json exists.",
-    "value": "1.0.0"
+    "_note": "CURRENT_SCHEMA_VERSION — single P0 oracle (R8 versioned-contract, RFC-008 L118). Every fixture INSTANCE declaring schema_version MUST byte-equal this value; test-p0-schemas.mjs asserts that equality non-vacuously (>=1 manifest instance). P1 promotes this to a production constant (validate-plugin-registry.mjs MAX_SUPPORTED) byte-equal'd against this oracle, and adds a non-vacuous REGISTRY-instance assertion once plugins/_index.json exists. RFC-009 P2-S6 MINOR bump 1.0.0->1.1.0: registry gains the `activation` plugin type.",
+    "value": "1.1.0"
   },
   "hash_serialization_contract": {
     "_note": "Canonical serialization used to bake good-manifest.json's taxonomy_version/events_version (F8/F37). P2's scripts/validate-bp-contract.mjs MUST reuse these exact bytes to avoid two-hand-rolled-hash drift.",

@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "plugins": [
     {
       "type": "enforcement",
@@ -51,6 +51,20 @@
       "capabilities": { "pre_tool_use": "MEDIUM" },
       "classifier": "override",
       "manifest": "plugins/pi-agent/manifest.json",
+      "status": "active"
+    },
+    {
+      "type": "activation",
+      "id": "claude-code",
+      "harness": "claude-code",
+      "directory": "plugins/claude-code-activation",
+      "blocking": false,
+      "capabilities": {
+        "user_prompt_submit": "STRONG",
+        "pre_tool_use": "STRONG",
+        "session_start": "STRONG"
+      },
+      "manifest": "plugins/claude-code-activation/manifest.json",
       "status": "active"
     }
   ]
