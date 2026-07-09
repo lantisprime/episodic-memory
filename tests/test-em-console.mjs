@@ -339,7 +339,8 @@ await (async () => {
       assert.ok(Array.isArray(hist.json.result.chain) && hist.json.result.chain.length === 1, 'chain missing for hostile episode')
 
       const page = (await req(rw.port, `/?token=${TOKEN}`)).text
-      const script = page.match(/<script>([\s\S]*?)<\/script>/)[1]
+      // Tolerate attributes on the <script> tag (#484 adds `nonce="…"`).
+      const script = page.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1]
       // The drawer must resolve result.chain first (regression pin for the
       // "no chain found" bug: the page read .episodes, which history never emits).
       assert.ok(script.includes('res.body.result.chain ||'), 'drawer no longer resolves result.chain first')
@@ -399,6 +400,36 @@ await (async () => {
       assert.strictEqual(run.status, 401, 'query token rode /api/run')
       const page = await req(rw.port, `/?token=${TOKEN}`)
       assert.strictEqual(page.status, 200, 'page bootstrap broke')
+    })
+    await test('CSP script nonce: header nonce matches the <script> tag, is fresh per load, and script-src has no unsafe-inline (#484)', async () => {
+      // Raw fetch — req() drops response headers, and the CSP header is the
+      // artifact under test.
+      const load = async () => {
+        const r = await fetch(`http://127.0.0.1:${rw.port}/?token=${TOKEN}`)
+        const csp = r.headers.get('content-security-policy') || ''
+        const body = await r.text()
+        return { csp, body }
+      }
+      const a = await load()
+      const b = await load()
+      // 1. script-src is nonce-based and carries NO 'unsafe-inline'.
+      const scriptSrcA = (a.csp.match(/script-src ([^;]*)/) || [])[1] || ''
+      assert.ok(/'nonce-[^']+'/.test(scriptSrcA), `script-src not nonce-based: ${scriptSrcA}`)
+      assert.ok(!/'unsafe-inline'/.test(scriptSrcA), `script-src still allows unsafe-inline: ${scriptSrcA}`)
+      // 2. The header nonce equals the nonce on the served <script> tag.
+      const headerNonce = a.csp.match(/script-src 'nonce-([^']+)'/)[1]
+      const tagNonce = a.body.match(/<script nonce="([^"]+)">/)[1]
+      assert.strictEqual(tagNonce, headerNonce, 'served <script> nonce != CSP header nonce')
+      assert.ok(headerNonce.length >= 20, `nonce too short to be 16 CSPRNG bytes: ${headerNonce}`)
+      // 3. Fresh per load — the second GET has a different nonce.
+      const headerNonceB = b.csp.match(/script-src 'nonce-([^']+)'/)[1]
+      assert.notStrictEqual(headerNonceB, headerNonce, 'nonce reused across loads (not per-request)')
+    })
+    await test('nonce edit did not disturb the escaping sink: served <script> still defines esc() and carries the nonce (#484 REQ-2)', async () => {
+      const page = (await req(rw.port, `/?token=${TOKEN}`)).text
+      assert.ok(/<script nonce="[^"]+">/.test(page), 'nonce attribute missing on served <script>')
+      const script = page.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1]
+      assert.ok(script.includes('function esc('), 'esc() sink no longer present in the served script')
     })
   } finally {
     rw.proc.kill()

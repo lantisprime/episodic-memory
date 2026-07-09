@@ -18,7 +18,7 @@
  * installed, system serif/sans/mono otherwise) — the CSP forbids webfonts.
  */
 
-export function renderPage() {
+export function renderPage(nonce = '') {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -282,7 +282,7 @@ details.more summary { color: var(--accent-dark); font-size: 13px; cursor: point
   <div class="d-body" id="d-body"></div>
 </aside>
 <div id="toast"></div>
-<script>
+<script nonce="${nonce}">
 'use strict';
 // --- token bootstrap: move ?token= into memory, scrub the URL --------------
 const qs = new URLSearchParams(location.search);
