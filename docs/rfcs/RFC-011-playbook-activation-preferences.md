@@ -2,7 +2,7 @@
 rfc_id: RFC-011
 slug: playbook-activation-preferences
 title: "Playbook Activation Preferences: Per-Project Session-Start and On-Demand Playbook Loading"
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-07-10
 last_modified: 2026-07-10

@@ -86,7 +86,7 @@
       "id": "RFC-011",
       "slug": "playbook-activation-preferences",
       "title": "Playbook Activation Preferences: Per-Project Session-Start and On-Demand Playbook Loading",
-      "status": "draft",
+      "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-011-playbook-activation-preferences.md"
     }
