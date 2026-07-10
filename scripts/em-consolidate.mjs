@@ -61,8 +61,8 @@ import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories } from './lib/categories.mjs'
-import { loadProtectionRows, computeProtectedIds } from './lib/protection.mjs'
-import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
+import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
+import { resolveRegisteredStores, resolveRegisteredStoresWithStatus, realpathSafe } from './lib/registered-stores.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -296,7 +296,8 @@ if (foldSuperseded) {
     // storeLabel = realpath(data_dir) — the display label must never feed the
     // class-d latestByStore bucket key (planner B4: basename collisions merge
     // buckets and silently unprotect one store's latest run record).
-    const registered = resolveRegisteredStores()
+    const reg = resolveRegisteredStoresWithStatus()
+    const registered = reg.stores
     const protectionDirs = new Map() // realpath -> dir
     for (const d of [LOCAL_DIR, GLOBAL_DIR, ...registered.map(s => s.data_dir)]) {
       const key = realpathSafe(d)
@@ -306,7 +307,23 @@ if (foldSuperseded) {
     for (const [key, d] of protectionDirs) {
       protectionRows.push(...loadProtectionRows(fs, path, d, key))
     }
-    const protectedIds = computeProtectedIds(protectionRows, today)
+    // RFC-011 R5(b): --fold-superseded binds to the SAME protection + abort
+    // semantics as em-prune. --all-projects archives across the registry, so the
+    // GLOBAL abort applies: a DEGRADED registry (installs.json rebuilt) OR any
+    // registered project's corrupt playbooks.json aborts exit 1 and folds NOTHING,
+    // naming the offending file (retention fails closed; advisory surfaces fail open).
+    const { abort: pbAbort, playbookIds } = resolvePlaybookProtection({
+      localStoreDir: LOCAL_DIR,
+      willArchiveLocal: false, // the registry (not a separate cwd-local fold) names the stores
+      registryStores: registered,
+      registryRebuilt: reg.registryRebuilt,
+      registryPath: reg.registryPath,
+    })
+    if (pbAbort) {
+      console.log(JSON.stringify({ status: 'error', message: `em-consolidate: aborting archival — ${pbAbort.reason} (${pbAbort.file})` }))
+      process.exit(1)
+    }
+    const protectedIds = computeProtectedIds(protectionRows, today, playbookIds)
 
     const stores = []
     let foldedTotal = 0
@@ -344,11 +361,34 @@ if (foldSuperseded) {
   // fold. The protection scan is cross-store (a global lesson's evidence can
   // name a local violation), so it reads BOTH stores' index rows regardless of
   // the fold's own scope.
+  // RFC-011 R5(b): binds to the identical SCOPED fail-closed abort as em-prune —
+  // --scope local aborts only on the LOCAL corrupt playbooks.json; --scope global
+  // aborts on a degraded registry OR any registered project's corrupt playbooks.json.
+  const willArchiveLocalCS = scope === 'local'
+  const willArchiveGlobalCS = scope === 'global'
+  let csRegistryStores = [], csRegistryRebuilt = false, csRegistryPath = null
+  if (willArchiveGlobalCS) {
+    const reg = resolveRegisteredStoresWithStatus()
+    csRegistryStores = reg.stores
+    csRegistryRebuilt = reg.registryRebuilt
+    csRegistryPath = reg.registryPath
+  }
+  const { abort: pbAbort, playbookIds } = resolvePlaybookProtection({
+    localStoreDir: LOCAL_DIR,
+    willArchiveLocal: willArchiveLocalCS,
+    registryStores: csRegistryStores,
+    registryRebuilt: csRegistryRebuilt,
+    registryPath: csRegistryPath,
+  })
+  if (pbAbort) {
+    console.log(JSON.stringify({ status: 'error', message: `em-consolidate: aborting archival — ${pbAbort.reason} (${pbAbort.file})` }))
+    process.exit(1)
+  }
   const protectionRows = [
     ...loadProtectionRows(fs, path, LOCAL_DIR, 'local'),
     ...loadProtectionRows(fs, path, GLOBAL_DIR, 'global')
   ]
-  const protectedIds = computeProtectedIds(protectionRows, today)
+  const protectedIds = computeProtectedIds(protectionRows, today, playbookIds)
   const res = foldStore(DATA_DIR, scope, protectedIds)
 
   console.log(JSON.stringify({

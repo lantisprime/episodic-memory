@@ -50,8 +50,25 @@ function containedIn(child, parent) {
  *   store_matches_project: boolean}>}
  */
 export function resolveRegisteredStores({ globalDir } = {}) {
+  return resolveRegisteredStoresWithStatus({ globalDir }).stores
+}
+
+/**
+ * Same as resolveRegisteredStores but ALSO surfaces readRegistry's `rebuilt` flag
+ * (RFC-011 R5b): archival consumers (em-prune --scope global, em-consolidate
+ * --fold-superseded) MUST treat a `rebuilt: true` registry (installs.json
+ * present-but-unparseable, silently degraded to an empty registry) as an ABORT
+ * condition, not as an empty registry — global playbooks protection would be
+ * unknowable. Non-archival consumers (em-stats/em-doctor/em-promote) keep using
+ * resolveRegisteredStores and degrade to an empty list as before.
+ *
+ * @returns {{ stores: Array<{project_path, data_dir, label, store_matches_project}>,
+ *   registryRebuilt: boolean, registryPath: string }}
+ */
+export function resolveRegisteredStoresWithStatus({ globalDir } = {}) {
   const gDir = globalDir || path.join(os.homedir(), STORE_DIR_BASENAME)
-  const { entries } = readRegistry(registryPath(gDir))
+  const regPath = registryPath(gDir)
+  const { entries, rebuilt } = readRegistry(regPath)
   const globalReal = realpathSafe(gDir)
   const seen = new Set()
   const out = []
@@ -81,5 +98,5 @@ export function resolveRegisteredStores({ globalDir } = {}) {
       store_matches_project: storeMatches,
     })
   }
-  return out
+  return { stores: out, registryRebuilt: rebuilt, registryPath: regPath }
 }

@@ -939,6 +939,19 @@ referencing episode is superseded or expires. Retained entries are counted in th
 `{id, score, reason, via}` where `via` names the protecting episode. `remaining`
 includes protected entries; the `--check` exit code ignores them.
 
+**RFC-011 R5(b) playbook-referenced protection + fail-closed abort.** A playbook
+declared in `<project>/.episodic-memory/playbooks.json` is load-bearing, so the
+resolved supersession chain of every declared id is protected with reason
+`playbook-referenced` (anchored on the resolved terminal; chain-closure extends it
+to every member). The same `playbooks.json` is read by `em-prune` and
+`em-consolidate --fold-superseded`, and retention FAILS CLOSED where the advisory
+surfaces fail open: a present-but-unparseable LOCAL `playbooks.json` aborts LOCAL
+archival with exit 1 and archives NOTHING; the GLOBAL store additionally aborts
+on a degraded registry (`installs.json` present-but-unparseable) or any registered
+project's corrupt `playbooks.json` (global protection is then unknowable). An
+absent file is normal operation (no protection, no abort); the abort message
+names the offending file. (Full docs land in S5.)
+
 ### em-promote
 
 EXPERIMENTAL (promote-or-remove decision 2026-10-08) — cross-project

@@ -26,7 +26,8 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { categoryLifecycle, canonicalCategory } from './lib/categories.mjs'
-import { computeProtectedIds } from './lib/protection.mjs'
+import { computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
+import { resolveRegisteredStoresWithStatus } from './lib/registered-stores.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -213,7 +214,36 @@ function pruneDir(dataDir, label, protectedIds) {
 // scan-to-archive window is a documented limitation: an episode stored mid-prune
 // protects one run late (recovery: em-restore / archived-index).
 const referenceRows = [...loadIndexRows(LOCAL_DIR, 'local'), ...loadIndexRows(GLOBAL_DIR, 'global')]
-const protectedIds = computeProtectedIds(referenceRows, TODAY)
+
+// RFC-011 R5(b): playbook-referenced chain protection + SCOPED fail-closed abort.
+// The registry is consulted ONLY when the GLOBAL store is being archived, so a
+// sibling project's corrupt playbooks.json can never abort an unrelated LOCAL
+// prune (scoped blast radius). LOCAL archival aborts only on the LOCAL corrupt
+// playbooks.json; absent file = normal. An abort exits 1 and archives NOTHING,
+// naming the offending file (fail direction inverts the advisory rule; retention
+// fails closed). parsePlaybooksConfig (S2 single source of truth) is imported by
+// resolvePlaybookProtection — never re-implemented here.
+const willArchiveLocal = scope === 'local' || scope === 'all'
+const willArchiveGlobal = scope === 'global' || scope === 'all'
+let registryStores = [], registryRebuilt = false, registryPathUsed = null
+if (willArchiveGlobal) {
+  const reg = resolveRegisteredStoresWithStatus({ globalDir: GLOBAL_DIR })
+  registryStores = reg.stores
+  registryRebuilt = reg.registryRebuilt
+  registryPathUsed = reg.registryPath
+}
+const { abort: pbAbort, playbookIds } = resolvePlaybookProtection({
+  localStoreDir: LOCAL_DIR,
+  willArchiveLocal,
+  registryStores,
+  registryRebuilt,
+  registryPath: registryPathUsed,
+})
+if (pbAbort) {
+  console.log(JSON.stringify({ status: 'error', message: `em-prune: aborting archival — ${pbAbort.reason} (${pbAbort.file})` }))
+  process.exit(1)
+}
+const protectedIds = computeProtectedIds(referenceRows, TODAY, playbookIds)
 
 const results = []
 if (scope === 'local' || scope === 'all') results.push(pruneDir(LOCAL_DIR, 'local', protectedIds))
