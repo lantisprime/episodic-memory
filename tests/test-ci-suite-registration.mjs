@@ -5,27 +5,37 @@
  * The class lesson behind #504 (and PLAN-session-auto-capture convention 8):
  * CI runs explicitly listed test files, so an unlisted suite silently never
  * runs. Instance fixes (wiring suites one by one) leave the class open — this
- * lint closes it: every top-level tests/test-*.{mjs,sh} must be
+ * lint closes it: every test-*.{mjs,sh} at any depth under tests/ must be
  *
- *   (a) referenced by a .github/workflows/*.yml run step (comment lines are
- *       stripped first, so a commented-out step does not count as wired), OR
- *   (b) a member of the P12 invariant meta-runner (glob test-p12-*.mjs plus
- *       its EXPLICIT set — membership-in-code, Rule 14), OR
+ *   (a) INVOKED by a .github/workflows/*.{yml,yaml} `run:` command — the
+ *       reference must be an interpreter invocation (`node|bash|sh tests/<f>`)
+ *       at command position inside an extracted run value. Step names, `if:`
+ *       conditions, YAML comments, shell comment lines, quoted strings, and
+ *       longer tokens that merely contain the filename do NOT count; OR
+ *   (b) a member of the P12 invariant meta-runner — re-derived the way the
+ *       runner derives it: glob(test-p12-*.mjs) minus meta-runners, plus the
+ *       runner's actual `const EXPLICIT = [...]` array (parsed from that
+ *       block only, comments stripped — a name quoted elsewhere in the runner
+ *       source does not count); OR
  *   (c) listed in the KNOWN_UNWIRED baseline below.
  *
  * The baseline is SHRINK-ONLY (a ratchet): it enumerates the suites that were
  * already unwired when this lint landed (2026-07-11, #504 audit). A baseline
- * entry that becomes wired must be deleted from the baseline (t_baseline_not_wired),
- * and an entry whose file is deleted must be deleted too (t_baseline_exists).
- * Adding a NEW suite to the baseline is a conscious reviewed edit of this
- * file, never the path of least resistance: a brand-new unwired suite fails
- * t_all_suites_registered by default.
+ * entry that becomes wired must be deleted (t_baseline_not_wired), and an
+ * entry whose file is deleted must be deleted too (t_baseline_exists). A
+ * brand-new unwired suite fails t_all_suites_registered by default; adding it
+ * to the baseline is a conscious reviewed edit of this file.
+ *
+ * Known out-of-contract files (tracked, not lint members): tests/e2e/
+ * console.e2e.mjs and tests/integration/codex-tmux-e2e.mjs do not follow the
+ * test-* naming contract (browser/tmux-bound; structurally CI-unsuitable).
  *
  * Zero deps. Node stdlib only.
  */
 
 import assert from 'node:assert'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -36,9 +46,10 @@ const repoRoot = path.dirname(testsDir)
 const workflowsDir = path.join(repoRoot, '.github', 'workflows')
 
 // Suites known to be unwired when this lint landed (#504 audit, 2026-07-11).
-// SHRINK-ONLY: entries may be removed (when wired or deleted), never added
-// without review. Many are structurally CI-unsuitable (live seats, external
-// codex/opencode binaries, network); wiring decisions stay per-suite.
+// Paths are relative to tests/. SHRINK-ONLY: entries may be removed (when
+// wired or deleted), never added without review. Many are structurally
+// CI-unsuitable (live seats, external codex/opencode binaries, network);
+// wiring decisions stay per-suite.
 const KNOWN_UNWIRED = [
   'test-bp1-approval-check-hook.mjs',
   'test-bp1-atomic.mjs',
@@ -125,54 +136,112 @@ const KNOWN_UNWIRED = [
   'test-worktree-marker-write.sh',
 ]
 
-// --- derivation (kept as small pure helpers so the negative control can run
-// --- the same predicate against synthetic input) --------------------------
+// --- derivation (small pure helpers so mutation fixtures can drive the SAME
+// --- code paths CI drives) --------------------------------------------------
 
-function listSuites(dir) {
-  return fs
-    .readdirSync(dir)
-    .filter((f) => /^test-.*\.(mjs|sh)$/.test(f))
-    .sort()
+// Recursive discovery: every test-*.{mjs,sh} at ANY depth under tests/,
+// returned as paths relative to tests/ (top level: 'test-x.mjs'; nested:
+// 'e2e/test-x.mjs'). Codex F3: a suite landing in tests/e2e etc. must not
+// escape the gate.
+function listSuites(dir, prefix = '') {
+  const out = []
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (ent.isDirectory()) out.push(...listSuites(path.join(dir, ent.name), `${prefix}${ent.name}/`))
+    else if (/^test-.*\.(mjs|sh)$/.test(ent.name)) out.push(`${prefix}${ent.name}`)
+  }
+  return out
 }
 
-// All workflow YAML with full-line comments stripped: a commented-out step
-// must not count as wired.
-function readWorkflowsText(dir) {
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
-    .map((f) =>
-      fs
-        .readFileSync(path.join(dir, f), 'utf8')
-        .split('\n')
-        .filter((line) => !/^\s*#/.test(line))
-        .join('\n'),
-    )
-    .join('\n')
+// Extract the VALUE TEXT of every `run:` key in a workflow YAML, without a
+// YAML dependency. Single-line values get their trailing YAML comment
+// stripped; block scalars (| or >, with chomping/indent modifiers) collect
+// the following deeper-indented lines verbatim. Everything outside run:
+// values (step names, if: conditions, YAML comments) is dropped, so a suite
+// name there can never count as wired (codex F1).
+function extractRunCommands(yamlText) {
+  const lines = yamlText.split('\n')
+  const commands = []
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*)(?:-\s+)?run:\s*(.*)$/)
+    if (!m) continue
+    const keyIndent = m[1].length
+    const value = m[2]
+    if (/^[|>]/.test(value)) {
+      const block = []
+      for (let j = i + 1; j < lines.length; j++) {
+        const line = lines[j]
+        if (line.trim() === '') { block.push(''); continue }
+        const indent = line.match(/^(\s*)/)[1].length
+        if (indent <= keyIndent) break
+        block.push(line)
+        i = j
+      }
+      commands.push(block.join('\n'))
+    } else {
+      commands.push(value.replace(/\s#.*$/, ''))
+    }
+  }
+  return commands
 }
 
-// P12 meta-runner membership, re-derived the way the runner derives it
-// (glob test-p12-*.mjs minus meta-runners) plus a textual match against its
-// source for the EXPLICIT set (the names appear literally there).
-const P12_RUNNER = 'test-p12-invariant-suite.mjs'
-const p12Source = fs.readFileSync(path.join(testsDir, P12_RUNNER), 'utf8')
-
-function isWired(basename, wfText) {
-  if (wfText.includes(basename)) return true
-  if (/^test-p12-.*\.mjs$/.test(basename) && !basename.includes('invariant-suite')) return true
-  if (p12Source.includes(`'${basename}'`)) return true
+// A suite counts as workflow-wired ONLY if some run-command line invokes it:
+// `node|bash|sh [./]tests/<relpath>` at command position (line start or after
+// ;, &&, ||, |, ( or $( ). Shell comment segments are stripped first, so
+// `# node tests/x.mjs` and `echo done # node tests/x.mjs` never count; a
+// quoted occurrence (`echo 'node tests/x.mjs'`) fails the command-position
+// anchor (codex F1 axes).
+function invokedByRunCommands(relPath, runCommands) {
+  const esc = relPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(?:^|[;&|(]|\\$\\()\\s*(?:node|bash|sh)\\s+(?:\\./)?tests/${esc}(?=$|[\\s;&|)'"])`)
+  for (const cmd of runCommands) {
+    for (const rawLine of cmd.split('\n')) {
+      const line = rawLine.replace(/(^|\s)#.*$/, '$1')
+      if (re.test(line)) return true
+    }
+  }
   return false
 }
 
-function computeUnregistered(suites, wfText, baseline) {
+function readWorkflowRunCommands(dir) {
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+    .flatMap((f) => extractRunCommands(fs.readFileSync(path.join(dir, f), 'utf8')))
+}
+
+// P12 meta-runner membership, re-derived the way the runner derives it
+// (test-p12-invariant-suite.mjs deriveMembers()): glob(test-p12-*.mjs) minus
+// meta-runners, plus its actual `const EXPLICIT = [...]` array. The EXPLICIT
+// set is parsed from THAT BLOCK ONLY, with // comments stripped first — a
+// filename quoted in a comment, assertion message, or anywhere else in the
+// runner source does not confer membership (codex F2).
+const P12_RUNNER = 'test-p12-invariant-suite.mjs'
+
+function parseP12Explicit(runnerSource) {
+  const block = runnerSource.match(/const EXPLICIT = \[([\s\S]*?)\n\]/)
+  assert.ok(block, `cannot locate "const EXPLICIT = [" block in ${P12_RUNNER} — update this lint's parser`)
+  const noComments = block[1].replace(/\/\/.*$/gm, '')
+  return [...noComments.matchAll(/'([^']+)'/g)].map((m) => m[1])
+}
+
+function p12Members(runnerSource, suiteBasenames) {
+  const globbed = suiteBasenames.filter((f) => /^test-p12-.*\.mjs$/.test(f) && !f.includes('invariant-suite'))
+  return new Set([...globbed, ...parseP12Explicit(runnerSource)])
+}
+
+function computeUnregistered(suites, runCommands, p12Set, baseline) {
   const base = new Set(baseline)
-  return suites.filter((f) => !isWired(f, wfText) && !base.has(f))
+  return suites.filter(
+    (f) => !invokedByRunCommands(f, runCommands) && !p12Set.has(f) && !base.has(f),
+  )
 }
 
 const SUITES = listSuites(testsDir)
-const WF_TEXT = readWorkflowsText(workflowsDir)
+const RUN_COMMANDS = readWorkflowRunCommands(workflowsDir)
+const P12_SOURCE = fs.readFileSync(path.join(testsDir, P12_RUNNER), 'utf8')
+const P12_SET = p12Members(P12_SOURCE, SUITES)
 
-// --- test harness ----------------------------------------------------------
+// --- test harness ------------------------------------------------------------
 
 let passed = 0
 let failed = 0
@@ -190,11 +259,11 @@ function test(name, fn) {
   }
 }
 
-console.log('# test-ci-suite-registration (#504 - every suite wired or baselined)')
-console.log(`# suites: ${SUITES.length}, baseline: ${KNOWN_UNWIRED.length}`)
+console.log('# test-ci-suite-registration (#504 - every suite invoked by CI or baselined)')
+console.log(`# suites: ${SUITES.length}, baseline: ${KNOWN_UNWIRED.length}, run commands: ${RUN_COMMANDS.length}`)
 
-test('t_all_suites_registered: every tests/test-*.{mjs,sh} is wired in a workflow, run by the P12 meta-runner, or baselined', () => {
-  const unregistered = computeUnregistered(SUITES, WF_TEXT, KNOWN_UNWIRED)
+test('t_all_suites_registered: every tests/ test-*.{mjs,sh} (any depth) is invoked by a workflow run command, a P12 member, or baselined', () => {
+  const unregistered = computeUnregistered(SUITES, RUN_COMMANDS, P12_SET, KNOWN_UNWIRED)
   assert.deepStrictEqual(
     unregistered,
     [],
@@ -202,8 +271,10 @@ test('t_all_suites_registered: every tests/test-*.{mjs,sh} is wired in a workflo
   )
 })
 
-test('t_baseline_not_wired: no baseline entry is wired (shrink-only ratchet — delete wired entries from KNOWN_UNWIRED)', () => {
-  const wiredButBaselined = KNOWN_UNWIRED.filter((f) => isWired(f, WF_TEXT))
+test('t_baseline_not_wired: no baseline entry is invoked or a P12 member (shrink-only ratchet — delete wired entries)', () => {
+  const wiredButBaselined = KNOWN_UNWIRED.filter(
+    (f) => invokedByRunCommands(f, RUN_COMMANDS) || P12_SET.has(f),
+  )
   assert.deepStrictEqual(
     wiredButBaselined,
     [],
@@ -220,20 +291,76 @@ test('t_baseline_sorted_unique: baseline is sorted and duplicate-free (reviewabl
   assert.deepStrictEqual(KNOWN_UNWIRED, [...new Set(KNOWN_UNWIRED)].sort())
 })
 
-test('t_detection_sanity: a known-wired suite reads wired; this lint itself is wired; positive workflow signal exists', () => {
-  // Guards the comment-stripper / reader against silently matching nothing.
-  assert.ok(isWired('test-plan-marker.mjs', WF_TEXT), 'test-plan-marker.mjs must read as wired')
-  // The P12 glob path must still short-circuit meta-runner members.
-  assert.ok(isWired('test-p12-global-clean.mjs', WF_TEXT), 'P12 glob member must read as wired')
-  // Rename drift: if this file is renamed without updating the workflow step,
-  // fail here on the next local run.
-  assert.ok(WF_TEXT.includes(SELF_BASENAME), `${SELF_BASENAME} must itself be wired in a workflow`)
+test('t_detection_sanity: known-wired suites detected via each acceptance branch; this lint itself is wired', () => {
+  assert.ok(invokedByRunCommands('test-plan-marker.mjs', RUN_COMMANDS), 'node-invoked suite must read as wired')
+  assert.ok(invokedByRunCommands('test-plan-gate.sh', RUN_COMMANDS), 'bash-invoked suite must read as wired')
+  assert.ok(P12_SET.has('test-p12-global-clean.mjs'), 'P12 glob member must read as wired')
+  assert.ok(P12_SET.has('test-uninstall-enforcement.mjs'), 'P12 EXPLICIT member must read as wired')
+  assert.ok(invokedByRunCommands(SELF_BASENAME, RUN_COMMANDS), `${SELF_BASENAME} must itself be invoked by a workflow`)
 })
 
-test('t_negative_control: a synthetic unwired suite is reported unregistered (red path proves the predicate bites)', () => {
+// Codex F1 mutation axes: every non-invocation reference class must read as
+// NOT wired, driven through the same extractRunCommands + invokedByRunCommands
+// paths the real check uses.
+test('t_mutation_workflow_axes: step-name / if: / YAML comment / shell comment / quoted / longer-token references never count', () => {
+  const target = 'test-mut-probe.mjs'
+  const wired = (yaml) => invokedByRunCommands(target, extractRunCommands(yaml))
+  // Positive controls: plain and block-scalar invocations DO count.
+  assert.ok(wired('      - name: x\n        run: node tests/test-mut-probe.mjs\n'), 'plain run invocation')
+  assert.ok(wired('      - run: |\n          echo start\n          node tests/test-mut-probe.mjs\n'), 'block-scalar invocation')
+  assert.ok(wired('      - run: node tests/a.mjs && node tests/test-mut-probe.mjs\n'), 'command position after &&')
+  // Attack axes: each must NOT count.
+  assert.ok(!wired('      - name: run node tests/test-mut-probe.mjs\n        run: echo hi\n'), 'step-name-only reference')
+  assert.ok(!wired("      - if: contains(github.event.head_commit.message, 'tests/test-mut-probe.mjs')\n        run: echo hi\n"), 'if-condition-only reference')
+  assert.ok(!wired('      # node tests/test-mut-probe.mjs\n      - run: echo hi\n'), 'YAML comment-only reference')
+  assert.ok(!wired('      - run: node tests/other.mjs # node tests/test-mut-probe.mjs\n'), 'inline trailing YAML comment')
+  assert.ok(!wired('      - run: |\n          # node tests/test-mut-probe.mjs\n          echo hi\n'), 'shell comment line in block scalar')
+  assert.ok(!wired('      - run: |\n          echo done # node tests/test-mut-probe.mjs\n'), 'trailing shell comment in block scalar')
+  assert.ok(!wired("      - run: |\n          echo 'node tests/test-mut-probe.mjs'\n"), 'quoted inert text in block scalar')
+  assert.ok(!wired('      - run: node tests/test-mut-probe.mjs.backup\n'), 'filename embedded in longer token')
+  assert.ok(!wired('      - run: node tests/prefix-test-mut-probe.mjs\n'), 'filename as suffix of longer token')
+  assert.ok(!wired('      - run: echo node tests/test-mut-probe.mjs\n'), 'echoed (non-command-position) reference')
+})
+
+// Codex F2 mutation axes: P12 membership binds to the ACTUAL EXPLICIT array.
+test('t_mutation_p12_axes: EXPLICIT-array literals confer membership; comments and stray literals elsewhere do not', () => {
+  const src = [
+    '// intro comment mentioning \'test-ghost-a.mjs\'',
+    'const EXPLICIT = [',
+    "  // rationale comment naming 'test-ghost-b.mjs'",
+    "  'test-real-member.mjs',",
+    ']',
+    "assert.deepStrictEqual([...EXPLICIT].sort(), ['test-ghost-c.mjs'])",
+  ].join('\n')
+  const set = p12Members(src, ['test-p12-extra.mjs', 'test-p12-invariant-suite.mjs'])
+  assert.ok(set.has('test-real-member.mjs'), 'actual EXPLICIT entry is a member')
+  assert.ok(set.has('test-p12-extra.mjs'), 'glob member joins')
+  assert.ok(!set.has('test-p12-invariant-suite.mjs'), 'meta-runner excluded from glob')
+  assert.ok(!set.has('test-ghost-a.mjs'), 'literal outside the array does not confer membership')
+  assert.ok(!set.has('test-ghost-b.mjs'), 'comment inside the array does not confer membership')
+  assert.ok(!set.has('test-ghost-c.mjs'), 'literal after the array (assertion pin) does not confer membership')
+})
+
+// Codex F3 mutation axis: nested suites are discovered and gated.
+test('t_mutation_nested_discovery: a suite under tests/e2e/ is discovered and reported unregistered', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-suite-reg-'))
+  try {
+    fs.mkdirSync(path.join(tmp, 'e2e'), { recursive: true })
+    fs.writeFileSync(path.join(tmp, 'test-top.mjs'), '')
+    fs.writeFileSync(path.join(tmp, 'e2e', 'test-nested.mjs'), '')
+    fs.writeFileSync(path.join(tmp, 'e2e', 'helper.mjs'), '')
+    const found = listSuites(tmp)
+    assert.deepStrictEqual(found, ['e2e/test-nested.mjs', 'test-top.mjs'])
+    const out = computeUnregistered(found, [' node tests/test-top.mjs'.trim()], new Set(), [])
+    assert.deepStrictEqual(out, ['e2e/test-nested.mjs'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('t_negative_control: a synthetic unwired suite is reported unregistered against the REAL repo state', () => {
   const synthetic = 'test-synthetic-never-wired-504.mjs'
-  assert.ok(!isWired(synthetic, WF_TEXT), 'synthetic name must not read as wired')
-  const out = computeUnregistered([...SUITES, synthetic], WF_TEXT, KNOWN_UNWIRED)
+  const out = computeUnregistered([...SUITES, synthetic], RUN_COMMANDS, P12_SET, KNOWN_UNWIRED)
   assert.deepStrictEqual(out, [synthetic])
 })
 
