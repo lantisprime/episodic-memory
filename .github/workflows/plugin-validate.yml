@@ -7,11 +7,9 @@ name: Plugin + schema validation
 # while a hand-curated per-file filter silently stops running when a new
 # scripts/lib helper joins the import graph.
 #
-# Issue #377 tracks the REMAINING plugin-family suites — still pending here:
-# test-json-instance-validate.mjs, test-plugin-json.mjs,
-# test-field-bindings.mjs, test-plugin-gauntlet.mjs,
-# test-plugin-harness-binding.mjs. Add them as steps per #377; this comment is
-# the marker that their absence is a tracked gap, not full coverage.
+# #377 (closed by #504's class sweep): the full plugin-family set now runs
+# here. tests/test-ci-suite-registration.mjs is the class gate — a suite
+# missing from every workflow fails CI instead of hiding behind a comment.
 
 on:
   pull_request:
@@ -60,6 +58,20 @@ jobs:
 
       - name: Run claude-code plugin gauntlet (REQ-1 regression lock)
         run: node tests/test-plugin-gauntlet.mjs
+
+      # #377 remainder (surfaced by the #504 registration lint): the plugin
+      # suites that were tracked in a comment here instead of running.
+      - name: Run closed-subset instance-validator suite (#377)
+        run: node tests/test-json-instance-validate.mjs
+
+      - name: Run plugin.json manifest conformance suite (#377)
+        run: node tests/test-plugin-json.mjs
+
+      - name: Run field_bindings interpreter suite (#377 — key-axis closure incl. __proto__)
+        run: node tests/test-field-bindings.mjs
+
+      - name: Run plugin harness-binding suite (#377 — F31/F36/F61 project-root→store-root axes)
+        run: node tests/test-plugin-harness-binding.mjs
 
       - name: Run opencode plugin gauntlet (RFC-008 P5, REQ-1/REQ-12)
         run: node scripts/test-plugin.mjs --project "$GITHUB_WORKSPACE" --harness opencode

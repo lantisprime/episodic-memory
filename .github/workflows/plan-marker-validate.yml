@@ -321,6 +321,31 @@ jobs:
       - name: Run install activation-classes deploy E2E (RFC-009 P1b S9)
         run: node tests/test-install-activation.mjs
 
+      # #504 remainder: the activation suites that predate RFC-011 S5's REQ-19
+      # wiring, listed explicitly per convention 8 (CI runs explicitly listed
+      # test files — unlisted suites silently never run).
+      - name: Run activation sessionstart adapter suite (#504)
+        run: node tests/test-activation-sessionstart.mjs
+
+      - name: Run activation hook E2E suite (#504)
+        run: node tests/test-activation-hook-e2e.mjs
+
+      - name: Run activation-manifest conformance suite (#504)
+        run: node tests/test-activation-manifest.mjs
+
+      - name: Run activation-match core conformance suite (#504)
+        run: node tests/test-activation-match.mjs
+
+      - name: Run uninstall-activation round-trip suite (#504)
+        run: node tests/test-uninstall-activation.mjs
+
+      # #504 class closure: every top-level tests/test-*.{mjs,sh} must be
+      # referenced by a workflow, run by the P12 meta-runner, or listed in the
+      # shrink-only KNOWN_UNWIRED baseline inside the lint. A new suite that is
+      # not wired anywhere fails this step instead of silently never running.
+      - name: Lint CI suite registration (#504 — class-closing, shrink-only baseline)
+        run: node tests/test-ci-suite-registration.mjs
+
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
     # separately-named REQUIRED check. Membership is defined in code
