@@ -65,7 +65,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["trigger_kind", "value", "episode_id", "summary", "effective_priority", "applies_to_projects", "applies_to_tools"],
-      "$comment": "F6a (S2 fix): read_command and triggers_overridden are BOUND under the entry_class:'playbook' conditional. read_command is REQUIRED on playbook rows and FORBIDDEN on lesson rows; triggers_overridden is OPTIONAL on playbook rows (present only on rows derived under a DECLARED override — RFC-011 R1 override clause / R2.9; the merged view mutes the episode's own trigger rows, T6 E2E) and FORBIDDEN on lesson rows. A forged lesson row carrying either is REJECTED, closing the forged-shape acceptance the pre-fix schema permitted. Implemented as four allOf if/then branches (all in the closed-subset validator's modeled keyword set: if/then/not/required/properties/minimum).",
+      "$comment": "F6a (S2 fix): read_command and triggers_overridden are BOUND under the entry_class:'playbook' conditional. read_command is REQUIRED on playbook rows and FORBIDDEN on lesson rows; triggers_overridden is OPTIONAL on playbook rows (present only on rows derived under a DECLARED override — RFC-011 R1 override clause / R2.9; the merged view mutes the episode's own trigger rows, T6 E2E) and FORBIDDEN on lesson rows. A forged lesson row carrying either is REJECTED, closing the forged-shape acceptance the pre-fix schema permitted. Implemented as four allOf if/then branches (all in the closed-subset validator's modeled keyword set: if/then/not/required/properties/minimum). agent-N1 (S3, deferred from §17 ledger): review_by is BOUND under the not-playbook conditional with the same allOf pattern F6a used — FORBIDDEN on playbook rows (no S2 build path emits it there, so this closes the forged-shape acceptance so a future forged playbook row carrying review_by is rejected), and leaves it OPTIONAL on lesson rows (where the em-trigger-index build emits it only when the lesson carried one). The 5th branch below pins the agent-N1 corner; the neg-control test leg lives in tests/test-activation-playbooks.mjs (entry_class schema validation) and tests/test-trigger-index-schema.mjs.",
       "description": "A lesson-activation trigger row (RFC-009 R1/R2) OR a derived playbook row (RFC-011 R2, entry_class:'playbook'). Playbook rows pin effective_priority to 0 (sort below every lesson in top-K), set applies_to_tools to ['*'] (the wildcard, never empty — scopeOk rejects empty), carry this project's slug in applies_to_projects, and MUST carry read_command. triggers_overridden is OPTIONAL on playbook rows (present only when the on_demand entry was derived under a declared override) and FORBIDDEN on lesson rows. The effective_priority minimum is conditional (R2.6): 0 for playbook rows, 1 for lesson rows.",
       "properties": {
         "trigger_kind": { "enum": ["phrase", "tool", "activity"] },
@@ -99,6 +99,10 @@
         {
           "if": { "not": { "required": ["entry_class"] } },
           "then": { "not": { "required": ["triggers_overridden"] } }
+        },
+        {
+          "if": { "required": ["entry_class"], "properties": { "entry_class": { "const": "playbook" } } },
+          "then": { "not": { "required": ["review_by"] } }
         }
       ]
     },

@@ -190,19 +190,56 @@ function loadStoreIndex({ scope, root }) {
     return rebuildStore({ scope, root, storeDir }) // corrupt -> rebuild once, else skip+stderr
   }
 
+  // Freshness (RFC-011 R2.5 / REQ-6, S3): compare MTIME+SIZE ONLY at event
+  // time (never sha256 — the build-side cache probe owns the sha; the strict
+  // read boundary governs CONTENT reads, and stat fingerprints are the
+  // sanctioned freshness mechanism). Compares three legs:
+  //   - index_* ALWAYS (the LOCAL store's index.jsonl — the existing R2.5 check).
+  //   - playbooks_* UNCONDITIONALLY (v3 builds record the local playbooks.json
+  //     fingerprint on every build — zero-state {0,0} when the file is absent,
+  //     so CREATE/edit/DELETE all invalidate). A cached v2 index (no playbooks_*)
+  //     mismatches `undefined !== 0` and rebuilds (T12).
+  //   - global_index_* IFF THE CACHED SOURCE CARRIES IT (fix-round Item 1,
+  //     3-way convergent: agent F2 + codex S3-F1 + kimi F1). The build records
+  //     the GLOBAL store's index.jsonl fingerprint on a LOCAL index IFF a valid
+  //     preference file couples this store to the global (R2.5: "config-free
+  //     projects pay no cross-store coupling"). The PRIOR either-side rule also
+  //     compared when an on-disk global index.jsonl existed — so EVERY config-
+  //     free project with any global store spawned a rebuild subprocess on EVERY
+  //     event forever (probe: 3 events = 3 spawns). Now: compare the global leg
+  //     ONLY when the cached source carries `global_index_mtime_ms` (i.e., the
+  //     build that produced this cache ran with a valid preference file). This
+  //     mirrors the build's own sourceMatches conditional at
+  //     em-trigger-index.mjs:547 (the "fresh" side only carries global_index_*
+  //     when validPref). Pref CREATE is still caught by the unconditional
+  //     playbooks_* leg (mtime+size move off zero-state); a global revision with
+  //     a valid pref is caught here. Missed-invalidation: a same-mtime+size
+  //     rewrite of playbooks.json (e.g. valid → malformed) evades until any other
+  //     leg moves — the identical PRE-EXISTING residual the index.jsonl stat
+  //     carries, stated per P5 (kimi F analysis: no NEW missed-invalidation
+  //     beyond that accepted residual). For a GLOBAL-store cache no
+  //     global_index_* is ever emitted (R2/F4) → this leg is a no-op there.
   const jsonlPath = path.join(storeDir, 'index.jsonl')
-  let expectMtime = 0
-  let expectSize = 0
-  try {
-    const st = fs.statSync(jsonlPath)
-    expectMtime = st.mtimeMs
-    expectSize = st.size
-  } catch {
-    expectMtime = 0
-    expectSize = 0
-  }
+  const expectIndex = (() => {
+    try { const s = fs.statSync(jsonlPath); return { mtimeMs: s.mtimeMs, size: s.size } }
+    catch { return { mtimeMs: 0, size: 0 } }
+  })()
+  const expectPlaybooks = (() => {
+    try { const s = fs.statSync(path.join(storeDir, 'playbooks.json')); return { mtimeMs: s.mtimeMs, size: s.size } }
+    catch { return { mtimeMs: 0, size: 0 } } // zero-state when absent (clean uninstall)
+  })()
   const src = cached && cached.source
-  const fresh = !!src && src.index_mtime_ms === expectMtime && src.index_size === expectSize
+  let fresh = !!src
+    && src.index_mtime_ms === expectIndex.mtimeMs && src.index_size === expectIndex.size
+    && src.playbooks_mtime_ms === expectPlaybooks.mtimeMs && src.playbooks_size === expectPlaybooks.size
+  if (fresh && scope === 'local' && src.global_index_mtime_ms !== undefined) {
+    // Cached source carries the global coupling fingerprint → compare it against
+    // the on-disk global index.jsonl stat (computed ONLY here, lazily, iff the
+    // cached source says the build recorded one — NOT unconditionally).
+    let expectGM = 0, expectGS = 0
+    try { const s = fs.statSync(path.join(GLOBAL_DIR, 'index.jsonl')); expectGM = s.mtimeMs; expectGS = s.size } catch { /* absent global index.jsonl -> zero-state */ }
+    fresh = src.global_index_mtime_ms === expectGM && src.global_index_size === expectGS
+  }
   if (fresh) return cached
 
   const rebuilt = rebuildStore({ scope, root, storeDir })
@@ -230,18 +267,55 @@ function rebuildStore({ scope, root, storeDir }) {
   }
 }
 
-// REQ-16 step 3: dedup by episode_id, LOCAL precedence; activity_phrases local-wins-else-global.
+// RFC-011 R2.9(a) + REQ-6b: dedup key is now (episode_id, trigger_kind, value),
+// NOT episode_id alone. The prior per-episode first-row-wins collapse silently
+// dropped every trigger after the first for ANY multi-trigger episode (probe-
+// confirmed at activation-hook-run.mjs:240-241, the latent RFC-009 defect the
+// S3 slice repairs). Tuple-key dedup preserves every trigger row across stores
+// while still keeping LOCAL precedence for the SAME tuple (local iterates
+// first). The CLI merged leg (loadMergedTriggerIndex) already keeps all rows
+// via its delayed seen-set; the two merge sites now CONVERGE on the same shape.
+//
+// R2.9(b) playbook-wins: for the SAME episode_id + trigger tuple, when BOTH a
+// lesson row and a playbook row exist, the PLAYBOOK form wins (it carries the
+// `read_command`). Implemented by REPLACING a queued lesson entry with a later
+// playbook entry of the same tuple — so an inherited playbook (episode's own
+// triggers, no override) collapses its matching lesson row into the playbook
+// row at MERGE time (zero new matching semantics on the matcher side, per R4).
+//
+// REQ-6b override-drop leg (mirrors loadMergedTriggerIndex semantics): a local
+// playbook row carrying `triggers_overridden:true` marks an episode whose own
+// (superseded) phrase/tool trigger set has been REPLACED within this project.
+// The hook DROPS the episode's own NON-playbook lesson rows for those ids in
+// BOTH local AND global streams (the matcher then never fires the old triggers —
+// T6 E2E "the episode's original phrase no longer fires"). Playbook row
+// presence is by-construction LOCAL-only (R2: persisted in the LOCAL store),
+// so LOCAL precedence is automatic; the override-drop covers BOTH origins.
 function mergeIndexes(local, global) {
-  const entries = []
-  const seen = new Set()
+  const overriddenIds = new Set()
+  if (local && Array.isArray(local.entries)) {
+    for (const e of local.entries) {
+      if (e && e.entry_class === 'playbook' && e.triggers_overridden === true) overriddenIds.add(e.episode_id)
+    }
+  }
+  const mapped = new Map() // tuple key -> entry (playbook-replaces-lesson for the same tuple)
   for (const idx of [local, global]) {
     if (!idx || !Array.isArray(idx.entries)) continue
     for (const e of idx.entries) {
-      if (!e || typeof e.episode_id !== 'string' || seen.has(e.episode_id)) continue
-      seen.add(e.episode_id)
-      entries.push(e)
+      if (!e || typeof e.episode_id !== 'string' || !e.episode_id) continue
+      if (e.entry_class !== 'playbook' && overriddenIds.has(e.episode_id)) continue
+      const tk = typeof e.trigger_kind === 'string' ? e.trigger_kind : ''
+      const v = typeof e.value === 'string' ? e.value : ''
+      const key = `${e.episode_id}\u0000${tk}\u0000${v}`
+      const existing = mapped.get(key)
+      if (!existing) { mapped.set(key, e); continue }
+      // R2.9(b): a playbook row replaces a lesson row for the same tuple ("the
+      // PLAYBOOK form wins" — it carries the read_command). Forged/malformed
+      // rows of either kind pass without replacement if entry_class is absent.
+      if (e.entry_class === 'playbook' && existing.entry_class !== 'playbook') mapped.set(key, e)
     }
   }
+  const entries = [...mapped.values()]
   const activityPhrases =
     local && local.activity_phrases && typeof local.activity_phrases === 'object' && !Array.isArray(local.activity_phrases)
       ? local.activity_phrases
@@ -342,7 +416,17 @@ function mergeSessionStart(localStatus, globalStatus) {
     globalVal ? globalVal.entries : null,
   ]))
   const preflight = mergePreflight(localVal, globalVal)
-  return { critical_entries, entries, preflight }
+  // RFC-011 R2.7 / REQ-8: thread the LOCAL persisted playbooks trio UNCHANGED
+  // (global never produces one; neither merge site recomputes any of the
+  // three — the build pre-caps/pre-computes them). Present iff a valid LOCAL
+  // preference file was processed (the build only attaches the trio then).
+  const out = { critical_entries, entries, preflight }
+  if (localVal && Object.prototype.hasOwnProperty.call(localVal, 'playbooks')) {
+    out.playbooks = localVal.playbooks
+    out.playbooks_capped = localVal.playbooks_capped
+    out.playbooks_capped_first = localVal.playbooks_capped_first
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
