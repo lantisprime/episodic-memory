@@ -176,7 +176,13 @@ function extractRunCommands(yamlText) {
         block.push(line)
         i = j
       }
-      commands.push(block.join('\n'))
+      // De-indent the way YAML hands the scalar to the shell: strip the
+      // common block indentation so heredoc delimiters compare the text the
+      // shell actually sees.
+      const baseIndent = Math.min(
+        ...block.filter((l) => l.trim() !== '').map((l) => l.match(/^( *)/)[1].length),
+      )
+      commands.push(block.map((l) => (l.trim() === '' ? l : l.slice(baseIndent))).join('\n'))
     } else {
       commands.push(value.replace(/\s#.*$/, ''))
     }
@@ -184,17 +190,41 @@ function extractRunCommands(yamlText) {
   return commands
 }
 
+// Drop shell heredoc BODIES from a command's lines: text between
+// `<<[-]['"]WORD['"]` and the closing WORD line is data fed to a program, not
+// executable commands (codex round-2 F1: `cat <<'INERT' ... INERT` carrying an
+// invocation-shaped line must not count as wired).
+function stripHeredocBodies(lines) {
+  const out = []
+  let delimiter = null
+  let dashed = false
+  for (const line of lines) {
+    if (delimiter !== null) {
+      const closing = dashed ? line.replace(/^\t+/, '') : line
+      if (closing === delimiter) delimiter = null
+      continue
+    }
+    out.push(line)
+    const m = line.replace(/(^|\s)#.*$/, '$1').match(/<<(-?)\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/)
+    if (m) {
+      dashed = m[1] === '-'
+      delimiter = m[2] ?? m[3] ?? m[4]
+    }
+  }
+  return out
+}
+
 // A suite counts as workflow-wired ONLY if some run-command line invokes it:
 // `node|bash|sh [./]tests/<relpath>` at command position (line start or after
-// ;, &&, ||, |, ( or $( ). Shell comment segments are stripped first, so
-// `# node tests/x.mjs` and `echo done # node tests/x.mjs` never count; a
-// quoted occurrence (`echo 'node tests/x.mjs'`) fails the command-position
-// anchor (codex F1 axes).
+// ;, &&, ||, |, ( or $( ). Heredoc bodies are dropped and shell comment
+// segments stripped first, so `cat <<'X' ... X`, `# node tests/x.mjs`, and
+// `echo done # node tests/x.mjs` never count; a quoted occurrence
+// (`echo 'node tests/x.mjs'`) fails the command-position anchor (codex F1 axes).
 function invokedByRunCommands(relPath, runCommands) {
   const esc = relPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const re = new RegExp(`(?:^|[;&|(]|\\$\\()\\s*(?:node|bash|sh)\\s+(?:\\./)?tests/${esc}(?=$|[\\s;&|)'"])`)
   for (const cmd of runCommands) {
-    for (const rawLine of cmd.split('\n')) {
+    for (const rawLine of stripHeredocBodies(cmd.split('\n'))) {
       const line = rawLine.replace(/(^|\s)#.*$/, '$1')
       if (re.test(line)) return true
     }
@@ -218,9 +248,19 @@ function readWorkflowRunCommands(dir) {
 const P12_RUNNER = 'test-p12-invariant-suite.mjs'
 
 function parseP12Explicit(runnerSource) {
-  const block = runnerSource.match(/const EXPLICIT = \[([\s\S]*?)\n\]/)
-  assert.ok(block, `cannot locate "const EXPLICIT = [" block in ${P12_RUNNER} — update this lint's parser`)
-  const noComments = block[1].replace(/\/\/.*$/gm, '')
+  // Strip /* */ block comments BEFORE locating the declaration: a
+  // block-commented fake `const EXPLICIT = [...]` preceding the real one must
+  // not shadow it (codex round-2 F2). Then require the declaration to be
+  // unique — two surviving declarations means this parser's assumptions broke,
+  // so fail closed instead of guessing.
+  const noBlockComments = runnerSource.replace(/\/\*[\s\S]*?\*\//g, '')
+  const decls = [...noBlockComments.matchAll(/const EXPLICIT = \[([\s\S]*?)\n\]/g)]
+  assert.strictEqual(
+    decls.length,
+    1,
+    `expected exactly one "const EXPLICIT = [" declaration in ${P12_RUNNER}, found ${decls.length} — update this lint's parser`,
+  )
+  const noComments = decls[0][1].replace(/\/\/.*$/gm, '')
   return [...noComments.matchAll(/'([^']+)'/g)].map((m) => m[1])
 }
 
@@ -320,6 +360,11 @@ test('t_mutation_workflow_axes: step-name / if: / YAML comment / shell comment /
   assert.ok(!wired('      - run: node tests/test-mut-probe.mjs.backup\n'), 'filename embedded in longer token')
   assert.ok(!wired('      - run: node tests/prefix-test-mut-probe.mjs\n'), 'filename as suffix of longer token')
   assert.ok(!wired('      - run: echo node tests/test-mut-probe.mjs\n'), 'echoed (non-command-position) reference')
+  // Codex round-2 F1: heredoc bodies are data, not commands.
+  assert.ok(!wired("      - run: |\n          cat <<'INERT'\n          node tests/test-mut-probe.mjs\n          INERT\n"), 'quoted-delimiter heredoc body')
+  assert.ok(!wired('      - run: |\n          cat <<INERT\n          node tests/test-mut-probe.mjs\n          INERT\n'), 'unquoted-delimiter heredoc body')
+  assert.ok(!wired('      - run: |\n          cat <<-INERT\n\t\t\tnode tests/test-mut-probe.mjs\n\tINERT\n'), 'dash-heredoc body with tab-indented close')
+  assert.ok(wired("      - run: |\n          cat <<'INERT'\n          inert text\n          INERT\n          node tests/test-mut-probe.mjs\n"), 'real invocation AFTER a closed heredoc still counts')
 })
 
 // Codex F2 mutation axes: P12 membership binds to the ACTUAL EXPLICIT array.
@@ -339,6 +384,22 @@ test('t_mutation_p12_axes: EXPLICIT-array literals confer membership; comments a
   assert.ok(!set.has('test-ghost-a.mjs'), 'literal outside the array does not confer membership')
   assert.ok(!set.has('test-ghost-b.mjs'), 'comment inside the array does not confer membership')
   assert.ok(!set.has('test-ghost-c.mjs'), 'literal after the array (assertion pin) does not confer membership')
+  // Codex round-2 F2: a block-commented fake declaration must not shadow the
+  // real one, and an ambiguous parse must fail closed rather than guess.
+  const shadowed = [
+    '/* const EXPLICIT = [',
+    "  'test-ghost-d.mjs',",
+    ']',
+    '*/',
+    'const EXPLICIT = [',
+    "  'test-real-member.mjs',",
+    ']',
+  ].join('\n')
+  const shadowSet = p12Members(shadowed, [])
+  assert.ok(shadowSet.has('test-real-member.mjs'), 'real declaration read past a block-commented fake')
+  assert.ok(!shadowSet.has('test-ghost-d.mjs'), 'block-commented fake declaration confers nothing')
+  const ambiguous = "const EXPLICIT = [\n  'a.mjs',\n]\nconst EXPLICIT = [\n  'b.mjs',\n]"
+  assert.throws(() => p12Members(ambiguous, []), /exactly one/, 'two surviving declarations fail closed')
 })
 
 // Codex F3 mutation axis: nested suites are discovered and gated.
