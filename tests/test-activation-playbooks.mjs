@@ -704,6 +704,16 @@ function restoreMtime(p, snap) {
   // hook's freshness check uses strict === — exactness is load-bearing).
   fs.utimesSync(p, snap.atimeMs / 1000, snap.mtimeMs / 1000);
 }
+function normalizeMtime(p) {
+  // Pin the file's mtime to WHOLE SECONDS before the build fingerprints it:
+  // an ext4 nanosecond mtime does not round-trip exactly through utimesSync's
+  // double-precision seconds argument (T9a/T9b setup failed on the Linux CI
+  // runner: restored 1783695322138.121 vs stat 1783695322138.1216), while an
+  // integer-second value is exactly representable on every filesystem, so
+  // snapX -> restoreMtime -> statSnap round-trips byte-exact everywhere.
+  const t = Math.floor(fs.statSync(p).mtimeMs / 1000);
+  fs.utimesSync(p, t, t);
+}
 
 {
   // ---- T9 (a): same-stat contradicting content swap ----------------------
@@ -723,6 +733,7 @@ function restoreMtime(p, snap) {
   const pbPath = path.join(storeDir(proj), "playbooks.json");
   const contentX = JSON.stringify({ schema_version: 1, playbooks: [{ id: idX, mode: "session_start" }] });
   fs.writeFileSync(pbPath, contentX);
+  normalizeMtime(pbPath);
   fs.rmSync(tiPath(proj), { force: true });
   rebuildFresh({ home, proj });
   const r1 = runSessionStart({ home, stdin: { hook_event_name: "SessionStart" } });
@@ -768,6 +779,7 @@ function restoreMtime(p, snap) {
   const pbPath = path.join(storeDir(proj), "playbooks.json");
   const contentX = JSON.stringify({ schema_version: 1, playbooks: [{ id: idX, mode: "session_start" }] });
   fs.writeFileSync(pbPath, contentX);
+  normalizeMtime(pbPath);
   fs.rmSync(tiPath(proj), { force: true });
   rebuildFresh({ home, proj });
   const r1 = runSessionStart({ home, stdin: { hook_event_name: "SessionStart" } });
