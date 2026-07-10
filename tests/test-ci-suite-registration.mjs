@@ -7,20 +7,22 @@
  * runs. Instance fixes (wiring suites one by one) leave the class open — this
  * lint closes it: every test-*.{mjs,sh} at any depth under tests/ must be
  *
- *   (a) STEP-WIRED in .github/workflows/*.{yml,yaml}: some line, OUTSIDE any
- *       YAML block scalar, in a workflow whose `on:` declares a pull_request
- *       or push trigger, trims to exactly
- *           [- ]run: node|bash|sh tests/<suite>
- *       This is a structural line-grammar contract, not shell parsing (codex
- *       rounds 1-3 killed every textual predicate: substrings, comments,
- *       step names, and four heredoc spellings). Heredocs can only exist
+ *   (a) STEP-WIRED in .github/workflows/*.{yml,yaml}: a `run:` line whose
+ *       value is exactly `node|bash|sh tests/<suite>`, located (by an
+ *       indent-stack walk that skips block scalars) at the YAML path
+ *       jobs.<job>.steps, in a workflow whose TOP-LEVEL `on:` declares a
+ *       pull_request or push trigger. This is a structural contract, not
+ *       shell parsing (codex rounds 1-4 killed every looser predicate:
+ *       substrings, comments, step names, four heredoc spellings, and
+ *       hierarchy-unbound exact lines under `env:`). Heredocs can only exist
  *       inside block scalars, so skipping block-scalar content closes the
- *       entire heredoc class; the trigger check closes the
- *       disabled-workflow class. STRICT by design: an invocation with
- *       arguments, inside a block scalar, or with a trailing comment does
- *       NOT count — a legitimate future wiring in one of those forms fails
- *       CI loudly and this contract gets extended consciously (false
- *       negatives are loud; only silent false positives are dangerous); OR
+ *       entire heredoc class; hierarchy binding closes the forged-placement
+ *       class; the trigger check closes the disabled-workflow class. STRICT
+ *       by design: an invocation with arguments, inside a block scalar, or
+ *       with a trailing comment does NOT count — a legitimate future wiring
+ *       in one of those forms fails CI loudly and this contract gets
+ *       extended consciously (false negatives are loud; only silent false
+ *       positives are dangerous); OR
  *   (b) a member of the P12 invariant meta-runner — re-derived the way the
  *       runner derives it: glob(test-p12-*.mjs) minus meta-runners, plus the
  *       runner's actual `const EXPLICIT = [...]` array (block comments
@@ -171,21 +173,31 @@ function listSuites(dir, prefix = '') {
 // A `key: |` / `key: >` line (with optional chomp/indent modifiers) opens a
 // YAML block scalar; its content is every following line indented deeper than
 // the key. Heredocs, echoed text, and any other data can only live inside
-// such content, so step scanning skips it entirely.
+// such content, so the scanner skips it entirely.
 const BLOCK_SCALAR_KEY = /^(\s*)(?:-\s+)?[\w-]+:\s*[|>][+-]?\d*\s*(?:#.*)?$/
 
-// The one shape that counts as a wiring step (trimmed, exact):
-//   [- ]run: node|bash|sh tests/<relpath>
-const STEP_INVOCATION = /^(?:-\s+)?run:\s*(?:node|bash|sh)\s+tests\/(\S+)$/
+// The one value shape that counts as a wiring step (exact to end of line):
+//   run: node|bash|sh tests/<relpath>
+const STEP_INVOCATION = /^run:\s*(?:node|bash|sh)\s+tests\/(\S+)$/
 
-// Collect the suite relpaths step-wired by one workflow's text: scan lines,
-// skip block-scalar content, exact-match the remainder against
-// STEP_INVOCATION.
-function collectStepInvocations(yamlText) {
+// One structural pass over a workflow's YAML (codex round-4 P1: matches must
+// bind to hierarchy, not just line shape). An indent stack of mapping keys is
+// maintained (sequence-item `- ` prefixes fold into effective indent), block
+// scalars are skipped wholesale, and:
+//   - a STEP_INVOCATION line counts ONLY under the exact path
+//     jobs(col 0) -> <job> -> steps, so a byte-identical line under `env:` or
+//     anywhere else confers nothing;
+//   - trigger keys count ONLY as direct children of top-level `on:` (or its
+//     flow/scalar value), so `env: { pull_request: x }` activates nothing.
+function parseWorkflow(yamlText) {
   const lines = yamlText.split('\n')
-  const out = []
+  const stack = [] // { indent, key }
+  const triggers = new Set()
+  const stepSuites = []
   for (let i = 0; i < lines.length; i++) {
-    const scalar = lines[i].match(BLOCK_SCALAR_KEY)
+    const raw = lines[i]
+    if (raw.trim() === '' || /^\s*#/.test(raw)) continue
+    const scalar = raw.match(BLOCK_SCALAR_KEY)
     if (scalar) {
       const keyIndent = scalar[1].length
       while (i + 1 < lines.length) {
@@ -195,30 +207,57 @@ function collectStepInvocations(yamlText) {
       }
       continue
     }
-    const m = lines[i].trim().match(STEP_INVOCATION)
-    if (m) out.push(m[1])
+    const indent = raw.match(/^( *)/)[1].length
+    let content = raw.slice(indent)
+    let seqOffset = 0
+    while (content.startsWith('- ')) {
+      content = content.slice(2)
+      seqOffset += 2
+    }
+    const effIndent = indent + seqOffset
+    while (stack.length && stack[stack.length - 1].indent >= effIndent) stack.pop()
+
+    const step = content.match(STEP_INVOCATION)
+    if (step) {
+      const n = stack.length
+      if (
+        n >= 3 &&
+        stack[n - 1].key === 'steps' &&
+        stack[n - 3].key === 'jobs' &&
+        stack[n - 3].indent === 0
+      ) {
+        stepSuites.push(step[1])
+      }
+      continue
+    }
+
+    const key = content.match(/^([\w_-]+):\s*(.*?)\s*(?:#.*)?$/)
+    if (!key) continue
+    if (key[1] === 'on' && effIndent === 0 && key[2] !== '') {
+      // Flow (`on: [push, pull_request]`) or scalar (`on: push`) trigger value.
+      for (const t of key[2].replace(/[[\]]/g, '').split(',')) triggers.add(t.trim())
+    } else if (stack.length === 1 && stack[0].key === 'on' && stack[0].indent === 0) {
+      triggers.add(key[1])
+    }
+    stack.push({ indent: effIndent, key: key[1] })
   }
-  return out
+  return { triggers, stepSuites }
 }
 
-// A workflow only executes on PRs/pushes if its `on:` declares those
-// triggers; a workflow_dispatch- or schedule-only file wires nothing (a
+// A workflow only executes on PRs/pushes if its top-level `on:` declares
+// those triggers; a workflow_dispatch- or schedule-only file wires nothing (a
 // suite invoked only there never gates a merge).
-function workflowHasActiveTrigger(yamlText) {
-  const noComments = yamlText
-    .split('\n')
-    .filter((line) => !/^\s*#/.test(line))
-    .join('\n')
-  return /^\s*(?:pull_request|push)\s*:/m.test(noComments) || /^on:\s*\[[^\]]*(?:pull_request|push)[^\]]*\]/m.test(noComments)
+function isTriggerActive(triggers) {
+  return triggers.has('pull_request') || triggers.has('push')
 }
 
 // The set of suites step-wired across all trigger-active workflows.
 function collectWiredSet(dir) {
   const wired = new Set()
   for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml'))) {
-    const text = fs.readFileSync(path.join(dir, f), 'utf8')
-    if (!workflowHasActiveTrigger(text)) continue
-    for (const suite of collectStepInvocations(text)) wired.add(suite)
+    const { triggers, stepSuites } = parseWorkflow(fs.readFileSync(path.join(dir, f), 'utf8'))
+    if (!isTriggerActive(triggers)) continue
+    for (const suite of stepSuites) wired.add(suite)
   }
   return wired
 }
@@ -316,14 +355,14 @@ test('t_detection_sanity: known-wired suites detected via each acceptance branch
   assert.ok(WIRED.has(SELF_BASENAME), `${SELF_BASENAME} must itself be step-wired`)
 })
 
-// Codex rounds 1-3 workflow axes, driven through the SAME helpers CI uses.
+// Codex rounds 1-4 workflow axes, driven through the SAME parser CI uses.
 // Every non-step reference class must read as NOT wired.
-test('t_mutation_workflow_axes: only bare step lines outside block scalars in trigger-active workflows count', () => {
+test('t_mutation_workflow_axes: only jobs.*.steps run lines outside block scalars in on:-triggered workflows count', () => {
   const target = 'test-mut-probe.mjs'
-  const ACTIVE = 'on:\n  pull_request:\n'
-  const wires = (yaml) => {
-    const text = ACTIVE + yaml
-    return workflowHasActiveTrigger(text) && collectStepInvocations(text).includes(target)
+  const SKELETON = 'on:\n  pull_request:\njobs:\n  validate:\n    runs-on: ubuntu-latest\n    steps:\n'
+  const wires = (steps, prefix = SKELETON) => {
+    const { triggers, stepSuites } = parseWorkflow(prefix + steps)
+    return isTriggerActive(triggers) && stepSuites.includes(target)
   }
   // Positive controls.
   assert.ok(wires('      - name: x\n        run: node tests/test-mut-probe.mjs\n'), 'plain step line')
@@ -344,12 +383,20 @@ test('t_mutation_workflow_axes: only bare step lines outside block scalars in tr
   assert.ok(!wires('      - run: |\n          cat <<FIRST <<SECOND\n          inert\n          FIRST\n          node tests/test-mut-probe.mjs\n          SECOND\n'), 'stacked heredocs (round-3)')
   assert.ok(!wires('      - run: |\n          cat <<X\n          run: node tests/test-mut-probe.mjs\n          X\n'), 'forged step line inside block scalar')
   assert.ok(!wires('      - run: |\n          node tests/test-mut-probe.mjs\n'), 'block-scalar invocation does not count (strict false negative, loud in CI)')
-  // Trigger axis (round-1 subagent finding): a workflow without pull_request/
-  // push wires nothing.
-  const inert = 'on:\n  workflow_dispatch:\n'
-  assert.ok(!workflowHasActiveTrigger(inert + 'jobs: {}\n'), 'dispatch-only workflow is not trigger-active')
-  assert.ok(!workflowHasActiveTrigger('# pull_request: in a comment\non:\n  schedule:\n    - cron: "0 0 * * *"\n'), 'schedule-only workflow with a comment mention is not trigger-active')
-  assert.ok(workflowHasActiveTrigger('on: [push]\n'), 'flow-style trigger list is recognized')
+  // Round-4 hierarchy axes: a byte-exact run line bound to the wrong YAML
+  // path confers nothing.
+  assert.ok(!wires('', 'on:\n  pull_request:\nenv:\n  run: node tests/test-mut-probe.mjs\njobs:\n  validate:\n    steps:\n'), 'top-level env.run placement (round-4)')
+  assert.ok(!wires('', 'on:\n  pull_request:\njobs:\n  validate:\n    env:\n      run: node tests/test-mut-probe.mjs\n    steps:\n'), 'job-level env.run placement (round-4)')
+  // Trigger axes (round-1 subagent + round-4): only top-level on: children
+  // (or its flow/scalar value) activate a workflow.
+  const dispatchOnly = 'on:\n  workflow_dispatch:\njobs:\n  v:\n    steps:\n      - run: node tests/test-mut-probe.mjs\n'
+  assert.ok(!wires('', dispatchOnly), 'dispatch-only workflow wires nothing')
+  const envTrigger = 'on:\n  workflow_dispatch:\nenv:\n  pull_request: inert-non-trigger-key\njobs:\n  v:\n    steps:\n      - run: node tests/test-mut-probe.mjs\n'
+  assert.ok(!wires('', envTrigger), 'pull_request under env: is not a trigger (round-4)')
+  assert.ok(!isTriggerActive(parseWorkflow('# pull_request: in a comment\non:\n  schedule:\n    - cron: "0 0 * * *"\n').triggers), 'schedule-only workflow with a comment mention is not trigger-active')
+  assert.ok(isTriggerActive(parseWorkflow('on: [push]\n').triggers), 'flow-style trigger list is recognized')
+  assert.ok(isTriggerActive(parseWorkflow('on: push\n').triggers), 'scalar trigger value is recognized')
+  assert.ok(wires('      - run: node tests/test-mut-probe.mjs\n', 'on:\n  push:\n    branches: [main]\njobs:\n  v:\n    steps:\n'), 'push-with-branches trigger activates (nested keys do not leak)')
 })
 
 // Codex round-2/3 P12 axes: membership binds to the ACTUAL EXPLICIT array.
@@ -398,7 +445,9 @@ test('t_mutation_nested_discovery: a suite under tests/e2e/ is discovered and re
     const out = computeUnregistered(found, new Set(['test-top.mjs']), new Set(), [])
     assert.deepStrictEqual(out, ['e2e/test-nested.mjs'])
     // A nested suite wired with its relative path registers.
-    const wiredNested = collectStepInvocations('      - run: node tests/e2e/test-nested.mjs\n')
+    const wiredNested = parseWorkflow(
+      'on:\n  pull_request:\njobs:\n  v:\n    steps:\n      - run: node tests/e2e/test-nested.mjs\n',
+    ).stepSuites
     assert.deepStrictEqual(wiredNested, ['e2e/test-nested.mjs'])
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
