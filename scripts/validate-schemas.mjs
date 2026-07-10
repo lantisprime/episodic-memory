@@ -48,7 +48,7 @@ import { UsageError } from "./lib/path-contain.mjs";
 
 const SCAN_ROOTS = ["patterns", "plugins", "schemas"];
 const CORPUS_REL = "tests/fixtures/schema-negative-corpus.json";
-const MIN_SCHEMA_DOCS = 21; // 20 pre-P1b (P0 floor 17 + post-P0 doc + categories.schema.json (P1a) + runbook-agent-manifest.schema.json) + activation-classes.schema.json (P1b) = 21
+const MIN_SCHEMA_DOCS = 22; // 21 (through activation-classes.schema.json P1b) + playbooks.schema.json (RFC-011 R1) = 22
 const MIN_CORPUS_ENTRIES = 14; // #368 non-vacuity floor (the 14 P0 negatives)
 
 function isSchemaDocName(name) {

@@ -1,28 +1,37 @@
 {
   "$id": "https://episodic-memory/schemas/trigger-index.schema.json",
-  "title": "Trigger index (per-store <store>/trigger-index.json) — RFC-009 R2 / #487",
-  "description": "Closed, versioned contract for the DERIVED trigger index emitted by em-trigger-index.mjs. schema_version is const 2 (the live producer, em-trigger-index.mjs TRIGGER_INDEX_SCHEMA_VERSION); a new top-level field or entry field is an additive schema_version bump, not a silent extension. review_by is emitted only when the lesson carries one (em-trigger-index.mjs:262), so it is optional.",
+  "title": "Trigger index (per-store <store>/trigger-index.json) — RFC-009 R2 / RFC-011 R2",
+  "description": "Closed, versioned contract for the DERIVED trigger index emitted by em-trigger-index.mjs. schema_version is const 3 (v3, RFC-011 R2 R2.6): additive additions are session_start.playbooks (+ playbooks_capped + playbooks_capped_first), the entry_class/read_command entry fields, the conditional effective_priority minimum (0 for entry_class:'playbook' rows, 1 otherwise), build_report.playbooks, and the extended source fingerprint (playbooks_* unconditional, global_index_* when a valid preference file exists). A cached v2 index is treated as stale and rebuilt (T12). review_by is emitted only when the lesson carries one (em-trigger-index.mjs build), so it is optional. entry_class:'playbook' rows carry read_command (required on those rows; RFC-011 R2).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "source", "build_report", "entries", "activity_phrases", "session_start"],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["index_mtime_ms", "index_size", "index_sha256"],
+      "required": ["index_mtime_ms", "index_size", "index_sha256", "playbooks_mtime_ms", "playbooks_size", "playbooks_sha256"],
+      "description": "index_* is the LOCAL store's index.jsonl fingerprint (existing). playbooks_* is the <store>/playbooks.json fingerprint, recorded UNCONDITIONALLY on every v3 build (zero-state when the file is absent — CREATE/edit/DELETE all invalidate, RFC-011 R2.5). global_index_* is the GLOBAL store's index.jsonl fingerprint, recorded when-and-only-when a valid preference file exists (config-free projects pay no cross-store coupling); it is therefore OPTIONAL here.",
       "properties": {
         "index_mtime_ms": { "type": "number" },
         "index_size": { "type": "integer", "minimum": 0 },
-        "index_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "index_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "playbooks_mtime_ms": { "type": "number" },
+        "playbooks_size": { "type": "integer", "minimum": 0 },
+        "playbooks_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "global_index_mtime_ms": { "type": "number" },
+        "global_index_size": { "type": "integer", "minimum": 0 },
+        "global_index_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "build_report": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["excluded_activity_classes"],
+      "required": ["excluded_activity_classes", "playbooks"],
+      "description": "excluded_activity_classes (RFC-009 P2). playbooks (RFC-011 R2.2/R2.3): the consent audit surface — declared accepts, capped_ids, and the exclusion counters are emitted on EVERY build (empty when no preference file or nothing accepted).",
       "properties": {
-        "excluded_activity_classes": { "type": "object" }
+        "excluded_activity_classes": { "type": "object" },
+        "playbooks": { "$ref": "#/$defs/playbooksReport" }
       }
     },
     "entries": {
@@ -37,10 +46,17 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["critical_entries", "entries", "preflight"],
+      "description": "critical_entries/entries/preflight (RFC-009 REQ-15). playbooks + playbooks_capped + playbooks_capped_first (RFC-011 R2) are local-store-only, threaded through BOTH merge sites; they are PRESENT iff a valid preference file was processed (even an empty playbooks:[]), absent otherwise (deleted/malformed -> section gone, EC1/EC7).",
       "properties": {
         "critical_entries": { "type": "array" },
         "entries": { "type": "array" },
-        "preflight": { "type": "object" }
+        "preflight": { "type": "object" },
+        "playbooks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/playbookLine" }
+        },
+        "playbooks_capped": { "type": "integer", "minimum": 0 },
+        "playbooks_capped_first": { "type": ["string", "null"] }
       }
     }
   },
@@ -49,15 +65,95 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["trigger_kind", "value", "episode_id", "summary", "effective_priority", "applies_to_projects", "applies_to_tools"],
+      "$comment": "F6a (S2 fix): read_command and triggers_overridden are BOUND under the entry_class:'playbook' conditional. read_command is REQUIRED on playbook rows and FORBIDDEN on lesson rows; triggers_overridden is OPTIONAL on playbook rows (present only on rows derived under a DECLARED override — RFC-011 R1 override clause / R2.9; the merged view mutes the episode's own trigger rows, T6 E2E) and FORBIDDEN on lesson rows. A forged lesson row carrying either is REJECTED, closing the forged-shape acceptance the pre-fix schema permitted. Implemented as four allOf if/then branches (all in the closed-subset validator's modeled keyword set: if/then/not/required/properties/minimum).",
+      "description": "A lesson-activation trigger row (RFC-009 R1/R2) OR a derived playbook row (RFC-011 R2, entry_class:'playbook'). Playbook rows pin effective_priority to 0 (sort below every lesson in top-K), set applies_to_tools to ['*'] (the wildcard, never empty — scopeOk rejects empty), carry this project's slug in applies_to_projects, and MUST carry read_command. triggers_overridden is OPTIONAL on playbook rows (present only when the on_demand entry was derived under a declared override) and FORBIDDEN on lesson rows. The effective_priority minimum is conditional (R2.6): 0 for playbook rows, 1 for lesson rows.",
       "properties": {
         "trigger_kind": { "enum": ["phrase", "tool", "activity"] },
         "value": { "type": "string" },
         "episode_id": { "type": "string", "minLength": 1 },
         "summary": { "type": "string" },
-        "effective_priority": { "type": "integer", "minimum": 1 },
+        "effective_priority": { "type": "integer" },
         "applies_to_projects": { "type": "array", "items": { "type": "string" } },
         "applies_to_tools": { "type": "array", "items": { "type": "string" } },
-        "review_by": { "type": "string" }
+        "review_by": { "type": "string" },
+        "entry_class": { "enum": ["playbook"] },
+        "read_command": { "type": "string" },
+        "triggers_overridden": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["entry_class"], "properties": { "entry_class": { "const": "playbook" } } },
+          "then": {
+            "required": ["read_command"],
+            "properties": { "effective_priority": { "minimum": 0 } }
+          }
+        },
+        {
+          "if": { "not": { "required": ["entry_class"] } },
+          "then": { "properties": { "effective_priority": { "minimum": 1 } } }
+        },
+        {
+          "if": { "not": { "required": ["entry_class"] } },
+          "then": { "not": { "required": ["read_command"] } }
+        },
+        {
+          "if": { "not": { "required": ["entry_class"] } },
+          "then": { "not": { "required": ["triggers_overridden"] } }
+        }
+      ]
+    },
+    "playbookLine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "summary", "read_command"],
+      "properties": {
+        "episode_id": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "read_command": { "type": "string" }
+      }
+    },
+    "playbooksReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared", "capped_ids", "excluded"],
+      "description": "RFC-011 R2.2/R2.3. declared lists every ACCEPTED {episode_id, mode} (the resolved terminal id + mode) on every build — the consent audit surface. capped_ids lists the session_start declarations beyond max_playbooks. excluded counts every dropped declaration by reason (none fatal; advisory surfaces fail open to nothing). note + warnings are optional augmentations for the malformed-file note (R1) and the oversized/unpinned selected-playbook warnings (R2/R5a).",
+      "properties": {
+        "declared": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["episode_id", "mode"],
+            "properties": {
+              "episode_id": { "type": "string", "minLength": 1 },
+              "mode": { "enum": ["session_start", "on_demand"] }
+            }
+          }
+        },
+        "capped_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "excluded": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unresolvable", "cycle", "inactive", "non_lesson", "expired", "chain_collision", "empty_triggers"],
+          "properties": {
+            "unresolvable": { "type": "integer", "minimum": 0 },
+            "cycle": { "type": "integer", "minimum": 0 },
+            "inactive": { "type": "integer", "minimum": 0 },
+            "non_lesson": { "type": "integer", "minimum": 0 },
+            "expired": { "type": "integer", "minimum": 0 },
+            "chain_collision": { "type": "integer", "minimum": 0 },
+            "empty_triggers": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "note": { "type": "string" },
+        "warnings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "oversized": { "type": "array", "items": { "type": "string" } },
+            "unpinned": { "type": "array", "items": { "type": "string" } }
+          }
+        }
       }
     }
   }
