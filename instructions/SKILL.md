@@ -41,6 +41,25 @@ session-start events — exit 0, never a block. Mute a lesson for one project by
 hand-authored `<project>/.episodic-memory/lesson-suppress.json` (fail-open). Full flag reference:
 "Lesson activation" in `EM_SCRIPTS_GUIDE.md`.
 
+### Playbooks (RFC-011)
+
+A consumer project may declare per-project playbook loading preferences in an optional
+hand-authored `<project>/.episodic-memory/playbooks.json` (schema-backed, at most 32 entries /
+64 KiB). Each entry selects a playbook lesson episode by **episode id** — any chain member;
+the trigger-index build resolves it to the terminal active revision — and a `mode`:
+`session_start` (surface at every session start) or `on_demand` (surface when the RFC-009
+trigger matcher fires). When the advisory activation adapter is installed, declared playbooks
+render as provenance-prefixed imperative `READ <id>` pointers into the tracked bounded
+`em-search --read <id>` (never bodies), the voluntary counterpart to the earned critical band.
+A missing or malformed file degrades to no playbooks loaded (advisory fail-open);
+`em-prune` / `em-consolidate --fold-superseded` protect referenced chains and fail CLOSED
+(abort) on a present-but-unparseable file. Full reference: “Playbooks (RFC-011 R1/R2)” and
+“Playbooks (RFC-011 R3/R4)” in `EM_SCRIPTS_GUIDE.md`.
+
+```json
+{"schema_version":1,"playbooks":[{"id":"<episode-id-a>","mode":"session_start"},{"id":"<episode-id-b>","mode":"on_demand","triggers":["review panel"]}],"bounds":{"max_playbooks":2}}
+```
+
 ## Research (web search + store)
 
 When researching from the web: first check `em-search.mjs --category research --query "<topic>"` to avoid duplicates. Distill findings into body with enough detail to be useful without revisiting the URL. Add `--url` and `--category research`.

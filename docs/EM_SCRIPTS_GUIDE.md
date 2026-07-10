@@ -203,6 +203,31 @@ plus exactly one stderr note. Injection always proceeds — never fatal. There i
 this phase; the file is hand-authored (RFC-009 R1). Suppression is for SCOPE errors; correct a
 WRONG lesson via `em-revise` supersession instead (the superseded version drops from the index).
 
+**Playbooks (RFC-011 R3/R4).** A per-project `<project>/.episodic-memory/playbooks.json`
+extends the session-start surface and the on-demand matcher with DECLARED pointers
+to playbook lesson episodes — the voluntary counterpart to the earned critical band
+(see `em-trigger-index` for the derived data and `em-search --read` for the tracked
+bounded read the pointers name). The session-start hook renders one imperative line
+per `session_start` playbook, AFTER the tier-1 critical band and BEFORE the tier-2
+static blend:
+
+```
+playbook (playbooks.json): READ <terminal-id> before proceeding (node <scripts>/em-search.mjs --read <terminal-id>): <summary>
+```
+
+The `playbook (playbooks.json):` provenance prefix is load-bearing — declared
+injection is visible and auditable, never ambient. `lesson-suppress.json` mutes a
+playbook id by episode id (applied before dedup, like every band). A playbook id
+that is also a tier-1 candidate renders once in the critical form instead, and
+playbook ids are excluded from the tier-2 blend (one id, one line). When the build
+capped declarations the note carries `+N declared playbooks capped, incl. <id>`;
+when the token budget drops a line, `+N more suppressed, incl. playbook <episode_id>`.
+On demand, `entry_class: "playbook"` rows (derived from `on_demand` declarations)
+flow through the existing `matchActivation` matcher untouched and render the same
+playbook form when matched. The adapter stays advisory — every path exits 0 with no
+decision field; an ABSENT `playbooks.json` is normal zero-state (renders nothing,
+silent); a MALFORMED file renders nothing with a stderr note.
+
 ---
 
 ## Full entries
@@ -303,7 +328,7 @@ Search episodes with local plus global fallback.
 node ~/.episodic-memory/scripts/em-search.mjs \
   [--project <name>] [--query <text>] [--tag <t>] [--category <cat>] \
   [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] \
-  [--full] [--include-superseded] [--history <id>] [--no-score] [--no-track]
+  [--full] [--include-superseded] [--read <id>] [--history <id>] [--no-score] [--no-track]
 ```
 
 Output:
@@ -342,6 +367,24 @@ Flags that matter (from the script's own `Usage:` header):
   were archived (`em-prune`, `em-consolidate --fold-superseded`) still appear:
   the walk also reads `archived-index.jsonl`, flags them `"archived": true`,
   and `--full` resolves their bodies from `archived/`.
+- `--read <id>` is the tracked, bounded, single-episode read (RFC-011 R7) the
+  playbook pointers name. It fetches exactly ONE episode by exact id — no
+  chain walk, no search fallthrough (an unknown OR empty id returns
+  `{"status":"error"}` exit 1; an empty value never falls through to search).
+  The episode payload is built from the episode FILE's parsed frontmatter
+  merged over the index row (the file wins for frontmatter fields; the index
+  row supplies `access_count`/`last_accessed`/`source`), so hand-authored or
+  foreign frontmatter keys survive the read. The read resolves `episodes/`
+  then `archived/` (an archived episode returns normally with its `status`
+  field visible). The body is bound to its SERIALIZED form in bytes: it is
+  truncated until `Buffer.byteLength(JSON.stringify(body), 'utf8') <= 49152`
+  with `body_truncated: true` and a stderr note (a truncated body is a prefix
+  of the original; output is always valid JSON). An index row whose body file
+  is absent from BOTH `episodes/` and `archived/` returns `body_missing: true`
+  with a stderr note and is NOT tracked (a delivered-nothing read must never
+  feed the conversion metric a clean follow). Otherwise the read WRITES access
+  tracking (`access_count` +1, `last_accessed`) on that row; `--no-track`
+  skips it. If both `--read` and `--history` are passed, `--read` wins.
 - `--category <cat>` is index-backed via `category-index.json` (same degrade-to-linear-scan
   fallback as `--tag`). A deprecated category name canonicalizes to its successor; an unknown
   category still filters (tolerant read).
@@ -351,6 +394,25 @@ Flags that matter (from the script's own `Usage:` header):
 ```json
 {"status":"ok","count":2,"chain":[{"id":"...-chose-jwt-over-sessions-7cd4","status":"superseded",...},{"id":"...-switched-to-session-cookies-285f","status":"active","supersedes":"...-chose-jwt-over-sessions-7cd4",...}]}
 ```
+
+`--read <id>` output (found — file frontmatter merged over the row, body
+included, access tracked; an unknown OR empty id returns the `error` shape and
+exit 1, never a search fallthrough):
+
+```json
+{"status":"ok","episode":{"id":"ep-read-1","date":"2026-07-08","time":"00:00","project":"t","category":"lesson","status":"active","summary":"tracked bounded read demo","tags":[],"triggers":["x phrase"],"priority":5,"access_count":0,"last_accessed":null,"source":"local","body":"# tracked bounded read demo\n\nthe playbook body text"}}
+{"status":"error","message":"Episode \"unknown-id\" not found"}
+```
+
+The read tracks access on the matched row (it bumps the index row's
+`access_count` +1 and stamps `last_accessed`); the values in the emitted
+episode are the PRE-increment row values (`access_count` 0 and `last_accessed`
+`null` on a first read), so the on-disk row reads `1` / a timestamp after the
+read. `--no-track` leaves the row untouched. A body whose
+`JSON.stringify(body)` exceeds 49152 bytes returns `body_truncated: true` (the
+body is truncated to AT MOST the cap — <= 49152 serialized bytes, a prefix of
+the original); a row with no body file in either `episodes/` or `archived/`
+returns `body_missing: true` and is not tracked. Both print a stderr note.
 
 Common mistakes: guessing `--query` words when you actually want a time or tag
 filter (use `--since` / `--tag` / `--category`); running plain `em-search` in a loop
@@ -800,6 +862,51 @@ The artifact: `trigger-index.json` carries `schema_version`, a `source` fingerpr
 `entries` = top-10 by the `static_score` blend; `preflight` = per-task-type recent
 violation counts keyed by `violated_pattern`) that the P2 session-start hook will read.
 
+**Playbooks (RFC-011 R1/R2).** An OPTIONAL per-project file
+`<project>/.episodic-memory/playbooks.json` declares which playbook lesson
+episodes load at session start or on demand (`schemas/playbooks.schema.json`:
+`schema_version: 1`, at most 32 entries / 64 KiB, unknown keys rejected;
+`{ id, mode: session_start|on_demand, triggers?(on_demand only) }`; optional
+`bounds.max_playbooks` integer 1..4, default 2). The `id` may be ANY member
+of a supersedes chain; the build resolves it to the terminal active revision.
+Resolution is cross-store: local + GLOBAL `index.jsonl` rows are merged for
+playbook resolution only, and a continuing-chain row outranks a stale terminal
+snapshot (a superseded copy in one store never shadows the live chain in the
+other). Derivation is advisory fail-open — a malformed/over-bound/schema-invalid
+file is skipped with a `build_report` note and a stderr line, never fatal, and
+degrades to no playbooks loaded. Two derived forms persist ONLY in the LOCAL
+store's index:
+
+- `session_start.playbooks` — `[{ episode_id, summary, read_command }]` in
+  preference-file order, CAPPED at build to `bounds.max_playbooks` (the cap
+  lives in the derived artifact). Siblings: `session_start.playbooks_capped`
+  (integer count) and `session_start.playbooks_capped_first` (first capped id,
+  or `null`).
+- `entries[]` rows with `entry_class: "playbook"` — one per effective trigger
+  of an `on_demand` entry, carrying the standard row shape plus
+  `effective_priority: 0` (sorts below every lesson in top-K),
+  `applies_to_projects: [<this project's slug>]`, `applies_to_tools: ["*"]`,
+  `read_command`, and `triggers_overridden: true` ONLY when the preference
+  entry declared a `triggers` override (the merged view then mutes the
+  episode's own trigger rows; an EXCLUDED declaration emits neither rows nor a
+  marker, so the episode's own triggers stay live).
+
+`build_report.playbooks = { declared: [{episode_id, mode}], capped_ids: [...],
+excluded: { unresolvable, cycle, inactive, non_lesson, expired,
+chain_collision, empty_triggers } }` plus an OPTIONAL `warnings: { oversized:
+[...], unpinned: [...] }` key emitted only when one of its lists is non-empty —
+the standing audit surface for what this project injects (`warnings.unpinned`
+flags selected terminals that are not pinned; pin them with `em-pin`). The
+`source` fingerprint extends on every v3 build: `playbooks_*` (mtime/size/sha256)
+is recorded UNCONDITIONALLY (absent = zero-state, so first CREATION, edits, and
+DELETION all invalidate), and `global_index_*` is recorded only when a valid
+preference file exists (a global playbook revision invalidates the local
+section; config-free projects pay no cross-store coupling). The event-plane
+freshness check compares `playbooks_*`/`global_index_*` mtime+size only (sha256
+is recorded for the build's own cache probe). `--merged` threads the local
+`session_start.playbooks` through unchanged. (`trigger-index.json` is now
+`schema_version: 3`; a cached v2 index is rebuilt on upgrade.)
+
 Common mistakes: confusing the stored `priority` (1-7, declared) with
 `effective_priority` (1-9, derived — the 8-9 band is earned from linked violations,
 never written); expecting `--project` to filter by name like other scripts.
@@ -939,18 +1046,48 @@ referencing episode is superseded or expires. Retained entries are counted in th
 `{id, score, reason, via}` where `via` names the protecting episode. `remaining`
 includes protected entries; the `--check` exit code ignores them.
 
-**RFC-011 R5(b) playbook-referenced protection + fail-closed abort.** A playbook
-declared in `<project>/.episodic-memory/playbooks.json` is load-bearing, so the
-resolved supersession chain of every declared id is protected with reason
-`playbook-referenced` (anchored on the resolved terminal; chain-closure extends it
-to every member). The same `playbooks.json` is read by `em-prune` and
-`em-consolidate --fold-superseded`, and retention FAILS CLOSED where the advisory
-surfaces fail open: a present-but-unparseable LOCAL `playbooks.json` aborts LOCAL
-archival with exit 1 and archives NOTHING; the GLOBAL store additionally aborts
-on a degraded registry (`installs.json` present-but-unparseable) or any registered
-project's corrupt `playbooks.json` (global protection is then unknowable). An
-absent file is normal operation (no protection, no abort); the abort message
-names the offending file. (Full docs land in S5.)
+**RFC-011 R5(b) playbook-referenced protection + SCOPED fail-closed abort.** A
+playbook declared in `<project>/.episodic-memory/playbooks.json` is load-bearing
+for that project, so `computeProtectedIds` resolves each declared id to its
+terminal active revision and protects the WHOLE resolved chain (terminal + every
+member) with reason `playbook-referenced` (members also carry `chain-member`).
+`--dry-run` lists the protected chain in `protected_episodes` as
+`{id, score, reason, via}` (`via` names the declared id). The same `playbooks.json`
+is read by `em-prune` AND `em-consolidate --fold-superseded`, and retention FAILS
+CLOSED where the advisory surfaces fail open — scoped by store:
+
+- LOCAL archival aborts only when THIS project's `playbooks.json` is
+  present-but-unparseable (exit 1, archives nothing; a sibling project's
+  corruption never blocks a local prune — the blast radius is scoped).
+- GLOBAL archival aborts when the registry is degraded
+  (`~/.episodic-memory/installs.json` present-but-unparseable, including
+  `readRegistry`'s silent `{entries:[], rebuilt:true}` rebuild) OR any
+  registered project's `playbooks.json` is present-but-unparseable (global
+  protection is then unknowable).
+
+An ABSENT file is normal operation: no protection, no abort, prunable episodes
+archive as usual. The abort message names the offending file. Pin a frequently
+referenced playbook terminal with `em-pin` (pinned episodes floor scoring decay
+and are never pruned); the build report's `warnings.unpinned` flags selected
+terminals that are not.
+
+`--dry-run` on a chain `pb-0 ← pb-1 ← pb-2` (active terminal) whose
+`playbooks.json` references the intermediate `pb-1` (observed on an isolated
+fixture — every member survives, terminal + members):
+
+```json
+{"status":"ok","results":[{"scope":"local","prunable":0,"remaining":3,"freed_bytes":0,"protected":3,"protected_episodes":[{"id":"pb-0","score":0.1,"reason":"chain-member","via":"pb-1"},{"id":"pb-1","score":0.1,"reason":"playbook-referenced","via":"pb-1"},{"id":"pb-2","score":0.1,"reason":"playbook-referenced","via":"pb-1"}],"episodes":[]}]}
+```
+
+(`--dry-run` uses the `prunable` key + an `episodes` preview list; a real
+prune uses `pruned` and mutates.)
+
+A torn-write (present-but-unparseable) local `playbooks.json` aborts LOCAL
+archival and archives nothing:
+
+```json
+{"status":"error","message":"em-prune: aborting archival — local playbooks.json present but unparseable (not valid JSON: ...) (<project>/.episodic-memory/playbooks.json)"}
+```
 
 ### em-promote
 

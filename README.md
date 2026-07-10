@@ -545,8 +545,16 @@ node ~/.episodic-memory/scripts/em-search.mjs --project my-project
 node ~/.episodic-memory/scripts/em-search.mjs --query "JWT" --full
 node ~/.episodic-memory/scripts/em-search.mjs --tag auth --category decision --since 2026-01-01
 node ~/.episodic-memory/scripts/em-search.mjs --history <id> --full
+node ~/.episodic-memory/scripts/em-search.mjs --read <id>            # RFC-011 R7: tracked, bounded, single-episode read the playbook pointers name
 node ~/.episodic-memory/scripts/em-search.mjs --include-superseded
 ```
+
+`--read <id>` (RFC-011 R7) fetches exactly one episode by exact id (resolving
+`episodes/` then `archived/`); an unknown or empty id is an error (never a search
+fallthrough). The body is bound to serialized bytes (≤49152, with `body_truncated`/
+`body_missing`); file frontmatter is merged over the index row, and the read tracks
+`access_count` (unless `--no-track`). This is the tracked bounded read the playbook
+pointers name.
 
 `--query` uses tiered relevance matching: an exact summary match scores 1.0, a
 contiguous summary substring 0.7, and a **multi-term query** matches when every
@@ -593,6 +601,9 @@ node ~/.episodic-memory/scripts/em-prune.mjs --check  # exit 1 if prunable episo
 # RFC-009 R6: evidence-linked violations, trigger-bearing lessons, consolidates
 # members, and the latest clerk run record are never archived — see the
 # protected / protected_episodes output fields in --dry-run.
+# RFC-011 R5(b): playbook-referenced chains (declared in playbooks.json) are also
+# protected (reason playbook-referenced / chain-member); a present-but-unparseable
+# playbooks.json aborts archival exit 1 and archives nothing (fail-closed).
 ```
 
 ### Backup (Mirror to Private Repo with Redaction)
@@ -784,6 +795,14 @@ The `activation-classes.json` vocabulary (deployed to `~/.episodic-memory/`) clo
 `activity:<class>` trigger set; `validate-rfc-009-contract-mirror.mjs` diffs the shipped
 surfaces against `docs/rfcs/RFC-009-lesson-activation.contract.json` in CI.
 
+**Playbooks (RFC-011 R1/R2):** an optional per-project `<project>/.episodic-memory/playbooks.json`
+(schema-backed, ≤32 entries / 64 KiB) declares playbook lesson episodes to load at session
+start or on demand; the build derives `session_start.playbooks` (capped at `bounds.max_playbooks`,
+default 2) and `entry_class:"playbook"` trigger rows, resolving each declared id cross-store to
+the terminal active revision. A `build_report.playbooks` declared/excluded audit +
+`warnings.unpinned` list surface the active set; the index is now `schema_version: 3`. See
+EM_SCRIPTS_GUIDE → `em-trigger-index`.
+
 ### Activation adapter (RFC-009 R3/R4, event plane)
 The **advisory activation adapter** is the event-plane consumer of the trigger index
 (Claude Code only, per-project, opt-in via `install.mjs --install-activation`). It installs
@@ -796,8 +815,12 @@ lessons + violation preflight). The adapter is **advisory-only** — every hook 
 emits no decision/block field — and reads ONLY the purpose-built derived indexes (never
 `index.jsonl`, episode bodies, or environment). A per-project, hand-authored
 `<project>/.episodic-memory/lesson-suppress.json` mutes lessons by episode id across all
-bands; a missing or malformed file fails open (injection proceeds). Reverse with
-`--uninstall-activation`. Enforcement is a separate, independently installed layer
+bands; a missing or malformed file fails open (injection proceeds). An optional per-project
+`playbooks.json` (RFC-011) extends the session-start blend and the on-demand matcher with
+declared playbook pointers — one imperative line per playbook (`playbook (playbooks.json):
+READ <id> before proceeding (...)`) pointing at a tracked bounded `em-search --read <id>`,
+never a body; the `playbook (playbooks.json):` provenance prefix keeps declared injection
+visible. Reverse with `--uninstall-activation`. Enforcement is a separate, independently installed layer
 (`--install-enforcement`).
 
 ### BP-1 Auto-Pilot (RFC-004)
