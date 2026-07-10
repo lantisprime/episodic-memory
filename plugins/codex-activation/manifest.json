@@ -1,0 +1,28 @@
+{
+  "type": "activation",
+  "schema_version": "1.0.0",
+  "id": "codex",
+  "harness": "codex",
+  "version": "1.0.0",
+  "blocking": false,
+  "capabilities": {
+    "user_prompt_submit": "MEDIUM",
+    "pre_tool_use": "MEDIUM",
+    "session_start": "MEDIUM"
+  },
+  "registrations": [
+    { "id": "rfc-009-codex-activation-user-prompt-submit", "file": "activation-prompt.sh", "event": "UserPromptSubmit", "timeout": 5, "checksum": "sha256:fa0488cea80a3b2c1fc0e8559d04d979b296da95fe8dbac70eb3c0171d4b52fc" },
+    { "id": "rfc-009-codex-activation-pre-tool-use", "file": "activation-tool.sh", "event": "PreToolUse", "timeout": 5, "checksum": "sha256:45b560242c22bcd0ee6b6e438cadb79555b78af26aa9158e48c80ed06e6c37d7" },
+    { "id": "rfc-009-codex-activation-session-start", "file": "activation-sessionstart.sh", "event": "SessionStart", "timeout": 10, "checksum": "sha256:f90557b032279799a3be34639b0c8946bb25015073b63c58e87296c582b01697" }
+  ],
+  "support_files": [
+    { "file": "activation-hook-run.mjs", "checksum": "sha256:ee8959086489e94cc16cd8bc78b86e2ad5cbd18530e84e455734f221bc3789dc" },
+    { "file": "activation-match.mjs", "checksum": "sha256:75dfbed55f1d3a0a7cea5d0d83dd8d5b7ad623d12c5a8e2a49d57b69d636ec0e" },
+    { "file": "json-instance-validate.mjs", "checksum": "sha256:5ccf2b3121e0ec0631e39e583ecc30d98fe625f15c9810cdd9ae1e8675927528" }
+  ],
+  "io_schema": "schemas/runtime/activation-io.schema.json",
+  "runbook": {
+    "full": "plugins/codex-activation/runbooks/activation.md",
+    "quickref": "plugins/codex-activation/runbooks/activation.quickref.md"
+  }
+}

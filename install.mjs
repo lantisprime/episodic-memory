@@ -93,6 +93,8 @@ const REPO_SECOND_OPINION = path.join(REPO_SCRIPTS, 'second-opinion')
 const REPO_PLUGIN_OPENCODE = path.join(REPO_DIR, 'plugins', 'opencode')
 // RFC-008 P6 S4: Codex enforcement plugin source (adapter + manifest + runbooks).
 const REPO_PLUGIN_CODEX = path.join(REPO_DIR, 'plugins', 'codex')
+// RFC-009 Codex advisory activation adapter source.
+const REPO_PLUGIN_CODEX_ACTIVATION = path.join(REPO_DIR, 'plugins', 'codex-activation')
 // RFC-008 P7 S5: Pi enforcement extension source (adapter + manifest + runbooks).
 const REPO_PLUGIN_PI = path.join(REPO_DIR, 'plugins', 'pi-agent')
 
@@ -240,17 +242,18 @@ Hook flags (claude-code / RFC-008 P4d — enforcement is PER-PROJECT, never glob
                           switch <project>/.episodic-memory/enforce-config.json
                           (explicit destructive opt-in; default leaves it).
 
-Activation flags (claude-code / RFC-009 P2 — advisory, PER-PROJECT, never global):
+Activation flags (claude-code and codex / RFC-009 — advisory, PER-PROJECT, never global):
   --install-activation    Install the PER-PROJECT advisory activation adapter
-                          under the literal <project>/.claude/ (the resolved
-                          --project, same root as enforcement; NEVER ~/.claude):
+                          under the harness-specific project config directory
+                          (.claude/ or .codex/; NEVER the user-global config):
                           the 3 thin hooks (activation-prompt UserPromptSubmit,
                           activation-tool PreToolUse, activation-sessionstart
-                          SessionStart) + the shared activation-hook-run.mjs
-                          runner + a co-located manifest.json carrying the
+                          SessionStart) + the activation runtime closure + a
+                          co-located manifest.json carrying the
                           project scope identity (slug + RESOLVED store root,
                           which for a worktree stays the main checkout), and
-                          register them in <project>/.claude/settings.json.
+                          register them in <project>/.claude/settings.json or
+                          <project>/.codex/hooks.json for the selected harness.
                           Advisory-ONLY: the hooks emit additionalContext and
                           always exit 0 — no gate, no block. Independent of
                           --install-enforcement. Skips divergent local hook
@@ -2333,6 +2336,165 @@ function uninstallCodexEnforcement(projectDir) {
   return report
 }
 
+// RFC-009 Codex advisory activation. This is deliberately separate from the
+// Codex enforcement plugin: it only injects bounded memory context and every
+// runtime path exits zero without a decision field.
+function codexActivationPaths(projectDir) {
+  let registrationRoot
+  try { registrationRoot = fs.realpathSync(projectDir) } catch { registrationRoot = path.resolve(projectDir) }
+  const authorityRoot = resolveRepoRoot(projectDir)
+  const codexDir = path.join(registrationRoot, '.codex')
+  const pluginDir = path.join(codexDir, 'episodic-memory-activation')
+  return {
+    registrationRoot,
+    authorityRoot,
+    codexDir,
+    pluginDir,
+    hooksDir: path.join(pluginDir, 'hooks'),
+    manifestPath: path.join(pluginDir, 'manifest.json'),
+    hooksJsonPath: path.join(codexDir, 'hooks.json'),
+  }
+}
+
+function codexActivationSourceManifest() {
+  return JSON.parse(fs.readFileSync(path.join(REPO_PLUGIN_CODEX_ACTIVATION, 'manifest.json'), 'utf8'))
+}
+
+function codexActivationCommand(hookPath) {
+  return `bash ${shellQuote(hookPath)}`
+}
+
+function installCodexActivation(projectDir) {
+  const report = { root: null, installedFiles: [], registrations: [], manifest: null, withheld: [], warnings: [], runnerReady: false }
+  const P = codexActivationPaths(projectDir)
+  report.root = P.registrationRoot
+
+  // Parse and validate the destination shape before writing any file.
+  let config = {}
+  if (fs.existsSync(P.hooksJsonPath)) {
+    try { config = JSON.parse(fs.readFileSync(P.hooksJsonPath, 'utf8')) }
+    catch (e) { report.warnings.push(`.codex/hooks.json is not valid JSON (${e.message}); aborted — nothing changed`); return report }
+    if (!isPlainObject(config) || (config.hooks !== undefined && !isPlainObject(config.hooks))) {
+      report.warnings.push('.codex/hooks.json must be an object with hooks absent or an object; aborted — nothing changed')
+      return report
+    }
+  }
+
+  const sourceManifest = codexActivationSourceManifest()
+  const owned = [
+    ...sourceManifest.registrations.map((r) => r.file),
+    ...(sourceManifest.support_files || []).map((r) => r.file),
+  ]
+  const results = new Map()
+  for (const file of owned) {
+    const src = path.join(REPO_PLUGIN_CODEX_ACTIVATION, 'hooks', file)
+    const dst = path.join(P.hooksDir, file)
+    const result = installHookFile(src, dst, installHooksForce)
+    results.set(file, result)
+    if (result === 'skipped-divergent' || result === 'missing-source') report.withheld.push(dst)
+    else report.installedFiles.push(dst)
+  }
+
+  const ready = owned.every((file) => ['copied', 'unchanged', 'forced'].includes(results.get(file)))
+  if (!ready) {
+    report.warnings.push('Codex activation registration withheld because one or more owned files are missing or locally modified; use --install-hooks-force to accept replacement')
+    return report
+  }
+
+  const deployedManifest = {
+    ...sourceManifest,
+    project_identity: { slug: path.basename(P.authorityRoot), root: P.authorityRoot },
+  }
+  writeJSONAtomic(P.manifestPath, deployedManifest)
+  report.installedFiles.push(P.manifestPath)
+  report.manifest = P.manifestPath
+
+  if (!config.hooks) config.hooks = {}
+  for (const reg of sourceManifest.registrations) {
+    if (!Array.isArray(config.hooks[reg.event])) config.hooks[reg.event] = []
+    const command = codexActivationCommand(path.join(P.hooksDir, reg.file))
+    const exists = config.hooks[reg.event].some((group) =>
+      Array.isArray(group && group.hooks) && group.hooks.some((hook) => hook && hook.command === command))
+    if (!exists) {
+      config.hooks[reg.event].push({
+        hooks: [{ type: 'command', command, statusMessage: 'episodic-memory activation', timeout: reg.timeout }],
+      })
+    }
+    report.registrations.push(`${reg.event} → ${reg.file}`)
+  }
+  writeJSONAtomic(P.hooksJsonPath, config)
+  report.installedFiles.push(P.hooksJsonPath)
+  report.runnerReady = true
+  console.log(`[codex activation] deployed under ${P.pluginDir}. Run "/hooks" inside Codex (cwd ${P.registrationRoot}) and trust the three episodic-memory activation hooks.`)
+  return report
+}
+
+function uninstallCodexActivation(projectDir) {
+  const report = { removedRegistrations: [], removedFiles: [], preserved: [], warnings: [] }
+  const P = codexActivationPaths(projectDir)
+  let config = {}
+  let configPresent = false
+  if (fs.existsSync(P.hooksJsonPath)) {
+    configPresent = true
+    try { config = JSON.parse(fs.readFileSync(P.hooksJsonPath, 'utf8')) }
+    catch (e) { report.warnings.push(`.codex/hooks.json is not valid JSON (${e.message}); aborted — nothing changed`); return report }
+    if (!isPlainObject(config) || (config.hooks !== undefined && !isPlainObject(config.hooks))) {
+      report.warnings.push('.codex/hooks.json has an unsupported shape; aborted — nothing changed')
+      return report
+    }
+  }
+
+  let manifest
+  try { manifest = JSON.parse(fs.readFileSync(P.manifestPath, 'utf8')) }
+  catch (e) { report.warnings.push(`Codex activation manifest unavailable (${e.message}); preserving files and registrations`); return report }
+
+  let changed = false
+  if (config.hooks) {
+    for (const reg of manifest.registrations || []) {
+      const command = codexActivationCommand(path.join(P.hooksDir, reg.file))
+      const removed = removeHookCommandFromEvent(config.hooks, reg.event, command)
+      if (removed > 0) {
+        changed = true
+        report.removedRegistrations.push(`${reg.event} → ${reg.file}`)
+      }
+      if (Array.isArray(config.hooks[reg.event]) && config.hooks[reg.event].length === 0) delete config.hooks[reg.event]
+    }
+    if (Object.keys(config.hooks).length === 0) delete config.hooks
+  }
+  if (configPresent && changed) writeJSONAtomic(P.hooksJsonPath, config)
+
+  const declared = [...(manifest.registrations || []), ...(manifest.support_files || [])]
+  let preservedOwnedFile = false
+  for (const item of declared) {
+    const target = path.join(P.hooksDir, item.file)
+    if (!fs.existsSync(target)) continue
+    const actual = `sha256:${sha256File(target)}`
+    if (actual !== item.checksum) {
+      preservedOwnedFile = true
+      report.preserved.push(target)
+      report.warnings.push(`preserved locally modified ${target}: expected ${item.checksum}, got ${actual}`)
+      continue
+    }
+    assertContained(target, P.pluginDir)
+    fs.rmSync(target, { force: true })
+    report.removedFiles.push(target)
+  }
+  // Keep the ownership record beside any locally modified owned file so a
+  // later uninstall can still verify and clean it after the operator reverts
+  // or explicitly replaces it.
+  if (fs.existsSync(P.manifestPath) && !preservedOwnedFile) {
+    assertContained(P.manifestPath, P.pluginDir)
+    fs.rmSync(P.manifestPath, { force: true })
+    report.removedFiles.push(P.manifestPath)
+  } else if (fs.existsSync(P.manifestPath)) {
+    report.preserved.push(P.manifestPath)
+  }
+  for (const dir of [P.hooksDir, P.pluginDir]) {
+    try { if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) { fs.rmdirSync(dir); report.removedFiles.push(dir) } } catch {}
+  }
+  return report
+}
+
 // ---------------------------------------------------------------------------
 // RFC-008 P7 S5 — Pi enforcement extension install/uninstall (per-project .pi/).
 // Mirrors installCodexEnforcement but deploys under
@@ -2470,7 +2632,10 @@ if (uninstallEnforcement) {
   console.log(JSON.stringify(rep, null, 2))
 }
 
-if (uninstallActivation && (tool === 'claude-code' || tool === 'all')) {
+if (uninstallActivation && tool === 'codex') {
+  const rep = uninstallCodexActivation(projectDir)
+  console.log(JSON.stringify(rep, null, 2))
+} else if (uninstallActivation && (tool === 'claude-code' || tool === 'all')) {
   // RFC-009 P2-S6: reverse the per-project advisory activation adapter. Never
   // touches ~/.claude or ~/.episodic-memory (the global-side Layer-1 writes
   // below are gated off for this run). Advisory-only, claude-code-only.
@@ -2478,7 +2643,11 @@ if (uninstallActivation && (tool === 'claude-code' || tool === 'all')) {
   console.log(JSON.stringify(rep, null, 2))
 }
 
-if (installActivation && (tool === 'claude-code' || tool === 'all')) {
+if (installActivation && tool === 'codex') {
+  const rep = installCodexActivation(projectDir)
+  lastActivationInstallReport = rep
+  console.log(JSON.stringify(rep, null, 2))
+} else if (installActivation && (tool === 'claude-code' || tool === 'all')) {
   // RFC-009 P2-S6: deploy the per-project advisory activation adapter under the
   // literal <project>/.claude/. Independent of --install-enforcement.
   const rep = runInstallActivation(projectDir)
@@ -3368,7 +3537,7 @@ try {
         enforcementInstalled = false // healed: a prior --uninstall-enforcement removed the engine
       }
       if (t === enforcementTool && installEnforcement) enforcementInstalled = true
-      // RFC-009 P2-S6: activation is claude-code-only + per-project. Same
+      // RFC-009 activation is harness-specific + per-project. Same
       // heal-from-disk-truth posture as enforcement (an --uninstall-activation
       // run cannot touch the registry, so the flag heals here on the next
       // regular install: runner gone on disk ⇒ false).
@@ -3376,6 +3545,10 @@ try {
       if (t === 'claude-code' && activationInstalled &&
           !fs.existsSync(path.join(activationRoot, '.claude', 'hooks', 'activation-hook-run.mjs'))) {
         activationInstalled = false // healed: a prior --uninstall-activation removed the runner
+      }
+      if (t === 'codex' && activationInstalled &&
+          !fs.existsSync(path.join(activationRoot, '.codex', 'episodic-memory-activation', 'hooks', 'activation-hook-run.mjs'))) {
+        activationInstalled = false
       }
       // Finding A: gate the flag on the runner actually landing on disk. A
       // malformed-settings abort in runInstallActivation returns without writing
@@ -3391,6 +3564,11 @@ try {
       if (t === 'claude-code' && installActivation &&
           lastActivationInstallReport && lastActivationInstallReport.runnerReady === true &&
           fs.existsSync(path.join(activationRoot, '.claude', 'hooks', 'activation-hook-run.mjs'))) {
+        activationInstalled = true
+      }
+      if (t === 'codex' && installActivation &&
+          lastActivationInstallReport && lastActivationInstallReport.runnerReady === true &&
+          fs.existsSync(path.join(activationRoot, '.codex', 'episodic-memory-activation', 'hooks', 'activation-hook-run.mjs'))) {
         activationInstalled = true
       }
       return {
