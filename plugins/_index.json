@@ -66,6 +66,20 @@
       },
       "manifest": "plugins/claude-code-activation/manifest.json",
       "status": "active"
+    },
+    {
+      "type": "activation",
+      "id": "codex",
+      "harness": "codex",
+      "directory": "plugins/codex-activation",
+      "blocking": false,
+      "capabilities": {
+        "user_prompt_submit": "MEDIUM",
+        "pre_tool_use": "MEDIUM",
+        "session_start": "MEDIUM"
+      },
+      "manifest": "plugins/codex-activation/manifest.json",
+      "status": "active"
     }
   ]
 }

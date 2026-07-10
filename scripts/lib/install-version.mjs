@@ -211,6 +211,16 @@ export function perProjectArtifactPairs(repoDir, projectDir) {
   add('plugins/claude-code/hooks/lib/so-timeout-floor.mjs', '.claude/hooks/lib/so-timeout-floor.mjs', 'capability')
   add('plugins/second-opinion/runbooks/harness.md', '.claude/hooks/runbooks/second-opinion-harness.md', 'capability')
 
+  // Codex RFC-009 advisory activation runtime. The generated deployed manifest
+  // is intentionally excluded because it carries project_identity; the owned
+  // hook/runtime bytes are stable and checksum-refreshable.
+  for (const file of [
+    'activation-prompt.sh', 'activation-tool.sh', 'activation-sessionstart.sh',
+    'activation-hook-run.mjs', 'activation-match.mjs', 'json-instance-validate.mjs',
+  ]) {
+    add(`plugins/codex-activation/hooks/${file}`, `.codex/episodic-memory-activation/hooks/${file}`, 'capability')
+  }
+
   return pairs
 }
 

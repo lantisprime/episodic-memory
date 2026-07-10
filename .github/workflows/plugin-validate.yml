@@ -97,6 +97,9 @@ jobs:
       - name: Run codex install/uninstall E2E (RFC-008 P6 S4, REQ-11)
         run: node tests/test-install-codex-enforcement.mjs
 
+      - name: Run Codex advisory activation install/uninstall + hook E2E (RFC-009 R3/R4)
+        run: node tests/test-codex-activation-install.mjs
+
       - name: Run pi-agent install/uninstall E2E (RFC-008 P7 S5, P12 closure)
         run: node tests/test-install-pi-enforcement.mjs
 

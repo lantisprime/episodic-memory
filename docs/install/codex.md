@@ -8,8 +8,7 @@ Self-contained guide. Everything you need is here.
 ## WHEN NOT TO USE
 - You are installing for Claude Code, Cursor, OpenCode, Pi Agent, or Windsurf. Use
   that harness's file in this directory.
-- Do NOT pass `--install-hooks`, `--install-enforcement`, or
-  `--install-second-opinion`. Those are Claude Code only.
+- Do not pass `--install-hooks`; it is a legacy Claude Code flag.
 
 ## Prerequisites
 - git and Node.js (standard library only; zero npm dependencies, no build step).
@@ -29,6 +28,17 @@ does not target the clone itself.
 ```
 node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool codex --project <ABSOLUTE_PATH_TO_TARGET_PROJECT>
 ```
+
+To install advisory lesson activation at prompt, tool, and session-start events:
+
+```
+node <ABSOLUTE_PATH_TO_CLONE>/install.mjs --tool codex --project <ABSOLUTE_PATH_TO_TARGET_PROJECT> --install-activation
+```
+
+This adds context only. It never blocks and is independent of enforcement.
+After installation, start Codex in the project, run `/hooks`, review the three
+episodic-memory activation definitions, and trust them. Codex skips new or
+changed project hooks until their exact definitions are trusted.
 
 Expected output (abbreviated; `<HOME>` is your resolved home, `<PROJ>` your project):
 
@@ -58,8 +68,10 @@ Done! Episodic memory is ready.
 | `<project>/.agents/skills/episodic-memory/SKILL.md` | the Codex skill (points at the guide) |
 | `<project>/.episodic-memory/` | local episode store |
 | `<project>/.gitignore` | created/appended with `.episodic-memory/` + run.key pattern |
+| `<project>/.codex/episodic-memory-activation/` | optional Codex advisory activation runtime and manifest |
+| `<project>/.codex/hooks.json` | optional merged activation registrations |
 
-The Codex project tree after install is just:
+Without optional activation, the Codex project tree after install is just:
 
 ```
 <PROJ>/.agents/skills/episodic-memory/SKILL.md
@@ -92,13 +104,18 @@ node ~/.episodic-memory/scripts/em-search.mjs --project <name> --no-track --no-s
   `.agents/skills/episodic-memory/SKILL.md`. If you also install Pi Agent (or run
   `--tool all`), the second install reports "already current" for that file. That is
   expected, not a conflict.
-- Do NOT add the Claude Code hook / enforcement flags.
+- `--install-activation` is Codex-specific when paired with `--tool codex`; it
+  writes only under the target project `.codex/` directory.
+- Installation and uninstallation never remove local episode files under
+  `<project>/.episodic-memory/episodes/`.
 
 ## Uninstall / reinstall
 
 - Reinstall is idempotent: re-run the same command after `git pull`. Re-runs print
   "already current" and "All 11 behavioral patterns already seeded"; these are
   normal.
+- Remove only Codex advisory activation while preserving the skill and episodes:
+  `node <clone>/install.mjs --tool codex --project <project> --uninstall-activation`.
 - To uninstall, remove `<project>/.agents/skills/episodic-memory/SKILL.md` (note this
   is shared with Pi Agent; remove only if neither tool needs it).
 

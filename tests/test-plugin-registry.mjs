@@ -444,6 +444,16 @@ function buildLiveProject() {
     "plugins/claude-code-activation/hooks/activation-tool.sh",
     "plugins/claude-code-activation/hooks/activation-sessionstart.sh",
     "plugins/claude-code-activation/hooks/activation-hook-run.mjs",
+    // RFC-009 Codex activation entry and its checksum-governed runtime closure.
+    "plugins/codex-activation/manifest.json",
+    "plugins/codex-activation/runbooks/activation.md",
+    "plugins/codex-activation/runbooks/activation.quickref.md",
+    "plugins/codex-activation/hooks/activation-prompt.sh",
+    "plugins/codex-activation/hooks/activation-tool.sh",
+    "plugins/codex-activation/hooks/activation-sessionstart.sh",
+    "plugins/codex-activation/hooks/activation-hook-run.mjs",
+    "plugins/codex-activation/hooks/activation-match.mjs",
+    "plugins/codex-activation/hooks/json-instance-validate.mjs",
     // A-io-schema reads the manifest's io_schema off disk.
     "schemas/runtime/activation-io.schema.json",
     "scripts/scaffold-plugin/templates/common-rows.md",
