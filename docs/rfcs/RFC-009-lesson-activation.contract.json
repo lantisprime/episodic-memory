@@ -52,7 +52,7 @@
     "rule"
   ],
   "trigger_index_shape": {
-    "schema_version": 2,
+    "schema_version": 3,
     "entry_fields": [
       "trigger_kind",
       "value",
@@ -61,7 +61,10 @@
       "effective_priority",
       "applies_to_projects",
       "applies_to_tools",
-      "review_by"
+      "review_by",
+      "entry_class",
+      "read_command",
+      "triggers_overridden"
     ],
     "trigger_kind_enum": [
       "phrase",

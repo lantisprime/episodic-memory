@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/playbooks.schema.json",
+  "title": "Per-project playbook activation preferences (RFC-011 R1)",
+  "description": "Schema for <project>/.episodic-memory/playbooks.json — an OPTIONAL, operator-authored, per-project declaration of which playbook lesson episodes load at session start or on demand. Selection is by EPISODE ID ONLY (any chain member; the build resolves to the terminal active revision, RFC-011 R2). Schema-validated, bounded (at most 32 entries, 64 KiB), failure-contained: a malformed/schema-invalid/over-bound file is skipped with a build-report note and a stderr line, never fatal, and degrades to no playbooks loaded (RFC-011 R1). The shared parser parsePlaybooksConfig (scripts/em-trigger-index.mjs, §12) is the single source of truth for build + protection; the build (R2) fails open (skip+note), the retention consumers (R5b) fail closed (abort exit 1).",
+  "$comment": "Two bounds CANNOT be expressed in the closed-subset instance validator (scripts/lib/json-instance-validate.mjs) and are enforced by parsePlaybooksConfig instead, keeping this schema as the authoritative contract: (1) the 64 KiB FILE-SIZE bound is a stat (a size, not a JSON-Schema constraint); (2) 'no two entries share the same id' is unique-BY-id, which uniqueItems cannot express for object arrays (it checks whole-item deep equality, so two entries with the same id but different mode would slip through). R1 states both as parser-enforced. validateInstance models exactly the keywords used here (type/const/enum/minLength/maxItems/additionalProperties/required/properties/items/if/then/not/$ref/$defs) so the parser validates against THIS schema as the single source of truth.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "playbooks"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Contract version (matches the derived-index convention). const 1 (RFC-011 R1)."
+    },
+    "playbooks": {
+      "type": "array",
+      "maxItems": 32,
+      "description": "At most 32 entries (Principle 6 bound). The 64 KiB whole-FILE bound is enforced by parsePlaybooksConfig as a stat.",
+      "items": {
+        "$ref": "#/$defs/playbookEntry"
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional render-cap bounds. max_playbooks caps the session_start.playbooks derived array at BUILD time (R2); it never gates at event time.",
+      "properties": {
+        "max_playbooks": {
+          "type": "integer",
+          "enum": [1, 2, 3, 4],
+          "description": "Schema-validated integer 1..4 (out-of-range rejected, NEVER clamped — 0 and 5 fail). Absent -> build default 2 (R1)."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "playbookEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mode"],
+      "description": "One playbook declaration. `id` may be ANY member of a supersedes chain; the build resolves to the terminal active revision (R2). `mode` is a closed enum. `triggers` (optional, on_demand ONLY) uses the RFC-009 R1 trigger grammar; a declared triggers array REPLACES the episode's own trigger set within this project (override, not addition).",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "An episode id (any chain member). Tag-based selectors are REJECTED by design (RFC-009 R10)."
+        },
+        "mode": {
+          "enum": ["session_start", "on_demand"],
+          "description": "session_start: surface at every session start. on_demand: surface when the RFC-009 R3 matcher fires."
+        },
+        "triggers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional, on_demand ONLY. RFC-009 R1 trigger grammar (phrase, tool:, activity:). Override: when present it replaces the episode's own trigger set entirely (an empty/whitespace-only set yields an empty effective trigger set, excluded at build as empty_triggers — R2.2)."
+        }
+      },
+      "if": {
+        "required": ["mode"],
+        "properties": { "mode": { "const": "session_start" } }
+      },
+      "then": {
+        "not": { "required": ["triggers"] },
+        "description": "triggers is rejected on a session_start entry (it is on_demand-only)."
+      }
+    }
+  }
+}

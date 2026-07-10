@@ -6,7 +6,7 @@
  * triggers by reading ONLY the derived index — never activation-classes.json (which
  * honors the EM_ACTIVATION_CLASSES_PATH env override) at event time. The bake is
  * DRY (one copy per class), leaves the pinned entry_fields untouched, omits
- * deprecated/unknown classes, and the schema_version bump (1->2) invalidates caches.
+ * deprecated/unknown classes, and the schema_version bump (1->2 then 2->3 via RFC-011) invalidates caches.
  *
  * Every test asserts captured on-disk contents against a discriminating sentinel —
  * never assert(true), never "non-empty".
@@ -98,7 +98,7 @@ t('per_store_output_backcompat', () => {
   const id = storeLesson(cwd, home, ['--trigger', 'second opinion', '--applies-to-project', 'x']);
   build(cwd, home);
   const ti = readTi(cwd);
-  assert.equal(ti.schema_version, 2, 'schema_version bumped to 2');
+  assert.equal(ti.schema_version, 3, 'schema_version bumped to 3 (RFC-011 R2.6 playbooks)');
   const e = ti.entries.find((x) => x.episode_id === id);
   // Every pre-existing entry field still present + unchanged for a non-activity trigger.
   assert.equal(e.trigger_kind, 'phrase');

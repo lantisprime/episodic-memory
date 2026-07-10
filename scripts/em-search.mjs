@@ -6,8 +6,9 @@
  *   node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>]
  *                      [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>]
  *                      [--scope local|global|all] [--include-superseded]
- *                      [--history <id>] [--full]
+ *                      [--read <id>] [--history <id>] [--full]
  *                      [--no-score] [--no-track]
+ *                      (if both --read and --history are passed, --read wins)
  *                      [--warn-time-ms <n>] [--warn-count <n>]
  *
  * By default, searches local then global (scope=all), hides superseded episodes,
@@ -35,7 +36,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-search.mjs', usage: 'node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>] [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] [--include-superseded] [--history <id>] [--full] [--no-score] [--no-track] [--warn-time-ms <n>] [--warn-count <n>]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-search.mjs', usage: 'node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>] [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] [--include-superseded] [--read <id>] [--history <id>] [--full] [--no-score] [--no-track] (if both --read and --history are passed, --read wins) [--warn-time-ms <n>] [--warn-count <n>]' }))
   process.exit(0)
 }
 
@@ -55,6 +56,7 @@ const scope = flag('--scope') || 'all'
 const full = argv.includes('--full')
 const includeSuperseded = argv.includes('--include-superseded')
 const historyId = flag('--history')
+const readId = flag('--read')
 const noScore = argv.includes('--no-score')
 const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
@@ -93,6 +95,189 @@ results = results.filter(e => {
   seen.add(e.id)
   return true
 })
+
+// ---------------------------------------------------------------------------
+// Read mode (RFC-011 R7 / REQ-14 — amended): fetch exactly ONE episode by exact
+// id. No chain walk; full frontmatter + body; SERIALIZED-BYTE body bound
+// (Buffer.byteLength(JSON.stringify(body),'utf8') <= 49152) with body_truncated +
+// stderr note so stdout is always valid JSON — never a mid-JSON break. Resolves
+// episodes/ then archived/ (an archived episode returns normally with its
+// status visible). Frontmatter is parsed from the episode FILE and merged OVER
+// the index row (file wins on frontmatter fields; the row supplies access_count,
+// last_accessed, source). A row whose body file is absent from BOTH episodes/ and
+// archived/ returns body_missing:true (status ok, exit 0) + a stderr note and
+// SKIPS tracking (a delivered-nothing read must not feed conversion telemetry).
+// Tracks access_count/last_accessed on the matched row otherwise, honoring
+// --no-track; an empty `--read ''` (flag present, empty value) is an error.
+// Drains stdout before exit (mirrors --history discipline ~:179-185). Does NOT
+// touch --history behavior.
+// ---------------------------------------------------------------------------
+if (readId !== undefined) {
+  // F-kimi: flag PRESENT with empty value is an error (check presence, not
+  // truthiness — `--read ''` must not fall through to the search path).
+  if (readId === '') {
+    const out = JSON.stringify({ status: 'error', message: 'Episode "" not found' })
+    await new Promise((resolve) => process.stdout.write(out + '\n', resolve))
+    process.exit(1)
+  }
+
+  // Active rows for the active scopes are already collected in `results`
+  // (loadIndex, local-priority dedup) BEFORE any filters apply — exact-id
+  // fetch ignores project/tag/category/query filters by design. Resolve
+  // episodes/ first (active index), then archived/ on miss (R7 order).
+  let row = results.find(e => e.id === readId)
+  let archived = false
+  if (!row) {
+    const archivedEntries = []
+    for (const [dir, label] of [[LOCAL_DIR, 'local'], [GLOBAL_DIR, 'global']]) {
+      if (scope !== 'all' && scope !== label) continue
+      archivedEntries.push(...loadArchivedIndex(dir, label))
+    }
+    row = archivedEntries.find(e => e.id === readId)
+    archived = !!row && !!row._archived
+  }
+
+  if (!row) {
+    // State B (§12): unknown id → error status, exit 1, no side effects.
+    const out = JSON.stringify({ status: 'error', message: `Episode "${readId}" not found` })
+    await new Promise((resolve) => process.stdout.write(out + '\n', resolve))
+    process.exit(1)
+  }
+
+  // Episode file path (episodes/ for active rows, archived/ for archived rows —
+  // mirrors --history body resolution).
+  const subDir = archived ? 'archived' : 'episodes'
+  const filePath = path.join(row._dataDir, subDir, `${row.id}.md`)
+  const fileExists = fs.existsSync(filePath)
+
+  // F-codex: parse the episode FILE's frontmatter and merge OVER the index row
+  // (file wins for frontmatter fields). The index row supplies the operational
+  // fields the file does not carry (access_count, last_accessed) plus source and
+  // the archived flag. Mirrors the line-based YAML-ish parser in
+  // em-rebuild-index.mjs's parseFrontmatter (the substrate convention: key: value,
+  // inline arrays, quoted scalars) — keeps custom/foreign frontmatter keys.
+  const entry = {}
+  if (fileExists) {
+    const content = fs.readFileSync(filePath, 'utf8')
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
+    if (fmMatch) {
+      for (const line of fmMatch[1].split('\n')) {
+        const m = line.match(/^(\w+):\s*(.*)$/)
+        if (!m) continue
+        const [, key, raw] = m
+        const arrMatch = raw.match(/^\[(.*)\]$/)
+        if (arrMatch) {
+          entry[key] = arrMatch[1].split(',').map(s => s.trim()).filter(Boolean)
+        } else if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+          entry[key] = raw.slice(1, -1)
+        } else {
+          entry[key] = raw === 'null' ? null : raw
+        }
+      }
+    }
+  }
+  // Merge: file frontmatter wins for content fields; the index row fills
+  // operational fields the file never carries. (Operational fields are FORCED
+  // after this loop — see F1 block below — so a forged
+  // access_count/last_accessed/archived/source in file frontmatter cannot
+  // override the resolution.)
+  const { _dataDir, _source, _archived, ...rowFrontmatter } = row
+  for (const [k, v] of Object.entries(rowFrontmatter)) {
+    if (!(k in entry)) entry[k] = v
+  }
+
+  // F1 (amended R7): operational fields come from the RESOLUTION, NEVER from
+  // file frontmatter — a file whose frontmatter carries forged
+  // access_count: 999 / last_accessed: forged / archived: true / source: global
+  // must not override the index's operational values. access_count +
+  // last_accessed from the index row (defaulting to 0/null matches the rebuilt
+  // index surface), source from the store that resolved the id, archived from
+  // which directory the body file came from (true only for an archived-row
+  // resolution; deleted otherwise — the index never carries an archived field).
+  entry.access_count = row.access_count ?? 0
+  entry.last_accessed = row.last_accessed ?? null
+  entry.source = _source
+  if (archived) entry.archived = true
+  else if ('archived' in entry) delete entry.archived
+
+  // LOCKSTEP with em-rebuild-index.mjs :184,:205 (priority → Number when finite;
+  // declaration at :184, the Number.isFinite coercion applied to the emitted
+  // entry at :205) and :208 (pinned → true when 'true'). The file-frontmatter parser above
+  // yields YAML scalars as strings; the writers/em-rebuild-index index a Number
+  // and a boolean. These exact coercions keep --read byte-consistent with the
+  // list/index surfaces so a priority/pinned value does not flip type between
+  // `--read` and `em-list`/`em-search`. Class is closed: priority and pinned
+  // are the only non-string scalars the writers emit.
+  if (entry.priority !== undefined) {
+    const priorityNum = Number(entry.priority)
+    entry.priority = Number.isFinite(priorityNum) ? priorityNum : entry.priority
+  }
+  if (entry.pinned === true || entry.pinned === 'true') {
+    entry.pinned = true
+  } else if ('pinned' in entry) {
+    delete entry.pinned
+  }
+
+  // F2: dangling body — index row present but file absent from BOTH episodes/
+  // and archived/ (deleted file P5, torn-prune P5b where the file moved to
+  // archived/ but the row is still active). Return body_missing:true (status ok,
+  // exit 0) + stderr note, and SKIP tracking entirely (a delivered-nothing read
+  // must not feed conversion telemetry).
+  if (!fileExists) {
+    entry.body_missing = true
+    process.stderr.write(`body file missing for episode ${row.id}; read returned frontmatter only\n`)
+    await new Promise((resolve) => process.stdout.write(
+      JSON.stringify({ status: 'ok', episode: entry }) + '\n', resolve))
+    process.exit(0)
+  }
+
+  // Body is everything after the second `---`.
+  const content = fs.readFileSync(filePath, 'utf8')
+  const parts = content.split('---')
+  let body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
+
+  // SERIALIZED-BYTE body bound (R7/REQ-14, amended F1): truncate until
+  // Buffer.byteLength(JSON.stringify(body), 'utf8') <= 49152. The bound must be
+  // SERIALIZED BYTES, not UTF-16 code units (.length) and not raw body bytes —
+  // a 45,000-char CJK body passes a `.length <= 49152` cap yet emits ~135,236
+  // UTF-8 bytes of stdout (panel F1 probe), and a quote-heavy body doubles under
+  // JSON escaping. Binary search the largest slice whose serialized UTF-8 byte
+  // length fits; the result is always valid JSON (never a mid-JSON break —
+  // JSON.stringify escapes lone surrogates, and the slice is a code-unit prefix).
+  const MAX_SERIALIZED_BODY = 49152
+  let bodyTruncated = false
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_SERIALIZED_BODY) {
+    bodyTruncated = true
+    let lo = 0, hi = body.length, best = ''
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      const candidate = body.slice(0, mid)
+      if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= MAX_SERIALIZED_BODY) {
+        best = candidate
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    body = best
+    process.stderr.write(`body truncated to serialized-byte bound (<=${MAX_SERIALIZED_BODY}); read episode ${row.id} file directly for the full body\n`)
+  }
+  entry.body = body
+  if (bodyTruncated) entry.body_truncated = true
+
+  // Access tracking on the matched row (R7), honoring --no-track. Mirrors the
+  // search write-back for exactly one row. Archived rows live in
+  // archived-index.jsonl, which writeBackAccessTracking does not target, so
+  // tracking is skipped for them. body_missing reads (above) skip tracking too.
+  if (!noTrack && !archived) {
+    writeBackAccessTracking([row])
+  }
+
+  // State A/C (§12): found → {status:"ok", episode:{...full}}, exit 0.
+  await new Promise((resolve) => process.stdout.write(
+    JSON.stringify({ status: 'ok', episode: entry }) + '\n', resolve))
+  process.exit(0)
+}
 
 // ---------------------------------------------------------------------------
 // History mode: show full revision chain for an episode

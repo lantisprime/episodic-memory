@@ -18,6 +18,7 @@ RFCs document proposed changes to the episodic-memory system. Every non-trivial 
 | RFC-008 | Decoupling the Enforcement Layer from the Memory Substrate | accepted | Charlton Ho |
 | RFC-009 | Lesson Activation: Trigger-Bearing Lessons, Derived Trigger Index, and Bounded Advisory Recall | accepted | Charlton Ho |
 | RFC-010 | Version-pinned central enforcement engine with per-project shims | draft | Charlton Ho |
+| RFC-011 | Playbook Activation Preferences: Per-Project Session-Start and On-Demand Playbook Loading | accepted | Charlton Ho |
 
 ---
 

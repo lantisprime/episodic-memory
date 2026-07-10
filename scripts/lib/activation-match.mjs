@@ -185,9 +185,32 @@ function scopeOk(entry, identity) {
 }
 
 // ---------------------------------------------------------------------------
-// REQ-11 render. No decision/block/permissionDecision field in either form.
+// REQ-11 render. No decision/block/permissionDecision field in any form.
+//
+// RFC-011 R4 (S3): an entry with `entry_class: "playbook"` renders the R3
+// playbook form (provenance prefix + READ + precomputed read_command) instead
+// of the lesson forms, regardless of the pinned effective_priority 0. The
+// matchers (sanitizeEntries/candidatesForEvent/scopeOk/selectAndBound) UNITE
+// playbook + lesson rows under the SAME matching semantics — only the render
+// branches on entry_class. read_command is precomputed at build (R2.4); a
+// malformed row without one degrades to a non-empty fallback line rather than
+// throwing (advisory fail-open, REQ-12).
 // ---------------------------------------------------------------------------
+function renderPlaybookLine(entry) {
+  const id = entry && typeof entry.episode_id === "string" ? entry.episode_id : "";
+  const summary = String((entry && entry.summary) ?? "");
+  const rc = entry && typeof entry.read_command === "string" && entry.read_command
+    ? entry.read_command
+    : `node <scripts>/em-search.mjs --read ${id}`;
+  // RFC-011 R3 / §8.2 verbatim — provenance prefix names the source file, so
+  // declared injection is auditable (R1 threat model). No body content, ever
+  // (R2.8 sentinel): only episode_id + summary + read_command appear.
+  return `playbook (playbooks.json): READ ${id} before proceeding (${rc}): ${summary}`;
+}
+
 function renderLine(entry) {
+  // R4 (S3): playbook rows render the playbook form regardless of priority.
+  if (entry && entry.entry_class === "playbook") return renderPlaybookLine(entry);
   const id = entry.episode_id;
   const summary = String(entry.summary ?? "");
   if (Number(entry.effective_priority) >= 8) {
@@ -268,6 +291,53 @@ function candidatesForEvent(entries, event, index, identity) {
 function filterSuppressed(candidates, suppress) {
   const s = suppress instanceof Set ? suppress : new Set();
   return candidates.filter((e) => !s.has(e.episode_id));
+}
+
+// ---------------------------------------------------------------------------
+// RFC-011 R2.9(b) first half (fix-round Item 2, agent F1): event-level render
+// dedup — ONE rendered entry per episode id per event. An episode with 2+
+// triggers that co-match one prompt (e.g. triggers ["alphaword", "betaword"],
+// prompt "alphaword and betaword together") produces N candidate rows → would
+// render N duplicate lines and burn N max_matches slots (probe-confirmed:
+// playbookLineCount=2, lessonLineCount=2). The session-start bands are
+// per-episode by construction (T4d — the session_start.playbooks array carries
+// one entry per episode; tier-1 critical_entries + tier-2 entries dedup by id
+// via tier1CandidateIds) and are NOT routed through this function.
+//
+// R2.9(b) second half (playbook form wins): when BOTH a lesson row AND a
+// playbook row for the SAME episode id match the same event, the PLAYBOOK form
+// wins (it carries the read_command). resolve the form BEFORE dedup — pick the
+// playbook representative when any playbook candidate exists for the group,
+// else keep the FIRST-ENCOUNTERED lesson candidate (local precedence — the
+// hook's mergeIndexes iterates local-then-global and candidatesForEvent
+// preserves entry order; no priority comparison happens here). All lesson rows
+// for one episode carry the SAME effective_priority (the band is derived
+// per-episode via effectivePriority(lessonId, rows), never per-trigger), so
+// which lesson row is the representative does not affect selectAndBound's
+// downstream sort. Forged/malformed rows (no entry_class) are treated as
+// lesson-form here; the schema-side F6a binding rejects forged playbook rows
+// at validation.
+// All playbook rows for one episode render identically (same episode_id /
+// summary / read_command), so the first playbook candidate is the representative.
+// The representative carries its OWN effective_priority into selectAndBound's
+// sort — a playbook row (pinned 0 per R2) sorts below every lesson, preserving
+// the R2 pinning invariant (a declared playbook never displaces an earned
+// lesson inside max_matches).
+// ---------------------------------------------------------------------------
+function dedupByEpisodePreferPlaybook(candidates) {
+  const byEpisode = new Map();
+  for (const e of candidates) {
+    if (!e || typeof e.episode_id !== "string" || !e.episode_id) continue;
+    const existing = byEpisode.get(e.episode_id);
+    if (!existing) { byEpisode.set(e.episode_id, e); continue; }
+    // R2.9(b) playbook-wins: a playbook representative replaces an existing
+    // lesson-form representative. Once a playbook row is the representative, a
+    // later lesson row for the same episode does NOT displace it.
+    if (e.entry_class === "playbook" && existing.entry_class !== "playbook") {
+      byEpisode.set(e.episode_id, e);
+    }
+  }
+  return [...byEpisode.values()];
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +478,38 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
     totalTokens += t;
   }
 
-  // ---- Tier 2: entries (plain-only, cross-tier dedup) ----------------------
+  // ---- Playbook band (RFC-011 R3, REQ-9): provenance-prefixed imperative
+  // line, positioned AFTER tier-1 critical_entries and BEFORE the tier-2
+  // static blend. The cap is enforced AT BUILD (R3/REQ-9: the array arrives
+  // pre-capped to bounds.max_playbooks in preference-file order); the renderer
+  // renders what is present. Playbooks consume ONLY the shared max_tokens
+  // budget (NEVER tier-1/tier-2 count caps, R3). Suppression by id BEFORE dedup
+  // (REQ-9). Dedup (R2.9(b)/EC5): a playbook id that is ALSO a tier-1 candidate
+  // renders once in critical form (existing candidacy rule — the playbook band
+  // skips it); playbook ids are then added to the tier-2 exclusion set the same
+  // way tier-1 candidates are (one id, one line, always). The exclusion uses the
+  // pre-budget candidacy set (mirrors the tier-1 F1 rule) so a playbook dropped
+  // by the shared token budget is still excluded from tier 2.
+  const playbooksRaw = Array.isArray(ss.playbooks) ? ss.playbooks : [];
+  const playbookCandidates = playbooksRaw.filter((p) =>
+    p && typeof p === "object" &&
+    typeof p.episode_id === "string" && p.episode_id &&
+    !s.has(p.episode_id) &&
+    !tier1CandidateIds.has(p.episode_id));
+  // Extend the cross-tier exclusion set so tier 2 also skips playbook ids
+  // (mutates tier1CandidateIds in place — the variable is local to this call).
+  for (const p of playbookCandidates) tier1CandidateIds.add(p.episode_id);
+  const playbookLines = [];
+  const droppedPlaybooks = [];
+  for (const p of playbookCandidates) {
+    const line = renderPlaybookLine(p);
+    const t = estimateTokens(line);
+    if (t > maxTokens || totalTokens + t > maxTokens) { droppedPlaybooks.push(p); continue; }
+    playbookLines.push(line);
+    totalTokens += t;
+  }
+
+  // ---- Tier 2: entries (plain-only, cross-tier dedup incl. playbook ids) ----
   const tier2Candidates = entriesRaw.filter((e) =>
     e && typeof e === "object" &&
     typeof e.episode_id === "string" && e.episode_id &&
@@ -442,12 +543,32 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
     preflightLines.push(`preflight: ${total} recent ${taskType} violation(s) (${ids.join(", ")})`);
   }
 
+  // ---- Overflow notes (RFC-011 R3 / REQ-9) ----
+  // Token-drop note: one named id per note. When BOTH a critical and a playbook
+  // line were dropped by the shared token budget, the critical id takes the
+  // named slot and counts aggregate (round-2 planner N4 note-precedence). When
+  // only a playbook line was dropped (no critical), the playbook form names an
+  // id (R3 §8.2 verbatim `+N more suppressed, incl. playbook <episode_id>`).
+  // Build-cap note (R3/REQ-9): when the build capped declarations at
+  // max_playbooks (playbooks_capped > 0), a SECOND note names the first capped
+  // id from session_start.playbooks_capped_first (both fields arrive inside the
+  // merged session_start — no other data path exists to the renderer).
+  const notes = [];
   const criticalDropped = droppedTier1.find((e) => Number(e.effective_priority) >= 8);
-  const overflowNote = criticalDropped
-    ? `+${droppedTier1.length} more matches suppressed, incl. critical ${criticalDropped.episode_id}`
-    : null;
+  if (criticalDropped) {
+    notes.push(`+${droppedTier1.length + droppedPlaybooks.length} more matches suppressed, incl. critical ${criticalDropped.episode_id}`);
+  } else if (droppedPlaybooks.length > 0) {
+    notes.push(`+${droppedPlaybooks.length} more suppressed, incl. playbook ${droppedPlaybooks[0].episode_id}`);
+  }
+  if (Number.isInteger(ss.playbooks_capped) && ss.playbooks_capped > 0) {
+    const first = typeof ss.playbooks_capped_first === "string" && ss.playbooks_capped_first
+      ? ss.playbooks_capped_first
+      : "";
+    notes.push(`+${ss.playbooks_capped} declared playbooks capped, incl. ${first}`);
+  }
+  const overflowNote = notes.length > 0 ? notes.join("\n") : null;
 
-  return { lines: [...tier1Lines, ...tier2Lines, ...preflightLines], overflowNote };
+  return { lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines], overflowNote };
 }
 
 // ---------------------------------------------------------------------------
@@ -499,9 +620,10 @@ export function matchActivation(index, event, identity, suppress, bounds) {
 
     const candidates = candidatesForEvent(entries, event, index, identity);
     const surviving = filterSuppressed(candidates, suppress);
-    if (surviving.length === 0) return { lines: [], overflowNote: null };
+    const deduped = dedupByEpisodePreferPlaybook(surviving); // RFC-011 R2.9(b) one-per-episode + playbook-wins
+    if (deduped.length === 0) return { lines: [], overflowNote: null };
 
-    return selectAndBound(surviving, bounds);
+    return selectAndBound(deduped, bounds);
   } catch {
     return { lines: [], overflowNote: null };
   }
@@ -510,4 +632,4 @@ export function matchActivation(index, event, identity, suppress, bounds) {
 // Exported for the test file's direct unit coverage of the parsing/escape
 // helpers (word-boundary/regex-metachar/tool-glob edge cases) without
 // re-deriving them through full matchActivation fixtures.
-export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, renderLine, renderPlainLine, estimateTokens, renderSessionStart };
+export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, renderLine, renderPlainLine, renderPlaybookLine, estimateTokens, renderSessionStart, dedupByEpisodePreferPlaybook };

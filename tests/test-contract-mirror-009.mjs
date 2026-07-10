@@ -75,6 +75,26 @@ t('testContractMirrorDetectsDrift', () => {
   const r4 = run(['--contract', p4]);
   assert.equal(r4.code, 1);
   assert.ok(r4.json.errors.some((e) => e.includes('violated_pattern')), 'names the dropped field');
+
+  // (e) stale trigger_index_shape.schema_version (the v3-bump guard — a contract
+  // pinned to v2 while code emits v3 is exactly the F1 drift class)
+  const staleVersion = structuredClone(doc);
+  staleVersion.trigger_index_shape.schema_version = 2;
+  const p5 = path.join(d, 'stalever.json');
+  fs.writeFileSync(p5, JSON.stringify(staleVersion));
+  const r5 = run(['--contract', p5]);
+  assert.equal(r5.code, 1, 'stale schema_version exits 1');
+  assert.ok(r5.json.errors.some((e) => e.includes('schema_version')), `names the version drift: ${r5.stdout}`);
+
+  // (f) dropped entry_field from trigger_index_shape.entry_fields (guards the
+  // entry_class/read_command/triggers_overridden v3 pins — F1 stale-consistent pair)
+  const withoutEntryField = structuredClone(doc);
+  withoutEntryField.trigger_index_shape.entry_fields = withoutEntryField.trigger_index_shape.entry_fields.filter((f) => f !== 'read_command');
+  const p6 = path.join(d, 'entryfield.json');
+  fs.writeFileSync(p6, JSON.stringify(withoutEntryField));
+  const r6 = run(['--contract', p6]);
+  assert.equal(r6.code, 1, 'a dropped entry_field exits 1');
+  assert.ok(r6.json.errors.some((e) => e.includes('read_command')), `names the dropped entry field: ${r6.stdout}`);
 });
 
 t('testContractMirrorBadArgvExits2', () => {
