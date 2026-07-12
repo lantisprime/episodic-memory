@@ -251,13 +251,13 @@ for (const cls of LAUNCH_CLASSES) {
   const dirty = [];
   for (const [i, s] of samples.entries()) {
     const keys = Object.keys(s).sort();
-    const shapeOk = keys.length === 2 && keys[0] === "lines" && keys[1] === "overflowNote";
+    const shapeOk = keys.length === 3 && keys[0] === "entries" && keys[1] === "lines" && keys[2] === "overflowNote";
     const noDecision = !Object.hasOwn(s, "decision") && !Object.hasOwn(s, "block") && !Object.hasOwn(s, "permissionDecision");
     const serialized = JSON.stringify(s);
     const noDecisionInJson = !/"decision"|"block"|"permissionDecision"/.test(serialized);
     if (!shapeOk || !noDecision || !noDecisionInJson) { allClean = false; dirty.push({ i, s }); }
   }
-  assert(allClean, "render_no_decision_field: MatchResult carries only {lines, overflowNote} across every sampled state, never decision/block/permissionDecision", JSON.stringify(dirty));
+  assert(allClean, "render_no_decision_field: MatchResult carries only {entries, lines, overflowNote} across every sampled state, never decision/block/permissionDecision", JSON.stringify(dirty));
 }
 
 // ===========================================================================

@@ -16,7 +16,7 @@
     { "id": "rfc-009-activation-session-start", "file": "activation-sessionstart.sh", "event": "SessionStart", "timeout": 10, "checksum": "sha256:b3db3db55f11dbeeed04fc0314e286d6cd37de27af260ef23909b58129a32667" }
   ],
   "support_files": [
-    { "file": "activation-hook-run.mjs", "checksum": "sha256:637540da08f00f717e1d02e610e7f081b5e9e95233489c70d7f3f7e58ca3d94d" }
+    { "file": "activation-hook-run.mjs", "checksum": "sha256:60c88ad441401e1bd28050261e075bff8b04cfd7cc5c6e68d46f771f7c63f8a0" }
   ],
   "io_schema": "schemas/runtime/activation-io.schema.json",
   "runbook": {

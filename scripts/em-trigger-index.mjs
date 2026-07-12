@@ -129,6 +129,21 @@ function parseRows(raw) {
   return rows
 }
 
+// Build an id -> access_count lookup from an in-hand rows array. The build
+// already loads index.jsonl as input, so this is data it has in hand at
+// emit time — never a new read path. Plan step 1.2cb: stamp access_count
+// into the trigger-index entry so the matcher picks it up as
+// entry.access_count ?? 0, leaving the event plane (hook) read-free.
+function accessCountById(rows) {
+  const m = new Map()
+  for (const r of rows) {
+    if (r && typeof r.id === 'string' && r.id) {
+      m.set(r.id, Number.isInteger(r.access_count) ? r.access_count : 0)
+    }
+  }
+  return m
+}
+
 // ---------------------------------------------------------------------------
 // Chain resolution + the earned band (REQ-13)
 // ---------------------------------------------------------------------------
@@ -421,6 +436,7 @@ function buildPlaybookSection({ config, localRows, globalRaw, storeDir, scriptsR
   const globalRows = globalRaw ? parseRows(globalRaw) : []
   const merged = mergeIndexRowsForChain(localRows, globalRows)
   const { byId, successorOf } = buildChainMaps(merged) // reused verbatim (R2.1)
+  const acMap = accessCountById(merged) // plan 1.2cb: stamp access_count at build time
   const todayStr = now.toISOString().slice(0, 10)
   const maxPlaybooks = (config.bounds && Number.isInteger(config.bounds.max_playbooks))
     ? config.bounds.max_playbooks : 2
@@ -482,6 +498,7 @@ function buildPlaybookSection({ config, localRows, globalRaw, storeDir, scriptsR
     episode_id: r.terminalId,
     summary: r.terminal.summary,
     read_command: `node ${scriptsRoot}/em-search.mjs --read ${r.terminalId}`,
+    access_count: acMap.get(r.terminalId) ?? 0,
   }))
 
   // Phase 6: on_demand entry rows — the FULL verbatim shape (R2), pinned to 0.
@@ -504,6 +521,7 @@ function buildPlaybookSection({ config, localRows, globalRaw, storeDir, scriptsR
         applies_to_tools: ['*'],
         entry_class: 'playbook',
         read_command: `node ${scriptsRoot}/em-search.mjs --read ${r.terminalId}`,
+        access_count: acMap.get(r.terminalId) ?? 0,
         ...(r.overridden ? { triggers_overridden: true } : {}),
       })
     }
@@ -657,6 +675,7 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date(), 
   }
 
   const excludedActivity = Object.create(null)
+  const acMap = accessCountById(rows)
   const entries = []
   for (const row of rows) {
     if (!row || row.category !== 'lesson') continue
@@ -682,6 +701,7 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date(), 
         effective_priority: ep, // DERIVED 1-9; never the stored `priority`
         applies_to_projects: Array.isArray(row.applies_to_projects) ? row.applies_to_projects : [],
         applies_to_tools: Array.isArray(row.applies_to_tools) ? row.applies_to_tools : [],
+        access_count: acMap.get(row.id) ?? 0,
         ...(typeof row.review_by === 'string' ? { review_by: row.review_by } : {}),
       })
     }
@@ -789,6 +809,7 @@ export function buildSessionStart(rows, now = new Date()) {
 
   // critical_entries — EVERY active band-8/9 lesson, TRIGGER-INDEPENDENT (EC14:
   // R8 always-tier content carries no trigger; the band scan covers ALL lessons).
+  const acMap = accessCountById(rows)
   const critical_entries = activeLessons
     .filter(r => ep(r.id) >= 8)
     .map(r => ({
@@ -798,6 +819,7 @@ export function buildSessionStart(rows, now = new Date()) {
       effective_priority: ep(r.id),
       applies_to_projects: Array.isArray(r.applies_to_projects) ? r.applies_to_projects : [],
       applies_to_tools: Array.isArray(r.applies_to_tools) ? r.applies_to_tools : [],
+      access_count: acMap.get(r.id) ?? 0,
     }))
     .sort((a, b) => b.effective_priority - a.effective_priority || (a.episode_id < b.episode_id ? -1 : 1))
 
@@ -832,6 +854,7 @@ export function buildSessionStart(rows, now = new Date()) {
     static_score: Number(static_score.toFixed(6)),
     applies_to_projects: Array.isArray(r.applies_to_projects) ? r.applies_to_projects : [],
     applies_to_tools: Array.isArray(r.applies_to_tools) ? r.applies_to_tools : [],
+    access_count: acMap.get(r.id) ?? 0,
   }))
 
   // preflight — per-task-type recent-violation counts keyed by the TYPED
