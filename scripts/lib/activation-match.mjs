@@ -208,13 +208,24 @@ function renderPlaybookLine(entry) {
   return `playbook (playbooks.json): READ ${id} before proceeding (${rc}): ${summary}`;
 }
 
+// isImperative(entry) — single source of truth for the imperative-vs-plain
+// predicate. R4 (S3) playbook rows are ALWAYS imperative (read_command-bearing
+// provenance prefix); lesson rows are imperative iff their effective_priority
+// is in the critical band (>=8). Exported so the RFC-009 P4-S1 telemetry
+// schema entries[] cannot diverge from the rendered lines[] (REQ-16/RFC-009
+// R6 telemetry producer — S1).
+function isImperative(entry) {
+  if (entry && entry.entry_class === "playbook") return true;
+  return Number(entry && entry.effective_priority) >= 8;
+}
+
 function renderLine(entry) {
   // R4 (S3): playbook rows render the playbook form regardless of priority.
   if (entry && entry.entry_class === "playbook") return renderPlaybookLine(entry);
   const id = entry.episode_id;
   const summary = String(entry.summary ?? "");
-  if (Number(entry.effective_priority) >= 8) {
-    return `READ ${id} before proceeding (em-search --history ${id} --full): ${summary}`;
+  if (isImperative(entry)) {
+    return `READ ${id} before proceeding (em-search --read ${id}): ${summary}`;
   }
   return `lesson ${id}: ${summary}`;
 }
@@ -368,6 +379,11 @@ function selectAndBound(candidates, bounds) {
   });
 
   const lines = [];
+  const entries = []; // RFC-009 P4-S1 (R6) telemetry: parallel to lines[], one
+                      // entry per INJECTED lesson, carrying the schema fields
+                      // {id, effective_priority, rendered, source_scope,
+                      // access_count_at_inject}. Populated in lock-step with
+                      // lines.push so result.entries.length === result.lines.length.
   const dropped = [];
   let totalTokens = 0;
 
@@ -387,6 +403,19 @@ function selectAndBound(candidates, bounds) {
       continue;
     }
     lines.push(line);
+    // trigger-index entries carry effective_priority AND access_count (RFC-009
+    // P4-S1 R6 / plan step 1.2cb: em-trigger-index.mjs stamps access_count from
+    // the in-hand index.jsonl rows at build time, so the hook never reads
+    // index.jsonl at event time). access_count defaults to 0 for any row whose
+    // index.jsonl record did not carry an integer value. source_scope is
+    // stamped by mergeIndexes in the hook.
+    entries.push({
+      id: entry.episode_id,
+      effective_priority: entry.effective_priority,
+      rendered: isImperative(entry) ? "imperative" : "plain",
+      source_scope: entry.source_scope ?? null,
+      access_count_at_inject: entry.access_count ?? 0,
+    });
     totalTokens += lineTokens;
   }
 
@@ -395,7 +424,7 @@ function selectAndBound(candidates, bounds) {
     ? `+${dropped.length} more matches suppressed, incl. critical ${criticalDropped.episode_id}`
     : null;
 
-  return { lines, overflowNote };
+  return { lines, overflowNote, entries };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +497,7 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   const tier1CandidateIds = new Set(tier1Candidates.map((e) => e.episode_id));
 
   const tier1Lines = [];
+  const tier1Entries = []; // RFC-009 P4-S1 (R6) telemetry: parallel to tier1Lines.
   const droppedTier1 = [];
   let totalTokens = 0;
   for (const e of sortedTier1) {
@@ -476,6 +506,16 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
     const t = estimateTokens(line);
     if (t > maxTokens || totalTokens + t > maxTokens) { droppedTier1.push(e); continue; }
     tier1Lines.push(line);
+    // entries[] carries one entry per episode-bearing LESSON only.
+    // preflight and pattern-health output are surface lines only and
+    // never carry entries — they are spread into lines below, not entries.
+    tier1Entries.push({
+      id: e.episode_id,
+      effective_priority: e.effective_priority,
+      rendered: isImperative(e) ? "imperative" : "plain",
+      source_scope: e.source_scope ?? null,
+      access_count_at_inject: e.access_count ?? 0,
+    });
     totalTokens += t;
   }
 
@@ -502,11 +542,19 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   for (const p of playbookCandidates) tier1CandidateIds.add(p.episode_id);
   const playbookLines = [];
   const droppedPlaybooks = [];
+  const playbookEntries = []; // RFC-009 P4-S1 (R6) telemetry: parallel to playbookLines.
   for (const p of playbookCandidates) {
     const line = renderPlaybookLine(p);
     const t = estimateTokens(line);
     if (t > maxTokens || totalTokens + t > maxTokens) { droppedPlaybooks.push(p); continue; }
     playbookLines.push(line);
+    playbookEntries.push({
+      id: p.episode_id,
+      effective_priority: p.effective_priority ?? 0, // playbooks pinned 0 (R2)
+      rendered: "imperative", // playbooks always imperative (R4 S3)
+      source_scope: p.source_scope ?? null,
+      access_count_at_inject: p.access_count ?? 0,
+    });
     totalTokens += t;
   }
 
@@ -521,11 +569,21 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   // preserve that order rather than re-sorting on a field tier 2 must not read.
 
   const tier2Lines = [];
+  const tier2Entries = []; // RFC-009 P4-S1 (R6) telemetry: parallel to tier2Lines.
   for (const e of tier2Candidates) {
     const line = renderPlainLine(e);
     const t = estimateTokens(line);
     if (t > maxTokens || totalTokens + t > maxTokens) continue; // state I' — silent, never critical
     tier2Lines.push(line);
+    // tier-2 entries carry NO effective_priority by REQ-18/§8.2 — the schema
+    // pin is plain-only, so the rendered form is unconditionally 'plain'.
+    tier2Entries.push({
+      id: e.episode_id,
+      effective_priority: null,
+      rendered: "plain",
+      source_scope: e.source_scope ?? null,
+      access_count_at_inject: e.access_count ?? 0,
+    });
     totalTokens += t;
   }
 
@@ -609,7 +667,11 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
     }
   }
 
-  return { lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines, ...patternHealthLines], overflowNote };
+  return {
+    lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines, ...patternHealthLines],
+    overflowNote,
+    entries: [...tier1Entries, ...playbookEntries, ...tier2Entries], // RFC-009 P4-S1 (R6) telemetry
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -652,25 +714,25 @@ export function matchActivation(index, event, identity, suppress, bounds) {
     }
 
     const entries = sanitizeEntries(index);
-    if (entries.length === 0) return { lines: [], overflowNote: null };
+    if (entries.length === 0) return { lines: [], overflowNote: null, entries: [] };
 
     if (kind !== "prompt" && kind !== "tool") {
       // any other/unknown kind: empty, advisory (fail open).
-      return { lines: [], overflowNote: null };
+      return { lines: [], overflowNote: null, entries: [] };
     }
 
     const candidates = candidatesForEvent(entries, event, index, identity);
     const surviving = filterSuppressed(candidates, suppress);
     const deduped = dedupByEpisodePreferPlaybook(surviving); // RFC-011 R2.9(b) one-per-episode + playbook-wins
-    if (deduped.length === 0) return { lines: [], overflowNote: null };
+    if (deduped.length === 0) return { lines: [], overflowNote: null, entries: [] };
 
     return selectAndBound(deduped, bounds);
   } catch {
-    return { lines: [], overflowNote: null };
+    return { lines: [], overflowNote: null, entries: [] };
   }
 }
 
 // Exported for the test file's direct unit coverage of the parsing/escape
 // helpers (word-boundary/regex-metachar/tool-glob edge cases) without
 // re-deriving them through full matchActivation fixtures.
-export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, renderLine, renderPlainLine, renderPlaybookLine, estimateTokens, renderSessionStart, dedupByEpisodePreferPlaybook };
+export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, isImperative, renderLine, renderPlainLine, renderPlaybookLine, estimateTokens, renderSessionStart, dedupByEpisodePreferPlaybook };

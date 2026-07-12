@@ -17,7 +17,7 @@
   ],
   "support_files": [
     { "file": "activation-hook-run.mjs", "checksum": "sha256:4bc2605eda864e38fe6894b53690aafa20f64e18114788f661886a37aa53e844" },
-    { "file": "activation-match.mjs", "checksum": "sha256:4995cfe35554c6b61f06eff20ed1deaab9c99f4f5f8513cd3281d50e658e52f2" },
+    { "file": "activation-match.mjs", "checksum": "sha256:e6cc87b0787b425c5a8d86a9e8847cc1a7d11b438e432d83e01624ed6f2d37af" },
     { "file": "json-instance-validate.mjs", "checksum": "sha256:5ccf2b3121e0ec0631e39e583ecc30d98fe625f15c9810cdd9ae1e8675927528" }
   ],
   "io_schema": "schemas/runtime/activation-io.schema.json",

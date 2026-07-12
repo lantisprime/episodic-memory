@@ -78,7 +78,8 @@
         "review_by": { "type": "string" },
         "entry_class": { "enum": ["playbook"] },
         "read_command": { "type": "string" },
-        "triggers_overridden": { "type": "boolean" }
+        "triggers_overridden": { "type": "boolean" },
+        "access_count": { "type": "integer" }
       },
       "allOf": [
         {
@@ -113,7 +114,8 @@
       "properties": {
         "episode_id": { "type": "string", "minLength": 1 },
         "summary": { "type": "string" },
-        "read_command": { "type": "string" }
+        "read_command": { "type": "string" },
+        "access_count": { "type": "integer" }
       }
     },
     "playbooksReport": {

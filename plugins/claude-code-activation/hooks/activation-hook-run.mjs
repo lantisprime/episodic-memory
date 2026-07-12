@@ -89,6 +89,7 @@ function resolveAsset(relForms) {
 
 const TRIGGER_INDEX_SCRIPT = resolveAsset(['em-trigger-index.mjs', 'scripts/em-trigger-index.mjs'])
 const MATCH_LIB_PATH = resolveAsset(['lib/activation-match.mjs', 'scripts/lib/activation-match.mjs'])
+const ACTIVATION_LOG_LIB_PATH = resolveAsset(['lib/activation-log.mjs', 'scripts/lib/activation-log.mjs'])
 const VALIDATE_LIB_PATH = resolveAsset(['lib/json-instance-validate.mjs', 'scripts/lib/json-instance-validate.mjs'])
 const SUPPRESS_SCHEMA_PATH = resolveAsset(['lesson-suppress.schema.json', 'schemas/lesson-suppress.schema.json'])
 
@@ -308,11 +309,15 @@ function mergeIndexes(local, global) {
       const v = typeof e.value === 'string' ? e.value : ''
       const key = `${e.episode_id}\u0000${tk}\u0000${v}`
       const existing = mapped.get(key)
-      if (!existing) { mapped.set(key, e); continue }
+      // RFC-009 P4-S1 (1.2d): tag each row with its origin store via a shallow
+      // copy — the entry object itself is NEVER mutated (e stays pristine for
+      // any other consumer holding a reference to the same object).
+      const tagged = { ...e, source_scope: idx === local ? 'local' : 'global' }
+      if (!existing) { mapped.set(key, tagged); continue }
       // R2.9(b): a playbook row replaces a lesson row for the same tuple ("the
       // PLAYBOOK form wins" — it carries the read_command). Forged/malformed
       // rows of either kind pass without replacement if entry_class is absent.
-      if (e.entry_class === 'playbook' && existing.entry_class !== 'playbook') mapped.set(key, e)
+      if (e.entry_class === 'playbook' && existing.entry_class !== 'playbook') mapped.set(key, tagged)
     }
   }
   const entries = [...mapped.values()]
@@ -407,13 +412,20 @@ function mergePreflight(localVal, globalVal) {
 function mergeSessionStart(localStatus, globalStatus) {
   const localVal = localStatus.ok ? localStatus.value : null
   const globalVal = globalStatus.ok ? globalStatus.value : null
+  // F4 (review-confirmed): stamp source_scope on each session_start entry during
+  // the merge — the persisted sections carry no origin tag, so without this
+  // stamp the entries[] producer in activation-match.mjs sees source_scope=null
+  // and the F4 access-count join (per-scope index lookup below) can't bind the
+  // row to its index.jsonl. Mirrors mergeIndexes' shallow-copy tag (same
+  // non-mutation invariant: original entries stay pristine).
+  const tagScope = (list, scope) => Array.isArray(list) ? list.map((e) => (e && typeof e === 'object' ? { ...e, source_scope: scope } : e)) : []
   const critical_entries = dedupByEpisodeId([
-    localVal ? localVal.critical_entries : null,
-    globalVal ? globalVal.critical_entries : null,
+    localVal ? tagScope(localVal.critical_entries, 'local') : null,
+    globalVal ? tagScope(globalVal.critical_entries, 'global') : null,
   ])
   const entries = sortEntriesByStaticScore(dedupByEpisodeId([
-    localVal ? localVal.entries : null,
-    globalVal ? globalVal.entries : null,
+    localVal ? tagScope(localVal.entries, 'local') : null,
+    globalVal ? tagScope(globalVal.entries, 'global') : null,
   ]))
   const preflight = mergePreflight(localVal, globalVal)
   // RFC-011 R2.7 / REQ-8: thread the LOCAL persisted playbooks trio UNCHANGED
@@ -582,6 +594,32 @@ async function main() {
 
   let text = lines.join('\n')
   if (result.overflowNote) text += `\n${result.overflowNote}`
+
+  // RFC-009 P4-S1 (R6, REQ-16): event-plane telemetry — one append per
+  // injection, fire-and-forget. Never allowed to affect stdout/exit (the
+  // advisory invariant governs this whole file); the try/catch here is a
+  // SECOND belt-and-suspenders layer on top of appendActivationLine's own
+  // internal try/catch, covering the resolveAsset/import/dataDir plumbing
+  // itself, not just the write.
+  try {
+    if (ACTIVATION_LOG_LIB_PATH) {
+      const logMod = await import(pathToFileURL(ACTIVATION_LOG_LIB_PATH).href)
+      const entries = (result.entries ?? []).map((e) => ({
+        id: e.id,
+        effective_priority: e.effective_priority,
+        rendered: e.rendered,
+        source_scope: e.source_scope,
+        access_count_at_inject: e.access_count_at_inject,
+      }))
+      const ts = new Date().toISOString()
+      const project = identity.slug
+      const surface = EVENT_NAME === 'PreToolUse' ? 'tool' : EVENT_NAME === 'SessionStart' ? 'session_start' : 'per_prompt'
+      const dataDir = path.join(identity.root, '.episodic-memory')
+      logMod.appendActivationLine(dataDir, { ts, project, event: 'inject', surface, entries })
+    }
+  } catch {
+    // fire-and-forget (REQ-16): never let telemetry affect stdout/exit.
+  }
 
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {

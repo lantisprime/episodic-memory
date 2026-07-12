@@ -226,7 +226,7 @@ function writeBand9Violations(dir, crit) {
   assert(ctx.includes(`node ${path.join(FAKE_ROOT, "scripts", "em-search.mjs")} --read ${ss}`), "T4a_session_start_playbook_renders: read_command names the verbatim tracked em-search --read command (precomputed at build)", ctx);
   assert(ctx.includes("ss playbook summary"), "T4a_session_start_playbook_renders: summary carried", ctx);
   // Positioning: critical (band-9 imperative form) -> playbook band -> tier-2 plain.
-  const critIdx = ctx.indexOf(`READ ${crit} before proceeding (em-search --history ${crit} --full)`);
+  const critIdx = ctx.indexOf(`READ ${crit} before proceeding (em-search --read ${crit})`);
   const pbIdx = ctx.indexOf(`playbook (playbooks.json): READ ${ss}`);
   const plainIdx = ctx.indexOf(`lesson ${plain}:`);
   assert(critIdx !== -1 && pbIdx !== -1 && plainIdx !== -1 && critIdx < pbIdx && pbIdx < plainIdx,
@@ -319,9 +319,11 @@ function writeBand9Violations(dir, crit) {
   const r = runSessionStart({ home, stdin: { hook_event_name: "SessionStart" } });
   const out = parseHookOut(r.stdout);
   const ctx = out && out.hookSpecificOutput ? out.hookSpecificOutput.additionalContext : "";
-  // Critical form verbatim: `READ ${ss} before proceeding (em-search --history ${ss} --full): ...`
-  assert(ctx.includes(`READ ${ss} before proceeding (em-search --history ${ss} --full)`),
-    "T4d_critical_wins: the dual id renders in CRITICAL form (em-search --history)", ctx);
+  // Critical form verbatim: `READ ${ss} before proceeding (em-search --read ${ss}): ...`
+  assert(ctx.includes(`READ ${ss} before proceeding (em-search --read ${ss})`),
+    "T4d_critical_wins: the dual id renders in CRITICAL form (em-search --read)", ctx);
+  assert(!ctx.includes("(em-search --history"),
+    "T4d_critical_wins: critical render never names --history (REQ-22 guard)", ctx);
   const pbMatchCount = (ctx.match(/playbook \(playbooks\.json\): READ /g) || []).length;
   assert(pbMatchCount === 0, "T4d_critical_wins: the playbook line for the dual id never renders (one id, one line, critical form wins; R2.9(c))", `pbMatchCount=${pbMatchCount}`);
   removeManifest();
@@ -897,7 +899,7 @@ function normalizeMtime(p) {
     const r = matchActivation(idx, promptEvent("alphaword and betaword together"), IDENTITY, undefined, BOUNDS);
     const lines = r.lines;
     const pbForm = lines.filter((l) => l.includes("playbook (playbooks.json):"));
-    const lsForm = lines.filter((l) => l.startsWith("lesson dual-1:") || l.startsWith("READ dual-1 before proceeding (em-search --history"));
+    const lsForm = lines.filter((l) => l.startsWith("lesson dual-1:") || l.startsWith("READ dual-1 before proceeding (em-search --read"));
     assert(lines.length === 1, "T6g_playbook_wins_one_line: exactly ONE line for the episode (R2.9(b) one-per-episode)", JSON.stringify(lines));
     assert(pbForm.length === 1 && lsForm.length === 0, "T6g_playbook_wins: the one line is the PLAYBOOK form, NOT the lesson imperative/plain form (R2.9(b) playbook-wins; the seen-set did not let the band-9 lesson row block the playbook row)", JSON.stringify(lines));
   }

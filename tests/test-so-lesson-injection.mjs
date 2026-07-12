@@ -232,8 +232,10 @@ function unitEntry(id, priority, summary, extra = {}) {
   const r = runRequest({ home, proj, body: 'renderprobe now' })
   assert(r.status === 0, 'render: exits 0', r.stderr)
   const body = latestBody(proj)
-  assert(body.includes(`READ ${imp.id} before proceeding (em-search --history ${imp.id} --full): imperative render probe`),
+  assert(body.includes(`READ ${imp.id} before proceeding (em-search --read ${imp.id}): imperative render probe`),
     'render: band-8 imperative form verbatim', body.slice(body.indexOf(LESSON_BLOCK_HEADER), body.indexOf(LESSON_BLOCK_HEADER) + 500))
+  assert(!body.includes('(em-search --history'),
+    'render: imperative render never names the untracked --history command (REQ-22 guard)', body.slice(body.indexOf(LESSON_BLOCK_HEADER), body.indexOf(LESSON_BLOCK_HEADER) + 500))
   assert(body.includes(`lesson ${plain.id}: plain render probe`), 'render: plain form verbatim')
 }
 // 11. sanitize (unit + E2E single-line confinement)
