@@ -700,6 +700,173 @@ function rebuildFreshGlobal(home, proj) {
 }
 
 // ===========================================================================
+// pattern_health_renders (RFC-009 R5b REQ-12)
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("ph-renders");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "ph render seed" });
+  rebuildFresh(home, proj);
+  const tiPath = triggerIndexPath(proj);
+  const ti = JSON.parse(fs.readFileSync(tiPath, "utf8"));
+  ti.session_start = ti.session_start && typeof ti.session_start === "object" ? ti.session_start : {};
+  ti.session_start.pattern_health = { schema_version: 1, verdict: "needs-enforcement", unhealthy: 2, pattern_ids: ["bp-001-implementation-workflow", "bp-010-habits-override-knowledge"], computed_at: "2026-07-11T00:00:00.000Z" };
+  fs.writeFileSync(tiPath, JSON.stringify(ti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart", source: "startup" } });
+  const out = parseHookOut(r.stdout);
+  assert(r.status === 0, "pattern_health_renders: hook exits 0", `status=${r.status} stderr=${r.stderr}`);
+  const ctx = out && out.hookSpecificOutput ? out.hookSpecificOutput.additionalContext : "";
+  assert(ctx.includes("pattern-health: 2 unhealthy (bp-001-implementation-workflow, bp-010-habits-override-knowledge) - run node scripts/em-pattern-health.mjs --hermetic"),
+    "pattern_health_renders: exact advisory line rendered", ctx);
+  assert(ctx.split("\n").filter((l) => l.startsWith("pattern-health:")).length === 1,
+    "pattern_health_renders: exactly one advisory line", ctx);
+  assert(noDecisionField(r.stdout), "pattern_health_renders: no decision field (advisory-only)", r.stdout);
+  removeManifest();
+}
+// ===========================================================================
+// pattern_health_silent (healthy verdict renders nothing)
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("ph-silent");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "ph silent seed" });
+  rebuildFresh(home, proj);
+  const tiPath = triggerIndexPath(proj);
+  const ti = JSON.parse(fs.readFileSync(tiPath, "utf8"));
+  ti.session_start = ti.session_start && typeof ti.session_start === "object" ? ti.session_start : {};
+  ti.session_start.pattern_health = { schema_version: 1, verdict: "healthy", unhealthy: 0, pattern_ids: [], computed_at: "2026-07-11T00:00:00.000Z" };
+  fs.writeFileSync(tiPath, JSON.stringify(ti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  assert(r.status === 0 && !/pattern-health:/.test(r.stdout),
+    "pattern_health_silent: healthy verdict renders no advisory line", r.stdout);
+  removeManifest();
+}
+// ===========================================================================
+// pattern_health_degraded (EC5: out-of-enum verdict renders nothing, exit 0)
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("ph-degraded");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "ph degraded seed" });
+  rebuildFresh(home, proj);
+  const tiPath = triggerIndexPath(proj);
+  const ti = JSON.parse(fs.readFileSync(tiPath, "utf8"));
+  ti.session_start = ti.session_start && typeof ti.session_start === "object" ? ti.session_start : {};
+  ti.session_start.pattern_health = { schema_version: 1, verdict: "catastrophic", unhealthy: 5, pattern_ids: ["bp-001-implementation-workflow"], computed_at: "2026-07-11T00:00:00.000Z" };
+  fs.writeFileSync(tiPath, JSON.stringify(ti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  assert(r.status === 0 && !/pattern-health:/.test(r.stdout),
+    "pattern_health_degraded: out-of-enum verdict renders nothing, exit 0", r.stdout);
+  removeManifest();
+}
+// ===========================================================================
+// pattern_health_local_only + repeated-run stability
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("ph-localonly");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "ph local only seed" });
+  rebuildFresh(home, proj);
+  const env = scrubEnv({ ...process.env, HOME: home });
+  spawnSync("node", [FAKE_TRIGGER_INDEX_SCRIPT, "--scope", "global"], { cwd: proj, env, encoding: "utf8", timeout: 15000 });
+  const gPath = path.join(home, ".episodic-memory", "trigger-index.json");
+  const gti = JSON.parse(fs.readFileSync(gPath, "utf8"));
+  gti.session_start = gti.session_start && typeof gti.session_start === "object" ? gti.session_start : {};
+  gti.session_start.pattern_health = { schema_version: 1, verdict: "needs-enforcement", unhealthy: 1, pattern_ids: ["bp-001-implementation-workflow"], computed_at: "2026-07-11T00:00:00.000Z" };
+  fs.writeFileSync(gPath, JSON.stringify(gti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  assert(r.status === 0 && !/pattern-health:/.test(r.stdout),
+    "pattern_health_local_only: global-store field never renders (local-only threading)", r.stdout);
+  const r2 = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  assert(r.stdout === r2.stdout,
+    "pattern_health_local_only: repeated runs byte-identical with the field present globally", `${r.stdout}\n---\n${r2.stdout}`);
+  removeManifest();
+}
+// ===========================================================================
+// pattern_health_overcount (F3: a large id set collapses to an explicit +N more suffix)
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("ph-overcount");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "ph overcount seed" });
+  rebuildFresh(home, proj);
+  const tiPath = triggerIndexPath(proj);
+  const ti = JSON.parse(fs.readFileSync(tiPath, "utf8"));
+  ti.session_start = ti.session_start && typeof ti.session_start === "object" ? ti.session_start : {};
+  const ids = Array.from({ length: 200 }, (_, i) => `bp-${String(i).padStart(5, "0")}`);
+  ti.session_start.pattern_health = { schema_version: 1, verdict: "needs-enforcement", unhealthy: ids.length, pattern_ids: ids, computed_at: "2026-07-11T00:00:00.000Z" };
+  fs.writeFileSync(tiPath, JSON.stringify(ti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  const out = parseHookOut(r.stdout);
+  const ctx = out && out.hookSpecificOutput ? out.hookSpecificOutput.additionalContext : "";
+  const line = ctx.split("\n").find((l) => l.startsWith("pattern-health:")) || "";
+  assert(r.status === 0, "pattern_health_overcount: hook exits 0", `status=${r.status} stderr=${r.stderr}`);
+  assert(/\+\d+ more/.test(line), "pattern_health_overcount: overflow ids collapse to a +N more suffix", line);
+  assert(!line.includes("bp-00199"), "pattern_health_overcount: not every id is rendered inline (tail id capped away)", line);
+  assert(line.includes("200 unhealthy"), "pattern_health_overcount: unhealthy count reflects the full set size", line);
+  removeManifest();
+}
+// ===========================================================================
+// pattern_health_overtoken (F3: the codex 5000-id probe stays within the R3 500-token bound,
+// never the 50,083-char uncapped line)
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("ph-overtoken");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "ph overtoken seed" });
+  rebuildFresh(home, proj);
+  const tiPath = triggerIndexPath(proj);
+  const ti = JSON.parse(fs.readFileSync(tiPath, "utf8"));
+  ti.session_start = ti.session_start && typeof ti.session_start === "object" ? ti.session_start : {};
+  const ids = Array.from({ length: 5000 }, (_, i) => `bp-${String(i).padStart(5, "0")}`);
+  ti.session_start.pattern_health = { schema_version: 1, verdict: "needs-enforcement", unhealthy: ids.length, pattern_ids: ids, computed_at: "2026-07-11T00:00:00.000Z" };
+  fs.writeFileSync(tiPath, JSON.stringify(ti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  const out = parseHookOut(r.stdout);
+  const ctx = out && out.hookSpecificOutput ? out.hookSpecificOutput.additionalContext : "";
+  const line = ctx.split("\n").find((l) => l.startsWith("pattern-health:")) || "";
+  assert(r.status === 0, "pattern_health_overtoken: hook exits 0", `status=${r.status} stderr=${r.stderr}`);
+  // Normative bound: estimateTokens is Math.ceil(len/4) (activation-match.mjs:225), so the
+  // R3/R4 500-token cap = 2000 chars. Uncapped this line was 50,083 chars (~12,521 tokens) for
+  // 5000 ids. Assert the advisory LINE and the WHOLE additionalContext against the exact
+  // 500-token estimator, summed per-line as the renderer budgets it (F3-R2: a <3000-char guard
+  // permitted ~750 tokens and did not prove the cap). Line dropped whole if even +N more won't fit.
+  const estTokens = (s) => Math.ceil(s.length / 4);
+  const ctxTokens = ctx.split("\n").reduce((t, l) => t + estTokens(l), 0);
+  assert(line === "" || estTokens(line) <= 500, "pattern_health_overtoken: advisory line within the 500-token R3 bound (never the 50,083-char form)", `len=${line.length} ~tokens=${estTokens(line)}`);
+  assert(ctxTokens <= 500, "pattern_health_overtoken: whole SessionStart additionalContext within the 500-token R4 bound", `~tokens=${ctxTokens}`);
+  assert(line === "" || (/\+\d+ more/.test(line) && !line.includes("bp-04999")),
+    "pattern_health_overtoken: pathological id set collapses to +N more (or the line is dropped whole)", line.slice(0, 200));
+  removeManifest();
+}
+// ===========================================================================
+// preflight_overtoken (F3-R2 / R4: the pre-existing preflight band is ALSO bounded to the
+// shared 500-token envelope - step 3.11a; codex probe: 5000 preflight ids = 50,083 chars)
+// ===========================================================================
+{
+  const { home, proj } = mkFixture("pf-overtoken");
+  writeManifest({ slug: "acme", root: proj });
+  storeEpisode(home, proj, { summary: "pf overtoken seed" });
+  rebuildFresh(home, proj);
+  const tiPath = triggerIndexPath(proj);
+  const ti = JSON.parse(fs.readFileSync(tiPath, "utf8"));
+  ti.session_start = ti.session_start && typeof ti.session_start === "object" ? ti.session_start : {};
+  const counts = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`bp-${String(i).padStart(5, "0")}`, 1]));
+  ti.session_start.preflight = { implementation: counts };
+  fs.writeFileSync(tiPath, JSON.stringify(ti, null, 2));
+  const r = runHook({ home, stdin: { hook_event_name: "SessionStart" } });
+  const out = parseHookOut(r.stdout);
+  const ctx = out && out.hookSpecificOutput ? out.hookSpecificOutput.additionalContext : "";
+  const pfLine = ctx.split("\n").find((l) => l.startsWith("preflight:")) || "";
+  const estTokens = (s) => Math.ceil(s.length / 4);
+  const ctxTokens = ctx.split("\n").reduce((t, l) => t + estTokens(l), 0);
+  assert(r.status === 0, "preflight_overtoken: hook exits 0", `status=${r.status} stderr=${r.stderr}`);
+  assert(pfLine === "" || estTokens(pfLine) <= 500, "preflight_overtoken: preflight line within the 500-token R4 bound (never the 50,083-char uncapped form)", `len=${pfLine.length} ~tokens=${estTokens(pfLine)}`);
+  assert(ctxTokens <= 500, "preflight_overtoken: whole SessionStart additionalContext within the 500-token R4 bound", `~tokens=${ctxTokens}`);
+  assert(pfLine === "" || /\+\d+ more/.test(pfLine), "preflight_overtoken: preflight ids collapse to +N more (or the line is dropped whole)", pfLine.slice(0, 200));
+  removeManifest();
+}
+// ===========================================================================
 console.log(`\ntest-activation-sessionstart: ${pass} passed, ${fail} failed`);
 if (fail > 0) {
   console.error("\nFAILURES:");

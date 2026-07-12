@@ -121,6 +121,31 @@ async function main() {
   }
   diffBoth('trigger-index-entry-fields', shape.entry_fields ?? [], triggerIndex.TRIGGER_ENTRY_FIELDS)
   diffBoth('trigger-kind-enum', shape.trigger_kind_enum ?? [], triggerIndex.TRIGGER_KIND_ENUM)
+
+  // P3: R7 dispatcher-injection surface - constants mirrored from the lib.
+  const inj = await import(pathToFileURL(path.join(repoRoot, 'scripts', 'second-opinion', 'lib', 'lesson-injection.mjs')).href)
+  const di = contract.dispatcher_injection ?? {}
+  if (di.header !== inj.LESSON_BLOCK_HEADER) errors.push(`dispatcher-injection: header contract=${JSON.stringify(di.header)} code=${JSON.stringify(inj.LESSON_BLOCK_HEADER)}`)
+  if (di.data_framing !== inj.LESSON_DATA_FRAMING) errors.push('dispatcher-injection: data_framing drift')
+  if (di.max_matches !== inj.LESSON_MAX_MATCHES) errors.push(`dispatcher-injection: max_matches contract=${di.max_matches} code=${inj.LESSON_MAX_MATCHES}`)
+  if (di.max_tokens !== inj.LESSON_MAX_TOKENS) errors.push(`dispatcher-injection: max_tokens contract=${di.max_tokens} code=${inj.LESSON_MAX_TOKENS}`)
+  if (di.summary_cap !== inj.LESSON_SUMMARY_CAP) errors.push(`dispatcher-injection: summary_cap contract=${di.summary_cap} code=${inj.LESSON_SUMMARY_CAP}`)
+
+  // P3: R5b pattern_health shape diffed against the trigger-index code exports.
+  const phs = contract.pattern_health_shape ?? {}
+  diffBoth('pattern-health-fields', phs.fields ?? [], triggerIndex.PATTERN_HEALTH_FIELDS)
+  diffBoth('pattern-health-verdicts', phs.verdict_enum ?? [], triggerIndex.PATTERN_HEALTH_VERDICTS)
+
+  // P3 docs grep (RFC-009 line 374: docs drift is CI-caught, not review-caught).
+  for (const [file, needles] of [
+    ['README.md', ['--timeout', '--with-pattern-health', 'pattern_health']],
+    [path.join('docs', 'EM_SCRIPTS_GUIDE.md'), ['--timeout', '--with-pattern-health', 'pattern_health']],
+  ]) {
+    const src = fs.readFileSync(path.join(repoRoot, file), 'utf8')
+    for (const needle of needles) {
+      if (!src.includes(needle)) errors.push(`docs-grep: ${file} missing surface "${needle}"`)
+    }
+  }
   // Functional cross-check: the enum members are what parseTriggerKind actually returns.
   const observed = [
     activationLib.parseTriggerKind('plain phrase value'),

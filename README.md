@@ -726,6 +726,8 @@ node scripts/second-opinion.mjs request \
   --consensus --max-rounds 5 --rebuttal-cb scripts/my-rebuttal.mjs
 ```
 
+`--timeout <ms>` (integer >= 1000) bounds every provider dispatch round; on expiry the child is killed, the error envelope names `{round, timeoutMs}`, and partial stdout persists under `.review-store/forensics/` (never parsed as a verdict). Every dispatch also prepends up to 3 matched lesson pointers from the merged trigger index (RFC-009 R7: ~500-token bound, `activity:review` always queried, `--no-track`, fail-open toward the dispatch).
+
 Providers: `codex`, `claude-subagent`, `gemini`, `opencode` (OpenCode CLI; DeepSeek v4-pro by default, overridable via `OPENCODE_MODEL`), `stub` (testing). Storage backends: `files` (`.review-store/`) or `episodic` (uses em-store; default for the cross-tool message bus). Preambles: per-provider defaults at `scripts/second-opinion/preambles/`, overridable via `--preamble <id>` or `<project>/.review-store/preambles/<provider>.md`.
 
 Bootstrap (writes the install snapshot consumed by validators + the Claude Code PreToolUse gate hook):
@@ -790,6 +792,7 @@ node ~/.episodic-memory/scripts/em-trigger-index.mjs                     # build
 node ~/.episodic-memory/scripts/em-trigger-index.mjs --scope all         # build both stores
 node ~/.episodic-memory/scripts/em-trigger-index.mjs --merged            # deduped local-precedence view
 node ~/.episodic-memory/scripts/em-trigger-index.mjs --project /path/to/repo   # PATH binding to another project's store
+node ~/.episodic-memory/scripts/em-trigger-index.mjs --with-pattern-health     # recompute + persist session_start.pattern_health (RFC-009 R5b)
 ```
 The `activation-classes.json` vocabulary (deployed to `~/.episodic-memory/`) closes the
 `activity:<class>` trigger set; `validate-rfc-009-contract-mirror.mjs` diffs the shipped

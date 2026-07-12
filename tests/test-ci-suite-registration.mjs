@@ -194,6 +194,20 @@ function parseWorkflow(yamlText) {
   const stack = [] // { indent, key }
   const triggers = new Set()
   const stepSuites = []
+  // #515 qualifier taxonomy (F4): on:-level filters (paths/branches/types)
+  // qualify the whole workflow; job-level and step-level `if:` qualify their
+  // scope. `always()` broadens, never narrows, so it does not qualify. Record
+  // now, classify after the loop (order-independent).
+  const partialSuites = []
+  const records = [] // { suite, jobKey, stepId }
+  const qualifiedJobs = new Set()
+  const qualifiedSteps = new Set()
+  const ON_QUALIFIER_KEYS = new Set(['paths', 'paths-ignore', 'branches', 'branches-ignore', 'types'])
+  const ALWAYS_RE = /^(?:\$\{\{\s*)?always\(\)\s*(?:\}\})?$/
+  const filteredTriggers = new Set() // pull_request/push triggers carrying a paths/branches/types filter
+  let workflowQualified = false
+  let stepCounter = 0
+  let currentStepId = -1
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
     if (raw.trim() === '' || /^\s*#/.test(raw)) continue
@@ -216,6 +230,9 @@ function parseWorkflow(yamlText) {
     }
     const effIndent = indent + seqOffset
     while (stack.length && stack[stack.length - 1].indent >= effIndent) stack.pop()
+    if (seqOffset > 0 && stack.length && stack[stack.length - 1].key === 'steps') {
+      currentStepId = ++stepCounter
+    }
 
     const step = content.match(STEP_INVOCATION)
     if (step) {
@@ -226,13 +243,24 @@ function parseWorkflow(yamlText) {
         stack[n - 3].key === 'jobs' &&
         stack[n - 3].indent === 0
       ) {
-        stepSuites.push(step[1])
+        records.push({ suite: step[1], jobKey: stack[n - 2].key, stepId: currentStepId })
       }
       continue
     }
 
     const key = content.match(/^([\w_-]+):\s*(.*?)\s*(?:#.*)?$/)
     if (!key) continue
+    const depth = stack.length
+    if (ON_QUALIFIER_KEYS.has(key[1]) && depth === 2 && stack[0].key === 'on' && stack[0].indent === 0) {
+      filteredTriggers.add(stack[1].key) // this trigger is filtered; workflow-partial decided post-loop
+    }
+    if (key[1] === 'if' && !ALWAYS_RE.test(key[2])) {
+      if (depth === 2 && stack[0].key === 'jobs' && stack[0].indent === 0) {
+        qualifiedJobs.add(stack[1].key)
+      } else if (depth >= 3 && stack[depth - 1].key === 'steps' && stack[depth - 3].key === 'jobs') {
+        qualifiedSteps.add(currentStepId)
+      }
+    }
     if (key[1] === 'on' && effIndent === 0 && key[2] !== '') {
       // Flow (`on: [push, pull_request]`) or scalar (`on: push`) trigger value.
       for (const t of key[2].replace(/[[\]]/g, '').split(',')) triggers.add(t.trim())
@@ -241,7 +269,17 @@ function parseWorkflow(yamlText) {
     }
     stack.push({ indent: effIndent, key: key[1] })
   }
-  return { triggers, stepSuites }
+  // F4: classify AFTER the full scan (YAML mapping order is not semantic).
+  const hasUnfilteredPush = triggers.has('push') && !filteredTriggers.has('push')
+  workflowQualified = triggers.has('pull_request') && filteredTriggers.has('pull_request') && !hasUnfilteredPush
+  for (const rec of records) {
+    if (workflowQualified || qualifiedJobs.has(rec.jobKey) || qualifiedSteps.has(rec.stepId)) {
+      partialSuites.push(rec.suite)
+    } else {
+      stepSuites.push(rec.suite)
+    }
+  }
+  return { triggers, stepSuites, partialSuites }
 }
 
 // A workflow only executes on PRs/pushes if its top-level `on:` declares
@@ -254,12 +292,16 @@ function isTriggerActive(triggers) {
 // The set of suites step-wired across all trigger-active workflows.
 function collectWiredSet(dir) {
   const wired = new Set()
+  const partial = new Set()
   for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml'))) {
-    const { triggers, stepSuites } = parseWorkflow(fs.readFileSync(path.join(dir, f), 'utf8'))
+    const { triggers, stepSuites, partialSuites } = parseWorkflow(fs.readFileSync(path.join(dir, f), 'utf8'))
     if (!isTriggerActive(triggers)) continue
     for (const suite of stepSuites) wired.add(suite)
+    for (const suite of partialSuites) partial.add(suite)
   }
-  return wired
+  // A suite fully wired anywhere is not partial: full wiring wins.
+  for (const suite of wired) partial.delete(suite)
+  return { wired, partial }
 }
 
 // P12 meta-runner membership, re-derived the way the runner derives it
@@ -289,13 +331,13 @@ function p12Members(runnerSource, suiteBasenames) {
   return new Set([...globbed, ...parseP12Explicit(runnerSource)])
 }
 
-function computeUnregistered(suites, wiredSet, p12Set, baseline) {
+function computeUnregistered(suites, wiredSet, p12Set, baseline, partialSet = new Set()) {
   const base = new Set(baseline)
-  return suites.filter((f) => !wiredSet.has(f) && !p12Set.has(f) && !base.has(f))
+  return suites.filter((f) => !wiredSet.has(f) && !partialSet.has(f) && !p12Set.has(f) && !base.has(f))
 }
 
 const SUITES = listSuites(testsDir)
-const WIRED = collectWiredSet(workflowsDir)
+const { wired: WIRED, partial: PARTIAL } = collectWiredSet(workflowsDir)
 const P12_SOURCE = fs.readFileSync(path.join(testsDir, P12_RUNNER), 'utf8')
 const P12_SET = p12Members(P12_SOURCE, SUITES)
 
@@ -319,9 +361,10 @@ function test(name, fn) {
 
 console.log('# test-ci-suite-registration (#504 - every suite step-wired, P12-run, or baselined)')
 console.log(`# suites: ${SUITES.length}, baseline: ${KNOWN_UNWIRED.length}, step-wired: ${WIRED.size}`)
+console.log(`# partial (qualified wiring, #515): ${PARTIAL.size}${PARTIAL.size ? ' - ' + [...PARTIAL].sort().join(', ') : ''}`)
 
 test('t_all_suites_registered: every tests/ test-*.{mjs,sh} (any depth) is step-wired, a P12 member, or baselined', () => {
-  const unregistered = computeUnregistered(SUITES, WIRED, P12_SET, KNOWN_UNWIRED)
+  const unregistered = computeUnregistered(SUITES, WIRED, P12_SET, KNOWN_UNWIRED, PARTIAL)
   assert.deepStrictEqual(
     unregistered,
     [],
@@ -456,8 +499,57 @@ test('t_mutation_nested_discovery: a suite under tests/e2e/ is discovered and re
 
 test('t_negative_control: a synthetic unwired suite is reported unregistered against the REAL repo state', () => {
   const synthetic = 'test-synthetic-never-wired-504.mjs'
-  const out = computeUnregistered([...SUITES, synthetic], WIRED, P12_SET, KNOWN_UNWIRED)
+  const out = computeUnregistered([...SUITES, synthetic], WIRED, P12_SET, KNOWN_UNWIRED, PARTIAL)
   assert.deepStrictEqual(out, [synthetic])
+})
+
+test('t_partial_paths_filter (#515): paths:-filtered workflow classifies its suites partial', () => {
+  const y = ['on:', '  pull_request:', "    paths:", "      - 'docs/**'", 'jobs:', '  j:', '    steps:', '      - run: node tests/test-x.mjs'].join('\n')
+  const { stepSuites, partialSuites } = parseWorkflow(y)
+  assert.deepStrictEqual(stepSuites, [])
+  assert.deepStrictEqual(partialSuites, ['test-x.mjs'])
+})
+
+test('t_partial_step_if (#515): step-level if: qualifies its suite - if before AND after run:', () => {
+  const y = ['on: [push]', 'jobs:', '  j:', '    steps:', "      - if: github.event_name == 'push'", '        run: node tests/test-a.mjs', '      - run: node tests/test-b.mjs', '        if: failure()', '      - run: node tests/test-c.mjs'].join('\n')
+  const { stepSuites, partialSuites } = parseWorkflow(y)
+  assert.deepStrictEqual([...stepSuites].sort(), ['test-c.mjs'])
+  assert.deepStrictEqual([...partialSuites].sort(), ['test-a.mjs', 'test-b.mjs'])
+})
+
+test('t_partial_job_if (#515): job-level if: marks every suite in that job partial; sibling job unaffected', () => {
+  const y = ['on: [push]', 'jobs:', '  gated:', "    if: github.repository == 'x/y'", '    steps:', '      - run: node tests/test-d.mjs', '  open:', '    steps:', '      - run: node tests/test-e.mjs'].join('\n')
+  const { stepSuites, partialSuites } = parseWorkflow(y)
+  assert.deepStrictEqual([...stepSuites].sort(), ['test-e.mjs'])
+  assert.deepStrictEqual([...partialSuites].sort(), ['test-d.mjs'])
+})
+
+test('t_always_qualifier (#515): if: always() stays fully wired (broadens, never narrows)', () => {
+  const y = ['on: [push]', 'jobs:', '  j:', '    steps:', '      - if: ${{ always() }}', '        run: node tests/test-f.mjs', '      - if: always()', '        run: node tests/test-g.mjs'].join('\n')
+  const { stepSuites, partialSuites } = parseWorkflow(y)
+  assert.deepStrictEqual([...stepSuites].sort(), ['test-f.mjs', 'test-g.mjs'])
+  assert.deepStrictEqual(partialSuites, [])
+})
+
+test('t_r5b_wired (#515/REQ-10): the four P3 suites are step-wired unqualified in the live workflows', () => {
+  for (const f of ['test-pattern-health-check-gate.mjs', 'test-so-lesson-injection.mjs', 'test-so-timeout.mjs', 'test-trigger-index-pattern-health.mjs']) {
+    assert.ok(WIRED.has(f), `${f} fully wired`)
+    assert.ok(!PARTIAL.has(f), `${f} not partial`)
+  }
+})
+
+test('t_order_job_if_after_steps (#515, F4): job-level if: AFTER steps still marks the job partial', () => {
+  const y = ['on: [push]', 'jobs:', '  j:', '    steps:', '      - run: node tests/test-job.mjs', "    if: github.repository == 'x/y'"].join('\n')
+  const { stepSuites, partialSuites } = parseWorkflow(y)
+  assert.deepStrictEqual(stepSuites, [])
+  assert.deepStrictEqual(partialSuites, ['test-job.mjs'])
+})
+
+test('t_order_on_after_jobs (#515, F4): on-qualifier AFTER jobs still marks the workflow partial', () => {
+  const y = ['jobs:', '  j:', '    steps:', '      - run: node tests/test-workflow.mjs', 'on:', '  pull_request:', "    paths:", "      - 'docs/**'"].join('\n')
+  const { stepSuites, partialSuites } = parseWorkflow(y)
+  assert.deepStrictEqual(stepSuites, [])
+  assert.deepStrictEqual(partialSuites, ['test-workflow.mjs'])
 })
 
 console.log(`\n# ${passed} passed, ${failed} failed`)

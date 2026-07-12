@@ -41,6 +41,7 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadActivationClasses, parseTriggerKind } from './lib/activation.mjs'
 
@@ -568,7 +569,7 @@ function sourceMatches(cached, fresh) {
  * @param {{project?:string, scope?:'local'|'global', now?:Date}} opts
  * @returns {{index:object, cacheHit:boolean, storeDir:string}}
  */
-export function buildTriggerIndex({ project, scope = 'local', now = new Date() } = {}) {
+export function buildTriggerIndex({ project, scope = 'local', now = new Date(), withPatternHealth = false } = {}) {
   const storeDir = resolveStoreDir({ project, scope })
   const indexPath = path.join(storeDir, 'trigger-index.json')
   const { raw, fingerprint } = readIndexWithFingerprint(storeDir)
@@ -612,12 +613,36 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date() }
   // full extended source (index_* + playbooks_* + global_index_* when either side
   // carries it) so preference CREATE/edit/DELETE and global revisions all
   // invalidate; a cached v2 index mismatches on schema_version and rebuilds (T12).
+  let priorPatternHealth = null
   try {
     const cached = JSON.parse(fs.readFileSync(indexPath, 'utf8'))
+    if (scope === 'local' && cached && cached.session_start &&
+        typeof cached.session_start.pattern_health === 'object' && cached.session_start.pattern_health !== null) {
+      priorPatternHealth = cached.session_start.pattern_health
+    }
     if (cached && cached.schema_version === TRIGGER_INDEX_SCHEMA_VERSION && sourceMatches(cached.source, source)) {
+      if (withPatternHealth && scope === 'local') {
+        // R5b (REQ-11): recompute UNCONDITIONALLY on a valid cache - the
+        // fingerprint cannot see enforcement-surface changes (EC9).
+        const ph = computePatternHealth(storeDir)
+        if (!cached.session_start || typeof cached.session_start !== 'object') cached.session_start = {}
+        if (ph) cached.session_start.pattern_health = ph
+        else delete cached.session_start.pattern_health
+        try {
+          const tmp = `${indexPath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`
+          fs.writeFileSync(tmp, JSON.stringify(cached, null, 2), 'utf8')
+          fs.renameSync(tmp, indexPath)
+        } catch (e) {
+          process.stderr.write(`em-trigger-index: could not persist ${indexPath}: ${e.message}\n`)
+        }
+      }
       return { index: cached, cacheHit: true, storeDir }
     }
-  } catch {}
+  } catch (e) {
+    if (scope === 'local' && e && e.code !== 'ENOENT') {
+      process.stderr.write('em-trigger-index: pattern_health carry-forward unavailable (prior index unreadable)\n')
+    }
+  }
 
   const rows = parseRows(raw)
   const todayStr = now.toISOString().slice(0, 10)
@@ -700,6 +725,16 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date() }
     session_start.playbooks = sessionStartPlaybooks.playbooks
     session_start.playbooks_capped = sessionStartPlaybooks.playbooks_capped
     session_start.playbooks_capped_first = sessionStartPlaybooks.playbooks_capped_first
+  }
+  // R5b (REQ-11): LOCAL-store only. Flagged -> recompute; unflagged -> carry
+  // the prior field forward VERBATIM (computed_at provenance visible).
+  if (scope === 'local') {
+    if (withPatternHealth) {
+      const ph = computePatternHealth(storeDir)
+      if (ph) session_start.pattern_health = ph
+    } else if (priorPatternHealth) {
+      session_start.pattern_health = priorPatternHealth
+    }
   }
 
   const index = {
@@ -910,6 +945,9 @@ export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
     session_start.playbooks_capped = lp.playbooks_capped
     session_start.playbooks_capped_first = lp.playbooks_capped_first
   }
+  if (lp && Object.prototype.hasOwnProperty.call(lp, 'pattern_health')) {
+    session_start.pattern_health = lp.pattern_health
+  }
   return { entries, session_start, local, global }
 }
 
@@ -923,7 +961,7 @@ function isMainModule() {
 if (isMainModule()) {
   const argv = process.argv.slice(2)
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.log(JSON.stringify({ status: 'help', script: 'em-trigger-index.mjs', usage: 'node em-trigger-index.mjs [--project <root>] [--scope local|global|all] [--merged] — builds trigger-index.json per store; --project <root> binds the LOCAL store to <root>/.episodic-memory (path binding, not a name filter); --merged prints the deduped local-precedence merged view' }))
+    console.log(JSON.stringify({ status: 'help', script: 'em-trigger-index.mjs', usage: 'node em-trigger-index.mjs [--project <root>] [--scope local|global|all] [--merged] [--with-pattern-health] — builds trigger-index.json per store; --project <root> binds the LOCAL store to <root>/.episodic-memory (path binding, not a name filter); --merged prints the deduped local-precedence merged view' }))
     process.exit(0)
   }
   const flag = (name) => {
@@ -932,6 +970,7 @@ if (isMainModule()) {
     return argv[i + 1]
   }
   const project = flag('--project')
+  const withPatternHealth = argv.includes('--with-pattern-health')
   const scope = flag('--scope') || 'local'
   const VALID = ['local', 'global', 'all']
   if (!VALID.includes(scope)) {
@@ -940,13 +979,14 @@ if (isMainModule()) {
   }
   if (argv.includes('--merged')) {
     const merged = loadMergedTriggerIndex({ project })
-    console.log(JSON.stringify({ status: 'ok', entries: merged.entries, session_start: merged.session_start }))
+    const mergedActivityPhrases = { ...(merged.global?.activity_phrases ?? {}), ...(merged.local?.activity_phrases ?? {}) }
+    console.log(JSON.stringify({ status: 'ok', entries: merged.entries, session_start: merged.session_start, activity_phrases: mergedActivityPhrases }))
     process.exit(0)
   }
   const built = []
   for (const s of scope === 'all' ? ['local', 'global'] : [scope]) {
     try {
-      const { index, cacheHit, storeDir } = buildTriggerIndex({ project, scope: s })
+      const { index, cacheHit, storeDir } = buildTriggerIndex({ project, scope: s, withPatternHealth })
       built.push({ scope: s, store: storeDir, entries: index.entries.length, cache_hit: cacheHit })
     } catch (e) {
       // per-store IO failure degrades to a named report, never a stack trace (I5)
@@ -955,4 +995,39 @@ if (isMainModule()) {
     }
   }
   console.log(JSON.stringify({ status: built.some(b => b.error) ? 'partial' : 'ok', built }))
+}
+
+export const PATTERN_HEALTH_VERDICTS = ['healthy', 'needs-attention', 'needs-enforcement']
+export const PATTERN_HEALTH_FIELDS = ['schema_version', 'verdict', 'unhealthy', 'pattern_ids', 'computed_at']
+
+// RFC-009 R5b (REQ-11): aggregation-plane verdict precompute. Spawns the
+// UNEDITED em-pattern-health contract (--hermetic --check; exit 0 healthy /
+// 1 unhealthy) and DERIVES the field from its JSON (the script emits no
+// verdict key: per-pattern `recommendation` + `summary` counts). Every
+// failure returns null after ONE stderr note - never a fabricated verdict.
+export function computePatternHealth(storeDir) {
+  const projectRoot = path.dirname(storeDir)
+  const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'em-pattern-health.mjs')
+  const r = spawnSync(process.execPath, [script, '--hermetic', '--check'],
+    { cwd: projectRoot, encoding: 'utf8' })
+  if (r.status !== 0 && r.status !== 1) {
+    process.stderr.write(`em-trigger-index: pattern_health unavailable: em-pattern-health exit ${r.status}\n`)
+    return null
+  }
+  let doc
+  try { doc = JSON.parse(r.stdout) } catch {
+    process.stderr.write('em-trigger-index: pattern_health unavailable: unparseable em-pattern-health output\n')
+    return null
+  }
+  if (!doc || doc.status !== 'ok' || !doc.summary || typeof doc.summary !== 'object') {
+    process.stderr.write('em-trigger-index: pattern_health unavailable: em-pattern-health reported no summary\n')
+    return null
+  }
+  const needsEnf = Number.isInteger(doc.summary.needs_enforcement) ? doc.summary.needs_enforcement : 0
+  const needsAtt = Number.isInteger(doc.summary.needs_attention) ? doc.summary.needs_attention : 0
+  const verdict = needsEnf > 0 ? 'needs-enforcement' : needsAtt > 0 ? 'needs-attention' : 'healthy'
+  const pattern_ids = (Array.isArray(doc.patterns) ? doc.patterns : [])
+    .filter(p => p && typeof p.pattern_id === 'string' && p.recommendation && p.recommendation !== 'healthy')
+    .map(p => p.pattern_id)
+  return { schema_version: 1, verdict, unhealthy: needsEnf + needsAtt, pattern_ids, computed_at: new Date().toISOString() }
 }
