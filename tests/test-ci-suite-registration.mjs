@@ -205,7 +205,6 @@ function parseWorkflow(yamlText) {
   const ON_QUALIFIER_KEYS = new Set(['paths', 'paths-ignore', 'branches', 'branches-ignore', 'types'])
   const ALWAYS_RE = /^(?:\$\{\{\s*)?always\(\)\s*(?:\}\})?$/
   const filteredTriggers = new Set() // pull_request/push triggers carrying a paths/branches/types filter
-  const GATE_TRIGGERS = new Set(['pull_request'])
   let workflowQualified = false
   let stepCounter = 0
   let currentStepId = -1
@@ -271,8 +270,8 @@ function parseWorkflow(yamlText) {
     stack.push({ indent: effIndent, key: key[1] })
   }
   // F4: classify AFTER the full scan (YAML mapping order is not semantic).
-  const gateTriggers = [...triggers].filter((t) => GATE_TRIGGERS.has(t))
-  workflowQualified = gateTriggers.length > 0 && gateTriggers.every((t) => filteredTriggers.has(t))
+  const hasUnfilteredPush = triggers.has('push') && !filteredTriggers.has('push')
+  workflowQualified = triggers.has('pull_request') && filteredTriggers.has('pull_request') && !hasUnfilteredPush
   for (const rec of records) {
     if (workflowQualified || qualifiedJobs.has(rec.jobKey) || qualifiedSteps.has(rec.stepId)) {
       partialSuites.push(rec.suite)

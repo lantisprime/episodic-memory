@@ -73,7 +73,7 @@ export function composeLessonBlock({ mergedIndex, matchText, project, tool, supp
     let hit = false
     if (e.trigger_kind === 'phrase') {
       hit = phraseRegex(e.value).test(text)
-    } else if (e.trigger_kind === 'activity' && e.value.startsWith('activity:')) {
+    } else if (e.trigger_kind === 'activity' && typeof e.value === 'string' && e.value.startsWith('activity:')) {
       const cls = e.value.slice('activity:'.length)
       if (cls === 'review') hit = true
       else {
