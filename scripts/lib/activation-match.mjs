@@ -225,7 +225,7 @@ function renderLine(entry) {
   const id = entry.episode_id;
   const summary = String(entry.summary ?? "");
   if (isImperative(entry)) {
-    return `READ ${id} before proceeding (em-search --history ${id} --full): ${summary}`;
+    return `READ ${id} before proceeding (em-search --read ${id}): ${summary}`;
   }
   return `lesson ${id}: ${summary}`;
 }

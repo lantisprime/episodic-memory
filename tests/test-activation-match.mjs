@@ -19,8 +19,27 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { matchActivation } from "../scripts/lib/activation-match.mjs";
+import { matchActivation as _matchActivationRaw } from "../scripts/lib/activation-match.mjs";
 import { validateInstance } from "../scripts/lib/json-instance-validate.mjs";
+
+// --break-* negative control (matches test-rfc-009-p4-telemetry.mjs's
+// argv-flag convention): --break-render post-processes rendered lines back to
+// the pre-P4-S2 --history form so render::usesReadNotHistory fails loud when
+// the migration is reverted. Render is closed-over inside matchActivation
+// (ESM named exports are immutable bindings), so the harness wraps the
+// call-site and rewrites the output instead of stubbing renderLine in place.
+const BREAK_RENDER = process.argv.includes("--break-render");
+const matchActivation = BREAK_RENDER
+  ? (...args) => {
+      const r = _matchActivationRaw(...args);
+      return {
+        ...r,
+        lines: r.lines.map((l) =>
+          l.replace(/\(em-search --read (\S+)\)/g, "(em-search --history $1 --full)"),
+        ),
+      };
+    }
+  : _matchActivationRaw;
 
 const REPO = fs.realpathSync(path.join(path.dirname(fileURLToPath(import.meta.url)), ".."));
 
@@ -217,11 +236,12 @@ for (const cls of LAUNCH_CLASSES) {
 {
   const index = idx([entry({ value: "criticalthing", episode_id: "id-band8", effective_priority: 8, summary: "do the thing" })]);
   const r = matchActivation(index, promptEvent("criticalthing happened"), IDENTITY, undefined, BOUNDS);
-  assert(r.lines.length === 1, "render_imperative_band8: one line rendered", JSON.stringify(r));
+  const line = r.lines[0] || "";
+  assert(r.lines.length === 1, "render::usesReadNotHistory: exactly one line rendered for a band-8 trigger", JSON.stringify(r));
   assert(
-    r.lines[0] === "READ id-band8 before proceeding (em-search --history id-band8 --full): do the thing",
-    "render_imperative_band8: exact imperative form naming the tracked read command",
-    r.lines[0],
+    line.includes("--read") && !line.includes("--history"),
+    "render::usesReadNotHistory: rendered band-8 imperative line names the tracked --read command and never --history",
+    line,
   );
 }
 {

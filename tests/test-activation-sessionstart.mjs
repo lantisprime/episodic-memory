@@ -283,7 +283,7 @@ function rebuildFreshGlobal(home, proj) {
   assert(ctx.includes(`READ ${crit.id}`), "tier2_static_order_plain_only: the critical lesson renders imperative (tier 1)", ctx);
   assert(ctx.includes(`lesson ${plain.id}:`), "tier2_static_order_plain_only: the plain lesson renders plain (tier 2)", ctx);
   // renderLine's imperative form legitimately repeats the id twice within its
-  // OWN line (`READ <id> ... --history <id> --full`) -- the dedup assertion
+  // OWN line (`READ <id> ... --read <id>`) -- the dedup assertion
   // is that the PLAIN tier-2 rendering of the critical id never appears, not
   // a raw substring count.
   assert(!ctx.includes(`lesson ${crit.id}:`),
