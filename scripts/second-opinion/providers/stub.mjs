@@ -8,6 +8,8 @@
  * Used ONLY in tests; never installed for production use.
  */
 
+import { spawnSync } from 'node:child_process'
+
 export const id = 'stub'
 export const binary = 'stub-provider'
 
@@ -40,11 +42,27 @@ export function available() {
 
 let _callCount = 0
 
-export function dispatch({ prompt, projectRoot }) {
+export function dispatch({ prompt, projectRoot, timeout }) {
   if (!prompt) throw new Error('stub.dispatch: prompt is required')
   if (!projectRoot) throw new Error('stub.dispatch: projectRoot is required')
 
   _callCount++
+
+  // SO_STUB_SLEEP_MS (A.5): simulate a slow provider via a REAL child so the
+  // spawnSync timeout/kill semantics match codex.mjs:74-86 exactly.
+  const sleepMs = parseInt(process.env.SO_STUB_SLEEP_MS || '0', 10)
+  const sleepOnCall = parseInt(process.env.SO_STUB_SLEEP_ON_CALL || '0', 10)
+  if (Number.isInteger(sleepMs) && sleepMs > 0 && (sleepOnCall === 0 || _callCount === sleepOnCall)) {
+    const sleeper = "if (process.env.SO_STUB_PID_FILE) require('node:fs').writeFileSync(process.env.SO_STUB_PID_FILE, String(process.pid)); process.stdout.write('stub-sleeper-partial'); setTimeout(() => {}, parseInt(process.env.SO_STUB_SLEEP_MS, 10))"
+    const child = spawnSync(process.execPath, ['-e', sleeper], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      ...(timeout === undefined ? {} : { timeout }),
+    })
+    if (child.signal === 'SIGTERM' && child.error?.code === 'ETIMEDOUT') {
+      return { ok: false, exitCode: null, stdout: child.stdout || '', stderr: child.stderr || '', timedOut: true }
+    }
+  }
 
   const idMatch = prompt.match(/(\d{8}-\d{6}-[a-z0-9-]+-[0-9a-f]{4})/)
   const requestId = idMatch ? idMatch[1] : 'unknown-request'

@@ -141,3 +141,15 @@ jobs:
 
       - name: Run classifier taxonomy runtime-sourcing tests (RFC-008 P3c, R4/F4)
         run: bash tests/test-classifier-taxonomy-sync.sh
+
+      - name: Run R7 lesson-injection suite (RFC-009 P3-S1)
+        run: node tests/test-so-lesson-injection.mjs
+
+      - name: Run provider dispatch --timeout suite (#512, RFC-009 P3-S2)
+        run: node tests/test-so-timeout.mjs
+
+      - name: Run trigger-index pattern-health suite (RFC-009 R5b, P3-S3)
+        run: node tests/test-trigger-index-pattern-health.mjs
+
+      - name: Run pattern-health CI gate suite (RFC-009 R5b, P3-S4)
+        run: node tests/test-pattern-health-check-gate.mjs

@@ -838,7 +838,7 @@ Build the derived lesson-activation trigger index (RFC-009 R2).
   is read-only over the store and never rewrites stored bytes).
 
 ```
-node ~/.episodic-memory/scripts/em-trigger-index.mjs [--project <root>] [--scope local|global|all] [--merged]
+node ~/.episodic-memory/scripts/em-trigger-index.mjs [--project <root>] [--scope local|global|all] [--merged] [--with-pattern-health]
 ```
 
 Output: `{"status":"ok","built":[{"scope":"local","store":".../.episodic-memory","entries":3,"cache_hit":false}]}`
@@ -860,7 +860,7 @@ The artifact: `trigger-index.json` carries `schema_version`, a `source` fingerpr
 `trigger_kind` phrase|tool|activity and the DERIVED `effective_priority` 1-9), and a
 `session_start` section (`critical_entries` = every band-8/9 lesson, trigger-independent;
 `entries` = top-10 by the `static_score` blend; `preflight` = per-task-type recent
-violation counts keyed by `violated_pattern`) that the P2 session-start hook will read.
+violation counts keyed by `violated_pattern`; `pattern_health` = the R5b build-time verdict `{schema_version:1, verdict, unhealthy, pattern_ids, computed_at}`, computed only under `--with-pattern-health`, carried forward verbatim otherwise, local-store only) that the P2 session-start hook will read.
 
 **Playbooks (RFC-011 R1/R2).** An OPTIONAL per-project file
 `<project>/.episodic-memory/playbooks.json` declares which playbook lesson
@@ -1294,3 +1294,7 @@ composition, consensus loop). This is a capability, not a memory command. Deep d
 README.md "Second-Opinion Review Harness" and `docs/USER_MANUAL.md` Scenario 8b.
 Agent rule: use it only when the user asks for a second-opinion / cross-tool review,
 and route through the harness rather than invoking a provider CLI directly.
+P3 surfaces: `--timeout <ms>` (>= 1000) bounds each dispatch round (expiry kills the child,
+records `{round, timeoutMs}`, persists partial output to `.review-store/forensics/`); every
+dispatch prepends up to 3 matched lesson pointers from the trigger index (RFC-009 R7, bounded,
+`--no-track`, fail-open toward the dispatch).

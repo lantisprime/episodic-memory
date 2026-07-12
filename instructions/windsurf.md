@@ -81,3 +81,9 @@ node ~/.episodic-memory/scripts/em-rebuild-index.mjs --scope all
 **Env-prefix wrapper escape** (specific instance of safety-check bypass). Don't invoke commands with leading environment-variable assignments where the var name hints at gate-bypass intent — names containing `BYPASS_*`, `SKIP_*`, `DISABLE_*`, `ALLOW_*`, `OVERRIDE_*`, `UNSAFE_*`, or known internal gate prefixes. The wrapping invocation looks innocuous to a permission check while the env var carries the bypass payload (documented cross-session attack class; tracked in episodes tagged `pr-271`). Reject the entire form; don't tokenize allowed vs. disallowed vars.
 
 Does NOT cover routine framework / runtime env vars on their normal commands — `NODE_ENV=production npm start`, `DEBUG=1 ./run.sh`, `CI=true pytest`, `PYTHONPATH=. python script.py`, `LOG_LEVEL=debug ./service` are fine.
+
+## Pattern-health + review-dispatch surfaces (RFC-009 P3)
+
+- `em-trigger-index.mjs --with-pattern-health` recomputes and persists `session_start.pattern_health` (verdict derived from `em-pattern-health --hermetic --check`); without the flag the prior field carries forward verbatim. The SessionStart adapter renders one `pattern-health:` advisory line when the verdict is unhealthy.
+- `second-opinion.mjs request|consensus --timeout <ms>` (>= 1000) bounds each provider dispatch round; expiry kills the child, records `{round, timeoutMs}`, and persists partial output to `.review-store/forensics/` (never parsed as a verdict).
+- Every second-opinion dispatch prepends up to 3 matched lesson pointers (500-token bound, `--no-track`, incl. `activity:review` lessons) from the merged trigger index.

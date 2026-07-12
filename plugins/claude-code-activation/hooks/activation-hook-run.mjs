@@ -426,6 +426,11 @@ function mergeSessionStart(localStatus, globalStatus) {
     out.playbooks_capped = localVal.playbooks_capped
     out.playbooks_capped_first = localVal.playbooks_capped_first
   }
+  // RFC-009 R5b (REQ-12): thread the LOCAL pattern_health field UNCHANGED -
+  // local-store-only by contract; global never contributes one.
+  if (localVal && Object.prototype.hasOwnProperty.call(localVal, 'pattern_health')) {
+    out.pattern_health = localVal.pattern_health
+  }
   return out
 }
 

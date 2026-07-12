@@ -440,6 +440,7 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   const criticalRaw = Array.isArray(ss.critical_entries) ? ss.critical_entries : [];
   const entriesRaw = Array.isArray(ss.entries) ? ss.entries : [];
   const preflightRaw = ss.preflight && typeof ss.preflight === "object" && !Array.isArray(ss.preflight) ? ss.preflight : {};
+  const patternHealthRaw = ss.pattern_health && typeof ss.pattern_health === "object" && !Array.isArray(ss.pattern_health) ? ss.pattern_health : null;
 
   const s = suppress instanceof Set ? suppress : new Set();
   const maxMatches = Number.isInteger(bounds && bounds.max_matches) && bounds.max_matches > 0 ? bounds.max_matches : 3;
@@ -528,7 +529,11 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
     totalTokens += t;
   }
 
-  // ---- Preflight advisory (generic derivation) -----------------------------
+  // ---- Preflight advisory (generic derivation), BUDGETED like the tiers ------
+  // RFC-009 R4 (line 122: the violation-preflight advisory shares the R3 caps) /
+  // F3-R2: cap ids with an explicit '+N more' form, shrink to fit the shared
+  // totalTokens/maxTokens envelope, drop whole only if the zero-id form will not fit
+  // (drop-if-over, matching the tiers and the pattern-health advisory below).
   const preflightLines = [];
   for (const [taskType, counts] of Object.entries(preflightRaw)) {
     if (!counts || typeof counts !== "object" || Array.isArray(counts)) continue;
@@ -540,7 +545,19 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
       if (Number.isFinite(v)) total += v;
     }
     if (total <= 0) continue;
-    preflightLines.push(`preflight: ${total} recent ${taskType} violation(s) (${ids.join(", ")})`);
+    const pfRender = (k) => {
+      const shown = ids.slice(0, k);
+      const more = ids.length - shown.length;
+      const inside = shown.join(", ") + (more > 0 ? `${shown.length ? ", " : ""}+${more} more` : "");
+      return `preflight: ${total} recent ${taskType} violation(s) (${inside})`;
+    };
+    let k = ids.length;
+    while (k > 0 && totalTokens + estimateTokens(pfRender(k)) > maxTokens) k--;
+    const pfLine = pfRender(k);
+    if (totalTokens + estimateTokens(pfLine) <= maxTokens) {
+      preflightLines.push(pfLine);
+      totalTokens += estimateTokens(pfLine);
+    }
   }
 
   // ---- Overflow notes (RFC-011 R3 / REQ-9) ----
@@ -568,7 +585,31 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   }
   const overflowNote = notes.length > 0 ? notes.join("\n") : null;
 
-  return { lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines], overflowNote };
+  // ---- Pattern-health advisory (RFC-009 R5b, F3): exactly one line, strict
+  // enum, BUDGETED against the same running totalTokens/maxTokens as the tiers.
+  // A large unhealthy set can never exceed the R3 bound: ids are capped with an
+  // explicit '+N more' form, shrinking until the line fits; if even '(+N more)'
+  // will not fit, the line is dropped (drop-if-over, matching the tiers above).
+  const patternHealthLines = [];
+  if (patternHealthRaw && (patternHealthRaw.verdict === "needs-attention" || patternHealthRaw.verdict === "needs-enforcement")) {
+    const n = Number.isInteger(patternHealthRaw.unhealthy) ? patternHealthRaw.unhealthy : 0;
+    const phIds = Array.isArray(patternHealthRaw.pattern_ids) ? patternHealthRaw.pattern_ids.filter((x) => typeof x === "string") : [];
+    const phRender = (k) => {
+      const shown = phIds.slice(0, k);
+      const more = phIds.length - shown.length;
+      const inside = shown.join(", ") + (more > 0 ? `${shown.length ? ", " : ""}+${more} more` : "");
+      return `pattern-health: ${n} unhealthy (${inside}) - run node scripts/em-pattern-health.mjs --hermetic`;
+    };
+    let k = phIds.length;
+    while (k > 0 && totalTokens + estimateTokens(phRender(k)) > maxTokens) k--;
+    const phLine = phRender(k);
+    if (totalTokens + estimateTokens(phLine) <= maxTokens) {
+      patternHealthLines.push(phLine);
+      totalTokens += estimateTokens(phLine);
+    }
+  }
+
+  return { lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines, ...patternHealthLines], overflowNote };
 }
 
 // ---------------------------------------------------------------------------

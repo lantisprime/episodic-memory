@@ -28,6 +28,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveRepoRoot } from './lib/local-dir.mjs'
 import { compose } from './second-opinion/preambles/composer.mjs'
+import { buildLessonInjection } from './second-opinion/lib/lesson-injection.mjs'
 import { validateProviderRegistry } from './second-opinion/lib/registry-validator.mjs'
 import * as filesStorage from './second-opinion/storage/files.mjs'
 import * as episodicStorage from './second-opinion/storage/episodic.mjs'
@@ -48,7 +49,7 @@ const PROVIDERS_REGISTRY = path.join(HARNESS_ROOT, 'scripts', 'second-opinion', 
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'second-opinion.mjs', usage: 'node second-opinion.mjs <request|list-replies|rebuild-index> [options]. request: --provider <p> --project <path> --storage <files|episodic> --body <text> --summary <text> [--dispatch] [--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'second-opinion.mjs', usage: 'node second-opinion.mjs <request|list-replies|rebuild-index> [options]. request: --provider <p> --project <path> --storage <files|episodic> --body <text> --summary <text> [--dispatch] [--timeout <ms>] [--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>]' }))
   process.exit(0)
 }
 
@@ -207,6 +208,20 @@ async function cmdRequest() {
     emitErr('invalid-storage-flag', `--storage must be 'episodic' or 'files', got: ${storageKind}`)
   }
 
+  // EC6 (F2): validate every REJECTING flag before compose or any storage side
+  // effect, so an invalid value writes nothing. --max-rounds moves here from its
+  // former post-write seam (fix-parity: it shared the write-before-validate gap).
+  const consensusMode = hasFlag('--consensus')
+  const maxRounds = parseInt(flag('--max-rounds') || '5', 10)
+  if (consensusMode && (!Number.isInteger(maxRounds) || maxRounds < 1)) {
+    emitErr('invalid-max-rounds', `--max-rounds must be a positive integer, got: ${maxRounds}`)
+  }
+  const timeoutRaw = flag('--timeout')
+  const timeoutMs = timeoutRaw === undefined ? undefined : parseInt(timeoutRaw, 10)
+  if (timeoutRaw !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1000)) {
+    emitErr('invalid-timeout', `--timeout must be an integer number of milliseconds >= 1000, got "${timeoutRaw}"`)
+  }
+
   // Compose preamble (3-tier resolution).
   const cliPreamble = flag('--preamble')
   const cliFragments = cliPreamble ? cliPreamble.split(',').map((s) => s.trim()).filter(Boolean) : null
@@ -228,6 +243,26 @@ async function cmdRequest() {
   }
 
   const userBody = readBodyFromFlag()
+  const baseBody = `${composed.preambleBody}\n\n---\n\n${userBody}`
+  let lessonBlock = ''
+  try {
+    const inj = buildLessonInjection({
+      projectRoot,
+      provider,
+      matchText: `${flag('--summary') || ''}\n${userBody}`,
+      headroomChars: providerEntry.prompt_max_chars - baseBody.length - 4,
+    })
+    lessonBlock = inj.block
+    if (inj.note) process.stderr.write(`second-opinion: ${inj.note}\n`)
+  } catch (e) {
+    process.stderr.write(`second-opinion: lesson injection skipped: ${e.message}\n`)
+  }
+  // R7 (REQ-3, F1): fold the block INTO the preamble, NOT the round-1 body, so
+  // EVERY dispatch carries it - round 1 AND every consensus round, which
+  // recomposes `${composed.preambleBody}\n\n---\n\n${rebuttalBody}` at the :446
+  // next-round seam. Zero match leaves composed.preambleBody untouched -> fullBody
+  // byte-identical to today (REQ-1).
+  if (lessonBlock) composed.preambleBody = `${composed.preambleBody}\n\n${lessonBlock}`
   const fullBody = `${composed.preambleBody}\n\n---\n\n${userBody}`
 
   // prompt_max_chars overflow check (PRE-dispatch).
@@ -270,15 +305,9 @@ async function cmdRequest() {
   // Optional synchronous dispatch (--dispatch) or consensus loop (--consensus).
   // --consensus implies --dispatch.
   // -------------------------------------------------------------------------
-  const consensusMode = hasFlag('--consensus')
   const dispatchRequested = consensusMode || hasFlag('--dispatch')
-  const maxRounds = parseInt(flag('--max-rounds') || '5', 10)
   const rebuttalCbPath = flag('--rebuttal-cb')
   const forceSpecCycleAccept = hasFlag('--force-spec-cycle-accept')
-
-  if (consensusMode && (!Number.isInteger(maxRounds) || maxRounds < 1)) {
-    emitErr('invalid-max-rounds', `--max-rounds must be a positive integer, got: ${maxRounds}`)
-  }
 
   let providerModule = null
   let firstWritten = written
@@ -344,13 +373,27 @@ async function cmdRequest() {
     })
   }
 
-  function runDispatch(promptText) {
+  function runDispatch(promptText, roundN = 1, requestId = null) {
     let r
     try {
-      r = providerModule.dispatch({ prompt: promptText, projectRoot })
+      r = providerModule.dispatch({ prompt: promptText, projectRoot, ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) })
     } catch (e) {
       emitErr('provider-dispatch-failed',
         `Provider ${provider} dispatch threw: ${e.message}`, { provider })
+    }
+    if (r && r.timedOut) {
+      let forensicsPath = null
+      if (requestId) {
+        try {
+          const fdir = path.join(projectRoot, '.review-store', 'forensics')
+          fs.mkdirSync(fdir, { recursive: true })
+          forensicsPath = path.join(fdir, `${requestId}.round${roundN}.timeout-stdout.txt`)
+          fs.writeFileSync(forensicsPath, r.stdout || '', 'utf8')
+        } catch { forensicsPath = null }
+      }
+      emitErr('provider-timeout',
+        `Provider ${provider} timed out after ${timeoutMs}ms (round ${roundN})`,
+        { provider, round: roundN, timeoutMs, forensics: forensicsPath })
     }
     if (!r.ok) {
       emitErr('provider-dispatch-nonzero',
@@ -367,7 +410,7 @@ async function cmdRequest() {
     let currentBody = fullBody
     let roundN = 1
     while (true) {
-      const dispatchR = runDispatch(currentBody)
+      const dispatchR = runDispatch(currentBody, roundN, currentRequestRecord.id)
       lastDispatch = dispatchR
       const replyR = writeReplyRound(currentRequestRecord.id, dispatchR.stdout, roundN)
       lastReply = replyR
@@ -456,7 +499,7 @@ async function cmdRequest() {
     }
   } else if (dispatchRequested) {
     // Single dispatch (existing behavior).
-    lastDispatch = runDispatch(fullBody)
+    lastDispatch = runDispatch(fullBody, 1, written.id)
     lastReply = writeReplyRound(written.id, lastDispatch.stdout, 1)
   }
 
