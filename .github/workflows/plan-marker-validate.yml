@@ -336,6 +336,9 @@ jobs:
       - name: Run activation-match core conformance suite (#504)
         run: node tests/test-activation-match.mjs
 
+      - name: Run RFC-009 P4-S1 telemetry suite (#505 / REQ-22)
+        run: node tests/test-rfc-009-p4-telemetry.mjs
+
       - name: Run uninstall-activation round-trip suite (#504)
         run: node tests/test-uninstall-activation.mjs
 
