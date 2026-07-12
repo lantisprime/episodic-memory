@@ -173,7 +173,14 @@ function runClerk({ root, extraArgs = [], home }) {
     timeout: 120000,
     env,
   })
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr, json: parseLastJson(r.stdout) }
+  return {
+    status: r.status,
+    stdout: r.stdout,
+    stderr: r.stderr,
+    json: parseLastJson(r.stdout),
+    signal: r.signal,
+    errorCode: r.error && r.error.code || null,
+  }
 }
 function parseLastJson(stdout) {
   if (!stdout) return null

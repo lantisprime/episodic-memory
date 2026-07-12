@@ -419,6 +419,11 @@ if (foldSuperseded) {
 // TDZ on const/let below the if-block would otherwise break the loader path).
 const _clerkTriggerPhrasesByEpisodeId = new Map()
 let _clerkActiveRows = []
+// Per-run memo for clerkHighDfTags: keyed on activeRows ref identity (stable
+// within a run because _clerkActiveRows is assigned once). Declared at module
+// scope so it's initialized BEFORE clerkSignals first runs (function decls are
+// hoisted; const is not — keeping it here avoids TDZ).
+const _highDfCache = new WeakMap()
 // --break-highdf disables the high-df tag drop in clerkSignals (negative control
 // for report::signalHighDfDrop; production runs never carry this flag).
 const _BREAK_HIGHDF = process.argv.includes('--break-highdf')
@@ -760,11 +765,15 @@ function clerkTagsFor(row) {
 // _BREAK_HIGHDF declared above the clerk-report branch to avoid TDZ.
 function clerkHighDfTags(activeRows) {
   if (_BREAK_HIGHDF) return new Set()
+  const rows = activeRows || []
+  const cached = _highDfCache.get(rows)
+  if (cached) return cached
   const df = new Map()
-  for (const r of activeRows) for (const t of clerkTagsFor(r)) df.set(t, (df.get(t) || 0) + 1)
-  const cutoff = HIGH_DF_MIN(activeRows.length)
+  for (const r of rows) for (const t of clerkTagsFor(r)) df.set(t, (df.get(t) || 0) + 1)
+  const cutoff = HIGH_DF_MIN(rows.length)
   const high = new Set()
   for (const [tag, n] of df) if (n >= cutoff) high.add(tag)
+  _highDfCache.set(rows, high)
   return high
 }
 function clerkTagJaccard(aTags, bTags, highDf) {
