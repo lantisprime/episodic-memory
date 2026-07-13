@@ -25,6 +25,7 @@
 
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
+import { tryAcquire, acquire, release } from './lib/lock.mjs'
 
 const args = process.argv.slice(2)
 
@@ -60,82 +61,16 @@ if (!lockFile || !cmdArgs.length || Number.isNaN(timeoutS) || timeoutS < 0) {
   process.exit(2)
 }
 
-const POLL_MS = 100
-const startMs = Date.now()
-const deadlineMs = startMs + timeoutS * 1000
-
-function tryAcquire() {
-  try {
-    const fd = fs.openSync(lockFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o644)
-    fs.writeSync(fd, `${process.pid}\n${new Date().toISOString()}\n${process.ppid}\n`)
-    fs.closeSync(fd)
-    return { ok: true }
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err
-    // Stale-lock detection: read pid, check if alive
-    try {
-      const txt = fs.readFileSync(lockFile, 'utf8')
-      const pid = parseInt(txt.split('\n')[0], 10)
-      if (pid > 0) {
-        try {
-          process.kill(pid, 0) // probe — does not actually signal
-          return { ok: false, heldBy: pid }
-        } catch (probeErr) {
-          if (probeErr.code === 'ESRCH') {
-            // Holder is gone. Steal.
-            try {
-              fs.unlinkSync(lockFile)
-              return tryAcquire()
-            } catch (unlinkErr) {
-              if (unlinkErr.code === 'ENOENT') return tryAcquire()
-              throw unlinkErr
-            }
-          }
-          // EPERM or other — treat as held
-          return { ok: false, heldBy: pid }
-        }
-      }
-      return { ok: false, heldBy: null }
-    } catch (readErr) {
-      if (readErr.code === 'ENOENT') return tryAcquire() // race; retry
-      throw readErr
-    }
-  }
-}
-
-async function acquire() {
-  while (true) {
-    const result = tryAcquire()
-    if (result.ok) return
-    if (Date.now() >= deadlineMs) {
-      console.error(JSON.stringify({
-        status: 'error',
-        code: 'lock-timeout',
-        file: lockFile,
-        held_by_pid: result.heldBy,
-        timeout_s: timeoutS,
-      }))
-      process.exit(1)
-    }
-    await new Promise((r) => setTimeout(r, POLL_MS))
-  }
-}
-
-function release() {
-  try {
-    const txt = fs.readFileSync(lockFile, 'utf8')
-    const pid = parseInt(txt.split('\n')[0], 10)
-    if (pid === process.pid) fs.unlinkSync(lockFile)
-  } catch (_err) {
-    // already gone or unreadable — fine
-  }
-}
+// tryAcquire/acquire/release are extracted to lib/lock.mjs (DELTA-2, S4.1) so
+// the clerk (em-consolidate.mjs) shares one implementation. The CLI still owns
+// the process.exit on lock-timeout (below) — acquire itself only RETURNS.
+let lockHandle = null
 
 let released = false
 function safeRelease() {
   if (released) return
   released = true
-  release()
+  release(lockHandle)
 }
 
 process.on('SIGINT', () => { safeRelease(); process.exit(130) })
@@ -146,7 +81,20 @@ process.on('uncaughtException', (err) => {
   process.exit(1)
 })
 
-await acquire()
+// Blocking acquire (imported); the CLI boundary owns the process.exit on
+// lock-timeout — acquire itself only RETURNS { ok:false, code:'lock-timeout' }.
+const _acq = await acquire(lockFile, timeoutS)
+if (!_acq.ok) {
+  console.error(JSON.stringify({
+    status: 'error',
+    code: 'lock-timeout',
+    file: lockFile,
+    held_by_pid: _acq.heldBy,
+    timeout_s: timeoutS,
+  }))
+  process.exit(1)
+}
+lockHandle = _acq.handle
 
 const child = spawn(cmdArgs[0], cmdArgs.slice(1), { stdio: 'inherit' })
 

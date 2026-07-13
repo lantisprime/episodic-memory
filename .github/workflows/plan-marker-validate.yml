@@ -339,8 +339,11 @@ jobs:
       - name: Run RFC-009 P4-S1 telemetry suite (#505 / REQ-22)
         run: node tests/test-rfc-009-p4-telemetry.mjs
 
-      - name: Run RFC-009 P4-S3 clerk report suite (REQ-1,2,3,4,5,13,21,23)
+      - name: Run RFC-009 P4-S3 clerk report suite (REQ-1,2,3,4,5,21,23)
         run: node tests/test-rfc-009-p4-report.mjs
+
+      - name: Run RFC-009 P4-S4 clerk apply suite (REQ-6..13)
+        run: node tests/test-rfc-009-p4-apply.mjs
 
       - name: Run uninstall-activation round-trip suite (#504)
         run: node tests/test-uninstall-activation.mjs

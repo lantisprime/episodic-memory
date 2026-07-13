@@ -60,10 +60,12 @@ import os from 'os'
 import crypto from 'crypto'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
-import { loadCategories, canonicalCategory, machineConsumedCategories } from './lib/categories.mjs'
+import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
 import { resolveRegisteredStores, resolveRegisteredStoresWithStatus, realpathSafe } from './lib/registered-stores.mjs'
-import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS } from './lib/activation-log.mjs'
+import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER } from './lib/activation-log.mjs'
+import { illegalValueChar, illegalScalarChar, serializeInlineArray, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
+import { acquire, release } from './lib/lock.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -422,11 +424,20 @@ let _clerkActiveRows = []
 // Per-run memo for clerkHighDfTags: keyed on activeRows ref identity (stable
 // within a run because _clerkActiveRows is assigned once). Declared at module
 // scope so it's initialized BEFORE clerkSignals first runs (function decls are
-// hoisted; const is not — keeping it here avoids TDZ).
+// hoisted; const is not — keeping it here avoids TDZ). In-memory only; store
+// untouched.
 const _highDfCache = new WeakMap()
 // --break-highdf disables the high-df tag drop in clerkSignals (negative control
 // for report::signalHighDfDrop; production runs never carry this flag).
 const _BREAK_HIGHDF = process.argv.includes('--break-highdf')
+// Clerk apply lock file (RFC-009 P4-S4, REQ-7). Declared in the pre-branch
+// module-state block to avoid the TDZ hazard (function decls are hoisted; const
+// is not) — the apply branch below references it.
+const CLERK_LOCK_FILE = path.join(DATA_DIR, 'clerk-apply.lock')
+// clerkWrite scalar-field list — declared in the pre-branch block (not below the
+// clerk branch) because clerkWrite is called from the top-level apply branch
+// during module evaluation; a `const` below the branch is in the TDZ then.
+const CLERK_SCALAR_FM_FIELDS = ['id', 'date', 'project', 'category', 'status', 'summary', 'record_type', 'clerk_cutover', 'superseded_by', 'supersedes', 'review_by']
 if (clerk && !apply) {
   const _clerkBreakReportWrite = process.argv.includes('--break-report-write')
   const _clerkBreakDrain = process.argv.includes('--break-drain')
@@ -598,6 +609,18 @@ if (clerk && !apply) {
   }
   await _drain()
   process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// Clerk APPLY mode (--clerk --apply). RFC-009 P4-S4, R9b, REQ-6..13.
+// Mutating merge/dedupe under ONE em-lock, ordered writes (REQ-8), exactly one
+// run-record (REQ-11). F2: ALL writes route through clerkWrite — NEVER the
+// legacy field-blind digest writer below. Delegated to clerkApplyMain (defined
+// at end of file, hoisted) so this branch stays small and the TDZ-sensitive
+// module state stays in the pre-branch block above.
+// ---------------------------------------------------------------------------
+if (clerk && apply) {
+  await clerkApplyMain()
 }
 
 // ---------------------------------------------------------------------------
@@ -974,3 +997,554 @@ for (let c = 0; c < clusters.length; c++) {
 }
 
 console.log(JSON.stringify({ status: 'ok', clusters: applied, applied: applied.length }))
+
+// ===========================================================================
+// clerkWrite(kind, frontmatter, dataDir) — the F2 DIRECT-write primitive
+// (RFC-009 P4-S4, REQ-8/9/11). Validation-first, fail-closed. This is the
+// ONLY write path the clerk apply uses; it NEVER routes through the legacy
+// field-blind digest writer above (§7 F-STRIP). kind ∈ {digest, index-flip,
+// run-record}. Returns { status, written?:id, flipped?:[ids] }; any
+// validation failure aborts BEFORE any mutation.
+// ===========================================================================
+// clerkWrite scalar-field list is declared in the pre-branch module-state block
+// (above) to avoid the TDZ hazard — the apply branch calls clerkWrite during
+// module evaluation, before this point in the file is reached.
+
+function clerkValidateFrontmatter(fm) {
+  // --break-validate skips the validator entirely (negative control for
+  // runrecord::categoryValidatedOnDirectWrite).
+  if (process.argv.includes('--break-validate')) return { ok: true }
+  // Category — mirror em-store.mjs:139-167: fail CLOSED on unloadable vocab.
+  if (typeof fm.category === 'string') {
+    let cv
+    try { cv = validateCategory(fm.category) } catch (e) { return { ok: false, message: e.message } }
+    if (!cv.ok) return { ok: false, message: `Invalid category "${fm.category}" (${cv.reason})` }
+  }
+  // Scalar line-breaking-char rejection (illegalScalarChar).
+  for (const f of CLERK_SCALAR_FM_FIELDS) {
+    const v = fm[f]
+    if (v === undefined || v === null) continue
+    const bad = illegalScalarChar(String(v))
+    if (bad !== null) return { ok: false, message: `field ${f} contains illegal line-breaking character ${JSON.stringify(bad)}` }
+  }
+  // Inline-array item rejection (illegalValueChar) — consolidates + tags + the
+  // activation arrays. This is the unquoted-inline-array class (§7.2 axis-5).
+  for (const f of ['consolidates', 'tags', ...ACTIVATION_ARRAY_FIELDS]) {
+    if (!Array.isArray(fm[f])) continue
+    for (const item of fm[f]) {
+      const bad = illegalValueChar(String(item))
+      if (bad !== null) return { ok: false, message: `inline-array field ${f} item ${JSON.stringify(item)} contains illegal character ${JSON.stringify(bad)}` }
+    }
+  }
+  return { ok: true }
+}
+
+function clerkSerializeFrontmatter(fm) {
+  const lines = ['---']
+  lines.push(`id: ${fm.id}`)
+  lines.push(`date: ${fm.date}`)
+  lines.push(`time: "${fm.time}"`)
+  lines.push(`project: ${fm.project}`)
+  lines.push(`category: ${fm.category}`)
+  lines.push(`status: ${fm.status || 'active'}`)
+  if (typeof fm.supersedes === 'string') lines.push(`supersedes: ${fm.supersedes}`)
+  if (typeof fm.superseded_by === 'string') lines.push(`superseded_by: ${fm.superseded_by}`)
+  if (Array.isArray(fm.consolidates)) lines.push(`consolidates: [${serializeInlineArray(fm.consolidates)}]`)
+  lines.push(`tags: [${serializeInlineArray(fm.tags || [])}]`)
+  if (typeof fm.priority === 'number') lines.push(`priority: ${fm.priority}`)
+  lines.push(`summary: ${fm.summary}`)
+  for (const f of ACTIVATION_ARRAY_FIELDS) {
+    if (Array.isArray(fm[f]) && fm[f].length) lines.push(`${f}: [${serializeInlineArray(fm[f])}]`)
+  }
+  if (typeof fm.review_by === 'string') lines.push(`review_by: ${fm.review_by}`)
+  if (typeof fm.record_type === 'string') lines.push(`record_type: ${fm.record_type}`)
+  if (typeof fm.clerk_cutover === 'string') lines.push(`clerk_cutover: ${fm.clerk_cutover}`)
+  if (fm.pinned === true) lines.push('pinned: true')
+  lines.push('---')
+  return lines.join('\n')
+}
+
+function clerkWrite(kind, frontmatter, dataDir) {
+  if (dataDir !== DATA_DIR) return { status: 'error', message: `clerkWrite dataDir mismatch (${dataDir} !== ${DATA_DIR})` }
+  const episodesDir = path.join(dataDir, 'episodes')
+  const indexFile = path.join(dataDir, 'index.jsonl')
+
+  if (kind === 'index-flip') {
+    const fv = clerkValidateFrontmatter({ id: frontmatter.id, superseded_by: frontmatter.superseded_by })
+    if (!fv.ok) return { status: 'error', message: fv.message }
+    const memberId = frontmatter.id
+    const supersededBy = frontmatter.superseded_by
+    // --break-index-flip-json: write index.jsonl as a single JSON OBJECT (the
+    // updateInverted shape) — corrupts the line-delimited JSONL. Negative
+    // control for apply::indexFlipYieldsValidJsonl (round-2 N1).
+    if (process.argv.includes('--break-index-flip-json')) {
+      const obj = {}; obj[memberId] = supersededBy
+      const tmp = indexFile + '.tmp'
+      fs.writeFileSync(tmp, JSON.stringify(obj), 'utf8')
+      fs.renameSync(tmp, indexFile)
+      return { status: 'ok', flipped: [memberId] }
+    }
+    // JSONL read-map-rewrite (em-consolidate.mjs member-flip pattern) — NOT
+    // updateInverted (which JSON.parses one OBJECT and corrupts JSONL).
+    const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+    const rewritten = lines.map(line => {
+      try {
+        const entry = JSON.parse(line)
+        if (entry.id === memberId) { entry.status = 'superseded'; entry.superseded_by = supersededBy }
+        return JSON.stringify(entry)
+      } catch { return line }
+    })
+    const tmp = indexFile + '.tmp'
+    fs.writeFileSync(tmp, rewritten.join('\n') + '\n', 'utf8')
+    fs.renameSync(tmp, indexFile)
+    // Flip the episode file frontmatter too so a rebuild stays consistent.
+    try {
+      const fp = path.join(episodesDir, `${memberId}.md`)
+      const content = fs.readFileSync(fp, 'utf8')
+      let updated = content.replace(/^status: active$/m, `status: superseded\nsuperseded_by: ${supersededBy}`)
+      if (updated === content) updated = content.replace(/^---\n/, `---\nsuperseded_by: ${supersededBy}\n`)
+      const ftmp = fp + '.tmp'
+      fs.writeFileSync(ftmp, updated, 'utf8')
+      fs.renameSync(ftmp, fp)
+    } catch {}
+    return { status: 'ok', flipped: [memberId] }
+  }
+
+  // digest + run-record: full episode write. Validate first, fail-closed.
+  const fv = clerkValidateFrontmatter(frontmatter)
+  if (!fv.ok) return { status: 'error', message: fv.message }
+
+  let content
+  try { content = `${clerkSerializeFrontmatter(frontmatter)}\n\n# ${frontmatter.summary}\n\n${frontmatter.body || ''}\n` }
+  catch (e) { return { status: 'error', message: e.message } }
+
+  fs.mkdirSync(episodesDir, { recursive: true })
+  fs.writeFileSync(path.join(episodesDir, `${frontmatter.id}.md`), content, 'utf8')
+
+  const row = {
+    id: frontmatter.id, date: frontmatter.date, time: frontmatter.time,
+    project: frontmatter.project, category: frontmatter.category,
+    status: frontmatter.status || 'active',
+    supersedes: frontmatter.supersedes || null,
+    ...(Array.isArray(frontmatter.consolidates) ? { consolidates: frontmatter.consolidates } : {}),
+    tags: frontmatter.tags || [],
+    summary: frontmatter.summary,
+    ...(Array.isArray(frontmatter.triggers) ? { triggers: frontmatter.triggers } : {}),
+    ...(Array.isArray(frontmatter.applies_to_projects) ? { applies_to_projects: frontmatter.applies_to_projects } : {}),
+    ...(Array.isArray(frontmatter.applies_to_tools) ? { applies_to_tools: frontmatter.applies_to_tools } : {}),
+    ...(Array.isArray(frontmatter.evidence) ? { evidence: frontmatter.evidence } : {}),
+    ...(Array.isArray(frontmatter.lessons) ? { lessons: frontmatter.lessons } : {}),
+    ...(typeof frontmatter.priority === 'number' ? { priority: frontmatter.priority } : {}),
+    ...(typeof frontmatter.review_by === 'string' ? { review_by: frontmatter.review_by } : {}),
+    ...(typeof frontmatter.record_type === 'string' ? { record_type: frontmatter.record_type } : {}),
+    ...(typeof frontmatter.clerk_cutover === 'string' ? { clerk_cutover: frontmatter.clerk_cutover } : {}),
+    ...(frontmatter.pinned === true ? { pinned: true } : {}),
+  }
+  fs.appendFileSync(indexFile, JSON.stringify(row) + '\n', 'utf8')
+  updateInverted('tags.json', frontmatter.id, frontmatter.tags || [], true)
+  updateInverted('category-index.json', frontmatter.id, [canonicalCategory(frontmatter.category)], true)
+  try { updateTokensIndex(dataDir, frontmatter.id, episodeTokens({ summary: frontmatter.summary, tags: frontmatter.tags || [], body: content })) } catch {}
+  return { status: 'ok', written: frontmatter.id }
+}
+
+// ===========================================================================
+// Clerk APPLY helpers (RFC-009 P4-S4). All hoisted function declarations so the
+// top-level `if (clerk && apply)` branch can call them (module state stays in
+// the pre-branch block above to dodge the TDZ hazard).
+// ===========================================================================
+
+// Read the current index.jsonl into a Map<id,row> (fresh, for at-apply guards).
+function clerkReadIndexRows(dataDir) {
+  const m = new Map()
+  try {
+    const lines = fs.readFileSync(path.join(dataDir, 'index.jsonl'), 'utf8').trim().split('\n').filter(Boolean)
+    for (const line of lines) { try { const e = JSON.parse(line); if (e && typeof e.id === 'string') m.set(e.id, e) } catch {} }
+  } catch {}
+  return m
+}
+
+// Parse a run-record episode's JSON payload (stored as the last {-line of body).
+function clerkReadRunRecordPayload(dataDir, id) {
+  try {
+    const content = fs.readFileSync(path.join(dataDir, 'episodes', `${id}.md`), 'utf8')
+    const lines = content.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const s = lines[i].trim()
+      if (s.startsWith('{')) { try { return JSON.parse(s) } catch {} }
+    }
+  } catch {}
+  return null
+}
+
+// Latest run-record payload per store (canonical id sort, mirrors protection class-d).
+function clerkLoadLatestRunRecord(dataDir) {
+  let rows = []
+  try { rows = loadIndex(dataDir, scope) } catch { return null }
+  const CANONICAL = /^\d{8}-\d{6}-/
+  let best = null
+  for (const r of rows) {
+    if (r.record_type !== 'clerk-run' || typeof r.id !== 'string') continue
+    const canonical = CANONICAL.test(r.id)
+    if (!best || (canonical === best.canonical ? r.id > best.id : canonical)) best = { id: r.id, canonical }
+  }
+  return best ? clerkReadRunRecordPayload(dataDir, best.id) : null
+}
+
+// Store fingerprint = sha256 of the sorted active-candidate ids. Baked into each
+// cluster fingerprint so a store mutation (new episode) invalidates a rejected
+// cluster's suppression (§7.2 axis-2). Run-records + digests are already excluded
+// from the candidate set (machine-consumed category / consolidates), so an apply's
+// own run-record append does NOT shift the fingerprint (keeps rejectedNotReproposed
+// stable on an unchanged store).
+function clerkStoreFingerprint(candidateRows) {
+  const ids = candidateRows.map(r => r.id).sort()
+  return crypto.createHash('sha256').update(ids.join('\n')).digest('hex').slice(0, 16)
+}
+function clerkClusterFingerprint(memberIds, storeFp) {
+  return crypto.createHash('sha256').update(memberIds.slice().sort().join(',') + '\u0000' + storeFp).digest('hex').slice(0, 24)
+}
+
+// Orphan reconciliation (REQ-8 / EC4 / §7.2 axis-3): a digest carrying the
+// clerk_cutover stamp but absent from EVERY run-record's written-ids is an
+// orphaned apply (crash before the run-record landed). benign iff no member is
+// yet superseded into it (crash before the supersede loop). Clock-independent
+// (stamped field, NOT a date compare, NSP F6). Legacy digests LACK clerk_cutover
+// so they are never re-offered.
+function clerkDetectOrphans(dataDir, scopeArg) {
+  let rows = []
+  try { rows = loadIndex(dataDir, scopeArg) } catch { return [] }
+  const written = new Set()
+  for (const r of rows) {
+    if (r.record_type !== 'clerk-run' || typeof r.id !== 'string') continue
+    const payload = clerkReadRunRecordPayload(dataDir, r.id)
+    if (payload && Array.isArray(payload.written_ids)) for (const w of payload.written_ids) written.add(w)
+  }
+  const supersededByMap = new Map()
+  for (const r of rows) {
+    if (typeof r.superseded_by === 'string' && r.status === 'superseded') {
+      if (!supersededByMap.has(r.superseded_by)) supersededByMap.set(r.superseded_by, [])
+      supersededByMap.get(r.superseded_by).push(r.id)
+    }
+  }
+  const orphans = []
+  for (const r of rows) {
+    if (r.clerk_cutover && Array.isArray(r.consolidates) && r.status !== 'superseded' && !written.has(r.id)) {
+      const members = supersededByMap.get(r.id) || []
+      orphans.push({ digest_id: r.id, superseded_member_ids: members, benign: members.length === 0 })
+    }
+  }
+  return orphans
+}
+
+// Cluster over the active candidates (same grouping + union-find as report mode,
+// clustering only pairs whose resolveAction is merge/dedupe; state D
+// supersession-adjacency forces merge). Returns { clusters, supersessionAdjacent }.
+function clerkBuildClusters(activeRaw) {
+  const groups = new Map()
+  for (const r of activeRaw) {
+    const key = `${r.project}\u0000${canonicalCategory(r.category)}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(r)
+  }
+  const parent = new Map()
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x) } return x }
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb) }
+  for (const r of activeRaw) parent.set(r.id, r.id)
+  const supRoots = new Map()
+  for (const r of activeRaw) if (typeof r.supersedes === 'string' && r.supersedes) {
+    if (!supRoots.has(r.supersedes)) supRoots.set(r.supersedes, [])
+    supRoots.get(r.supersedes).push(r.id)
+  }
+  const supersessionAdjacent = new Set()
+  for (const ids of supRoots.values()) if (ids.length >= 2) for (const id of ids) supersessionAdjacent.add(id)
+  for (const members of groups.values()) {
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        const a = members[i], b = members[j]
+        const action = (supersessionAdjacent.has(a.id) && supersessionAdjacent.has(b.id) && a.supersedes === b.supersedes)
+          ? 'merge' : clerkResolveAction(clerkSignals(a, b))
+        if (action === 'merge' || action === 'dedupe') union(a.id, b.id)
+      }
+    }
+  }
+  const byRoot = new Map()
+  for (const r of activeRaw) { const root = find(r.id); if (!byRoot.has(root)) byRoot.set(root, []); byRoot.get(root).push(r) }
+  const clusters = [...byRoot.values()]
+    .filter(m => m.length >= minCluster)
+    .map(m => m.sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.id.localeCompare(b.id)))
+  return { clusters, supersessionAdjacent }
+}
+
+// Cluster-wide action: the most-actionable across its pairs (dedupe > merge >
+// keep-distinct), matching the report envelope.
+function clerkResolveClusterAction(members, supersessionAdjacent) {
+  const RANK = { 'dedupe': 3, 'merge': 2, 'keep-distinct': 1 }
+  let best = 'keep-distinct'
+  for (let i = 0; i < members.length && best !== 'dedupe'; i++) {
+    for (let j = i + 1; j < members.length && best !== 'dedupe'; j++) {
+      const a = members[i], b = members[j]
+      const action = (supersessionAdjacent.has(a.id) && supersessionAdjacent.has(b.id) && a.supersedes === b.supersedes)
+        ? 'merge' : clerkResolveAction(clerkSignals(a, b))
+      if (RANK[action] > RANK[best]) best = action
+    }
+  }
+  return best
+}
+
+// REQ-9 merge field contract, built DIRECTLY by the clerk (NOT the legacy
+// field-blind writer): triggers/applies_to_*/evidence = union(dedup); priority =
+// max of DEFINED stored values (missing stays missing); review_by = latest-or-unset;
+// tags = union; consolidates = member ids; clerk_cutover stamped.
+function clerkBuildMergeFrontmatter(members) {
+  const { dateStr, timeStr, idStamp } = nowParts()
+  const memberIds = members.map(m => m.id)
+  const summary = `Consolidated: ${members[members.length - 1].summary} (+${members.length - 1} related)`
+  const digestId = `${idStamp}-${slugify(summary)}-${crypto.randomBytes(2).toString('hex')}`
+  const unionArr = (field) => {
+    const seen = new Set(), out = []
+    for (const m of members) for (const v of (Array.isArray(m[field]) ? m[field] : [])) {
+      if (typeof v === 'string' && !seen.has(v)) { seen.add(v); out.push(v) }
+    }
+    return out
+  }
+  const priorities = members.map(m => m.priority).filter(p => typeof p === 'number')
+  const reviewBys = members.map(m => m.review_by).filter(r => typeof r === 'string')
+  const bodySections = members.map(m => {
+    let body = ''
+    try { body = bodyOf(fs.readFileSync(path.join(EPISODES_DIR, `${m.id}.md`), 'utf8')) } catch {}
+    return `## ${m.summary}\n\n(id: \`${m.id}\`, ${m.date})\n\n${body}`
+  })
+  const digestBody = [`Digest of ${members.length} related episodes (clerk merge, ${dateStr}).`, '', ...bodySections].join('\n\n')
+  const triggers = unionArr('triggers')
+  const applies_to_projects = unionArr('applies_to_projects')
+  const applies_to_tools = unionArr('applies_to_tools')
+  const evidence = unionArr('evidence')
+  return {
+    id: digestId, date: dateStr, time: timeStr,
+    project: members[0].project, category: canonicalCategory(members[0].category),
+    status: 'active', consolidates: memberIds,
+    tags: normalizeTags(members.flatMap(m => Array.isArray(m.tags) ? m.tags : [])),
+    summary,
+    ...(triggers.length ? { triggers } : {}),
+    ...(applies_to_projects.length ? { applies_to_projects } : {}),
+    ...(applies_to_tools.length ? { applies_to_tools } : {}),
+    ...(evidence.length ? { evidence } : {}),
+    ...(priorities.length ? { priority: Math.max(...priorities) } : {}),
+    ...(reviewBys.length ? { review_by: reviewBys.slice().sort()[reviewBys.length - 1] } : {}),
+    clerk_cutover: CLERK_CUTOVER_MARKER,
+    body: digestBody,
+  }
+}
+
+// Legacy field-blind digest write (--break-oldwriter red control for
+// apply::mergeFieldContract): drops the union activation fields + clerk_cutover.
+function clerkLegacyDigestWrite(members, digest) {
+  const bare = {
+    id: digest.id, date: digest.date, time: digest.time, project: digest.project,
+    category: digest.category, status: 'active', consolidates: digest.consolidates,
+    tags: digest.tags, summary: digest.summary, body: digest.body,
+  }
+  clerkWrite('digest', bare, DATA_DIR)
+  for (const m of members) clerkWrite('index-flip', { id: m.id, superseded_by: digest.id }, DATA_DIR)
+}
+
+// REQ-11 run-record: category workflow.lifecycle + scalar record_type:clerk-run +
+// clerk_cutover; payload (JSON body) carries the source-index fingerprint, proposals,
+// per-item outcomes, written/superseded ids, and the cumulative rejected set.
+function clerkBuildRunRecord({ writtenIds, supersededIds, proposals, applied, rejected, skippedGuard, rejectedSet, storeFp, orphans, badCategory }) {
+  const { dateStr, timeStr, idStamp } = nowParts()
+  const id = `${idStamp}-clerk-run-${crypto.randomBytes(2).toString('hex')}`
+  const payload = {
+    mode: 'clerk-apply', ts: new Date().toISOString(),
+    source_index_fingerprint: storeFp,
+    written_ids: writtenIds, superseded_ids: supersededIds,
+    proposals, applied, rejected, skipped_guard: skippedGuard,
+    rejected_cumulative: rejectedSet, orphans,
+  }
+  return {
+    id, date: dateStr, time: timeStr, project: 'clerk',
+    // --sim-bad-runrecord-category proves the validator runs on the direct write
+    // path (runrecord::categoryValidatedOnDirectWrite): an invalid category must
+    // be REJECTED by clerkWrite before any write.
+    category: badCategory ? 'zzinvalidcatsentinel' : RUN_RECORD_CATEGORY,
+    status: 'active', tags: [],
+    summary: `Clerk apply run: ${writtenIds.length} written, ${supersededIds.length} superseded, ${rejected.length} rejected`,
+    record_type: RUN_RECORD_TYPE, clerk_cutover: CLERK_CUTOVER_MARKER,
+    // rejected fingerprints stored top-level too so clerkLoadLatestRunRecord can
+    // read them without the full payload parse (belt-and-braces).
+    body: `Clerk run record (RFC-009 R9b P4-S4).\n\n${JSON.stringify({ ...payload, rejected: rejectedSet })}`,
+  }
+}
+
+// ===========================================================================
+// clerkApplyMain — the top-level --clerk --apply flow (REQ-6..13). Hoisted.
+// ===========================================================================
+async function clerkApplyMain() {
+  const _breakConfirm = process.argv.includes('--break-confirm')
+  const _breakWriteOrder = process.argv.includes('--break-writeorder')
+  const _breakLock = process.argv.includes('--break-lock')
+  const _breakRejected = process.argv.includes('--break-rejected')
+  // F1 (REQ-12/REQ-6 TOCTOU): --break-locked-reread restores the RACY pre-lock
+  // rejected-set read (negative control for apply::rejectedVisibleUnderLock).
+  const _breakLockedReread = process.argv.includes('--break-locked-reread')
+  const _breakOldWriter = process.argv.includes('--break-oldwriter')
+  const _simCrashAfterStore = process.argv.includes('--sim-crash-after-store')
+  const _simCrashAfterSupersede = process.argv.includes('--sim-crash-after-supersede')
+  const _simBadRunRecordCat = process.argv.includes('--sim-bad-runrecord-category')
+  const _simRaceSupersedeCanonical = process.argv.includes('--sim-race-supersede-canonical')
+  // Per-cluster human decision (REQ-6/12/13): --reject-all rejects every proposed
+  // cluster; --reject-member <id> rejects any cluster containing that member.
+  // Rejected clusters are recorded (fingerprint) into the run-record's cumulative
+  // set and NOT applied; they are not re-proposed against an unchanged store.
+  const _rejectAll = process.argv.includes('--reject-all')
+  const _rejectMembers = new Set()
+  for (let i = 0; i < process.argv.length; i++) if (process.argv[i] === '--reject-member' && process.argv[i + 1]) _rejectMembers.add(process.argv[i + 1])
+  const _lockTimeoutS = (() => { const v = flag('--lock-timeout'); const n = v !== undefined ? parseInt(v, 10) : 30; return Number.isFinite(n) && n >= 0 ? n : 30 })()
+
+  // Orphan reconciliation BEFORE the confirm gate so a plain `--clerk --apply`
+  // (no --confirm) still reports crash orphans (EC4 detection path).
+  const orphans = clerkDetectOrphans(DATA_DIR, scope)
+
+  // REQ-6: fail-closed unless confirmed. --break-confirm bypasses (red control).
+  if (!confirm && !_breakConfirm) {
+    process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-apply', code: 'unconfirmed', message: 'clerk apply requires --confirm (REQ-6)', orphans }) + '\n')
+    process.exit(1)
+  }
+
+  const activeRaw = loadIndex(DATA_DIR, scope).filter(r =>
+    r.status !== 'superseded' &&
+    typeof r.id === 'string' &&
+    typeof r.summary === 'string' &&
+    !EXCLUDED_CATEGORIES.has(canonicalCategory(r.category)) &&
+    (includePinned || r.pinned !== true) &&
+    (!categoryFilter || canonicalCategory(r.category) === canonicalCategory(categoryFilter)) &&
+    (!projectFilter || r.project === projectFilter) &&
+    !Array.isArray(r.consolidates)
+  )
+  _clerkActiveRows = activeRaw
+
+  let triggerIndex = { entries: [] }
+  try { triggerIndex = loadMergedTriggerIndex({ project: LOCAL_DIR === DATA_DIR ? path.dirname(LOCAL_DIR) : undefined }) } catch {}
+  clerkRegisterTriggers(triggerIndex)
+
+  const today = new Date().toISOString().slice(0, 10)
+  let protectedIds = new Map()
+  try {
+    const protectionRows = [
+      ...loadProtectionRows(fs, path, LOCAL_DIR, 'local'),
+      ...loadProtectionRows(fs, path, GLOBAL_DIR, 'global'),
+    ]
+    protectedIds = computeProtectedIds(protectionRows, today, [])
+  } catch {}
+
+  const { clusters, supersessionAdjacent } = clerkBuildClusters(activeRaw)
+  const storeFp = clerkStoreFingerprint(activeRaw)
+
+  const proposals = clusters.map(members => {
+    const memberIds = members.map(m => m.id)
+    return {
+      members, memberIds,
+      action: clerkResolveClusterAction(members, supersessionAdjacent),
+      fingerprint: clerkClusterFingerprint(memberIds, storeFp),
+    }
+  })
+
+  const applied = []
+  const rejectedThisRun = []
+  const skippedGuard = []
+
+  // F1 (REQ-12/REQ-6 TOCTOU): the latest-run-record read + suppression marking are
+  // the human-consent-critical read; they MUST run UNDER the lock so a concurrent
+  // apply's rejection run-record is visible before this apply acts (else B applies a
+  // cluster A just rejected — reviewer reproduced 6/6). --break-locked-reread keeps
+  // the racy pre-lock snapshot (the falsifiable RED per A.6b).
+  const markSuppression = () => {
+    const latestRR = clerkLoadLatestRunRecord(DATA_DIR)
+    const priorSet = new Set((latestRR && Array.isArray(latestRR.rejected)) ? latestRR.rejected : [])
+    for (const p of proposals) p.suppressed = priorSet.has(p.fingerprint) && !_breakRejected
+    return priorSet
+  }
+  let priorRejected = null
+  if (_breakLockedReread) priorRejected = markSuppression() // RED: racy pre-lock read
+
+  let lockHandle = null
+  if (!_breakLock) {
+    const acq = await acquire(CLERK_LOCK_FILE, _lockTimeoutS)
+    if (!acq.ok) {
+      process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-apply', locked: true, code: 'lock-held', orphans }) + '\n')
+      process.exit(1)
+    }
+    lockHandle = acq.handle
+  }
+  // GREEN: read the rejected set + mark suppression AFTER the lock is held.
+  if (!_breakLockedReread) priorRejected = markSuppression()
+  const newRejectedSet = new Set(priorRejected)
+
+  let runRecordId = null
+  try {
+    for (const p of proposals) {
+      if (p.suppressed) continue
+      const humanRejected = _rejectAll || p.memberIds.some(id => _rejectMembers.has(id))
+      if (humanRejected || p.action === 'keep-distinct') { rejectedThisRun.push(p.fingerprint); newRejectedSet.add(p.fingerprint); continue }
+      // Guard: protected non-pinned member blocks merge/dedupe (F4).
+      const protectedHit = p.memberIds.find(id => protectedIds.has(id))
+      if (protectedHit) { skippedGuard.push({ members: p.memberIds, reason: `protected:${protectedIds.get(protectedHit).reason}` }); continue }
+      const canonicalId = p.members[0].id
+      if (_simRaceSupersedeCanonical) clerkWrite('index-flip', { id: canonicalId, superseded_by: '__race__' }, DATA_DIR)
+      // Guard: canonical already superseded (F4) → refuse, no write.
+      const freshCanon = clerkReadIndexRows(DATA_DIR).get(canonicalId)
+      if (!freshCanon || freshCanon.status === 'superseded') { skippedGuard.push({ members: p.memberIds, reason: 'canonical-superseded' }); continue }
+
+      if (p.action === 'dedupe') {
+        for (const m of p.members) { if (m.id !== canonicalId) clerkWrite('index-flip', { id: m.id, superseded_by: canonicalId }, DATA_DIR) }
+        if (_simCrashAfterSupersede) process.exit(1)
+        applied.push({ action: 'dedupe', canonical: canonicalId, superseded: p.memberIds.filter(id => id !== canonicalId), members: p.memberIds })
+      } else {
+        const digest = clerkBuildMergeFrontmatter(p.members)
+        if (_breakOldWriter) {
+          clerkLegacyDigestWrite(p.members, digest)
+        } else if (_breakWriteOrder) {
+          for (const m of p.members) clerkWrite('index-flip', { id: m.id, superseded_by: digest.id }, DATA_DIR)
+          if (_simCrashAfterSupersede) process.exit(1) // WRONG order: digest not yet written
+          clerkWrite('digest', digest, DATA_DIR)
+          if (_simCrashAfterStore) process.exit(1)
+        } else {
+          clerkWrite('digest', digest, DATA_DIR)          // (1) store FIRST
+          if (_simCrashAfterStore) process.exit(1)         // benign orphan window
+          for (const m of p.members) clerkWrite('index-flip', { id: m.id, superseded_by: digest.id }, DATA_DIR) // (2) supersede
+          if (_simCrashAfterSupersede) process.exit(1)     // dangerous orphan window
+        }
+        applied.push({ action: 'merge', digest_id: digest.id, superseded: p.memberIds, members: p.memberIds })
+      }
+    }
+
+    // (3) exactly ONE run-record (REQ-11), even for an empty apply.
+    const writtenIds = applied.map(a => a.digest_id).filter(Boolean)
+    const supersededIds = applied.flatMap(a => a.superseded || [])
+    const rr = clerkBuildRunRecord({
+      writtenIds, supersededIds,
+      proposals: proposals.map(p => ({ members: p.memberIds, action: p.action, fingerprint: p.fingerprint, suppressed: p.suppressed })),
+      applied, rejected: rejectedThisRun, skippedGuard,
+      rejectedSet: [...newRejectedSet], storeFp, orphans, badCategory: _simBadRunRecordCat,
+    })
+    const rrRes = clerkWrite('run-record', rr, DATA_DIR)
+    if (rrRes.status === 'ok') runRecordId = rr.id
+    else {
+      process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-apply', code: 'run-record-write-failed', message: rrRes.message, applied, orphans }) + '\n')
+      release(lockHandle)
+      process.exit(1)
+    }
+  } finally {
+    release(lockHandle)
+  }
+
+  const out = {
+    status: 'ok', mode: 'clerk-apply',
+    applied,
+    proposals: proposals.filter(p => !p.suppressed).map(p => ({ members: p.memberIds, action: p.action, fingerprint: p.fingerprint })),
+    rejected: rejectedThisRun, skipped_guard: skippedGuard,
+    run_record: runRecordId, orphans,
+  }
+  await new Promise(resolve => process.stdout.write(JSON.stringify(out) + '\n', resolve))
+  process.exit(0)
+}
