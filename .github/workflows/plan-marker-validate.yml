@@ -345,6 +345,15 @@ jobs:
       - name: Run RFC-009 P4-S4 clerk apply suite (REQ-6..13)
         run: node tests/test-rfc-009-p4-apply.mjs
 
+      - name: Run RFC-009 P4-S5 conversion suite (REQ-18,19,20,21)
+        run: node tests/test-rfc-009-p4-conversion.mjs
+
+      - name: Run RFC-009 P4-S6 enrichment suite (REQ-14)
+        run: node tests/test-rfc-009-p4-enrich.mjs
+
+      - name: Run RFC-009 P4-S7 clerk prompt conformance (REQ-15)
+        run: node tests/test-rfc-009-p4-prompt.mjs
+
       - name: Run uninstall-activation round-trip suite (#504)
         run: node tests/test-uninstall-activation.mjs
 

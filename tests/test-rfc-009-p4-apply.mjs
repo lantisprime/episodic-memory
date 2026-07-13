@@ -646,6 +646,52 @@ function main() {
     ok(rowById(SR, rrId2).record_type === undefined, 'RED: broken whitelist drops record_type on rebuild')
   })
 
+  // ---- GLM review F5: run-record body carries the conversion report ----
+  // apply::runRecordBodyConversionFold — a real --clerk --apply --confirm
+  // run with a seeded closed-window activation log writes a run-record
+  // whose .md body embeds the conversion report (the way the report scan
+  // reads it for report::zeroConversionCandidate). The test parses the
+  // payload the same way the report scan does and asserts
+  // payload.conversion.per_band + per_lesson + lower_bound:true are
+  // present. (Additive — no existing assertions touched.)
+  t('apply::runRecordBodyConversionFold', () => {
+    const S = mkStore('rrbodyconv')
+    seedMergePair(S, 'rrbc')
+    // Seed a closed-window activation log line (in the past, well before NOW)
+    // so the conversion rotate-consume is exercised and per_band + per_lesson
+    // are populated.
+    const SENTINEL_ID = '20260101-000000-rrbc-logline-aaaa'
+    const injectTs = '2026-07-12T10:00:00Z'
+    fs.appendFileSync(path.join(S.dataDir, 'activation-log.jsonl'), JSON.stringify({
+      v: 1, ts: injectTs, project: 'rrbc', event: 'inject', surface: 'per_prompt',
+      entries: [{ id: SENTINEL_ID, effective_priority: 8, rendered: 'imperative', source_scope: 'local', access_count_at_inject: 0 }],
+    }) + '\n')
+    // Real --clerk --apply --confirm run.
+    const r = runClerk(S, { confirm: true })
+    eq(r.status, 0, `run-record-body F5: clerk apply exit 0 (stderr=${r.stderr})`)
+    const rrRows = runRecordRows(S)
+    eq(rrRows.length, 1, 'run-record-body F5: exactly 1 run-record written')
+    const rrId = rrRows[0].id
+    // Read the run-record .md body and extract the JSON payload the same
+    // way the report scan does (drop the frontmatter, regex out the
+    // first JSON object — mirrors the em-consolidate.mjs zeroConversionCandidate
+    // scan at the read site, so the two stay in lock-step).
+    const rrPath = path.join(S.episodesDir, `${rrId}.md`)
+    const rrBody = fs.readFileSync(rrPath, 'utf8')
+    const afterFrontmatter = rrBody.split('\n\n').slice(1).join('\n\n') || '{}'
+    const jsonMatch = afterFrontmatter.replace(/^[^{]*/, '').match(/\{[\s\S]*\}/)
+    ok(jsonMatch && jsonMatch[0], 'run-record-body F5: a JSON object is embedded in the run-record body')
+    let payload = null
+    try { payload = JSON.parse(jsonMatch[0]) } catch (e) { throw new Error(`run-record-body F5: payload JSON parse failed: ${e.message} (raw=${jsonMatch[0].slice(0, 100)})`) }
+    ok(payload && payload.conversion, 'run-record-body F5: payload.conversion is present')
+    ok(payload.conversion.per_band && typeof payload.conversion.per_band === 'object', 'run-record-body F5: payload.conversion.per_band is present')
+    ok(Array.isArray(payload.conversion.per_lesson), 'run-record-body F5: payload.conversion.per_lesson is an array')
+    eq(payload.conversion.lower_bound, true, 'run-record-body F5: payload.conversion.lower_bound === true')
+    // The seeded closed-window line is consumed (denominator ≥ 1).
+    const totalD = (payload.conversion.per_band.imperative?.d || 0) + (payload.conversion.per_band.plain?.d || 0)
+    ok(totalD >= 1, `run-record-body F5: per_band denominator is ≥ 1 (got ${totalD})`)
+  })
+
   // ---- FOLD ROUND F1: rejected-set read is UNDER the lock (REQ-12/REQ-6 TOCTOU) ----
   // apply::rejectedVisibleUnderLock — a rejection run-record that lands WHILE a
   // concurrent apply B is blocked on the lock is visible to B once it acquires
