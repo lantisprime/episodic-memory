@@ -22,6 +22,11 @@ const LOCAL_DIR = resolveLocalDir()
 
 const argv = process.argv.slice(2)
 
+// RFC-009 P4-S4 (round-2 N2): --break-rebuild-whitelist omits `record_type` from
+// the rebuilt index row — negative control for runrecord::survivesRebuild (proves
+// the whitelist add is load-bearing for protection.mjs class-d + crash discriminator).
+const BREAK_REBUILD_WHITELIST = argv.includes('--break-rebuild-whitelist')
+
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(JSON.stringify({ status: 'help', script: 'em-rebuild-index.mjs', usage: 'node em-rebuild-index.mjs [--scope local|global|all] [--check]' }))
   process.exit(0)
@@ -206,6 +211,12 @@ function rebuildDir(dataDir, label) {
       ...(typeof fm.review_by === 'string' ? { review_by: fm.review_by } : {}),
       ...(typeof fm.violated_pattern === 'string' ? { violated_pattern: fm.violated_pattern } : {}),
       ...(fm.pinned === true || fm.pinned === 'true' ? { pinned: true } : {}),
+      // RFC-009 P4-S4 (round-2 N2): clerk run-record + digest markers. record_type
+      // feeds protection.mjs class-d (latest-run-record reservation) + the crash
+      // discriminator; clerk_cutover is the clock-independent orphan stamp. Keep
+      // this pair in LOCKSTEP with em-store/em-revise's index fields.
+      ...((fm.record_type && !BREAK_REBUILD_WHITELIST) ? { record_type: fm.record_type } : {}),
+      ...(fm.clerk_cutover ? { clerk_cutover: fm.clerk_cutover } : {}),
       access_count: accessCount,
       last_accessed: lastAccessed,
       ...(feedback !== 0 ? { feedback } : {}),

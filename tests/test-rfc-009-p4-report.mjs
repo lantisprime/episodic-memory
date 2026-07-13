@@ -179,7 +179,7 @@ function runClerk({ root, extraArgs = [], home }) {
     stderr: r.stderr,
     json: parseLastJson(r.stdout),
     signal: r.signal,
-    errorCode: r.error && r.error.code || null,
+    errorCode: r.error?.code ?? null,
   }
 }
 function parseLastJson(stdout) {
