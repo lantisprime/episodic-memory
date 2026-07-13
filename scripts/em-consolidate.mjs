@@ -58,15 +58,17 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
+import { fileURLToPath } from 'node:url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
+import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex, tokenizeQuery } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
 import { resolveRegisteredStores, resolveRegisteredStoresWithStatus, realpathSafe } from './lib/registered-stores.mjs'
-import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER } from './lib/activation-log.mjs'
+import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER, ATTRIBUTION_WINDOW_MS, ACTIVATION_LOG_NAME, ACTIVATION_LOG_MAX_BYTES, LOG_FORMAT_VERSION } from './lib/activation-log.mjs'
 import { illegalValueChar, illegalScalarChar, serializeInlineArray, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
 import { acquire, release } from './lib/lock.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
+import { spawnSync } from 'node:child_process'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -74,7 +76,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-consolidate.mjs', usage: 'node em-consolidate.mjs [--scope local|global] [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] [--include-pinned] [--apply] [--confirm] — fold near-duplicate episodes into digest episodes (dry-run by default) | --fold-superseded [--min-chain <n>] [--dry-run] [--all-projects] — archive non-terminal members of long supersedes-chains (reversible; terminal untouched; history walk still resolves the chain). --all-projects (fold mode only, mutually exclusive with --scope) folds every consumer-registry store; a real multi-store run requires --confirm; per-store R6 protection unions cwd-local + global + all registered stores' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-consolidate.mjs', usage: 'node em-consolidate.mjs [--scope local|global] [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] [--include-pinned] [--apply] [--confirm] — fold near-duplicate episodes into digest episodes (dry-run by default) | --fold-superseded [--min-chain <n>] [--dry-run] [--all-projects] — archive non-terminal members of long supersedes-chains (reversible; terminal untouched; history walk still resolves the chain). --all-projects (fold mode only, mutually exclusive with --scope) folds every consumer-registry store; a real multi-store run requires --confirm; per-store R6 protection unions cwd-local + global + all registered stores | --clerk [--apply] [--confirm] [--window-ms <ms>] [--zero-conversion-runs <n>] — R9b lexical clerk (report by default, apply with --apply; consumes activation-log.jsonl via rotate-and-consume; the R6 conversion metric is a binary lower bound folded into the run-record; the report surfaces lessons with >= --zero-conversion-runs (default 3) consecutive zero-conversion runs as reword/demote/suppress candidates) | --clerk --enrich [--apply] [--confirm] [--reject-member <id>]... — R9c lexical enrichment backfill (proposes triggers/applies_to_project/applies_to_tool from the episode\'s OWN project and tool provenance fields ONLY, never widened; per-item confirm; apply writes via em-revise AS-IS and a run-record under the same lock)' }))
   process.exit(0)
 }
 
@@ -95,6 +97,7 @@ const confirm = argv.includes('--confirm')
 const foldSuperseded = argv.includes('--fold-superseded')
 const dryRun = argv.includes('--dry-run')
 const clerk = argv.includes('--clerk')
+const enrich = argv.includes('--enrich')
 // Default chain length before folding kicks in. 10 keeps short, still-warm
 // revision chains intact while catching the pathological ones (the live
 // store's worst chain measured ~145 members).
@@ -438,7 +441,7 @@ const CLERK_LOCK_FILE = path.join(DATA_DIR, 'clerk-apply.lock')
 // clerk branch) because clerkWrite is called from the top-level apply branch
 // during module evaluation; a `const` below the branch is in the TDZ then.
 const CLERK_SCALAR_FM_FIELDS = ['id', 'date', 'project', 'category', 'status', 'summary', 'record_type', 'clerk_cutover', 'superseded_by', 'supersedes', 'review_by']
-if (clerk && !apply) {
+if (clerk && !apply && !enrich) {
   const _clerkBreakReportWrite = process.argv.includes('--break-report-write')
   const _clerkBreakDrain = process.argv.includes('--break-drain')
   const _clerkActiveRaw = loadIndex(DATA_DIR, scope).filter(r =>
@@ -587,6 +590,56 @@ if (clerk && !apply) {
     advisory = `cadence: ${activeCount} active lessons (>= ${CADENCE_N_LESSONS}); consider a clerk run`
   }
 
+  // S5 REQ-18/19/20: compute the R6 conversion metric under the SAME
+  // CLERK_LOCK_FILE lock the apply mode holds (one lock, one writer). The
+  // conversion rotate-and-consume mutates the activation log; the lock
+  // serializes the rotate against concurrent appends AND a concurrent apply.
+  // The report's envelope carries the conversion summary so a reword/demote/
+  // suppress candidate surface is available to the human reviewer.
+  const _zeroRuns = (() => { const v = flag('--zero-conversion-runs'); const n = v !== undefined ? parseInt(v, 10) : 3; return Number.isFinite(n) && n >= 1 ? n : 3 })()
+  const _windowMs = (() => { const v = flag('--window-ms'); const n = v !== undefined ? parseInt(v, 10) : ATTRIBUTION_WINDOW_MS; return Number.isFinite(n) && n > 0 ? n : ATTRIBUTION_WINDOW_MS })()
+  const _clerkReportLockHandle = await acquire(CLERK_LOCK_FILE, 30)
+  let _conversion = { per_band: { imperative: { n: 0, d: 0 }, plain: { n: 0, d: 0 } }, per_lesson: [], torn_skipped: 0, carried_forward: 0, lower_bound: true }
+  if (_clerkReportLockHandle && _clerkReportLockHandle.ok) {
+    try {
+      _conversion = clerkComputeConversion(DATA_DIR, GLOBAL_DIR, Date.now(), _windowMs)
+    } finally {
+      release(_clerkReportLockHandle.handle)
+    }
+  }
+  // REQ-21: read the last N run-records; surface lessons with N consecutive
+  // zero-conversion runs as reword/demote/suppress candidates. (S5 stays
+  // ADVISORY — it never blocks an apply; the run-record body carries the same
+  // conversion report so a later P5 needs-enforcement reader can act on it.)
+  const _zeroCandidates = (() => {
+    const candidates = []
+    const lessonHits = new Map() // id -> [{ts,n}, ...] most-recent first
+    try {
+      const allRows = loadIndex(DATA_DIR, scope)
+      const rrRows = allRows
+        .filter(r => r.record_type === RUN_RECORD_TYPE && r.category === RUN_RECORD_CATEGORY)
+        .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')))
+      for (const rr of rrRows) {
+        let payload = null
+        try { payload = JSON.parse((fs.readFileSync(path.join(EPISODES_DIR, `${rr.id}.md`), 'utf8').split('\n\n').slice(1).join('\n\n') || '{}').replace(/^[^{]*/, '').match(/\{[\s\S]*\}/)?.[0] || 'null') } catch {}
+        if (!payload || !payload.conversion || !Array.isArray(payload.conversion.per_lesson)) continue
+        for (const le of payload.conversion.per_lesson) {
+          if (!le || typeof le.id !== 'string') continue
+          if (!lessonHits.has(le.id)) lessonHits.set(le.id, [])
+          lessonHits.get(le.id).push({ ts: rr.date || '', n: le.n || 0, d: le.d || 0 })
+        }
+      }
+    } catch {}
+    for (const [id, hits] of lessonHits) {
+      if (hits.length < _zeroRuns) continue
+      const recent = hits.slice(0, _zeroRuns)
+      if (recent.every(h => (h.n || 0) === 0 && (h.d || 0) > 0)) {
+        candidates.push({ id, consecutive_zero_runs: recent.length, suggestion: 'reword' })
+      }
+    }
+    return candidates
+  })()
+
   // Negative control: --break-report-write injects a stray write INSIDE the clerk
   // branch so report::byteIdenticalStore has teeth (red when the flag is set).
   if (_clerkBreakReportWrite) {
@@ -599,6 +652,8 @@ if (clerk && !apply) {
     clusters: _clusterReports,
     ...(truncatedSentinel ? { truncated: truncatedSentinel } : {}),
     ...(advisory ? { advisory } : {}),
+    conversion: _conversion,
+    ...(_zeroCandidates.length ? { zero_conversion_candidates: _zeroCandidates } : {}),
   }
 
   // Drain-before-exit (#486, REQ-4): em-search.mjs:120 idiom.
@@ -619,8 +674,22 @@ if (clerk && !apply) {
 // at end of file, hoisted) so this branch stays small and the TDZ-sensitive
 // module state stays in the pre-branch block above.
 // ---------------------------------------------------------------------------
-if (clerk && apply) {
+if (clerk && apply && !enrich) {
   await clerkApplyMain()
+}
+
+// ---------------------------------------------------------------------------
+// Clerk ENRICH mode (--clerk --enrich). RFC-009 P4-S6, R9c, REQ-14.
+// Lexical enrichment backfill: proposes triggers/applies_to_project/
+// applies_to_tool from the episode's OWN project and tool provenance
+// fields ONLY (never widened). REPORT mode (no --apply) prints proposals;
+// APPLY mode (--apply --confirm) calls em-revise AS-IS per confirmed
+// item and writes ONE run-record under the SAME CLERK_LOCK_FILE the
+// apply path uses (one lock, one writer — reuse, never a second lock).
+// Delegated to clerkEnrichMain (defined at end of file, hoisted).
+// ---------------------------------------------------------------------------
+if (clerk && enrich) {
+  await clerkEnrichMain()
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,7 +1420,10 @@ function clerkLegacyDigestWrite(members, digest) {
 // REQ-11 run-record: category workflow.lifecycle + scalar record_type:clerk-run +
 // clerk_cutover; payload (JSON body) carries the source-index fingerprint, proposals,
 // per-item outcomes, written/superseded ids, and the cumulative rejected set.
-function clerkBuildRunRecord({ writtenIds, supersededIds, proposals, applied, rejected, skippedGuard, rejectedSet, storeFp, orphans, badCategory }) {
+// S5: payload also carries the conversion report (REQ-18/19/20) so a later
+// report::zeroConversionCandidate scan can read prior run-records and surface
+// lessons with N consecutive zero-conversion runs (REQ-21).
+function clerkBuildRunRecord({ writtenIds, supersededIds, proposals, applied, rejected, skippedGuard, rejectedSet, storeFp, orphans, badCategory, conversion }) {
   const { dateStr, timeStr, idStamp } = nowParts()
   const id = `${idStamp}-clerk-run-${crypto.randomBytes(2).toString('hex')}`
   const payload = {
@@ -1360,6 +1432,7 @@ function clerkBuildRunRecord({ writtenIds, supersededIds, proposals, applied, re
     written_ids: writtenIds, superseded_ids: supersededIds,
     proposals, applied, rejected, skipped_guard: skippedGuard,
     rejected_cumulative: rejectedSet, orphans,
+    ...(conversion ? { conversion } : {}),
   }
   return {
     id, date: dateStr, time: timeStr, project: 'clerk',
@@ -1373,6 +1446,247 @@ function clerkBuildRunRecord({ writtenIds, supersededIds, proposals, applied, re
     // rejected fingerprints stored top-level too so clerkLoadLatestRunRecord can
     // read them without the full payload parse (belt-and-braces).
     body: `Clerk run record (RFC-009 R9b P4-S4).\n\n${JSON.stringify({ ...payload, rejected: rejectedSet })}`,
+  }
+}
+
+// ===========================================================================
+// clerkComputeConversion(localDataDir, globalDataDir, now, windowMs)
+//   — RFC-009 P4-S5 (R6 conversion metric, REQ-18/19/20).
+//
+// Rotate-and-consume the activation-log: atomic rename of activation-log.jsonl
+// to a .processing name, parse the .processing file. OPEN-window lines
+// (ts ∈ (now-window, now]) are carried forward (re-appended to a fresh log) so
+// a later in-window access is not lost (NSP F5 / REQ-18). CLOSED-window lines
+// are consumed: for each entry, read last_accessed from the store named by
+// the line's source_scope; converted iff last_accessed ∈ (ts, ts+windowMs]
+// (half-open, REQ-19). An unreadable source_scope store counts UNCONVERTED
+// (lower bound, never inflated, REQ-20). Torn/unknown-v lines are skipped +
+// counted (EC8). Multi-injection disambiguation: a (ts, access_count_at_inject)
+// tuple is the attribution unit; the binary lower bound operates per-tuple
+// (a per-access delta is unreconstructable from the scalar last_accessed index,
+// see §7.1 F-7.1 / D-F).
+//
+// Crash recovery (REQ-18, fold round 2026-07-13): a leftover
+// activation-log.jsonl.processing from a PRIOR crashed rotation is consumed
+// FIRST (BEFORE the current log's rename) so its lines are folded into the
+// same report — the next rotate would otherwise rename ON TOP of the leftover
+// and silently lose those lines. The broken --break-rotate path
+// (read+unlink) never touches a leftover .processing, so the red control
+// proves the recovery is wired by leaving the leftover intact. Fail-open on
+// any recovery error (crash recovery is best-effort, telemetry never raises).
+//
+// Fail direction (REQ-16/17 + §8.2): telemetry handling fails OPEN (drop at
+// bound, skip torn lines, skip leftover on read error); the run-record write
+// fails CLOSED (clerkWrite). This function returns an EMPTY lower_bound:true
+// report on any read/rotate failure rather than throwing — the caller folds
+// the (possibly empty) report into the run-record or the report envelope,
+// never raising.
+//
+// Negative-control argv flags (portable — no env vars):
+//   --break-rotate       : non-atomic rotate (read-then-truncate-in-place) AND skip leftover consumption — proves EC9 + crash recovery wiring
+//   --break-window       : inclusive lower bound (last_accessed >= ts) — proves the half-open boundary
+//   --break-sourcescope  : ignore line.source_scope, always read local — proves cross-store attribution
+//   --break-tornskip     : throw on torn line instead of skipping+counting — proves EC8
+//   --break-openwindow   : drop open-window lines instead of carrying forward — proves REQ-18 carry-forward
+// ===========================================================================
+
+// _parseLogForConversion(filePath, now, windowMs, opts) — pure line parser
+// shared by the leftover-recovery and the rotated-log paths. Reads the file
+// at filePath, partitions lines by ts vs the open-window boundary, and
+// returns { perBand, perLessonMap, tornSkipped, openWindowLines }. The
+// caller merges the returned state into its accumulator.
+function _parseLogForConversion(filePath, now, windowMs, opts) {
+  const perBand = { imperative: { n: 0, d: 0 }, plain: { n: 0, d: 0 } }
+  const perLessonMap = new Map()
+  let tornSkipped = 0
+  const openWindowLines = []
+  let raw
+  try { raw = fs.readFileSync(filePath, 'utf8') } catch { return { perBand, perLessonMap, tornSkipped, openWindowLines } }
+  const openWindowStart = now - windowMs
+  for (const lineRaw of raw.split('\n')) {
+    if (!lineRaw.trim()) continue
+    let parsed
+    try { parsed = JSON.parse(lineRaw) } catch {
+      if (opts.breakTornSkip) throw new Error('torn line (--break-tornskip)')
+      tornSkipped++
+      continue
+    }
+    if (!parsed || parsed.v !== opts.logFormatVersion) {
+      if (opts.breakTornSkip) throw new Error('unknown v (--break-tornskip)')
+      tornSkipped++
+      continue
+    }
+    const tsMs = Date.parse(parsed.ts)
+    if (!Number.isFinite(tsMs)) { tornSkipped++; continue }
+    if (tsMs > openWindowStart) {
+      if (!opts.breakOpenWindow) openWindowLines.push({ serialized: lineRaw, ts: parsed.ts })
+      continue
+    }
+    const lineEntries = Array.isArray(parsed.entries) ? parsed.entries : []
+    for (const entry of lineEntries) {
+      if (!entry || typeof entry.id !== 'string') continue
+      // F3 (GLM review round 1): an entry with a missing or unknown
+      // source_scope is treated as UNCONVERTED for that entry — counts toward
+      // d, never n (REQ-20 lower bound, never inflated). The previous
+      // implementation silently coerced unknown/missing to 'local' and could
+      // count CONVERTED. --break-sourcescope still forces ALL scopes to
+      // local (the red control semantics).
+      const isKnownScope = entry.source_scope === 'local' || entry.source_scope === 'global'
+      const entrySourceScope = isKnownScope ? entry.source_scope : 'local'
+      const sourceDataDir = (opts.breakSourceScope || entrySourceScope === 'local') ? opts.localDataDir : opts.globalDataDir
+      let lastAccessedRow = null
+      if (isKnownScope) {
+        // F4 (GLM review round 1): scan ALL rows matching the id and take the
+        // MINIMUM last_accessed (conservative, provably lower-bound — the
+        // earliest access that could have converted). Row-order independent.
+        try {
+          const indexFile = path.join(sourceDataDir, 'index.jsonl')
+          if (fs.existsSync(indexFile)) {
+            let minLa = null
+            for (const ln of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+              if (!ln.trim()) continue
+              try {
+                const row = JSON.parse(ln)
+                if (!row || row.id !== entry.id) continue
+                const la = row.last_accessed ? Date.parse(row.last_accessed) : null
+                if (la === null || Number.isNaN(la)) continue
+                if (minLa === null || la < minLa) {
+                  minLa = la
+                  lastAccessedRow = row
+                }
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+      const lastAccessedMs = lastAccessedRow && lastAccessedRow.last_accessed ? Date.parse(lastAccessedRow.last_accessed) : null
+      let converted = false
+      if (lastAccessedMs !== null) {
+        const upper = tsMs + windowMs
+        if (opts.breakWindow) converted = (lastAccessedMs >= tsMs && lastAccessedMs <= upper) // RED: inclusive lower bound
+        else converted = (lastAccessedMs > tsMs && lastAccessedMs <= upper) // GREEN: half-open
+      }
+      const band = entry.rendered === 'imperative' ? 'imperative' : 'plain'
+      perBand[band].d++
+      if (converted) perBand[band].n++
+      const lessonKey = entry.id
+      if (!perLessonMap.has(lessonKey)) perLessonMap.set(lessonKey, { n: 0, d: 0, last_ts: null, last_access_count: 0, band })
+      const agg = perLessonMap.get(lessonKey)
+      agg.d++
+      if (converted) agg.n++
+      agg.last_ts = parsed.ts
+      agg.last_access_count = entry.access_count_at_inject || 0
+    }
+  }
+  return { perBand, perLessonMap, tornSkipped, openWindowLines }
+}
+
+// _mergeParseResult(into, from) — fold one _parseLogForConversion result
+// into the running accumulator. All accumulators are object properties so
+// mutations are visible to the caller (primitives would NOT be visible
+// across a function call).
+function _mergeParseResult(into, from) {
+  into.perBand.imperative.n += from.perBand.imperative.n
+  into.perBand.imperative.d += from.perBand.imperative.d
+  into.perBand.plain.n += from.perBand.plain.n
+  into.perBand.plain.d += from.perBand.plain.d
+  into.tornSkipped += from.tornSkipped
+  for (const l of from.openWindowLines) into.openWindowLines.push(l)
+  for (const [id, v] of from.perLessonMap) {
+    const existing = into.perLessonMap.get(id)
+    if (existing) {
+      existing.n += v.n
+      existing.d += v.d
+      if (v.last_ts && (!existing.last_ts || v.last_ts > existing.last_ts)) {
+        existing.last_ts = v.last_ts
+        existing.last_access_count = v.last_access_count
+      }
+    } else {
+      into.perLessonMap.set(id, { n: v.n, d: v.d, last_ts: v.last_ts, last_access_count: v.last_access_count, band: v.band })
+    }
+  }
+}
+
+function clerkComputeConversion(localDataDir, globalDataDir, now, windowMs) {
+  const _breakRotate = process.argv.includes('--break-rotate')
+  const _breakWindow = process.argv.includes('--break-window')
+  const _breakSourceScope = process.argv.includes('--break-sourcescope')
+  const _breakTornSkip = process.argv.includes('--break-tornskip')
+  const _breakOpenWindow = process.argv.includes('--break-openwindow')
+  const logPath = path.join(localDataDir, ACTIVATION_LOG_NAME)
+  const processingPath = logPath + '.processing'
+  const freshLogPath = logPath // re-append open-window lines here
+  // Single state object — all accumulators live as object properties so
+  // _mergeParseResult mutations are visible to the caller (a primitive
+  // local would NOT be visible across a function call).
+  const state = {
+    perBand: { imperative: { n: 0, d: 0 }, plain: { n: 0, d: 0 } },
+    perLessonMap: new Map(),
+    tornSkipped: 0,
+    openWindowLines: [],
+  }
+  const opts = { breakTornSkip: _breakTornSkip, breakOpenWindow: _breakOpenWindow, breakSourceScope: _breakSourceScope, breakWindow: _breakWindow, localDataDir, globalDataDir, logFormatVersion: LOG_FORMAT_VERSION }
+  // REQ-18 crash recovery: a leftover .processing from a prior CRASHED
+  // rotation is consumed FIRST so its lines are folded into the same report.
+  // The next atomic rename would otherwise overwrite the leftover, silently
+  // losing those telemetry lines. The broken --break-rotate path does not
+  // touch a leftover .processing, so a red run leaves the leftover intact
+  // (proves the recovery is wired). Fail-open on any read/parse error.
+  if (!_breakRotate && fs.existsSync(processingPath)) {
+    try { _mergeParseResult(state, _parseLogForConversion(processingPath, now, windowMs, opts)) } catch {}
+  }
+  // FAIL OPEN: no log AND no leftover → empty lower-bound report, no throw.
+  if (!fs.existsSync(logPath)) {
+    if (state.openWindowLines.length) {
+      try { fs.appendFileSync(freshLogPath, state.openWindowLines.map(l => l.serialized).join('\n') + '\n', 'utf8') } catch {}
+      try { fs.unlinkSync(processingPath) } catch {}
+    } else if (fs.existsSync(processingPath)) {
+      // no log, no open-window lines: the leftover was fully consumed; clean up.
+      try { fs.unlinkSync(processingPath) } catch {}
+    }
+    return { per_band: state.perBand, per_lesson: [...state.perLessonMap.entries()].map(([id, v]) => ({ id, n: v.n, d: v.d, last_ts: v.last_ts, last_access_count_at_inject: v.last_access_count, band: v.band })), torn_skipped: state.tornSkipped, carried_forward: state.openWindowLines.length, lower_bound: true }
+  }
+  // Rotate: atomic rename (.processing) or, under --break-rotate, copy-then-truncate.
+  if (_breakRotate) {
+    // RED (--break-rotate): non-atomic — a concurrent O_APPEND after readSync
+    // but before unlink would be lost. EC9 counterexample. Also skips the
+    // leftover-recovery step above (proves recovery is wired) AND refuses to
+    // touch a leftover .processing (would overwrite it). The red run leaves
+    // both the leftover and the current log intact, with the leftover's
+    // sentinel id absent from per_lesson.
+    if (fs.existsSync(processingPath)) {
+      // A leftover exists; the broken path does not recover it. Leave both
+      // files intact and return the (still-empty) accumulating state. The
+      // leftover is preserved on disk for a later atomic run to recover.
+      return { per_band: state.perBand, per_lesson: [...state.perLessonMap.entries()].map(([id, v]) => ({ id, n: v.n, d: v.d, last_ts: v.last_ts, last_access_count_at_inject: v.last_access_count, band: v.band })), torn_skipped: state.tornSkipped, carried_forward: 0, lower_bound: true }
+    }
+    try {
+      const raw = fs.readFileSync(logPath, 'utf8')
+      fs.writeFileSync(processingPath, raw, 'utf8')
+      fs.unlinkSync(logPath)
+    } catch { return { per_band: state.perBand, per_lesson: [...state.perLessonMap.entries()].map(([id, v]) => ({ id, n: v.n, d: v.d, last_ts: v.last_ts, last_access_count_at_inject: v.last_access_count, band: v.band })), torn_skipped: state.tornSkipped, carried_forward: 0, lower_bound: true } }
+  } else {
+    try { fs.renameSync(logPath, processingPath) }
+    catch { return { per_band: state.perBand, per_lesson: [...state.perLessonMap.entries()].map(([id, v]) => ({ id, n: v.n, d: v.d, last_ts: v.last_ts, last_access_count_at_inject: v.last_access_count, band: v.band })), torn_skipped: state.tornSkipped, carried_forward: 0, lower_bound: true } }
+  }
+  // Parse the (post-rename / post-write) .processing file and fold into state.
+  // No try/catch here: a throw from --break-tornskip propagates to the caller
+  // (clerk report / apply) which fails-closed on the run-record write.
+  _mergeParseResult(state, _parseLogForConversion(processingPath, now, windowMs, opts))
+  // Re-append open-window lines to a fresh log + unlink the .processing file.
+  try {
+    if (state.openWindowLines.length) {
+      const fresh = state.openWindowLines.map(l => l.serialized).join('\n') + '\n'
+      fs.appendFileSync(freshLogPath, fresh, 'utf8')
+    }
+    fs.unlinkSync(processingPath)
+  } catch {}
+  return {
+    per_band: state.perBand,
+    per_lesson: [...state.perLessonMap.entries()].map(([id, v]) => ({ id, n: v.n, d: v.d, last_ts: v.last_ts, last_access_count_at_inject: v.last_access_count, band: v.band })),
+    torn_skipped: state.tornSkipped,
+    carried_forward: state.openWindowLines.length,
+    lower_bound: true,
   }
 }
 
@@ -1480,8 +1794,20 @@ async function clerkApplyMain() {
   if (!_breakLockedReread) priorRejected = markSuppression()
   const newRejectedSet = new Set(priorRejected)
 
+  // S5 REQ-18/19/20: compute the R6 conversion metric INSIDE the same locked
+  // block the apply holds (one lock, one writer). The rotate-and-consume is
+  // bounded by _windowMs (defaults to ATTRIBUTION_WINDOW_MS, 4h); the result
+  // is folded into the run-record body so report::zeroConversionCandidate
+  // (REQ-21) can read it later. Moved INSIDE the try block below so a throw
+  // from the conversion still releases the held lock.
+  const _applyWindowMs = (() => { const v = flag('--window-ms'); const n = v !== undefined ? parseInt(v, 10) : ATTRIBUTION_WINDOW_MS; return Number.isFinite(n) && n > 0 ? n : ATTRIBUTION_WINDOW_MS })()
+  let _applyConversion = { per_band: { imperative: { n: 0, d: 0 }, plain: { n: 0, d: 0 } }, per_lesson: [], torn_skipped: 0, carried_forward: 0, lower_bound: true }
+
   let runRecordId = null
   try {
+    // R6 conversion rotate-and-consume INSIDE the held lock; a throw from
+    // --break-tornskip propagates to the finally (releases the lock + exits).
+    _applyConversion = clerkComputeConversion(DATA_DIR, GLOBAL_DIR, Date.now(), _applyWindowMs)
     for (const p of proposals) {
       if (p.suppressed) continue
       const humanRejected = _rejectAll || p.memberIds.some(id => _rejectMembers.has(id))
@@ -1526,6 +1852,7 @@ async function clerkApplyMain() {
       proposals: proposals.map(p => ({ members: p.memberIds, action: p.action, fingerprint: p.fingerprint, suppressed: p.suppressed })),
       applied, rejected: rejectedThisRun, skippedGuard,
       rejectedSet: [...newRejectedSet], storeFp, orphans, badCategory: _simBadRunRecordCat,
+      conversion: _applyConversion,
     })
     const rrRes = clerkWrite('run-record', rr, DATA_DIR)
     if (rrRes.status === 'ok') runRecordId = rr.id
@@ -1544,7 +1871,186 @@ async function clerkApplyMain() {
     proposals: proposals.filter(p => !p.suppressed).map(p => ({ members: p.memberIds, action: p.action, fingerprint: p.fingerprint })),
     rejected: rejectedThisRun, skipped_guard: skippedGuard,
     run_record: runRecordId, orphans,
+    conversion: _applyConversion,
   }
   await new Promise(resolve => process.stdout.write(JSON.stringify(out) + '\n', resolve))
   process.exit(0)
 }
+
+// ===========================================================================
+// clerkEnrichCandidates(row, opts) — R9c lexical candidate finder (REQ-14).
+// For a given active lesson row, proposes:
+//   - triggers: lexemes extracted from the row's summary + tags (tokenizeQuery)
+//   - applies_to_project: [row.project] — the episode's OWN project; NEVER
+//     widened beyond provenance (REQ-14 hard stop, NSP T8)
+//   - applies_to_tool: row.applies_to_tools — the episode's OWN tool
+//     provenance; NEVER widened
+//   - activity: [] (no automatic activity-class inference; humans or a
+//     downstream R10 classifier would fill this in)
+//
+// --break-scope widens the candidate scope beyond provenance (RED control
+// for enrich::scopeFromProvenanceOnly).
+// ===========================================================================
+function clerkEnrichCandidates(row, opts) {
+  const triggers = new Set()
+  for (const t of tokenizeQuery(row.summary || '')) triggers.add(t)
+  for (const tag of (Array.isArray(row.tags) ? row.tags : [])) {
+    for (const t of tokenizeQuery(tag)) triggers.add(t)
+  }
+  const appliesToProject = [row.project].filter(Boolean)
+  const appliesToTool = Array.isArray(row.applies_to_tools) ? row.applies_to_tools.slice() : []
+  if (opts && opts._breakScope) {
+    // RED: widen beyond provenance (violates REQ-14). The red control proves
+    // the green test discriminates the scope-narrow invariant.
+    appliesToProject.push('unrelated-widened-project-1', 'unrelated-widened-project-2')
+    appliesToTool.push('unrelated-widened-tool-1')
+  }
+  return {
+    id: row.id,
+    triggers: [...triggers].slice(0, 20),
+    applies_to_project: appliesToProject,
+    applies_to_tool: appliesToTool,
+    activity: [],
+  }
+}
+
+// ===========================================================================
+// clerkEnrichMain() — the --clerk --enrich flow (REQ-14, R9c lexical
+// enrichment). REPORT mode: prints per-lesson candidates. APPLY mode: per
+// confirmed item, calls em-revise AS-IS via spawnSync (the
+// scripts/em-capture.mjs:453 idiom), then writes ONE run-record under
+// the SAME CLERK_LOCK_FILE lock the apply path uses — reuse, never a second
+// writer or second lock. em-revise is NEVER modified; the clerk drives
+// its existing --original --project --summary --body --trigger
+// --applies-to-project --applies-to-tool surface. Fail direction split is
+// preserved: the per-item em-revise subprocess failures fail CLOSED
+// (the apply halts and the run-record is NOT written); a successful apply
+// drains a single JSON envelope to stdout then exits 0.
+// ===========================================================================
+async function clerkEnrichMain() {
+  const _breakScope = process.argv.includes('--break-scope')
+  // --break-confirm bypasses the fail-closed confirm gate (GLM review F2 red
+  // control for enrich::noConfirmNoWrite, mirroring S4's --break-confirm).
+  const _breakConfirm = process.argv.includes('--break-confirm')
+  // Per-item rejection (mirrors S4's --reject-member).
+  const _rejectMembers = new Set()
+  for (let i = 0; i < process.argv.length; i++) if (process.argv[i] === '--reject-member' && process.argv[i + 1]) _rejectMembers.add(process.argv[i + 1])
+  const _lockTimeoutS = (() => { const v = flag('--lock-timeout'); const n = v !== undefined ? parseInt(v, 10) : 30; return Number.isFinite(n) && n >= 0 ? n : 30 })()
+  const _enrichHome = process.env.HOME || os.homedir()
+  const _revisePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'em-revise.mjs')
+
+  const activeRaw = loadIndex(DATA_DIR, scope).filter(r =>
+    r.status !== 'superseded' &&
+    typeof r.id === 'string' &&
+    typeof r.summary === 'string' &&
+    !EXCLUDED_CATEGORIES.has(canonicalCategory(r.category)) &&
+    (includePinned || r.pinned !== true) &&
+    (!categoryFilter || canonicalCategory(r.category) === canonicalCategory(categoryFilter)) &&
+    (!projectFilter || r.project === projectFilter) &&
+    !Array.isArray(r.consolidates)
+  )
+
+  // Compute candidates for each active row.
+  const proposals = activeRaw.map(row => ({
+    id: row.id,
+    project: row.project,
+    candidates: clerkEnrichCandidates(row, { _breakScope }),
+  }))
+
+  // REPORT mode (default): print proposals, no writes.
+  if (!apply) {
+    const out = {
+      status: 'ok',
+      mode: 'clerk-enrich',
+      proposals,
+    }
+    await new Promise(resolve => process.stdout.write(JSON.stringify(out) + '\n', resolve))
+    process.exit(0)
+  }
+
+  // APPLY mode: per-item confirmation gating (REQ-6 mirror). --break-confirm
+  // bypasses the gate (red control for enrich::noConfirmNoWrite).
+  if (!confirm && !_breakConfirm) {
+    process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-enrich', code: 'unconfirmed', message: 'clerk enrich apply requires --confirm (REQ-14)', proposals }) + '\n')
+    process.exit(1)
+  }
+
+  // Acquire the SAME CLERK_LOCK_FILE the apply path uses (one lock, one
+  // writer — reuse, never a second lock).
+  const acq = await acquire(CLERK_LOCK_FILE, _lockTimeoutS)
+  if (!acq.ok) {
+    process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-enrich', locked: true, code: 'lock-held', proposals }) + '\n')
+    process.exit(1)
+  }
+  const lockHandle = acq.handle
+
+  const applied = []
+  const rejectedThisRun = []
+  try {
+    for (const p of proposals) {
+      if (_rejectMembers.has(p.id)) { rejectedThisRun.push(p.id); continue }
+      const c = p.candidates
+      // Skip if no candidates to apply (no triggers, no applies, no tools).
+      if (c.triggers.length === 0 && c.applies_to_project.length === 0 && c.applies_to_tool.length === 0) continue
+      const row = activeRaw.find(r => r.id === p.id)
+      if (!row) continue
+      // Read the original body from the episode file.
+      let body = ''
+      try { body = bodyOf(fs.readFileSync(path.join(EPISODES_DIR, `${p.id}.md`), 'utf8')) } catch {}
+      // Build em-revise args (REQ-14: provenance-only triggers/applies).
+      const args = [
+        _revisePath,
+        '--original', p.id,
+        '--project', row.project,
+        '--summary', row.summary,
+        '--body', body,
+      ]
+      for (const t of c.triggers) args.push('--trigger', t)
+      for (const ap of c.applies_to_project) args.push('--applies-to-project', ap)
+      for (const at of c.applies_to_tool) args.push('--applies-to-tool', at)
+      // scripts/em-capture.mjs:453 idiom (cwd = TARGET project root,
+      // encoding utf8, timeout 60000). HOME inherited from the test
+      // fixture override.
+      const r = spawnSync(process.execPath, args, { encoding: 'utf8', cwd: process.cwd(), timeout: 60000, env: { ...process.env, HOME: _enrichHome } })
+      let json = null
+      try { json = JSON.parse(r.stdout.trim()) } catch {}
+      if (r.status !== 0 || !json || json.status !== 'ok') {
+        release(lockHandle)
+        process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-enrich', code: 'revise-failed', id: p.id, status: r.status, stderr: r.stderr, applied, rejected: rejectedThisRun }) + '\n')
+        process.exit(1)
+      }
+      applied.push({ id: p.id, revised_id: json.id })
+    }
+    // Build run-record (clerkBuildRunRecord, same writer as S4) under the lock.
+    const writtenIds = applied.map(a => a.revised_id).filter(Boolean)
+    const supersededIds = applied.map(a => a.id)
+    const rr = clerkBuildRunRecord({
+      writtenIds, supersededIds,
+      proposals: proposals.map(p => ({ id: p.id, candidates: p.candidates })),
+      applied, rejected: rejectedThisRun, skippedGuard: [],
+      rejectedSet: rejectedThisRun.slice(), storeFp: 'enrich', orphans: [], badCategory: false,
+    })
+    // Override the summary to reflect the enrich action.
+    rr.summary = `Clerk enrich run: ${writtenIds.length} enriched, ${supersededIds.length} superseded, ${rejectedThisRun.length} rejected`
+    const rrRes = clerkWrite('run-record', rr, DATA_DIR)
+    let runRecordId = null
+    if (rrRes.status === 'ok') runRecordId = rr.id
+    else {
+      release(lockHandle)
+      process.stdout.write(JSON.stringify({ status: 'error', mode: 'clerk-enrich', code: 'run-record-write-failed', message: rrRes.message, applied }) + '\n')
+      process.exit(1)
+    }
+    const out = {
+      status: 'ok', mode: 'clerk-enrich',
+      applied, rejected: rejectedThisRun,
+      run_record: runRecordId, proposals,
+    }
+    release(lockHandle)
+    await new Promise(resolve => process.stdout.write(JSON.stringify(out) + '\n', resolve))
+    process.exit(0)
+  } catch (e) {
+    release(lockHandle)
+    throw e
+  }
+}
+

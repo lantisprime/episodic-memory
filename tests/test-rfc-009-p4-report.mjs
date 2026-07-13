@@ -195,18 +195,22 @@ function parseLastJson(stdout) {
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 }
-// FIX-4 (S3 review F7): full source-store manifest as sorted (relpath, sha256)
-// tuples for every file under a store dir, EXCEPT trigger-index.json — the
-// REQ-1 carve-out (R2 lazy rebuild may produce or change it; the rest of the
-// store MUST be byte-identical). Returned as a sorted array of arrays so deep
-// equality is unambiguous; missing dir → empty array.
-function manifestExcludingTriggerIndex(dataDir) {
+// FIX-4 (S3 review F7) + GLM review F1: full source-store manifest as sorted
+// (relpath, sha256) tuples for every file under a store dir, EXCEPT the
+// carve-out files: trigger-index.json (REQ-1, R2 lazy rebuild may produce or
+// change it), activation-log.jsonl and activation-log.jsonl.processing
+// (P4-S5 rotation surface — the S5 rotate-and-consume mutates the .processing
+// path AND carries open-window lines back to a fresh activation-log.jsonl;
+// the rest of the store MUST be byte-identical). Returned as a sorted array
+// of arrays so deep equality is unambiguous; missing dir → empty array.
+const STORE_MANIFEST_EXCLUSIONS = new Set(['trigger-index.json', 'activation-log.jsonl', 'activation-log.jsonl.processing'])
+function manifestExcludingTransient(dataDir) {
   const out = []
   if (!fs.existsSync(dataDir)) return out
   function walk(dir, relBase) {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
       const rel = relBase ? `${relBase}/${ent.name}` : ent.name
-      if (rel === 'trigger-index.json') continue
+      if (STORE_MANIFEST_EXCLUSIONS.has(rel)) continue
       const full = path.join(dir, ent.name)
       if (ent.isDirectory()) walk(full, rel)
       else if (ent.isFile()) out.push([rel, sha256(full)])
@@ -236,15 +240,60 @@ function main() {
     const globalDir = path.join(fixtureHome, '.episodic-memory')
     fs.mkdirSync(globalDir, { recursive: true })
     seedLesson({ dataDir: S.dataDir, episodesDir: S.episodesDir, id: '20260101-000000-byteident-aaaa', date: '2026-01-01', project: 'acme', category: 'lesson', tags: ['t-byteidentical'], summary: 'byteidentical baseline lesson', body: 'body' })
-    const localPre = manifestExcludingTriggerIndex(S.dataDir)
-    const globalPre = manifestExcludingTriggerIndex(globalDir)
+    const localPre = manifestExcludingTransient(S.dataDir)
+    const globalPre = manifestExcludingTransient(globalDir)
     const r = runClerk({ root: S.root, home: fixtureHome })
     eq(r.status, 0, 'clerk exits 0')
     eq(r.json && r.json.status, 'ok', 'status:ok')
-    const localPost = manifestExcludingTriggerIndex(S.dataDir)
-    const globalPost = manifestExcludingTriggerIndex(globalDir)
+    const localPost = manifestExcludingTransient(S.dataDir)
+    const globalPost = manifestExcludingTransient(globalDir)
     eq(JSON.stringify(localPost), JSON.stringify(localPre), `local manifest unchanged pre/post (pre=${JSON.stringify(localPre)} post=${JSON.stringify(localPost)})`)
     eq(JSON.stringify(globalPost), JSON.stringify(globalPre), `isolated-global manifest unchanged pre/post (pre=${JSON.stringify(globalPre)} post=${JSON.stringify(globalPost)})`)
+  })
+
+  // 1b. report::byteIdenticalStoreWithLog (GLM review F1) — the S5 rotation
+  //     surface (P4-S5 REQ-18 rotate-and-consume) is unguarded by the original
+  //     byteIdenticalStore test (it runs without an activation log). Seed a
+  //     closed-window line into activation-log.jsonl so the clerk report
+  //     rotation IS exercised; assert the LOCAL manifest (episodes/ + index.jsonl)
+  //     is byte-identical while ONLY the carve-out files (trigger-index.json,
+  //     activation-log.jsonl, activation-log.jsonl.processing) change.
+  t('report::byteIdenticalStoreWithLog', () => {
+    const S = mkStore('byteidenticalwithlog')
+    seedLesson({ dataDir: S.dataDir, episodesDir: S.episodesDir, id: '20260101-000000-bidl-aaaa', date: '2026-01-01', project: 'acme', category: 'lesson', tags: ['t-bidl'], summary: 'bidl baseline lesson with activation log', body: 'body' })
+    // Seed a closed-window activation-log line (in the past, well before NOW)
+    // so the report-mode rotation consumes it. The line names a UNIQUE
+    // sentinel id so the test is discriminating.
+    const SENTINEL_ID = '20260101-000000-bidl-logline-aaaa'
+    const injectTs = '2026-07-12T10:00:00Z'
+    fs.appendFileSync(path.join(S.dataDir, 'activation-log.jsonl'), JSON.stringify({
+      v: 1, ts: injectTs, project: 'bidl', event: 'inject', surface: 'per_prompt',
+      entries: [{ id: SENTINEL_ID, effective_priority: 8, rendered: 'imperative', source_scope: 'local', access_count_at_inject: 0 }],
+    }) + '\n')
+    // Pre-run: manifest snapshot (excludes the activation log itself; the log
+    // is mutated by the rotation, so it must NOT be in the byte-identical
+    // assertion set).
+    const localPre = manifestExcludingTransient(S.dataDir)
+    // The activation log file IS present pre-run (we just seeded it).
+    const preLog = fs.readFileSync(path.join(S.dataDir, 'activation-log.jsonl'), 'utf8')
+    ok(preLog.includes(SENTINEL_ID), 'pre-run: activation-log.jsonl carries the seeded sentinel line')
+    // Run the clerk report — this rotates + consumes the activation log
+    // (the rotation is the S5 surface we're proving is byte-identical-safe).
+    const r = runClerk({ root: S.root })
+    eq(r.status, 0, 'clerk exits 0')
+    eq(r.json && r.json.status, 'ok', 'status:ok')
+    // Post-run: manifest snapshot. The carve-out files (trigger-index.json,
+    // activation-log.jsonl, activation-log.jsonl.processing) are excluded;
+    // the rest of the store (episodes/ + index.jsonl) MUST be byte-identical.
+    const localPost = manifestExcludingTransient(S.dataDir)
+    eq(JSON.stringify(localPost), JSON.stringify(localPre), `local manifest (episodes/ + index.jsonl) unchanged pre/post (pre=${JSON.stringify(localPre)} post=${JSON.stringify(localPost)})`)
+    // Also assert: the conversion ran (the rotation exercised the S5
+    // surface — the report carries the lower-bound per_band + per_lesson).
+    const conv = r.json.conversion
+    ok(conv, 'green: conversion ran (rotation surface exercised)')
+    eq(conv.lower_bound, true, 'green: lower_bound:true labeled')
+    // The .processing leftover must be gone (atomic rotate consumed it).
+    ok(!fs.existsSync(path.join(S.dataDir, 'activation-log.jsonl.processing')), 'green: no .processing leftover (atomic rotate consumed it)')
   })
 
   // 2. report::signalTagJaccard — pair with tag-Jaccard >= 0.5 + same category +
