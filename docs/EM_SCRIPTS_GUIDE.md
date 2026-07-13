@@ -21,6 +21,8 @@ This guide is deployed to `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` on every inst
 Human-facing walkthroughs live in `docs/USER_MANUAL.md`. Installation per harness is
 in `docs/install/`.
 
+> **Per-project model.** `install.mjs` hook and enforcement flags (`--install-hooks`, `--install-enforcement`, `--install-activation` and their uninstall counterparts) are independent per-project opt-ins, each scoped to the `--project <path>` you pass; enforcement is per-project and never global, none of these three layers ever writes to `~/.claude`, and a project without `--install-enforcement` has no gates.
+
 All outputs shown below are trimmed from real runs (Node v26, isolated sandbox).
 
 ---
@@ -245,11 +247,11 @@ Create a new episode.
 ```
 node ~/.episodic-memory/scripts/em-store.mjs \
   --project <name> \
-  --category <decision|discovery|milestone|context|research|lesson|violation|workflow.lifecycle> \
+  --category <decision|discovery|milestone|context|research|lesson|violation|workflow.lifecycle|workplan|temporary> \
   --tags "<t1,t2>" \
   --summary "<one line>" \
   --body "<detail>" \
-  [--body-file <path>] [--scope local|global] [--url <source-url>]
+  [--body-file <path|->] [--scope local|global] [--url <source-url>]
 ```
 
 Output on success:
@@ -261,15 +263,13 @@ Output on success:
 Output when required args are missing:
 
 ```json
-{"status":"error","message":"Missing required args. Usage: --project <name> --category <decision|discovery|milestone|context|research|lesson|violation|workflow.lifecycle> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path>) [--scope local|global]"}
+{"status":"error","message":"Missing required args. Usage: --project <name> --category <decision|discovery|milestone|context|research|lesson|violation|workflow.lifecycle|workplan|temporary> (--tags <t1,t2> | --tag <t> [--tag <t> ...]) --summary <text> (--body <text> | --body-file <path|->) [--scope local|global]"}
 ```
 
 Flags that matter:
 - `--scope` defaults to `global`. Pass `--scope local` for episodes that should stay
   inside this repo.
-- `--body-file <path>` reads the body from a file. Use it for long bodies (plan
-  documents) so a huge inline `--body "$(cat ...)"` does not trip a shell or a
-  permission gate. Mutually exclusive with `--body`.
+- `--body-file <path|->` reads the body from a file; `-` reads stdin. It is recommended for bodies containing backticks, `$()`, or `$VAR`, which an inline shell argument may expand before the script sees it. Also use it for long bodies (plan documents), so a huge inline `--body` does not trip a shell or permission gate. Mutually exclusive with `--body`.
 - Tags accept `--tags a,b`, repeated `--tag a --tag b`, or a mix. They are merged,
   deduplicated, lowercased, and sorted.
 - Lesson-only activation flags (`--trigger`, `--applies-to-project`, `--applies-to-tool`,
@@ -328,7 +328,8 @@ Search episodes with local plus global fallback.
 node ~/.episodic-memory/scripts/em-search.mjs \
   [--project <name>] [--query <text>] [--tag <t>] [--category <cat>] \
   [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] \
-  [--full] [--include-superseded] [--read <id>] [--history <id>] [--no-score] [--no-track]
+  [--full] [--include-superseded] [--read <id>] [--history <id>] [--no-score] [--no-track] \
+  [--warn-time-ms <n>] [--warn-count <n>]
 ```
 
 Output:
@@ -388,6 +389,7 @@ Flags that matter (from the script's own `Usage:` header):
 - `--category <cat>` is index-backed via `category-index.json` (same degrade-to-linear-scan
   fallback as `--tag`). A deprecated category name canonicalizes to its successor; an unknown
   category still filters (tolerant read).
+- `--warn-time-ms <n>` and `--warn-count <n>` tune the elapsed-time and total-episode thresholds for performance warnings (defaults 500 ms and 5000 episodes).
 
 `--history` output (chain, oldest first):
 
@@ -450,7 +452,7 @@ recent cross-project) plus behavioral-pattern pre-flight warnings.
 - WHEN NOT TO USE: for a specific topic lookup (use `em-search`).
 
 ```
-node ~/.episodic-memory/scripts/em-recall.mjs [--project <name>] [--task-type <implementation|push|rule|general>] [--scope local|global|all] [--limit <n>] [--days <n>] [--no-track]
+node ~/.episodic-memory/scripts/em-recall.mjs [--project <name>] [--task-type <implementation|push|rule|general>] [--scope local|global|all] [--limit <n>] [--days <n>] [--no-track] [--warn-time-ms <n>] [--warn-count <n>]
 ```
 
 Output shape:
@@ -460,7 +462,8 @@ Output shape:
 ```
 
 Flags that matter: `--task-type implementation` adds the violation pre-flight;
-`--no-track` avoids bumping access counts if you are recalling repeatedly.
+`--no-track` avoids bumping access counts if you are recalling repeatedly;
+`--warn-time-ms <n>` and `--warn-count <n>` tune performance-warning thresholds.
 
 Common mistakes: skipping recall and re-deriving context that a past session already
 recorded.
@@ -553,13 +556,22 @@ semantic-consolidation capability). Dry-run by DEFAULT — `--apply` writes.
 node ~/.episodic-memory/scripts/em-consolidate.mjs [--scope local|global] \
   [--min-sim <0..1>] [--min-cluster <n>] [--category <cat>] [--project <name>] \
   [--include-pinned] [--apply] [--confirm]
+node ~/.episodic-memory/scripts/em-consolidate.mjs --clerk [--scope local|global]
+node ~/.episodic-memory/scripts/em-consolidate.mjs --clerk --apply --confirm \
+  [--scope local|global] [--reject-all] [--reject-member <id>]... [--lock-timeout <s>]
 node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
   [--min-chain <n>] [--dry-run] [--scope local|global]
 node ~/.episodic-memory/scripts/em-consolidate.mjs --fold-superseded \
   --all-projects [--min-chain <n>] [--dry-run] [--confirm]
 ```
 
-Clustering is body-token Jaccard within (project, category) groups; the
+Clerk report mode (`--clerk` without `--apply`) is READ-ONLY over episode and source-index state. It proposes `merge`, `dedupe`, or `keep-distinct` clusters from lexical signals: tag Jaccard after high-document-frequency tags are dropped, summary Jaccard, and shared triggers. It emits `mode: "clerk-report"` and writes nothing except a derived `trigger-index.json` that may be lazily built while loading shared triggers.
+
+Clerk apply mode (`--clerk --apply --confirm`) fails closed without `--confirm`. It holds one blocking target-store `clerk-apply.lock` (`.episodic-memory/clerk-apply.lock` for a local store) for the whole apply; `--lock-timeout <s>` controls acquisition and defaults to 30 seconds. For a merge, writes are ordered digest first, then member `status: superseded` / `superseded_by` index flips; the original knowledge remains reachable and can be reactivated through `em-revise`. Apply finishes with exactly one run-record episode per invocation: `category: workflow.lifecycle`, scalar `record_type: clerk-run`, with a `clerk_cutover` stamp. Each apply invocation detects incomplete prior applies and reports their orphans as benign (digest written, members active) or dangerous (members already superseded).
+
+Human rejections are explicit apply inputs: `--reject-all`, or repeatable `--reject-member <id>` for any cluster containing that member. The run record carries rejected cluster fingerprints, and a rejected cluster is not re-proposed against an unchanged store. `--scope local|global` chooses the store for both report and apply.
+
+Standard (non-clerk) clustering is body-token Jaccard within (project, category) groups; the
 0.35 default separates genuine near-duplicates (~0.35–0.5) from unrelated
 episodes (~0.0). On `--apply`, each cluster gets one digest episode carrying
 `consolidates: [ids...]`, union tags, full member bodies, and inherited
@@ -719,7 +731,8 @@ file storage, built fresh per query — no sidecar DB.
 
 ```
 node ~/.episodic-memory/scripts/em-graph.mjs --from <id> [--depth <n>] [--limit <n>] \
-  [--edges supersedes,consolidates,evidence,cites,tags|all] [--scope local|global|all]
+  [--edges supersedes,consolidates,evidence,cites,tags|all] [--scope local|global|all] \
+  [--include-superseded]
 node ~/.episodic-memory/scripts/em-graph.mjs --orphans     # no non-tag edges at all
 node ~/.episodic-memory/scripts/em-graph.mjs --hubs [--top <n>]
 ```
@@ -1039,7 +1052,8 @@ no writes.
 evidence-linked to a valid lesson (either direction: the lesson's `evidence` array
 or the violation's `lessons` array); valid lessons carrying `triggers`; episodes
 named in a valid episode's `consolidates` array; supersession-chain members of any
-of those; and the latest `record_type: clerk-run` episode per store. "Valid" means
+of those; and the latest `record_type: clerk-run` episode per store. Clerk run records
+are produced by `em-consolidate --clerk --apply`. "Valid" means
 not superseded and `review_by` absent or unexpired — protection lapses when the
 referencing episode is superseded or expires. Retained entries are counted in the
 `protected` output field; `--dry-run` lists them in `protected_episodes` as
@@ -1137,8 +1151,13 @@ Interactive day-2 maintenance wizard: status (doctor + stats), hygiene
 (rebuild-index, fold-superseded, prune, doctor --fix — dry-run first, apply only
 on explicit confirm), backup, capture drafts, routines, and an em-console
 launcher. Prose menus for humans; every underlying operation is a spawned `em-*`
-script. Scriptable via piped stdin (EOF takes defaults). Agent rule: human
-surface — suggest it to users; agents call the underlying scripts directly.
+script. Scriptable via piped stdin (EOF takes defaults).
+
+```
+node ~/.episodic-memory/scripts/em-manage.mjs
+```
+
+Agent rule: human surface — suggest it to users; agents call the underlying scripts directly.
 
 ### em-pattern-health
 
@@ -1153,6 +1172,7 @@ which patterns need enforcement.
 node ~/.episodic-memory/scripts/em-pattern-health.mjs            # full report
 node ~/.episodic-memory/scripts/em-pattern-health.mjs --summary  # one line
 node ~/.episodic-memory/scripts/em-pattern-health.mjs --check    # exit 1 if attention needed
+node ~/.episodic-memory/scripts/em-pattern-health.mjs --pattern <id> --window-days <N> --min-violations <N> --json
 ```
 
 `needs-enforcement` means violated repeatedly with no hook found. `needs-attention`
@@ -1235,6 +1255,11 @@ without a config; it refuses rather than ship raw personal memory. Deep docs:
 `docs/em-backup.md` and README.md "Backup" section. Agent rule: do not touch unless
 the user asks to back up.
 
+```
+node ~/.episodic-memory/scripts/em-backup.mjs --self-test    # built-in redaction tests
+node ~/.episodic-memory/scripts/em-backup.mjs --show-config  # resolved config, secrets/PII masked
+```
+
 ### em-restore
 
 Selectively restore from a cloned backup repo (filter by tag / date / category /
@@ -1277,9 +1302,13 @@ recall.
 
 ### em-lock
 
-Zero-dependency atomic file lock (a `flock` replacement for macOS) used by the
-auto-promote and backup-sync paths. Deep docs: header comment in the script. Agent
-rule: infrastructure primitive; do not invoke directly.
+Zero-dependency atomic lock CLI around `scripts/lib/lock.mjs`:
+
+```
+node ~/.episodic-memory/scripts/em-lock.mjs --file <path> --timeout <s> -- <cmd> [args...]
+```
+
+It releases the lock when the child exits and on `SIGINT` / `SIGTERM`. Clerk apply uses the same lock primitive internally through `scripts/lib/lock.mjs` for its whole-apply lock. Agent rule: infrastructure primitive; do not invoke directly.
 
 ### em-watch-codex
 

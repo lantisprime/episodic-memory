@@ -16,9 +16,10 @@ A persistent memory system for AI coding assistants. It remembers your decisions
 - [Scenario 7: Recording Project Context](#scenario-7-recording-project-context)
 - [Scenario 8: Switching Between Tools](#scenario-8-switching-between-tools)
 - [Scenario 8b: Running a Second-Opinion Review on a Plan or Diff](#scenario-8b-running-a-second-opinion-review-on-a-plan-or-diff)
-- [Scenario 8c: Running Routines on a Schedule (macOS)](#scenario-8c-running-routines-on-a-schedule-macos)
+- [Scenario 8c: Running Routines on a Schedule (Cross-Platform)](#scenario-8c-running-routines-on-a-schedule-cross-platform)
 - [Scenario 8d: One View Across Every Project](#scenario-8d-one-view-across-every-project)
 - [Scenario 8e: Looking at Your Memory Instead of Querying It](#scenario-8e-looking-at-your-memory-instead-of-querying-it)
+- [Scenario 8f: Tending the Memory Store by Hand](#scenario-8f-tending-the-memory-store-by-hand)
 - [Scenario 9: Explicitly Asking to Remember](#scenario-9-explicitly-asking-to-remember)
 - [Scenario 10: Preventing Repeated Mistakes](#scenario-10-preventing-repeated-mistakes)
 - [Scenario 11: Tracking Rule Violations](#scenario-11-tracking-rule-violations)
@@ -40,8 +41,8 @@ node ~/episodic-memory/install.mjs --tool cursor --project /path/to/my-project
 # For Claude Code
 node ~/episodic-memory/install.mjs --tool claude-code --project /path/to/my-project
 
-# For Claude Code with checkpoint enforcement hooks (opt-in, recommended)
-node ~/episodic-memory/install.mjs --tool claude-code --install-hooks --project /path/to/my-project
+# For Claude Code with the four per-project enforcement gates (opt-in)
+node ~/episodic-memory/install.mjs --tool claude-code --install-enforcement --project /path/to/my-project
 
 # For Codex
 node ~/episodic-memory/install.mjs --tool codex --project /path/to/my-project
@@ -61,19 +62,24 @@ node ~/episodic-memory/install.mjs --tool all --project /path/to/my-project
 
 That's the only manual step. After this, your AI assistant reads the instruction file automatically and manages everything.
 
+> **Everything here is per-project.** Installing gates in project A changes nothing in project B, and your global Claude Code setup is never touched. `--install-hooks`, `--install-enforcement`, and `--install-activation` are three independent per-project opt-ins, each scoped to the `--project <path>` you pass; a project without `--install-enforcement` has no gates, and removing the layer touches only that project. None of these three layers ever writes to `~/.claude`.
+
+If you do want the command line, the installer places a shim at `~/.episodic-memory/bin/em`. `em <command>` is shorthand for `node ~/.episodic-memory/scripts/em-<command>.mjs`; `em help` lists the available commands, and unknown commands include did-you-mean suggestions.
+
 ### What the installer does
 
 1. Copies scripts to `~/.episodic-memory/scripts/` (shared across all projects)
 2. Creates `.episodic-memory/` in your project for local memories
 3. Adds the right instruction file for your tool
 4. Updates `.gitignore` to exclude memory data
-5. With `--install-hooks` (Claude Code only): registers PreToolUse (checkpoint-gate, plan-gate, stop-gate), SessionStart (recall + BP-1 fallback sweep), and SessionEnd hooks. Re-running the installer warns when any installed hook has drifted from the source-of-truth copy.
+5. With `--install-hooks` (Claude Code only): installs the non-enforcement SessionStart hooks (`em-recall`, `session-handoff`) and SessionEnd prompt under `<project>/.claude/`, registered in `<project>/.claude/settings.json`.
+6. With `--install-enforcement` (Claude Code only): installs the four per-project gates (checkpoint, plan, preflight, stop), their library closure, and enforce-contract config under `<project>/.claude/`; registers them in the project's settings; and seeds `<project>/.episodic-memory/enforce-config.json` if absent. This is the only flag that arms enforcement, and neither flag writes to `~/.claude`.
 
 ### Turn enforcement on or off per project (optional)
 
-The checkpoint / plan / stop / preflight / second-opinion gates are opt-in via `--install-hooks`. Once installed, you can tune them **per project** with `<project>/.episodic-memory/enforce-config.json` (RFC-008 P4) — without disabling them everywhere:
+The checkpoint / plan / preflight / stop gates are opt-in per project via `--install-enforcement`. Once installed, you can tune them with `<project>/.episodic-memory/enforce-config.json` (RFC-008 P4) — without disabling enforcement in other projects:
 
-- **Turn it all off for this project** — `{"active": false}`. Silences *every* episodic-memory gate for this repo only; your other projects keep their hooks (R5). Cleaner than removing the global hook entry, which would disable enforcement across all repos.
+- **Turn it all off for this project** — `{"active": false}`. Silences every episodic-memory enforcement gate in this repo only; your other projects keep their settings. To remove the layer instead, run `--uninstall-enforcement` for this project (add `--purge-config` only if you also want to delete the operator-owned config).
 - **Relax a single gate** — `{"bp-001": {"plan_approval": "MEDIUM"}}`. Lowers one gate's tier (clamps DOWN only; never raises).
 
 Fail-closed by design: a missing, empty, or malformed file leaves enforcement fully ON. (`enforce-config.json` is operator-owned — `--install-enforcement` **seeds** a default `{"active": true}`, create-if-absent, and never overwrites your edits; a deliberate `{"active": false}` survives reinstalls, even with `--install-hooks-force`.)
@@ -391,30 +397,33 @@ The `--rebuttal-cb` is a script that takes the reviewer's verdict and decides wh
 
 ---
 
-## Scenario 8c: Running Routines on a Schedule (macOS)
+## Scenario 8c: Running Routines on a Schedule (Cross-Platform)
 
-**What happens:** Some episodic-memory chores benefit from running on a recurring schedule rather than waiting for your next session — nightly transcript mining (so today's lessons don't pile up), Sunday digest, weekly hygiene check, and daily backup sync. macOS `launchd` can drive these for you so you never have to remember.
+**What happens:** Doctor repair, embedding refresh, backup sync, and hygiene reports benefit from a recurring schedule instead of waiting for your next session. `em-routines.mjs` keeps the definitions in `~/.episodic-memory/routines.json` and adapts them to launchd on macOS, systemd user timers on Linux, or managed cron as the fallback.
 
-This is the one corner of the project where you run a script yourself: a one-shot install. After that, the routines fire on their own and write logs you can read later.
+Start with a preview, then sync the defaults to the detected scheduler:
 
 ```bash
-# From the project root
-bash install-launchd-routines.sh --dry-run     # preview, no writes
-bash install-launchd-routines.sh               # install
-bash install-launchd-routines.sh --smoke       # install + kickstart daily-mining for a smoke test
-bash install-launchd-routines.sh --uninstall   # remove everything (logs preserved)
+node ~/.episodic-memory/scripts/em-routines.mjs sync --dry-run
+node ~/.episodic-memory/scripts/em-routines.mjs sync
+node ~/.episodic-memory/scripts/em-routines.mjs list
 ```
 
-After install:
+You can manage or inspect each routine through the same surface:
 
-- **Daily 19:30** — mines the day's transcripts into a staging file you'll review next session.
-- **Sunday 09:00** — writes the weekly digest episode (so Monday you wake up to a summary).
-- **Sunday 11:00** — runs the instruction-hygiene audit against your behavioral rules.
-- **Daily 23:00** — pushes your em-backup repo to remote.
+```bash
+node ~/.episodic-memory/scripts/em-routines.mjs run doctor
+node ~/.episodic-memory/scripts/em-routines.mjs enable doctor
+node ~/.episodic-memory/scripts/em-routines.mjs disable doctor
+node ~/.episodic-memory/scripts/em-routines.mjs add --name my-job --cron "0 4 * * *" --cmd "..."
+node ~/.episodic-memory/scripts/em-routines.mjs remove my-job
+node ~/.episodic-memory/scripts/em-routines.mjs logs doctor --lines 50
+node ~/.episodic-memory/scripts/em-routines.mjs uninstall
+```
 
-Logs live at `~/Library/Logs/episodic-memory/`. If something looks off (digest didn't run, mining looks empty), `tail ~/Library/Logs/episodic-memory/em-daily-mining.log` is the first stop; `launchctl print gui/$(id -u)/com.charltonho.em-daily-mining` shows whether the job is loaded and when it last ran.
+Use `--scheduler launchd|systemd|cron` to select a scheduler explicitly; otherwise the script chooses the platform adapter. `list` reports platform, last run, and staleness, so a silently dead schedule is visible.
 
-**When you don't want this:** if you're on Linux/Windows or just prefer manual control, skip the install — the mining job has a direct CLI equivalent (`node scripts/em-mine-transcripts.mjs`), and the digest / hygiene jobs run their SKILLs, so you can trigger those by asking your AI assistant to run the weekly-digest / instruction-hygiene routine when you want one.
+The old `install-launchd-routines.sh` remains only as a legacy, macOS-specific path for maintainer-machine Claude-skill jobs; use `em-routines.mjs` for normal scheduled maintenance.
 
 ---
 
@@ -441,6 +450,8 @@ a glance which store is bloated, which has index drift, and which has a 40-revis
 folding. A real multi-store fold additionally requires `--confirm`, and stores whose layout the
 substrate can't safely write (a registered subfolder of a bigger repo, a linked worktree) are
 reported and skipped rather than touched.
+
+**Consolidating near-duplicate lessons.** Ask the assistant for a clerk report when the store starts repeating itself. `em-consolidate --clerk` only proposes merge / dedupe / keep-distinct groups (apart from a possible derived trigger-index refresh); it does not change episodes. If the report looks right, the assistant can run `--clerk --apply --confirm`, applying approved groups while recording any `--reject-all` or `--reject-member <id>` decisions so unchanged clusters are not suggested again.
 
 **Promoting lessons that keep recurring.** When the same lesson shows up independently in two or
 more projects ("always quote hook command paths" learned in project A, then learned again in
@@ -489,14 +500,29 @@ Prefer the terminal? The same day-2 chores come as a guided menu:
 node ~/.episodic-memory/scripts/em-manage.mjs
 ```
 
-Pick `status` for health + analytics, `hygiene` for rebuild-index / fold / prune
-(you always see the dry-run before anything is applied and confirm explicitly),
+Pick `status` for health + analytics, `hygiene` for rebuild-index / fold / prune,
 `backup`, `capture` for pending drafts, `routines`, or `console` to launch the web
-page from the menu.
+page from the menu. Fold and prune always show a dry-run before offering apply.
 
 **When you don't want this:** neither surface is for agents — they keep using the
 JSON CLI. And nothing here runs unattended: both exist only while you're looking
 at them.
+
+---
+
+## Scenario 8f: Tending the Memory Store by Hand
+
+**What happens:** You want to inspect and maintain memory yourself without memorizing individual flags. `em-manage` is the one command to run when you want to tend the memory store by hand.
+
+```bash
+node ~/.episodic-memory/scripts/em-manage.mjs
+```
+
+The terminal menu offers `status` (doctor + stats), `hygiene` (rebuild-index, fold superseded chains, prune, doctor fix), `backup` (show config or sync), `capture` (review pending drafts), `routines` (list or sync schedules), and `console` (launch the local web console).
+
+Nothing is applied merely by opening the wizard: you choose each action. Fold and prune run a dry-run first and ask again before apply; backup sync, routines sync, and console write access also ask for confirmation. The manager then shows the underlying `em-*` JSON result. For automation, the same menu is scriptable through piped stdin; EOF takes safe defaults instead of hanging.
+
+**What you did:** Ran one guided, dry-run-first maintenance surface and confirmed only the work you wanted.
 
 ---
 
@@ -593,7 +619,9 @@ AI:   ⚠️ Pre-flight warning: bp-001 (implementation workflow) was
 
 ## Scenario 12: The Checkpoint Gate Stopped the AI
 
-**What happens:** You installed Claude Code with `--install-hooks`. The AI tries to edit a file or run a command and is blocked with a message about a "checkpoint required."
+> **Per-project model (restated).** These gates belong to one project, not your whole machine. A project with no `--install-enforcement` has no gates; opting in for project A leaves project B's behaviour (and your global Claude Code setup) unchanged. To remove the layer for THIS project only, run `--uninstall-enforcement` for that project.
+
+**What happens:** You installed Claude Code with `--install-enforcement`. The AI tries to edit a file or run a command and is blocked with a message about a "checkpoint required."
 
 ```
 AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
@@ -608,10 +636,11 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 
 **Why this exists:** The checkpoint enforcement gates (RFC-002 Phase 3b + RFC-004 BP-1 Auto-Pilot) are PreToolUse hooks that prevent the AI from skipping the plan → review → approval → testing steps of the implementation workflow (bp-001). It's the mechanical version of the rules described in Scenario 11 — instead of relying on the AI to remember, the hooks physically block edits until each checkpoint is recorded.
 
-**Three gates:**
-- **Pre-checkpoint** — blocks `Edit`/`Write`/`Bash` until the AI has printed its plan and you've approved it.
-- **Stop-gate (post-checkpoint)** — blocks turn-end until E2E testing has run and any bugs found are logged ([#144](https://github.com/lantisprime/episodic-memory/pull/144)).
-- **Push-gate** — blocks `git push` until all wrap-up steps are complete.
+**Four installed gates:**
+- **Checkpoint-gate** — blocks repository-source writes until the pre-implementation checkpoint is complete, and blocks push / PR creation until the post-checkpoint is complete.
+- **Plan-gate** — blocks write tools while plan approval is pending; read-only tools remain available.
+- **Preflight-gate** — requires a structured memory pre-flight before review handoffs and rule-bearing edits.
+- **Stop-gate** — blocks turn-end while required post-implementation wrap-up remains incomplete.
 
 **To clear a gate:** Approve the AI's plan in chat. The AI writes the checkpoint marker on your behalf — you don't run any commands manually. (Marker location is an internal implementation detail; PR #207 relocated it from `<repo>/.claude/.X` to `<repo>/.checkpoints/.X` to escape Claude Code's built-in sensitive-file prompt — readers honor both during burn-in.)
 
@@ -628,11 +657,11 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
    ```
    Labels: `read_only`, `shared_write`, `marker_write`, `push_or_pr_create`, `unsafe_complex`. Overrides are per-project (cache key includes the project root + the script's sha256 digest — they don't bleed across repos and re-trigger if the script content changes). See `skills/classify-correction/SKILL.md` for the full reference, including the `--allow-non-git` mode for non-git projects (PR #327).
 2. **Disable LLM dispatch entirely** by setting `enabled: false` in `<project-root>/.episodic-memory/classifier-config.json` (or globally at `~/.episodic-memory/classifier-config.json`). The Tier 1 heuristic table + safe `shared_write` default then apply — useful if you're offline, don't have an API key, or want to minimize cost.
-3. **Remove the hook entry** from `~/.claude/settings.json` to opt out of the gate entirely.
+3. **Uninstall this project's enforcement layer** with `node ~/episodic-memory/install.mjs --tool claude-code --uninstall-enforcement --project <path>`. This removes only the project's enforcement files and registrations; it never changes another project or `~/.claude`.
 
-**Behind the scenes — BP-1 Auto-Pilot (RFC-004).** These three gates are part of a run-lifecycle system that signs each implementation run with HMAC, tracks state across crashes, and replays unfinished work via a finalize-recovery state machine. You don't interact with it directly — the gates above are its user-facing edges.
+**Behind the scenes — BP-1 Auto-Pilot (RFC-004).** These four gates are part of a run-lifecycle system that signs each implementation run with HMAC, tracks state across crashes, and replays unfinished work via a finalize-recovery state machine. You don't interact with it directly — the gates above are its user-facing edges.
 
-**To opt out entirely:** Don't pass `--install-hooks` during install, or remove the hook entries from `~/.claude/settings.json`.
+**To opt out entirely:** Don't pass `--install-enforcement`, or reverse it for this project with `--uninstall-enforcement`.
 
 ---
 
@@ -844,6 +873,12 @@ node ~/.episodic-memory/scripts/em-backup.mjs --init
 
 # Daily run: rsync sources, redact, commit, push
 node ~/.episodic-memory/scripts/em-backup.mjs --sync
+
+# Run built-in redaction tests
+node ~/.episodic-memory/scripts/em-backup.mjs --self-test
+
+# Inspect the resolved config with secrets / PII masked
+node ~/.episodic-memory/scripts/em-backup.mjs --show-config
 ```
 
 Config lives at `~/.config/em-backup/config.json`; see `examples/em-backup.config.example.json`. Refuses `--init` / `--sync` without a config to prevent shipping raw personal memory.
