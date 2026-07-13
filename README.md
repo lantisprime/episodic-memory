@@ -140,8 +140,16 @@ The installer:
 3. Creates `.episodic-memory/` in the target project for local episodes
 4. Copies the appropriate instruction file for your tool
 5. Copies `docs/EM_SCRIPTS_GUIDE.md` to `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` (all tools)
-6. With `--install-hooks`: copies `plugins/claude-code/hooks/*.sh` into `~/.claude/hooks/` and `plugins/claude-code/hooks/lib/*.sh` into `~/.claude/hooks/lib/`, then registers PreToolUse (checkpoint-gate + plan-gate + stop-gate, from `~/.claude/hooks/`), SessionStart (em-recall-sessionstart + BP-1 fallback sweep, from `~/.claude/hooks/`), and SessionEnd (em-session-end-prompt, run directly from `~/.episodic-memory/scripts/`) hooks in `~/.claude/settings.json` (Claude Code only, opt-in). Re-running the installer warns when an installed hook has drifted from the source-of-truth copy ([#201](https://github.com/lantisprime/episodic-memory/pull/201)). Use `--install-hooks-force` to overwrite locally edited hook files.
+6. With Claude Code hook flags (all registrations are per-project):
+
+   > **Per-project layer — the headline.** Hooks, enforcement, and activation are three INDEPENDENT per-project opt-ins. Each one is scoped to the project you pass via `--project <path>`. A project with only `--install-hooks` has no gates; a project without `--install-enforcement` has no gates. None of these three layers ever writes to `~/.claude`, and removing or changing a layer in project A never touches project B or your global Claude Code setup. The one separate global write is `install.mjs --install-second-opinion`, which installs the second-opinion provider snapshot at `~/.claude/hooks/second-opinion-providers.json`; that flag is its own capability and is not part of the per-project layers above.
+
+   - `--install-hooks` installs only the non-enforcement hooks under `<project>/.claude/`: `em-recall` and `session-handoff` at SessionStart, plus `em-session-end-prompt` at SessionEnd. It registers them in `<project>/.claude/settings.json`; it does not install gates or write to `~/.claude`.
+   - `--install-enforcement` is the only flag that arms enforcement. It installs the four gates (`checkpoint-gate`, `plan-gate`, `preflight-gate`, `stop-gate`), their `hooks/lib` closure, and the enforce-contract config set under `<project>/.claude/`; registers them in `<project>/.claude/settings.json`; and seeds `<project>/.episodic-memory/enforce-config.json` if absent. Use `--uninstall-enforcement` to remove that project's enforcement files and registrations; add `--purge-config` to remove the operator-owned config too. Re-running either install warns about drift; `--install-hooks-force` accepts the repository copies.
+   - `--install-activation` is the third independent per-project opt-in: it installs the advisory activation adapter (UserPromptSubmit + PreToolUse + SessionStart hooks) under `<project>/.claude/` and registers them in `<project>/.claude/settings.json`. It never writes to `~/.claude` and never blocks; reverse with `--uninstall-activation`.
 7. Records what it installed (Layer 1 update distribution): a **version manifest** at each target root — `~/.episodic-memory/install-manifest.json` for the global set, `<project>/.episodic-memory-install.json` per project — with the source version (git SHA of the repo the installer ran from; content hash when git is unavailable), timestamp, tool, and per-file sha256 checksums; a **consumer registry** entry in `~/.episodic-memory/installs.json` (`{project_path, tool, version, enforcement_installed, last_install_ts}`, deduped per project+tool); and a **dist cache** of the current artifact payloads at `~/.episodic-memory/dist/<version>/` (copy source only — nothing is registered or executed from there).
+
+For a fresh Claude Code session, `--bootstrap-last-prompt` writes a 60-second per-project sentinel from `CLAUDE_SESSION_ID`, giving the preflight gate first-prompt ground truth before UserPromptSubmit has fired.
 
 **Keeping consuming projects up to date.** Copies used to fall behind silently on every repo update; now:
 
@@ -159,9 +167,9 @@ The per-project SessionStart hook (Claude Code, installed with `--install-enforc
 
 **Per-harness agent guides.** If you are an AI coding agent installing this for yourself, read the self-contained guide for your harness in [docs/install/](docs/install/) (one file each for Claude Code, Cursor, Codex, OpenCode, Pi Agent, Windsurf): exact commands, real expected output, artifact tables, and troubleshooting. The agent-facing per-script command reference is [docs/EM_SCRIPTS_GUIDE.md](docs/EM_SCRIPTS_GUIDE.md), also deployed to `~/.episodic-memory/EM_SCRIPTS_GUIDE.md` on every install.
 
-**Per-project enforcement config (optional, RFC-008 P4).** With `--install-enforcement`, the installer **seeds** a default `<project>/.episodic-memory/enforce-config.json` = `{"active": true}` (create-if-absent, never overwriting your edits — a deliberate `{"active": false}` survives reinstalls, even with `--install-hooks-force`). Tune enforcement **per project** by editing it — no need to touch global hooks:
+**Per-project enforcement config (optional, RFC-008 P4).** With `--install-enforcement`, the installer **seeds** a default `<project>/.episodic-memory/enforce-config.json` = `{"active": true}` (create-if-absent, never overwriting your edits — a deliberate `{"active": false}` survives reinstalls, even with `--install-hooks-force`). Tune enforcement **per project** by editing it — no need to change the project's hook registrations:
 
-- `{"active": false}` — layer-wide **kill switch**: silences *all* episodic-memory gates (checkpoint, plan, stop, preflight, second-opinion) for that project only; your other repos keep their hooks (R5).
+- `{"active": false}` — layer-wide **kill switch**: silences *all* episodic-memory gates (checkpoint, plan, stop, preflight, second-opinion) for that project only; other repos keep their own project-local hooks (R5).
 - `{"bp-001": {"plan_approval": "MEDIUM"}}` — relax an individual gate (clamps tier DOWN only; never raises).
 - `{"auto_update": true}` — opt-in **session-start auto-update** (Layer 1): on version drift the SessionStart hook refreshes this project's unmodified installed artifacts from `~/.episodic-memory/dist/<version>/` instead of only printing the drift notice (locally modified files are always left untouched and reported). Never enabled automatically. Set it only after this project's deployed `enforce-config.schema.json` is current (an older deployed schema rejects the key, and validation failure fails closed to `{active: true}` — which would override a deliberate `"active": false`).
 
@@ -244,6 +252,7 @@ script through `scripts/lib/categories.mjs`. Filter by category with `em-search 
 ├── tags.json                 # Inverted tag index
 ├── category-index.json       # Category -> episode-ids index
 ├── trigger-index.json        # Derived lesson-activation index (RFC-009 R2, lazy-built)
+├── activation-log.jsonl      # Append-only, 1 MiB-bounded injected-pointer telemetry (RFC-009 R6)
 └── lesson-suppress.json      # Optional, hand-authored: mute lessons by id (RFC-009 R3, fail-open)
 
 patterns/                     # Behavioral patterns (shipped with repo)
@@ -304,7 +313,7 @@ Behavioral patterns are documentation by default — but the most-violated patte
 - **Violation tracking** (`em-violation.mjs`) — structured storage with pattern linkage, searchable by `--category violation` and `--tag violated:<pattern_id>`
 - **Session-end prompt** (`em-session-end-prompt.mjs`) — SessionEnd hook that asks about violations
 - **Proactive recall** (`em-recall.mjs`) — surfaces past violations at session start as pre-flight warnings
-- **Checkpoint enforcement gate** (RFC-002 Phase 3b, shipped + activated 2026-05-02 via [#78](https://github.com/lantisprime/episodic-memory/pull/78) and [#84](https://github.com/lantisprime/episodic-memory/pull/84)) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done. Opt-in via `node install.mjs --tool claude-code --install-hooks --project <path>`; registers SessionStart + PreToolUse + SessionEnd hooks in `~/.claude/settings.json`.
+- **Checkpoint enforcement gate** (RFC-002 Phase 3b, shipped + activated 2026-05-02 via [#78](https://github.com/lantisprime/episodic-memory/pull/78) and [#84](https://github.com/lantisprime/episodic-memory/pull/84)) — PreToolUse hook that blocks code edits until the implementation checkpoint is printed, and blocks pushes until E2E + bug logging are done. Opt in per project via `node install.mjs --tool claude-code --install-enforcement --project <path>`; the four enforcement gates are registered only in `<project>/.claude/settings.json`.
 - **LLM intent classifier for the checkpoint gate** (Tier 2/3 shipped 2026-05-22 via [#326](https://github.com/lantisprime/episodic-memory/pull/326); replaced by agent-self-classify marker 2026-05-23 via [#331](https://github.com/lantisprime/episodic-memory/pull/331)) — when the Tier 1 heuristic table doesn't recognize a `Bash` command, the gate consults a per-session marker (`scripts/classifier-marker.mjs`) populated by the active agent's own reasoning, then falls through to the Tier 1 safe-default if no marker exists. Configuration loaded by `scripts/classifier-config-loader.mjs` from `<project>/.episodic-memory/classifier-config.json` (or the global file under `~/.episodic-memory/`); set `enabled: false` to disable LLM dispatch entirely and run on the Tier 1 heuristic alone. False-positives (read-only inspectors blocked as `shared_write`) are corrected via the `classify-correction` skill — see [Skills](#skills) below.
 - **BP-1 Auto-Pilot** (RFC-004, M0 + M1 + M2 shipped 2026-05-06..23 via [#181](https://github.com/lantisprime/episodic-memory/pull/181), [#186](https://github.com/lantisprime/episodic-memory/pull/186), [#188](https://github.com/lantisprime/episodic-memory/pull/188), [#200](https://github.com/lantisprime/episodic-memory/pull/200), [#206](https://github.com/lantisprime/episodic-memory/pull/206), [#305](https://github.com/lantisprime/episodic-memory/pull/305), [#309](https://github.com/lantisprime/episodic-memory/pull/309), [#313](https://github.com/lantisprime/episodic-memory/pull/313), [#322](https://github.com/lantisprime/episodic-memory/pull/322)) — activation gate, deadline sweep, finalize-replay state machine, HMAC-signed run manifests, per-session preflight markers, and the M2 finish-line `bp1-flag-flip` cutover that mechanically enforce bp-001 (implementation workflow). Replaces documentation-only enforcement for the workflow lifecycle.
 
@@ -324,7 +333,12 @@ Episodic-memory and user-preferences are fully independent — install either or
 | [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
 | [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 + M2 shipped) |
 | [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Accepted |
-| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Accepted (harness shipped PR #222) |
+| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Withdrawn (the review harness shipped separately) |
+| [RFC-007](docs/rfcs/RFC-007-graph-projection.md) | Graph Projection — first-class traversal over latent episode/rule edges | Draft |
+| [RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md) | Decoupling the Enforcement Layer from the Memory Substrate | Accepted |
+| [RFC-009](docs/rfcs/RFC-009-lesson-activation.md) | Lesson Activation: Trigger-Bearing Lessons, Derived Trigger Index, and Bounded Advisory Recall | Accepted |
+| [RFC-010](docs/rfcs/RFC-010-versioned-central-engine.md) | Version-pinned central enforcement engine with per-project shims | Draft |
+| [RFC-011](docs/rfcs/RFC-011-playbook-activation-preferences.md) | Playbook Activation Preferences: Per-Project Session-Start and On-Demand Playbook Loading | Accepted |
 
 ## Scripts Reference
 
@@ -344,6 +358,7 @@ Health check + repair for stores and installation: index parse/drift, tags + cat
 node ~/.episodic-memory/scripts/em-doctor.mjs            # report (exit 1 on errors)
 node ~/.episodic-memory/scripts/em-doctor.mjs --fix      # rebuild indexes, clear litter
 node ~/.episodic-memory/scripts/em-doctor.mjs --strict   # CI mode: warns also fail
+node ~/.episodic-memory/scripts/em-doctor.mjs --verbose  # include affected ids/files in findings
 node ~/.episodic-memory/scripts/em-doctor.mjs --all-projects        # + every registered project store
 node ~/.episodic-memory/scripts/em-doctor.mjs --all-projects --fix  # repair each store in place
 ```
@@ -399,6 +414,9 @@ node ~/.episodic-memory/scripts/em-store.mjs ... --pin                # pin at c
 # Feedback: retrieval says an episode was SEEN; feedback says it HELPED.
 # ±5% per point in ranking (clamped −30%/+50%), survives rebuilds.
 node ~/.episodic-memory/scripts/em-feedback.mjs --id <episode-id> --useful   # or --noise
+# Infer useful feedback from episode ids cited in a file; preview before writing.
+node ~/.episodic-memory/scripts/em-feedback.mjs --scan-text <file> --dry-run
+node ~/.episodic-memory/scripts/em-feedback.mjs --scan-text <file>
 ```
 
 ### Move (scope relocation, RFC-005)
@@ -465,6 +483,17 @@ A failing/unavailable reranker falls back to vector order with a warning;
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local            # preview
 node ~/.episodic-memory/scripts/em-consolidate.mjs --scope local --apply    # fold
 
+# Clerk mode uses lesson-specific lexical signals (high-df-filtered tag Jaccard,
+# summary Jaccard, shared triggers) to propose merge/dedupe/keep-distinct clusters.
+node ~/.episodic-memory/scripts/em-consolidate.mjs --clerk --scope local
+node ~/.episodic-memory/scripts/em-consolidate.mjs --clerk --apply --confirm --scope local
+```
+
+`--clerk` without `--apply` emits a read-only `clerk-report`: it writes no episodes or store indexes, although it may lazily build the derived `trigger-index.json`. Apply mode fails closed without `--confirm`; holds one blocking `.episodic-memory/clerk-apply.lock` for the entire apply (`--lock-timeout <s>`, default 30); and, for merges, writes the digest before flipping members to `superseded` (the members remain reversible via `em-revise`). Every apply writes exactly one `category: workflow.lifecycle`, `record_type: clerk-run` episode with a `clerk_cutover` stamp and reports crash orphans as benign or dangerous.
+
+Human rejection is part of apply: `--reject-all` rejects every proposal, while repeatable `--reject-member <id>` rejects any cluster containing that member. Rejections are stored by fingerprint in the run record and are not proposed again while the store is unchanged.
+
+```bash
 # Archive long supersedes-chains (reversible move; terminal untouched), and
 # the registry-wide form: every registered project store in one pass. A real
 # multi-store run requires --confirm; unsafe store layouts are skipped.
@@ -547,6 +576,7 @@ node ~/.episodic-memory/scripts/em-search.mjs --tag auth --category decision --s
 node ~/.episodic-memory/scripts/em-search.mjs --history <id> --full
 node ~/.episodic-memory/scripts/em-search.mjs --read <id>            # RFC-011 R7: tracked, bounded, single-episode read the playbook pointers name
 node ~/.episodic-memory/scripts/em-search.mjs --include-superseded
+node ~/.episodic-memory/scripts/em-search.mjs --warn-time-ms <n> --warn-count <n>  # tune performance-warning thresholds
 ```
 
 `--read <id>` (RFC-011 R7) fetches exactly one episode by exact id (resolving
@@ -591,6 +621,7 @@ node ~/.episodic-memory/scripts/em-seed-patterns.mjs
 node ~/.episodic-memory/scripts/em-recall.mjs
 node ~/.episodic-memory/scripts/em-recall.mjs --project my-project --limit 5
 node ~/.episodic-memory/scripts/em-recall.mjs --days 14 --no-track
+node ~/.episodic-memory/scripts/em-recall.mjs --warn-time-ms <n> --warn-count <n>  # tune performance-warning thresholds
 ```
 
 ### Prune (Archive Stale Episodes)
@@ -601,10 +632,13 @@ node ~/.episodic-memory/scripts/em-prune.mjs --check  # exit 1 if prunable episo
 # RFC-009 R6: evidence-linked violations, trigger-bearing lessons, consolidates
 # members, and the latest clerk run record are never archived — see the
 # protected / protected_episodes output fields in --dry-run.
+# Clerk run records are produced by em-consolidate --clerk --apply.
 # RFC-011 R5(b): playbook-referenced chains (declared in playbooks.json) are also
 # protected (reason playbook-referenced / chain-member); a present-but-unparseable
 # playbooks.json aborts archival exit 1 and archives nothing (fail-closed).
 ```
+
+`--check` is the read-only CI gate: it exits 1 when prunable episodes exist and 0 when the store passes, without archiving anything.
 
 ### Backup (Mirror to Private Repo with Redaction)
 ```bash
@@ -823,7 +857,10 @@ bands; a missing or malformed file fails open (injection proceeds). An optional 
 declared playbook pointers — one imperative line per playbook (`playbook (playbooks.json):
 READ <id> before proceeding (...)`) pointing at a tracked bounded `em-search --read <id>`,
 never a body; the `playbook (playbooks.json):` provenance prefix keeps declared injection
-visible. Reverse with `--uninstall-activation`. Enforcement is a separate, independently installed layer
+visible. Each activation hook appends injected lesson-pointer telemetry to the per-project
+`activation-log.jsonl`; the event-plane log is append-only and capped at 1 MiB. It is the
+raw input for the planned R6 conversion metric; the shipped clerk's cadence advisory is
+computed from the trigger index, not this log. Reverse with `--uninstall-activation`. Enforcement is a separate, independently installed layer
 (`--install-enforcement`).
 
 ### BP-1 Auto-Pilot (RFC-004)
@@ -843,22 +880,26 @@ node ~/.episodic-memory/scripts/bp1-canonicalize.mjs --episode <path> [--pretty]
 # Path A + Path B fallback executor (auto-wired as SessionStart H2 hook)
 node ~/.episodic-memory/scripts/bp1-deadline-sweep.mjs --once [--project <root>]
 
-# Orchestrator subcommands: init-run, finalize-run, finalize-recover (M1)
-node ~/.episodic-memory/scripts/bp1-orchestrator.mjs init-run --project <root>
-node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-run --run-id <id>
-node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-recover --run-id <id>
+# Orchestrator subcommands (M1)
+node ~/.episodic-memory/scripts/bp1-orchestrator.mjs init-run --project <root> --rfc-id <rfcId>
+node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-run --project <root> --run-id <id>
+node ~/.episodic-memory/scripts/bp1-orchestrator.mjs finalize-recover --project <root> --run-id <id>
+# Further subcommands: detect-rfcs, record-classifier-dispatch-pre,
+# record-classification, record-awaiting-approval, confirm-approval,
+# check-deadlines, sweep-naked-entries.
 
-# Marker validation — verify a checkpoint marker's HMAC + shape (slice 2d-W, #305)
-node ~/.episodic-memory/scripts/bp1-marker-validate.mjs --marker <path>
+# Marker validation — verify a run's checkpoint marker HMAC + shape (slice 2d-W, #305)
+node ~/.episodic-memory/scripts/bp1-marker-validate.mjs --project <path> --run-id <id> [--skip-mtime-check]
 
 # Crash-class classification for SessionStart resumption (slice 2e, #313)
-node ~/.episodic-memory/scripts/bp1-crash-classify.mjs --run-id <id>
+node ~/.episodic-memory/scripts/bp1-crash-classify.mjs --project <root> --run-id <id> [--now <iso>]
 
 # Emit a marker-invalid evidence episode (used by the deadline-firing path, #313)
-node ~/.episodic-memory/scripts/bp1-emit-marker-invalid-evidence.mjs --run-id <id> --reason <code>
+node ~/.episodic-memory/scripts/bp1-emit-marker-invalid-evidence.mjs --project <path> --run-id <id> --reason <enum> --marker-path <path>
 
-# M2 finish-line: flip the BP-1 activation flag (slice 2f, #322)
-node ~/.episodic-memory/scripts/bp1-flag-flip.mjs --enable    # or --disable
+# M2 finish-line: only --disable is functional.
+node ~/.episodic-memory/scripts/bp1-flag-flip.mjs --disable <projectRoot>
+# --enable, --dry-run-on, and --dry-run-off are M5 stubs that exit 2.
 ```
 
 The orchestrator also auto-stubs a missing run on first interaction via `scripts/bp1-auto-stub.mjs` — not normally invoked directly.
@@ -878,7 +919,9 @@ node ~/.episodic-memory/scripts/em-mine-transcripts.mjs \
   [--since <ISO>] [--slug <substr>] [--output <path>] [--dry-run]
 ```
 
-### Scheduled Routines (launchd, macOS)
+### Scheduled Routines — Legacy macOS launchd Bootstrap (maintainer-machine only)
+
+> **Legacy, macOS-only, maintainer-machine claude-skill jobs.** This section is kept for the small set of `claude -p`-driven SKILL jobs that the maintainer machine still runs directly; it is NOT the general path. For normal scheduled maintenance (doctor repair, embed refresh, backup sync, hygiene reports) use **`em-routines.mjs`** — definitions live in `~/.episodic-memory/routines.json` and adapt to launchd on macOS, systemd user timers on Linux, or managed cron as the fallback. Install via the wizard, `install.mjs --install-routines`, or `node ~/.episodic-memory/scripts/em-routines.mjs sync`. See [USER_MANUAL Scenario 8c](docs/USER_MANUAL.md#scenario-8c-running-routines-on-a-schedule-cross-platform) for the full reference.
 
 Bootstrap (`install-launchd-routines.sh`) installs four LaunchAgent plists so the recurring chores run without manual invocation:
 
