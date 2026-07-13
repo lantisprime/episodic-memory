@@ -14,7 +14,7 @@ superseded_by: ~
 
 ## AI context
 
-> This RFC defines the promotion arc: the contract for turning accumulated episodes (lessons, violations, attempts, telemetry) into promoted knowledge — graduated cross-store lesson promotion (`em-promote`), consolidation/promotion cadence surfaced through the RFC-009 activation plane, write-side capture nudges, a typed attempt/outcome shape, a read-only stagnation audit, and the RFC-009 "third arc" enforcement-promotion clerk (propose-only). It exists because the learning-strategy family currently has one EXPERIMENTAL member with a 2026-10-08 promote-or-remove deadline, RFC-009 R9's cadence advisory is computed but never surfaced, capture fires only at SessionEnd (exactly where momentum kills it), and the third arc was explicitly deferred with no owner. The key design decision: every mechanism in this arc is advisory and confirm-gated — the arc *proposes* knowledge and surfaces signals; it never auto-writes derived content without confirmation, never writes into a foreign project store, and never gates a tool call (RFC-008 R1 boundary holds throughout).
+> This RFC defines the promotion arc: the contract for turning accumulated episodes (lessons, violations, attempts, telemetry) into promoted knowledge — graduated cross-store lesson promotion (`em-promote`), consolidation/promotion cadence surfaced through the RFC-009 activation plane, write-side capture nudges, a typed attempt/outcome shape, a read-only stagnation audit, clerk scaffold self-revision (the training-free AutoMem analog), and the RFC-009 "third arc" enforcement-promotion clerk (propose-only). It exists because the learning-strategy family currently has one EXPERIMENTAL member with a 2026-10-08 promote-or-remove deadline, RFC-009 R9's cadence advisory is computed but never surfaced, capture fires only at SessionEnd (exactly where momentum kills it), and the third arc was explicitly deferred with no owner. The key design decision: every mechanism in this arc is advisory and confirm-gated — the arc *proposes* knowledge and surfaces signals; it never auto-writes derived content without confirmation, never writes into a foreign project store, and never gates a tool call (RFC-008 R1 boundary holds throughout).
 
 ---
 
@@ -29,7 +29,7 @@ The word "promotion" names three distinct mechanisms in this repo, and none of t
 Around those, four observable gaps:
 
 - **Cadence is computed but invisible.** RFC-009 R9 requires "a one-line advisory (via the R3/R4 adapter, never a gate) when the R2 build observes K or more entries sharing one phrase (K=3) or the active-lesson count crosses N (N=200 per store)" (`docs/rfcs/RFC-009-lesson-activation.md:183`). The constants and the advisory string ship (`scripts/lib/activation-log.mjs:19-20`, `scripts/em-consolidate.mjs:473-484,585-591`) — but only inside `em-consolidate --clerk`'s own manual report. Neither `scripts/em-trigger-index.mjs` nor the activation hook runner references them: the operator who never runs the clerk never sees the advisory that tells them to run the clerk. There is also no "episodes since the last clerk run" delta and no last-consolidation timestamp anywhere the activation plane can read — the only run timestamp lives inside a clerk-run run-record's JSON body (`scripts/em-consolidate.mjs:1430`), unindexed.
-- **Capture is write-side blind until SessionEnd.** The activation plane (RFC-009 R3/R4) is exclusively read-side: it surfaces lessons to *consult* at SessionStart / UserPromptSubmit / PreToolUse. The only write-side prompting is the SessionEnd violation prompt (`scripts/em-session-end-prompt.mjs:220-225`) and the opt-in SessionEnd draft extraction spawn (`scripts/em-session-end-prompt.mjs:195-218` → `scripts/em-capture.mjs`). Session-end is precisely where task-end momentum defeats capture — the failure mode bp-001 documents for this project's own operator. External corroboration: the CORAL framework (multi-institution, May 2026; reviewed via the swarm-research distillation, YouTube u-lMMDCfmSM) found agents systematically *forget to consult and contribute to shared persistent memory* and corrected it with three prompted reflection points — per-iteration note capture, periodic consolidation after N attempts, and stagnation-triggered redirection. Its consolidation trigger discipline (fire after a fixed number of attempts, not when a human remembers) is the direct inspiration for R3 below; its reflection and redirection heartbeats inspire R4 and R6 — translated from wall-clock timers to lifecycle-gated events, because timers violate Principle 6.
+- **Capture is write-side blind until SessionEnd.** The activation plane (RFC-009 R3/R4) is exclusively read-side: it surfaces lessons to *consult* at SessionStart / UserPromptSubmit / PreToolUse. The only write-side prompting is the SessionEnd violation prompt (`scripts/em-session-end-prompt.mjs:220-225`) and the opt-in SessionEnd draft extraction spawn (`scripts/em-session-end-prompt.mjs:195-218` → `scripts/em-capture.mjs`). Session-end is precisely where task-end momentum defeats capture — the failure mode bp-001 documents for this project's own operator. External corroboration: the CORAL framework (multi-institution, May 2026; reviewed via the swarm-research distillation, YouTube u-lMMDCfmSM) found agents systematically *forget to consult and contribute to shared persistent memory* and corrected it with three prompted reflection points — per-iteration note capture, periodic consolidation after N attempts, and stagnation-triggered redirection. Its consolidation trigger discipline (fire after a fixed number of attempts, not when a human remembers) is the direct inspiration for R3 below; its reflection and redirection heartbeats inspire R4 and R6 — translated from wall-clock timers to lifecycle-gated events, because timers violate Principle 6. A second corroboration: AutoMem (Stanford, July 2026, arXiv:2607.01224; reviewed via distillation of YouTube 1b-aZ8c0xJ8) lifted a frozen Qwen2.5-32B from 17% to ~51% on long-horizon agent benchmarks purely by improving memory management, and its two transferable properties require no training: the gains lived in the memory *scaffold* (file schemas, prompts, action vocabulary — data, not weights), and the memory work ran on a separate cheap specialist model while the task model stayed frozen. This substrate's scaffold is already data (the clerk prompt, capture heuristics, trigger definitions, categories.json), but nothing revises it from evidence today — it is hand-tuned only (R9 below).
 - **Repeated failure without progress is invisible.** Nothing in the substrate measures "the same task attempted repeatedly with no recorded successful outcome." `em-pattern-health` counts violation density per behavior pattern (`scripts/em-pattern-health.mjs:257-289`) and its verdict already reaches `session_start.pattern_health` (`scripts/em-trigger-index.mjs:1031`), but attempts at ordinary work (not pattern violations) have no episode shape at all, so no audit can see them.
 - **The charter and RFC-009 disagree.** RFC-009 R9(b) prose calls the consolidation clerk "the LEARNING-STRATEGY family's first shipped implementation" (`docs/rfcs/RFC-009-lesson-activation.md:175`), while `CAPABILITIES.md:39-40` files `em-consolidate` under curation (family 4) and names `em-promote` as the first learning-strategy (family 3) member. One of them is wrong; the drift is live in two governing documents.
 
@@ -37,7 +37,7 @@ Around those, four observable gaps:
 
 ## Proposal
 
-Seven requirements. R1 fixes vocabulary; R2 graduates or removes `em-promote`; R3–R6 add the evidence-and-cadence plumbing (each independently shippable); R7 closes RFC-009's third arc. A cross-cutting invariant block binds all of them.
+Nine requirements. R1 fixes vocabulary; R2 graduates or removes `em-promote`; R3–R6 add the evidence-and-cadence plumbing (each independently shippable); R7 closes RFC-009's third arc; R8 reconciles the charter drift; R9 folds AutoMem's training-free parts into the clerk. A cross-cutting invariant block binds all of them.
 
 ### Boundary invariants (bind every requirement below)
 
@@ -108,9 +108,17 @@ The deferred promotion clerk (`docs/rfcs/RFC-009-lesson-activation.md:313`) beco
 
 One-sentence errata to RFC-009 R9(b) prose (`docs/rfcs/RFC-009-lesson-activation.md:175`): the consolidation clerk is a **curation** clerk per the charter; the learning-strategy family's first member is `em-promote` (`CAPABILITIES.md:39-40`). Errata rides this RFC's acceptance PR (archive rule: errata permitted; RFC-008 amendment tier: clarification, intent unchanged).
 
+### R9 — Clerk scaffold self-revision (AutoMem-cheap: data, selection, cheap seats — no training)
+
+The training-free analog of AutoMem's two loops, scoped to the clerk:
+
+- **R9a Definition-revision duty.** The aggregation-plane clerk MAY propose revisions to the data-tier scaffold — the clerk prompt (`scripts/em-consolidate/prompts/clerk.md`), capture heuristics, R4 nudge-condition definitions, and lesson trigger definitions — grounded in observed evidence: R6 conversion telemetry (injected-then-accessed lower bounds), `access_count` / `feedback` index fields, and clerk run-record history. Each proposal is (a) a `workflow.lifecycle` proposal episode citing the evidence rows and (b) a reviewable data diff; application is a human-confirmed PR or per-item confirm (B-2). Definitions remain data throughout (B-5, P2); no revision path may touch `.mjs` interpreters. This is AutoMem Loop 1 with the meta-LLM replaced by evidence plus confirmation.
+- **R9b Cheap-seat clerking.** Agentic aggregation-plane work (the R9d-prompt consumer, R7, R9a) runs on a designated low-cost model seat, declared per run in the run-record (model id plus approximate cost — P6 visibility); the primary session agent never performs aggregation-plane clerking inline (two-plane contract, `docs/rfcs/RFC-009-lesson-activation.md:42`). AutoMem's specialist/task split, applied at the harness tier.
+- **R9c Exemplar selection, not generation.** The clerk MAY select high-conversion episodes (converted within the attribution window, per the R6 surface) as few-shot exemplar data shipped alongside the prompt-as-data directory. Exemplars are verbatim episode excerpts with cited ids — the clerk filters the corpus's own good decisions; it never synthesizes exemplar content (AutoMem's selection-not-generation property). Exemplar-set changes are data diffs under R9a's confirm path.
+
 ### Scope
 
-- **In scope:** the contracts above (R1–R8); the graduation decision path for `em-promote`; additive activation-plane surfacing; the `attempt` category and stagnation audit contract; the propose-only enforcement-promotion clerk contract; the RFC-009/CAPABILITIES drift errata.
+- **In scope:** the contracts above (R1–R9); the graduation decision path for `em-promote`; additive activation-plane surfacing; the `attempt` category and stagnation audit contract; the propose-only enforcement-promotion clerk contract; the clerk scaffold self-revision contract (R9); the RFC-009/CAPABILITIES drift errata.
 - **Out of scope:** all implementation (this RFC ships as `draft`; the implementation plan is populated at acceptance per template rule — explicitly held back by champion instruction 2026-07-14); the agentic aggregator runtime (blocked on #531; only R7d's dependency note touches it); any recall-algorithm change (RFC-001/RFC-007 territory); model-weight or RL optimization from the surveyed papers (out of substrate scope entirely); wall-clock heartbeat timers in any form (P6); auto-activation of proposed guards (P3/P12); cross-store foreign writes (B-3); em-consolidate `--help` discoverability (#527) and stdout truncation (#486) — pre-existing issues that ride their own fixes.
 
 ---
@@ -129,6 +137,7 @@ One-sentence errata to RFC-009 R9(b) prose (`docs/rfcs/RFC-009-lesson-activation
 | Let `em-promote` stay EXPERIMENTAL past 2026-10-08 while the arc matures | The charter's experimental tier exists precisely to prevent permanent squatters (`CAPABILITIES.md:159-166`); R2 makes the deadline the contract. |
 | Fold everything into RFC-009 as a P5 phase instead of a new RFC | RFC-009 is accepted and its scope statement explicitly ejected the third arc (`:313`); reopening an accepted RFC's scope for a multi-mechanism arc buries the vocabulary problem R1 exists to fix. |
 | Stagnation audit prescribes redirection (full CORAL heartbeat 3) | Prescribing a pivot is workflow steering — behavior-pattern territory (RFC-008 R1); the capability boundary permits naming the signal only (R6c). |
+| AutoMem's LoRA memory-specialist + meta-LLM training loops | Weight optimization is not substrate work (P1: episodes are the only data layer; the substrate is model-free). The training-free analog — evidence-fed data-tier scaffold revision (R9a), cheap specialist seats (R9b), selection of the corpus's own good decisions as exemplar data (R9c) — captures the transferable benefit at zero training cost. |
 
 ---
 
@@ -147,11 +156,14 @@ graph TD
     R4[R4: write-side nudges]
     R7[R7: enforcement-promotion clerk]
 
+    R9[R9: clerk scaffold self-revision]
+
     R3a --> R2
     R5 --> R6
     R3a --> R4
     R2 --> R7
     R6 --> R7
+    R3a --> R9
 ```
 
 ---
@@ -199,6 +211,8 @@ graph TD
 | OQ-4 | R4a nudge condition set: are the two proposed initial conditions (decision-shaped prompt, milestone tool event) the right minimal set, and what is the false-positive tolerance before a nudge trains the operator to ignore it? | Charlton Ho | open |
 | OQ-5 | R7 zero-dep lexical form vs agentic form: does the lexical form deliver enough candidate quality to ship first, or does R7 wait on the aggregator arc (#531) entirely? | Charlton Ho | open |
 | OQ-6 | R2a migration: does retiring the `cross-project` project-field sentinel require an `em-move`-style sweep of existing promoted digests, and is that sweep in R2 scope or a follow-up? | Charlton Ho | open |
+| OQ-7 | R9a revisable-set v1: clerk prompt + capture heuristics only, or also trigger definitions and nudge conditions? A smaller set is a safer burn-in. | Charlton Ho | open |
+| OQ-8 | R9c exemplar placement: sibling data file under `scripts/em-consolidate/prompts/` (deploys with the #531 fix) vs global episodes tagged as exemplars? | Charlton Ho | open |
 
 ---
 
