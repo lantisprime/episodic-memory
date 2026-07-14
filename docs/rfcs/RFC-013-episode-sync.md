@@ -14,7 +14,7 @@ superseded_by: ~
 
 ## AI context
 
-> This RFC adds `em-sync` — opt-in, transport-pluggable replication of episode stores across hosts, so every coding-harness instance working on the same repo (and every machine sharing one user's global store) sees the same episodes. It solves the problem that both store scopes are strictly host-local today: a fresh clone or a second machine starts blind, workplan discovery fails, and lessons learned on one host never reach another. The key design decision is that only durable episode content replicates (episode files + archive); every derived index and every usage counter stays host-local and is rebuilt after merge, which reduces sync to a near-trivial file union plus a small deterministic reconcile step — no server, no daemon, no second data layer (Principles 1, 6).
+> This RFC adds `em-sync` — opt-in, transport-pluggable replication of episode stores across hosts, so every coding-harness instance working on the same repo (and every machine sharing one user's global store) sees the same episodes. It solves the problem that both store scopes are strictly host-local today: a fresh clone or a second machine starts blind, workplan discovery fails, and lessons learned on one host never reach another. The key design decision is twofold: only durable episode content replicates (derived indexes and usage counters stay host-local and are rebuilt after merge, reducing sync to file union plus a small deterministic reconcile), and the reference transport is a **plain-filesystem exchange directory driven by Node stdlib only** — no server, no daemon, no second data layer, and no external binary; git is an optional transport *plugin*, honestly labeled as the dependency it is (Principles 1, 5, 6).
 
 ---
 
@@ -37,7 +37,7 @@ There is no supported mechanism — documented or scripted — to move a store b
 
 ## Proposal
 
-Add a **replication capability** for episode stores: a zero-dependency `scripts/em-sync.mjs` CLI operating per store (project or global), a per-store `sync-config.json` written only by explicit `em-sync init` consent, and a pluggable transport layer whose reference implementation is git (already present on every host this project targets). No daemon, no server, no new data layer: sync is an operation *over episode files*, and everything else in the store is rebuilt locally after a merge.
+Add a **replication capability** for episode stores: a zero-dependency `scripts/em-sync.mjs` CLI operating per store (project or global), a per-store `sync-config.json` written only by explicit `em-sync init` consent, and a pluggable transport layer. The **reference transport is `fs-exchange`**: a shared exchange directory on any medium the user already has (a Syncthing/Dropbox/OneDrive-synced folder, an NFS/SMB mount, a cloud-drive mount, a USB stick), driven entirely by Node `fs`/`crypto` stdlib. Git is **not required**; it is available as an opt-in transport plugin for users whose only shared endpoint is their repo's remote — declared honestly as an external-binary dependency (Principle 5), never as "zero-dep". No daemon, no server, no new data layer: sync is an operation *over episode files*, and everything else in the store is rebuilt locally after a merge.
 
 ### 1. The replication model: synced set vs host-local set
 
@@ -63,34 +63,32 @@ Episode IDs are immutable and corrections are revision chains (Principle 7), so 
 |---|---|---|
 | `status: active` vs `status: superseded` in frontmatter | `em-revise` flips the *original* file's status in place (probe-verified, §"Runtime evidence") | **Recompute, don't choose:** after union, `status` is derivable — an episode is `superseded` iff any episode in the merged set carries `supersedes: <id>`. Reconcile recomputes status from the supersedes graph; both replicas converge regardless of merge order. |
 | `pinned: true` vs absent/false | `em-pin` / `--pin` writes frontmatter + index | **Pin wins.** Not derivable, so a conservative monotone rule: protection is never lost by syncing. A deliberate unpin propagates by running `em-pin --unpin` *after* a sync round (documented; OQ-1 revisits if this bites). |
-| present in `episodes/` on one replica, `archived/` on the other | `em-prune` moves files | **Archived wins** when the transport preserves moves (git does: the move is a tracked delete+add and merges as such). Dumb file-sync transports can resurrect archived episodes on union — an honest, documented WEAK-tier caveat (Principle 5), detectable by `em-doctor` (same ID present in both directories). |
+| present in `episodes/` on one replica, `archived/` on the other | `em-prune` moves files | **Archived wins, carried by tombstones** (§4): every em-sync transport records the archive-move as an explicit tombstone entry, so no replica can resurrect a pruned episode by re-offering the pre-move file. (Pointing a raw file-sync tool at the store *without* em-sync lacks tombstones and can resurrect — the documented WEAK caveat, Principle 5, detectable by `em-doctor`.) |
 | any other byte difference | should never happen (bodies are immutable by convention) | **Quarantine, never overwrite:** the losing variant is preserved at `<store>/sync/conflicts/<id>.<replica>.md`, `em-sync status` and `em-doctor` flag it, and resolution is a human/agent decision — mirroring `em-move`'s found-in-both-scopes hard-error stance (RFC-005 F3). |
 
 After every merge: acquire the store lock (`lib/lock.mjs`), run reconcile, run `em-rebuild-index --scope <s>` (atomic temp+rename already), release. Sync never edits an episode body and never mints an ID.
 
-Note the common case is trivial: a file changed on **one** replica only (every new episode, every revision made on a single host) unions/merges cleanly with no reconcile decision at all. The rules above cover the rare concurrent-touch cases.
+Note the common case is trivial: a file changed on **one** replica only (every new episode, every revision made on a single host) unions cleanly with no reconcile decision at all. The rules above cover the rare concurrent-touch cases.
 
 ### 3. `em-sync.mjs` — the CLI contract
 
-Zero external dependencies, JSON to stdout, degrades gracefully (missing config → `{"status":"not-configured"}`, exit 0 on status/read paths).
+Zero external dependencies — Node stdlib only, including the reference transport. JSON to stdout, degrades gracefully (missing config → `{"status":"not-configured"}`, exit 0 on status/read paths).
 
 ```
-node scripts/em-sync.mjs init   [--scope local|global] [--transport git] [--mode sidecar|in-repo|repo <url>] [--remote <name|url>]
+node scripts/em-sync.mjs init   [--scope local|global] [--transport fs-exchange|git] [--exchange-root <dir>] [git plugin: --mode sidecar|in-repo|repo <url>]
 node scripts/em-sync.mjs status [--scope local|global|all]      # ahead/behind/conflicts, never writes
-node scripts/em-sync.mjs pull   [--scope ...]                   # fetch → union+reconcile → rebuild index
-node scripts/em-sync.mjs push   [--scope ...]                   # publish local episodes (fetch-merge-retry loop on races)
+node scripts/em-sync.mjs pull   [--scope ...]                   # ingest foreign replicas → union+reconcile → rebuild index
+node scripts/em-sync.mjs push   [--scope ...]                   # refresh this replica's published subtree
 node scripts/em-sync.mjs sync   [--scope ...]                   # pull then push
-node scripts/em-sync.mjs disable [--scope ...] [--purge-remote-config]
+node scripts/em-sync.mjs disable [--scope ...]
 ```
 
 Per-store config at `<store>/sync-config.json` (project) and `~/.episodic-memory/sync-config.json` (global):
 
 ```json
 {
-  "transport": "git",
-  "mode": "sidecar",
-  "remote": "origin",
-  "ref": "refs/em/sync",
+  "transport": "fs-exchange",
+  "exchange_root": "/path/to/shared/em-exchange",
   "auto_pull_on_session_start": false,
   "auto_push_after_store": false,
   "replica_id": "<hostname>-<8hex>"
@@ -99,32 +97,56 @@ Per-store config at `<store>/sync-config.json` (project) and `~/.episodic-memory
 
 `sync-config.json` is host-local (never synced) and exists only after explicit `em-sync init` consent. No config → every subcommand is a no-op with a status token, so sync-unaware hosts are unaffected.
 
-### 4. Transports and modes (with honest capability tiers)
+### 4. Transports — reference implementation is plain filesystem, stdlib-only
 
-The transport is a plugin seam (`sync-transport` plugin type, experimental tier per CAPABILITIES.md); git ships as the reference implementation because it is already installed on every host running a coding harness, solves auth/transport/history for free, and adds zero dependencies.
+#### 4.1 `fs-exchange` (default, core)
 
-| Mode | Scope | Mechanism | Tier | Trade-off |
+The "remote" is nothing but a directory all replicas can reach — *how* it is shared is the user's business (Syncthing, Dropbox, OneDrive, iCloud, an NFS/SMB mount, a cloud-drive FUSE mount, a USB stick carried between machines). em-sync itself performs only local `fs` operations against it:
+
+```
+<exchange-root>/
+  em-exchange.json                    # format marker: { format: "em-exchange", version: 1 }
+  replicas/
+    <replica_id>/
+      manifest.json                   # the COMMIT POINT: { seq, written_at, files: { "<relpath>": "<sha256>" } }
+      episodes/<id>.md                # full mirror of this replica's synced set
+      archived/<id>.md
+      archived-index.jsonl
+      tombstones.jsonl                # append-only: { id, action: "archived"|"moved-scope", ts, replica }
+```
+
+Three rules give dumb storage strong semantics:
+
+- **Single writer per subtree.** A replica writes *only* `replicas/<own-id>/` and reads all others. There is no cross-host write contention anywhere on the shared medium — no locking protocol, no push races, no retry loop. Team/multi-agent use is namespaced by construction.
+- **Manifest is the commit point.** `push` writes content files first (temp + rename), the manifest last; `pull` verifies each foreign subtree against its manifest checksums and, on any mismatch (the underlying medium propagated a partial state), skips that replica *this round* and reports it — degrade and retry later, never ingest a torn write.
+- **Tombstones make moves first-class.** `em-prune` archival and `em-move` scope relocation publish explicit tombstone entries, so a stale replica's re-offer of the pre-move file loses deterministically (§2). This is what raw folder-syncing of the store could never express — and it is transport-independent, so *every* em-sync transport inherits it.
+
+`pull` = for each foreign subtree with a consistent manifest: union episode files, apply tombstones, reconcile (§2), rebuild index. `push` = refresh own subtree to mirror the local synced set (incremental via manifest checksum diff). Storage cost is `replicas × synced-set size` — markdown-cheap; a replica may compact its own subtree at will (it is its only writer). OQ-2 tracks delta bundles if mirrors ever get heavy.
+
+#### 4.2 Transport plugins (opt-in, honestly labeled)
+
+The transport seam registers as a `sync-transport` plugin type (experimental tier per CAPABILITIES.md). `fs-exchange` is the built-in default; plugins trade the "any shared folder" requirement for other reach, and each declares its true dependencies:
+
+| Transport | Scope | Mechanism | Dependencies | Tier |
 |---|---|---|---|---|
-| **git sidecar ref** (default) | project | episodes live on a dedicated ref (`refs/em/sync`, materialized in a hidden worktree or via plumbing) pushed/fetched over the repo's **existing** `origin` | STRONG | memory rides the remote the team already shares — any host that can clone the repo can sync episodes — without polluting code branches or the working tree |
-| **git in-repo** | project | `.episodic-memory/episodes/` + `archived/` committed on normal branches; derived indexes gitignored | MEDIUM | simplest possible ("memory arrives with `git pull`"), and team-visible by design — but couples memory history to code history, needs team consent, and parallel sessions create merge commits in the code repo |
-| **git dedicated repo** | project or global | a separate (typically private) repository holds the synced set; global default: `~/.episodic-memory` synced set tracks e.g. `git@…:me/em-global-store.git` | STRONG | full isolation from the code repo; one more remote to provision |
-| **external file-sync** (Syncthing/Dropbox/rsync) | either | user syncs *only* the synced-set directories | WEAK | works *because* derived indexes are host-local, but move/archive semantics degrade (resurrection caveat, §2) and conflict copies need `em-doctor` cleanup |
+| **fs-exchange** (default) | both | exchange directory on any user-shared medium | Node stdlib only | STRONG semantics; propagation latency is the medium's |
+| **git plugin** — sidecar ref / in-repo / dedicated repo | project or global | exchange payload carried on a dedicated ref (`refs/em/sync`) of the repo's existing `origin`, committed in-repo, or in a separate private repo | **external `git` binary** + a reachable remote | STRONG; the honest fit for hosts whose *only* shared endpoint is the repo remote (CI runners, ephemeral web containers) |
+| **https-exchange plugin** | both | same exchange format over WebDAV / S3-compatible storage via stdlib `fetch` + `crypto` signing | stdlib + a provisioned endpoint & credentials | MEDIUM until proven |
+| raw file-sync of the store, no em-sync | either | pointing a sync tool directly at `episodes/` | — | WEAK: no tombstones (resurrection), no reconcile (conflict copies), documented for what it is |
 
-Project-scope `.gitignore` guidance ships with `init`: in every mode, `index.jsonl`, `tags.json`, `category-index.json`, `tokens.json`, locks, and `sync-config.json` are ignored; only the synced set is ever tracked.
-
-Multi-writer races (two hosts pushing concurrently) are handled the boring way: `push` runs a bounded fetch→merge→retry loop; since merges are unions plus deterministic reconcile, retries always converge.
+One deployment reality stated plainly (Principle 5): the fs-exchange medium must be reachable by every participating host. A laptop fleet shares a Syncthing folder trivially; an **ephemeral CI or remote-web container usually cannot mount one** — its only pre-provisioned shared endpoint is the repo's git remote. For those hosts the git plugin (or an https-exchange endpoint) is the practical medium; that is a deployment constraint of such hosts, not a git requirement in the design.
 
 ### 5. Activation lifecycle — no daemons (Principle 6)
 
 - **Default:** manual. `em-sync pull` at session start and `em-sync push` when done are the documented workflow; the skill/instructions files gain one line each.
 - **Opt-in session-start pull:** mirrors the existing `auto_update` pattern (`em-sync-install.mjs` + SessionStart hook): one bounded pull attempt per session start, single-line `notice` in session output, degrade-to-token on any failure, never blocks a session. Per-project registration only (Principle 12) for project scope.
 - **Opt-in push-after-store:** a debounced push (fire at session end or N minutes after the last `em-store`, whichever first) — declared trigger, declared cost, off by default.
-- Explicitly rejected: any polling daemon, watcher service, or background timer not user-started and bounded.
+- Explicitly rejected: any polling daemon, watcher service, or background timer not user-started and bounded. (An `fs.watch` on the exchange root would be cheap but is still a standing watcher; it stays out of core and out of v1.)
 
 ### 6. Consent, privacy, reversibility (Principles 3, 10)
 
-- `em-sync init` declares its side effects before writing anything: config file created, refs/remotes touched, gitignore lines proposed, and — most important — **"pushing publishes these episodes to `<remote>`; anyone with read access to that remote can read them."** Project episodes routinely contain repo-internal reasoning; the default posture is the repo's own remote (same audience as the code) or a private dedicated repo, and the warning is unconditional.
-- `em-sync disable` removes the config and (optionally) the local sidecar plumbing; it never deletes episodes, local or remote. Round-trip restores the pre-init state.
+- `em-sync init` declares its side effects before writing anything: config file created, exchange subtree created, and — most important — **"pushing publishes these episodes to `<exchange-root|remote>`; anyone with read access to that location can read them."** Project episodes routinely contain repo-internal reasoning; the warning is unconditional, whatever the transport.
+- `em-sync disable` removes the config; it never deletes episodes, local or remote (the replica's published subtree is left for other replicas unless `--purge-published` is passed explicitly). Round-trip restores the pre-init state.
 - Sync never activates enforcement, and enforcement never depends on sync (Principle 12 I-4: the substrate — now including its replication — stays hook-free at core; the optional SessionStart pull is an adapter, registered per-project).
 
 ### 7. Identity and provenance across hosts
@@ -134,12 +156,12 @@ Multi-writer races (two hosts pushing concurrently) are handled the boring way: 
 
 ### 8. Where this sits in the architecture
 
-By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a capability family"* — sync is a substrate capability, not distribution (distribution "moves artifacts, it never touches episodes"). It joins the **curation strategy** family: it maintains the corpus across replicas, derives no new knowledge, changes no ranking, enforces nothing, and honors the family invariant of reversibility (quarantine over overwrite, disable over delete). The transport seam registers as a new **experimental-tier plugin type `sync-transport`** (RFC-008 R8 additive MINOR bump), with `git` as the default member and the promote-or-remove decision date set at acceptance.
+By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a capability family"* — sync is a substrate capability, not distribution (distribution "moves artifacts, it never touches episodes"). It joins the **curation strategy** family: it maintains the corpus across replicas, derives no new knowledge, changes no ranking, enforces nothing, and honors the family invariant of reversibility (quarantine over overwrite, disable over delete). The transport seam registers as a new **experimental-tier plugin type `sync-transport`** (RFC-008 R8 additive MINOR bump): `fs-exchange` is the stdlib-only built-in; `git` and `https-exchange` are plugin members with declared external dependencies, and the promote-or-remove decision date is set at acceptance.
 
 ### Scope
 
-- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable); union+reconcile merge; git transport (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
-- **Out of scope:** real-time sync or daemons; syncing usage counters (`access_count`/`feedback` — OQ-3); syncing derived indexes, locks, registry, dist cache, or enforcement config; multi-user permission models beyond what the remote's ACL provides; conflict *resolution* UI (quarantine + doctor flag only); non-git transports beyond the documented external-file-sync guidance.
+- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable); union+reconcile merge; tombstones; the `fs-exchange` reference transport; the git transport plugin (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
+- **Out of scope:** real-time sync or daemons; syncing usage counters (`access_count`/`feedback` — OQ-3); syncing derived indexes, locks, registry, dist cache, or enforcement config; multi-user permission models beyond what the shared medium's ACL provides; conflict *resolution* UI (quarantine + doctor flag only); the https-exchange plugin implementation (format is specified; plugin ships separately).
 
 ---
 
@@ -147,12 +169,12 @@ By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a cap
 
 | Alternative | Why rejected |
 |---|---|
-| Central sync server / API (self-hosted or SaaS) | Second store + background service: violates Principle 1 (episodes stop being the only data layer) and Principle 6 (long-lived process); adds auth/ops burden the git remote already solves. |
+| **Git as the reference transport** (this RFC's own first draft) | Demoted, not deleted: spawning the `git` binary is an external runtime dependency, and "zero-dep" in this project means Node stdlib only — claiming git "adds zero dependencies" was dishonest labeling (Principle 5). The correctness machinery never needed git; `fs-exchange` + tombstones achieves the same semantics over media users already have. Git remains an opt-in plugin because for some hosts (CI, ephemeral containers) the repo remote is the only shared endpoint that exists. |
+| Central sync server / API (self-hosted or SaaS) | Second store + background service: violates Principle 1 (episodes stop being the only data layer) and Principle 6 (long-lived process); adds auth/ops burden a shared folder or existing remote already solves. |
 | Sync the whole store directory (including `index.jsonl`, `tags.json`, …) | Derived indexes conflict on every concurrent session (append-ordered `index.jsonl`, whole-file JSON rewrites) and carry host telemetry; syncing them buys nothing since `em-rebuild-index` regenerates them from the synced set — probe-verified. |
-| CRDT database / sidecar (e.g. Automerge store) | The episode model is *already* a natural grow-mostly set with revision chains; a CRDT engine imports a dependency and a second data representation for a problem three reconcile rules solve. Principle 1 trigger without the "cannot be expressed as episodes" condition being met. |
-| In-repo commit as the *only* mode | Forces memory into code history and requires team-wide consent as a precondition for any sync at all; sidecar ref gives the same reach (same remote, same credentials) without the coupling. Kept as an explicit mode, not the default. |
-| Documentation-only answer ("rsync/Syncthing the directory yourself") | Hand-syncing the full directory corrupts host-local state (counters, locks) and silently resurrects archived episodes; without the synced/host-local partition and reconcile rules there is no correct directory set to point a file-syncer at. Retained only as the documented WEAK tier over the *synced set*. |
-| Object storage transport (S3 etc.) as reference implementation | New credentials + SDK or hand-rolled signing; git is universally present on target hosts and gives history/audit for free. Admissible later as a `sync-transport` plugin. |
+| CRDT database / sidecar (e.g. Automerge store) | The episode model is *already* a natural grow-mostly set with revision chains; a CRDT engine imports a dependency and a second data representation for a problem three reconcile rules and a tombstone log solve. Principle 1 trigger without the "cannot be expressed as episodes" condition being met. |
+| Documentation-only answer ("rsync/Syncthing the directory yourself") | Hand-syncing the full directory corrupts host-local state (counters, locks), silently resurrects archived episodes, and leaves same-ID conflicts as tool-specific "conflicted copy" litter. The synced/host-local partition, tombstones, and reconcile rules are exactly the parts documentation alone cannot supply. Retained only as the documented WEAK tier. |
+| Peer-to-peer transport built into em-sync (sockets, mDNS discovery) | A listening process is a daemon by another name (Principle 6) and stdlib networking would still need discovery, auth, and NAT answers; a user-chosen shared medium already solves all three. |
 
 ---
 
@@ -164,9 +186,9 @@ By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a cap
 
 ```mermaid
 graph TD
-    PR1[PR-1: em-sync core — init/status/pull/push, union+reconcile, rebuild-after-merge, git sidecar ref for project scope]
-    PR2[PR-2: global-store sync — dedicated-repo mode, sync-config at ~/.episodic-memory]
-    PR3[PR-3: in-repo mode + gitignore guidance + external-file-sync doc tier]
+    PR1[PR-1: em-sync core — init/status/pull/push, fs-exchange transport, union+reconcile, tombstones, rebuild-after-merge]
+    PR2[PR-2: global-store sync — sync-config at ~/.episodic-memory, exchange-root reuse across scopes]
+    PR3[PR-3: git transport plugin — sidecar ref, in-repo, dedicated-repo modes; sync-transport plugin type registration]
     PR4[PR-4: opt-in lifecycle — SessionStart pull adapter, debounced push-after-store]
     PR5[PR-5: hardening — em-doctor sync checks, ID suffix widening, origin provenance, tier matrix docs]
 
@@ -192,7 +214,7 @@ graph TD
 
 Per the repo convention (behavior simulation before design claims), the load-bearing claims were probed against isolated fixture stores (non-git scratch dirs, `--scope local`, explicit `cwd`), 2026-07-14:
 
-1. **Union + rebuild converges; derived indexes never travel.** Two replicas each stored one episode; copying only `episodes/*.md` from A into B and running `em-rebuild-index --scope local` on B yielded `{"status":"ok","rebuilt":[{"scope":"local","count":2,…}]}` and `em-search` on B returned both episodes with correct tags/category/status — no index file was copied.
+1. **Union + rebuild converges; derived indexes never travel.** Two replicas each stored one episode; copying only `episodes/*.md` from A into B and running `em-rebuild-index --scope local` on B yielded `{"status":"ok","rebuilt":[{"scope":"local","count":2,…}]}` and `em-search` on B returned both episodes with correct tags/category/status — no index file was copied. This is also the existence proof for the fs-exchange transport: the entire merge is expressible as local file operations.
 2. **Cross-replica revision chains resolve.** `em-revise` on B against the A-authored ID returned `{"status":"ok","id":"20260714-224110-revised-on-host-b-e810","supersedes":"20260714-224042-episode-written-on-host-a-ace2",…}` and `em-search --history` showed the full two-link chain with the original `status: superseded`.
 3. **Episode files are not byte-immutable — reconcile is required.** After the revision on B, `diff` of the *original* episode file across replicas showed exactly one line: `status: active` (A) vs `status: superseded` (B). This is the concrete basis for the recompute-status reconcile rule (§2) and the reason pure "immutable union" designs are wrong for this store.
 
@@ -200,7 +222,7 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 
 ## Related RFCs
 
-- **RFC-005 (em-move)** — establishes ID-preserving relocation and the found-in-both-places hard-error stance that §2's quarantine rule mirrors; scope moves are a mutation class sync must survive.
+- **RFC-005 (em-move)** — establishes ID-preserving relocation and the found-in-both-places hard-error stance that §2's quarantine rule mirrors; scope moves are a mutation class sync must survive (tombstoned, OQ-5).
 - **RFC-008 (decoupled enforcement)** — sync is substrate-side and hook-free at core; the optional SessionStart pull follows RFC-008's per-project adapter discipline and the `sync-transport` plugin type rides its plugin registry (R8).
 - **RFC-009 / RFC-012 (lesson activation, promotion arc)** — direct beneficiaries: cross-host recurrence becomes visible to promotion, and lessons activate on every replica, not just the authoring host.
 
@@ -223,10 +245,10 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 | # | Question | Owner | Status |
 |---|---|---|---|
 | OQ-1 | Is monotone pin-wins acceptable, or does concurrent unpin-vs-pin need a timestamped rule? | — | open |
-| OQ-2 | Sidecar ref materialization: hidden linked worktree vs pure plumbing (`git hash-object`/`mktree`/`commit-tree`)? Worktree is simpler; plumbing avoids any on-disk checkout of episode history. | — | open |
+| OQ-2 | fs-exchange mirrors are full copies per replica; do large stores need delta bundles / content-addressed sharing across subtrees? | — | open |
 | OQ-3 | Should `feedback`/`access_count` eventually merge (e.g. per-replica counters summed at read time)? Host-local in v1. | — | open |
-| OQ-4 | Team semantics for project scope: is the sidecar ref shared by all collaborators of the remote by default, and does that need a partition (per-user namespaces under `refs/em/`)? | — | open |
-| OQ-5 | Does `em-move` (local↔global) need sync-awareness, e.g. a tombstone in the source scope so a move isn't undone by a stale replica's push? | — | open |
+| OQ-4 | Team semantics: per-replica subtrees namespace writers by construction, but does read access need partitioning too (per-user exchange roots vs one shared root)? | — | open |
+| OQ-5 | Does `em-move` (local↔global) need more than a tombstone — e.g. a cross-scope pointer so a chain split across scopes stays discoverable from either exchange? | — | open |
 
 ---
 
