@@ -97,6 +97,14 @@
       "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-012-promotion-arc.md"
+    },
+    {
+      "id": "RFC-013",
+      "slug": "episode-sync",
+      "title": "Episode Sync: Cross-Host Replication of Project and Global Episode Stores",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-013-episode-sync.md"
     }
   ]
 }
