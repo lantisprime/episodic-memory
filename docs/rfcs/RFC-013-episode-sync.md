@@ -53,9 +53,13 @@ The store partitions cleanly (verified by runtime probes, §"Runtime evidence"):
 
 Because the synced set is (a) append-mostly and (b) sufficient to regenerate everything else, **sync = union of episode files + local `em-rebuild-index`**. The probe in §"Runtime evidence" demonstrates exact convergence: copying only `episodes/*.md` from replica A into replica B and rebuilding makes both episodes searchable on B with correct metadata, no index file ever traveling.
 
+**Backfill is by construction, not a migration step.** The synced set is the *entire current store* — every past episode already accumulated (design decisions, workplans, violations, lessons) — never a from-now-on stream. A replica's first `push` publishes its full corpus; a brand-new host's first `pull` receives all of it. There is no separate import/export tool and no cutover date: the existing store on the machine that has been accreting this project's memory *is* the seed, and enabling sync on it makes the whole history the payload. This matters because the accumulated corpus — not future episodes — is what agents joining the project are currently blind to.
+
 Usage counters deliberately stay host-local in v1: they are relevance telemetry about *this host's* sessions, they merge poorly (sums need CRDT bookkeeping), and losing them costs only ranking nuance. OQ-3 tracks a future merge rule.
 
 ### 2. Merge semantics: union + deterministic reconcile
+
+**Invariant — episode identity is global.** An episode's ID is minted exactly once, at first store, on the authoring host, and is byte-identical on every replica forever: sync never mints, renames, renumbers, or re-slugs an ID, in any direction, under any conflict rule (the quarantine path preserves both *contents* but never forks the *ID*). This is load-bearing, not cosmetic — `supersedes` chains, `--evidence`/`--lesson` linkage, MEMORY.md anchors, and RFC-012 provenance are all ID references, and they must resolve identically on whichever host they are read. It extends RFC-005's ID-preserving discipline (built for local↔global moves) across the host boundary.
 
 Episode IDs are immutable and corrections are revision chains (Principle 7), so the store is *nearly* a grow-only set — but runtime probing shows three real mutation classes that a naive "immutable files, pure union" design would corrupt. The reconcile step handles each deterministically:
 
@@ -134,6 +138,16 @@ The transport seam registers as a `sync-transport` plugin type (experimental tie
 | **https-exchange plugin** | both | same exchange format over WebDAV / S3-compatible storage via stdlib `fetch` + `crypto` signing | stdlib + a provisioned endpoint & credentials | MEDIUM until proven |
 | raw file-sync of the store, no em-sync | either | pointing a sync tool directly at `episodes/` | — | WEAK: no tombstones (resurrection), no reconcile (conflict copies), documented for what it is |
 
+#### 4.3 Transfer granularity: file-based delta, deliberately not block-based
+
+Incremental transfer is rsync-*like* at **file granularity**: `push`/`pull` diff manifest sha256 maps and move only files whose checksum differs — after the first backfill, a sync round transfers exactly the episodes that changed, typically a handful of small markdown files. **Block-based** delta (rsync's rolling-checksum algorithm, which ships changed byte ranges *within* a file) is deliberately rejected: it earns its complexity on large files that mutate internally, and this corpus is the opposite shape — thousands of small (~KB) write-once files whose only in-place mutations are one-line frontmatter flips (§2). The break-even is never reached; whole-file transfer of a changed episode costs less than computing its rolling checksums. If replica mirrors ever get heavy the pressure shows up as *storage*, not transfer, and the remedy is content-addressing across subtrees (identical episodes stored once, manifests pointing at blobs) — tracked in OQ-2, still file-granular.
+
+#### 4.4 Day-zero seeding: the repo working tree as a read-complete replica
+
+Every transport above assumes the participating host can reach *some* medium. But for **project scope** there is one medium every agent already holds before any sync machinery exists: **the repository clone itself**. `em-sync seed --to-repo` copies the synced set (episodes + archived + tombstones — never indexes, counters, locks, or `sync-config.json`) into the version-controlled `.episodic-memory/` of the working tree, with the host-local set gitignored. From then on **every clone is a read-complete replica at clone time**: session start runs `em-rebuild-index` (cheap, local) and the entire accumulated corpus — past design decisions, workplans, lessons — is searchable with zero transports configured, zero dependencies, zero reachability requirements. This is the fix for the observed day-zero failure (this RFC was itself authored in an ephemeral container where `CLAUDE.md`'s session-start workplan discovery returned empty, because the corpus existed only on the maintainer's machine).
+
+Two honest boundaries (Principle 5): seeding is **team-visible by design** — the corpus enters the repository and its access control becomes the repo's — so `seed` is a consent-gated, explicit act with the same unconditional publish warning as any push; and the seeded copy is a **read tier** — an agent's *new* episodes land as untracked files in the seeded directory, and write-back travels by whatever path the agent's work already travels (committed alongside its changes — memory riding the same PR as the code it explains — or any §4 transport). Seed + fs-exchange compose cleanly: seed answers "can a fresh host read the past *right now*"; transports answer "how do hosts continuously exchange the present".
+
 One deployment reality stated plainly (Principle 5): the fs-exchange medium must be reachable by every participating host. A laptop fleet shares a Syncthing folder trivially; an **ephemeral CI or remote-web container usually cannot mount one** — its only pre-provisioned shared endpoint is the repo's git remote. For those hosts the git plugin (or an https-exchange endpoint) is the practical medium; that is a deployment constraint of such hosts, not a git requirement in the design.
 
 ### 5. Activation lifecycle — no daemons (Principle 6)
@@ -160,7 +174,7 @@ By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a cap
 
 ### Scope
 
-- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable); union+reconcile merge; tombstones; the `fs-exchange` reference transport; the git transport plugin (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
+- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstones; global episode-ID identity invariant; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); the `fs-exchange` reference transport; the git transport plugin (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
 - **Out of scope:** real-time sync or daemons; syncing usage counters (`access_count`/`feedback` — OQ-3); syncing derived indexes, locks, registry, dist cache, or enforcement config; multi-user permission models beyond what the shared medium's ACL provides; conflict *resolution* UI (quarantine + doctor flag only); the https-exchange plugin implementation (format is specified; plugin ships separately).
 
 ---
@@ -175,6 +189,8 @@ By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a cap
 | CRDT database / sidecar (e.g. Automerge store) | The episode model is *already* a natural grow-mostly set with revision chains; a CRDT engine imports a dependency and a second data representation for a problem three reconcile rules and a tombstone log solve. Principle 1 trigger without the "cannot be expressed as episodes" condition being met. |
 | Documentation-only answer ("rsync/Syncthing the directory yourself") | Hand-syncing the full directory corrupts host-local state (counters, locks), silently resurrects archived episodes, and leaves same-ID conflicts as tool-specific "conflicted copy" litter. The synced/host-local partition, tombstones, and reconcile rules are exactly the parts documentation alone cannot supply. Retained only as the documented WEAK tier. |
 | Peer-to-peer transport built into em-sync (sockets, mDNS discovery) | A listening process is a daemon by another name (Principle 6) and stdlib networking would still need discovery, auth, and NAT answers; a user-chosen shared medium already solves all three. |
+| Block-based (rolling-checksum) delta transfer inside files | Pays off on large internally-mutating files; the corpus is thousands of small write-once markdown files whose only in-place edits are one-line frontmatter flips. File-granular manifest diff already ships only what changed; block math would cost more than it saves (§4.3). |
+| Treating sync as future-episodes-only (a stream with a start date) | The accumulated corpus is the value — past decisions, workplans, lessons are exactly what joining agents are blind to. Backfill-by-construction (§1) and day-zero repo seeding (§4.4) make the existing store the payload, not an afterthought needing a separate migration tool. |
 
 ---
 
