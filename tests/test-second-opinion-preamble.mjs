@@ -104,7 +104,7 @@ test('default preamble for codex includes review-ladder + env-prefix-discipline'
   const tmp = makeTmpProject()
   const result = compose({ provider: 'codex', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['review-ladder-v9.4', 'env-prefix-discipline-v1'])
+  assert.deepStrictEqual(result.fragmentIds, ['review-ladder-v9.4', 'env-prefix-discipline-v1', 'adversarial-depth-v1'])
 
   const reg = loadRegistry()
   const ladder = readFragment(reg.fragments.find((f) => f.id === 'review-ladder-v9.4'))
@@ -113,32 +113,42 @@ test('default preamble for codex includes review-ladder + env-prefix-discipline'
     'composed body must include review-ladder fragment content')
   assert.ok(result.preambleBody.includes(envPrefix),
     'composed body must include env-prefix-discipline fragment content')
+  const adversarial = readFragment(reg.fragments.find((f) => f.id === 'adversarial-depth-v1'))
+  assert.ok(result.preambleBody.includes(adversarial),
+    'composed body must include adversarial-depth fragment content')
 })
 
 test('default preamble for claude-subagent includes loader-ref + env-prefix-discipline', () => {
   const tmp = makeTmpProject()
   const result = compose({ provider: 'claude-subagent', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['claude-subagent-loader-ref', 'env-prefix-discipline-v1'])
+  assert.deepStrictEqual(result.fragmentIds, ['claude-subagent-loader-ref', 'env-prefix-discipline-v1', 'adversarial-depth-v1'])
 })
 
 test('default preamble for gemini includes ladder-v1 + env-prefix-discipline', () => {
   const tmp = makeTmpProject()
   const result = compose({ provider: 'gemini', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['gemini-ladder-v1', 'env-prefix-discipline-v1'])
+  assert.deepStrictEqual(result.fragmentIds, ['gemini-ladder-v1', 'env-prefix-discipline-v1', 'adversarial-depth-v1'])
 })
 
 test('default preamble for opencode includes ladder-v1 + env-prefix-discipline', () => {
   const tmp = makeTmpProject()
   const result = compose({ provider: 'opencode', projectRoot: tmp, cliFragments: null })
   assert.strictEqual(result.preambleSource, 'default')
-  assert.deepStrictEqual(result.fragmentIds, ['opencode-ladder-v1', 'env-prefix-discipline-v1'])
+  assert.deepStrictEqual(result.fragmentIds, ['opencode-ladder-v1', 'env-prefix-discipline-v1', 'adversarial-depth-v1'])
 
   const reg = loadRegistry()
   const ladder = readFragment(reg.fragments.find((f) => f.id === 'opencode-ladder-v1'))
   assert.ok(result.preambleBody.includes(ladder),
     'composed body must include opencode-ladder fragment content')
+})
+
+test('default preamble for stub includes review-ladder + adversarial-depth', () => {
+  const tmp = makeTmpProject()
+  const result = compose({ provider: 'stub', projectRoot: tmp, cliFragments: null })
+  assert.strictEqual(result.preambleSource, 'default')
+  assert.deepStrictEqual(result.fragmentIds, ['review-ladder-v9.4', 'adversarial-depth-v1'])
 })
 
 test('unknown provider with no default → no-default-preamble-for-provider', () => {
