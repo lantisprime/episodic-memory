@@ -105,6 +105,14 @@
       "status": "draft",
       "champion": "Charlton Ho",
       "file": "RFC-013-episode-sync.md"
+    },
+    {
+      "id": "RFC-014",
+      "slug": "episode-server",
+      "title": "em-serve — Episode Server: Rendezvous Sync, Live Episode Feed, and Remote Recall over the CLI Contract",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-014-episode-server.md"
     }
   ]
 }
