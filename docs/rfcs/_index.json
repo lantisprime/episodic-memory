@@ -89,6 +89,14 @@
       "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-011-playbook-activation-preferences.md"
+    },
+    {
+      "id": "RFC-012",
+      "slug": "promotion-arc",
+      "title": "Promotion Arc: Evidence-Fed Knowledge Promotion, Advisory Cadence, and Stagnation Signals",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-012-promotion-arc.md"
     }
   ]
 }
