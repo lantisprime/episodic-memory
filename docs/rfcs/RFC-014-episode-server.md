@@ -69,6 +69,14 @@ When the server's replica ingests an episode (its own store or a pushed subtree)
 
 What it unlocks: a harness on host B learns *mid-session* that host A stored a decision touching its current work (surfaced through the RFC-009 advisory plane — bounded pointer, never enforcement); RFC-003 typed requests (`recipient`/`audience` routing, P8) finally cross the machine boundary — a review request stored on A can wake the consumer on B without either side polling.
 
+**Delivery semantics — stated, not implied.** The near-realtime scenario ("A stores a design decision, B must pick it up mid-session") only works if the failure modes are contractual:
+
+- **At-least-once, idempotent by ID.** Events may be delivered twice (reconnect races); consumers ingest by episode ID and duplicates are no-ops. The global-ID invariant (RFC-013 §2) is what makes idempotence free.
+- **No cross-episode ordering guarantee.** A revision's event can arrive before its ancestor has synced. The consumer tolerates a dangling `supersedes` (the substrate already treats these as warn-not-error in `em-doctor`) and it heals at the next pull. Full pulls remain manifest-atomic; only the feed can produce this state.
+- **The event is a hint, not the payload.** An event carries the episode's index row plus `replica` + `relpath`; the body may not have reached B's replica yet. The consumer fetches the body through the M1 exchange endpoints (or M3 `em-search --full`), falling back to a targeted `em-sync pull` — never blocking on it.
+- **Disconnection loses nothing.** `Last-Event-ID` reconnect backfills from index order; a dead feed degrades to RFC-013's pull cadence, never below it. Heartbeat comments every ~30s keep intermediaries from silently killing idle streams.
+- **The window is seconds, never zero — and nothing may pretend otherwise.** If A and B cross inside the propagation gap, the result is a supersession fork, handled by RFC-013 §2.1 (detected at merge, disclosed on read, resolved by a multi-`supersedes` episode). The feed is what makes RFC-013's stale-base guard (D-5) effective across hosts; it is never a freshness guarantee, so no enforcement gate may key off it (RFC-008 discipline).
+
 ### 3. M3 — Thin-client store/recall for storeless hosts
 
 ```

@@ -74,6 +74,16 @@ After every merge: acquire the store lock (`lib/lock.mjs`), run reconcile, run `
 
 Note the common case is trivial: a file changed on **one** replica only (every new episode, every revision made on a single host) unions cleanly with no reconcile decision at all. The rules above cover the rare concurrent-touch cases.
 
+#### 2.1 Concurrent supersession across the network: forks are first-class, not edge cases
+
+The scenario: agent A revises decision E on one host while agent B revises the *same* E on another, before either syncs. After merge, every replica legitimately contains E (`superseded`) plus **two active heads** with contradictory content, both carrying `supersedes: E`. Runtime probes (§"Runtime evidence" 4–6) show the substrate's current behavior is *silence in three places*: plain search returns both heads as `active` with no conflict signal; `em-search --history` silently walks **one** branch and presents a clean linear chain (an agent asking "what is current?" gets a confident wrong answer); `em-revise` happily accepts an already-superseded original and mints a third head; and `em-doctor` has no multi-head check (only a dangling-pointer warn). The fork itself is legitimate concurrency — the defect is that nothing discloses it. Five design rules:
+
+- **D-1 Detection is free at merge time.** Reconcile already builds the supersedes graph to recompute `status` (§2); a fork is simply >1 non-superseded episode referencing the same ancestor. `em-sync pull`/`status` output gains `forks: [{root, heads: [...]}]`, and `em-doctor` gains the same graph check as a standing `chain-fork` warning.
+- **D-2 Read surfaces disclose, always.** `em-search --history` walks **all** branches and emits `forked: true` with every head; plain search marks each head `fork_of: <root>`. An agent can no longer read a linearized lie.
+- **D-3 Resolution is an episode, not an edit (P7).** `em-revise` accepts repeated `--original`: the resolution episode carries `supersedes: [headA, headB]` and closes the fork the same way every correction has ever worked — by superseding. The graph-based status recompute needs zero changes (an episode is superseded iff *any* supersedes edge references it); frontmatter readers accept scalar or list (OQ-6).
+- **D-4 Nothing auto-resolves.** The heads differ in *content* — picking one is a decision, and the substrate never decides (P11). The advisory plane (RFC-009 activation; RFC-014 M2 feed) surfaces "decision X has 2 active heads" as a bounded pointer to the agent or human who owns the call. Until resolved, heads render in deterministic (lexicographic-ID) order so all replicas at least *display* identically — explicitly a presentation rule, never a truth rule.
+- **D-5 Prevention is a freshness race, so make staleness loud.** `em-revise` gains a stale-base guard: revising an episode the local index already shows as superseded errors with the current head's ID (`--allow-fork` overrides for a deliberate branch). Its cross-host effectiveness equals the host's freshness — which is precisely what RFC-014's live feed buys: the fork window shrinks from "until next pull" to seconds. It never reaches zero; D-1–D-4 are the backstop, not the feed.
+
 ### 3. `em-sync.mjs` — the CLI contract
 
 Zero external dependencies — Node stdlib only, including the reference transport. JSON to stdout, degrades gracefully (missing config → `{"status":"not-configured"}`, exit 0 on status/read paths).
@@ -174,8 +184,31 @@ By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a cap
 
 ### Scope
 
-- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstones; global episode-ID identity invariant; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); the `fs-exchange` reference transport; the git transport plugin (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
+- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstones; global episode-ID identity invariant; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); fork handling (D-1–D-5: merge-time detection, disclosing read surfaces, multi-`--original` resolution revisions, stale-base guard in `em-revise`, `chain-fork` check in `em-doctor`); the `fs-exchange` reference transport; the git transport plugin (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
 - **Out of scope:** real-time sync or daemons; syncing usage counters (`access_count`/`feedback` — OQ-3); syncing derived indexes, locks, registry, dist cache, or enforcement config; multi-user permission models beyond what the shared medium's ACL provides; conflict *resolution* UI (quarantine + doctor flag only); the https-exchange plugin implementation (format is specified; plugin ships separately).
+
+---
+
+## Scenario matrix — happy and negative paths
+
+Every scenario the design must survive, not just the ones it enjoys. "Probe n" references §"Runtime evidence".
+
+| # | Scenario | Class | Outcome under this design | Grounding |
+|---|---|---|---|---|
+| S1 | A stores an episode; B pulls | happy | union + local rebuild; converges exactly | probe 1 |
+| S2 | A revises an A-authored episode; B pulls | happy | chain resolves on B; original's status recomputed from graph | probes 2–3 |
+| S3 | A and B concurrently revise the same episode (fork) | negative | detected at merge (D-1), disclosed on every read surface (D-2), closed by a multi-`supersedes` resolution episode (D-3); never auto-picked (D-4) | probes 4–6: today all three read surfaces are silent |
+| S4 | Agent revises a stale base (already-superseded original) | negative | `em-revise` errors with the current head's ID; `--allow-fork` for deliberate branches (D-5) | probe 5: accepted silently today |
+| S5 | Revision arrives before its ancestor (out-of-order) | negative | only reachable via the live feed — full pulls are manifest-atomic; dangling `supersedes` is tolerated (existing `em-doctor` warn semantics) and heals at next pull | `em-doctor` `supersedes-links` check |
+| S6 | A archives E while B revises E | negative | B's head is a *new* episode and survives; the tombstone keeps E archived; `em-doctor` flags active-head-with-archived-root for curation | §2 tombstone rule |
+| S7 | A moves E local↔global while B revises the local copy | negative | scope-move tombstone + RFC-005's stance (chain split across scopes resolves via `--scope all`); cross-scope pointer tracked in OQ-5 | RFC-005 F3 |
+| S8 | Two hosts mint the same ID (same second, slug, suffix) | negative | widened 4-byte suffix (~1/4.3B) + same-ID-different-body quarantine; a collision can never silently overwrite | §2, §7 |
+| S9 | Two agents store the *same decision* independently (different IDs — semantic duplicate) | negative | **not solvable by sync mechanics** — no shared ID exists; this is `em-consolidate`'s job, and the live feed shrinks the window in which it happens. Stated honestly rather than hand-waved | Principle 5 |
+| S10 | Torn push on a dumb medium (partial propagation) | negative | manifest-as-commit-point: pull verifies checksums, skips the inconsistent subtree this round, retries later | §4.1 |
+| S11 | Buggy or malicious replica publishes forged tombstones | adversarial | tombstones are auditable (`replica`, `ts` fields; `em-doctor` lists per-replica) and **reversible** — archival moves files, never deletes, so a forged tombstone displaces, never destroys; scope-move tombstones validate target presence | §2, §4.1 |
+| S12 | Manifest/content mismatch (corruption or tamper) | adversarial | passive medium: checksum verification skips the subtree; server transport: the commit is rejected server-side before other replicas can see it | §4.1; RFC-014 M1 |
+| S13 | Clock skew between hosts | negative | reconcile never reads a wall clock: status comes from the graph, pin is monotone, archival comes from tombstones. The ID's timestamp prefix is a naming convention, never an ordering oracle | §2 |
+| S14 | Poisoned episodes entering via a seeded repo PR | adversarial | seeded episodes ride the same review gate as code — same-ID tampering is a visible diff; on merge, quarantine rules still apply | §4.4 |
 
 ---
 
@@ -233,6 +266,9 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 1. **Union + rebuild converges; derived indexes never travel.** Two replicas each stored one episode; copying only `episodes/*.md` from A into B and running `em-rebuild-index --scope local` on B yielded `{"status":"ok","rebuilt":[{"scope":"local","count":2,…}]}` and `em-search` on B returned both episodes with correct tags/category/status — no index file was copied. This is also the existence proof for the fs-exchange transport: the entire merge is expressible as local file operations.
 2. **Cross-replica revision chains resolve.** `em-revise` on B against the A-authored ID returned `{"status":"ok","id":"20260714-224110-revised-on-host-b-e810","supersedes":"20260714-224042-episode-written-on-host-a-ace2",…}` and `em-search --history` showed the full two-link chain with the original `status: superseded`.
 3. **Episode files are not byte-immutable — reconcile is required.** After the revision on B, `diff` of the *original* episode file across replicas showed exactly one line: `status: active` (A) vs `status: superseded` (B). This is the concrete basis for the recompute-status reconcile rule (§2) and the reason pure "immutable union" designs are wrong for this store.
+4. **A merged fork is silent on every read surface.** Two replicas concurrently revised the same decision episode ("switch to gRPC" on C, "switch to GraphQL" on D, both `supersedes: 20260714-234655-use-rest-for-the-api-70a8`); after union+rebuild, plain search returned **both heads as `status: active`** with no conflict marker, while `em-search --history` on the same store returned `{"count":2, "chain":[original, gRPC-head]}` — the GraphQL head **absent**, the fork presented as a clean linear chain. The two read surfaces disagree and neither warns (basis for D-1/D-2).
+5. **Stale-base revision is accepted silently.** `em-revise --original <already-superseded-id>` on the merged store returned `{"status":"ok", "id":"20260714-234801-third-head-…", "supersedes":"…-70a8"}` — a third active head, no warning (basis for D-5).
+6. **No existing check catches forks.** `em-doctor` on the forked store: `{"summary":{"ok":25,"warn":1,"error":0}}` with no chain/multi-head check present (source-confirmed: only `supersedes-links` dangling-pointer warnings exist). Meta-observation from the same working session: the repo's own `negative-scenario-planner` agent **could not run** in the authoring container because its canonical prompt lives as a *global episode* on one maintainer machine — `em-rebuild-index --scope global` reported `count: 0`. The tooling that audits this RFC is itself blocked by the problem this RFC solves.
 
 ---
 
@@ -265,6 +301,8 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 | OQ-3 | Should `feedback`/`access_count` eventually merge (e.g. per-replica counters summed at read time)? Host-local in v1. | — | open |
 | OQ-4 | Team semantics: per-replica subtrees namespace writers by construction, but does read access need partitioning too (per-user exchange roots vs one shared root)? | — | open |
 | OQ-5 | Does `em-move` (local↔global) need more than a tombstone — e.g. a cross-scope pointer so a chain split across scopes stays discoverable from either exchange? | — | open |
+| OQ-6 | Multi-`supersedes` frontmatter shape for fork resolutions (D-3): YAML list vs repeated scalar key — and the compatibility rule for pre-RFC-013 readers that assume a scalar. | — | open |
+| OQ-7 | Should the stale-base guard (D-5) consult only the local index, or also the last-seen exchange manifests, so a host that synced recently gets a stronger check without a network round-trip? | — | open |
 
 ---
 
