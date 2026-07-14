@@ -2,7 +2,7 @@
 rfc_id: RFC-012
 slug: promotion-arc
 title: "Promotion Arc: Evidence-Fed Knowledge Promotion, Advisory Cadence, and Stagnation Signals"
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-07-14
 last_modified: 2026-07-14
@@ -145,7 +145,21 @@ The training-free analog of AutoMem's two loops, scoped to the clerk:
 
 ## Implementation plan
 
-> Populate this section when the RFC moves to `accepted`. Per champion instruction (2026-07-14), no implementation begins from the draft; sequencing will be drafted at acceptance. Expected shape: R3a/R8 (smallest, zero new schema) → R2 (deadline-bound) → R3b/R3c → R5 → R6 → R4 → R9 → R7, each independently shippable. The mermaid graph records hard dependencies only; the arrow order in this note is expected shipping order, not a dependency chain. R2 → R7 because R7's proposal episodes cite the typed evidence linkage and the learning-type registry slot that R2a/R2b stabilize.
+Populated at acceptance (2026-07-14). Shipping order follows the draft's sequencing note — R3a/R8 first (smallest, zero new schema), then R2 (deadline-bound), R3b/R3c, R5, R6, R4, R9, R7 — and the mermaid graph records hard dependencies only, not shipping order. R2 → R7 because R7's proposal episodes cite the typed evidence linkage and the learning-type registry slot that R2a/R2b stabilize. R8 is complete: its one-sentence errata to RFC-009 R9(b) rides this acceptance PR (P0 below). R1 ships no code: the vocabulary is normative in this document, and every later document names which sense it means. Each remaining phase is independently shippable, opens with its own phase plan document (`docs/plans/rfc-012-p<N>.md`, PLAN_TEMPLATE §1-20 + Appendix A) in which the phase-start decisions named below are made, lands in its own PR(s), and marks the `## Implementation` ledger immediately after shipping. R2's charter deadline (2026-10-08) binds P2 absolutely: if later phases would push P2 past the deadline, P2 preempts them.
+
+### Phases
+
+| Phase | Deliverables | Primary files | Tests | Sizing | Hard deps |
+|---|---|---|---|---|---|
+| P0 (R8) | One-sentence errata to RFC-009 R9(b): the consolidation clerk is a curation (family 4) capability; the learning-strategy family's first shipped member is `em-promote` | `docs/rfcs/RFC-009-lesson-activation.md` | `em-rfc-validate` green | landed in this PR | — |
+| P1 (R3a) | K/N gauges computed at trigger-index build from index rows, per store; typed `cadence` field stamped into `session_start` with fixed rendering order and build-compiled enablement flags; active-lesson gauge corrected to filter `category: lesson` | `scripts/em-trigger-index.mjs`, `scripts/lib/activation-log.mjs`, `scripts/em-consolidate.mjs` | gauge-threshold fixtures (both polarities per gauge); envelope truncation-order fixture | 1 PR | — |
+| P2 (R2a–R2d) | Store-identity episode chain (mint, ordinary rebind, single-write clone-detach, alias resolution, crash fixtures); `promotion_sources` writer flag + write-time validation + store/rebuild/revise lockstep; learning registry sub-schema, descriptor schema, runtime IO schema + conformance gauntlet folding `tests/test-em-promote.mjs`; #478 residual disposition (R2c); assisted apply with per-candidate fingerprint confirm, `promote-run` run-record + class-d protection arm; assisted revision migration; consumer-registry mirror bump | `scripts/em-promote.mjs`, `scripts/em-store.mjs`, `scripts/em-revise.mjs`, `scripts/em-rebuild-index.mjs`, `scripts/lib/protection.mjs`, `scripts/lib/registered-stores.mjs`, `scripts/lib/install-version.mjs`, `plugins/_index.schema.json`, `plugins/consumer-registry.schema.json`, `scripts/validate-plugin-registry.mjs`, `tests/test-em-promote.mjs` | the R2b fixture list (in-body) plus the existing 15-test suite | 3–4 PRs | P1 |
+| P3 (R3b/R3c) | `CADENCE_M_NEW_EPISODES` registered as data (OQ-1 telemetry check at phase start); clerk-run delta gauge; promotion advisory off the promote-run baseline (suppressed when no baseline exists) | `scripts/em-trigger-index.mjs`, `scripts/lib/activation-log.mjs` | no-baseline suppression fixture; threshold polarity fixtures | 1 PR | P1, P2 |
+| P4 (R5) | `attempt` category (`categories.json` MINOR); `attempt_of`/`outcome` typed scalars, fail-closed write-time validation, lockstep carry; writer form decided at phase start (OQ-2) | `categories.json`, `scripts/em-store.mjs`, `scripts/em-revise.mjs`, `scripts/em-rebuild-index.mjs` | fail-closed negative writes; lockstep parity | 1 PR | — |
+| P5 (R6) | Read-only stagnation audit structurally cloned from `em-pattern-health`; closed verdict enum registered as data; `session_start` stamp (OQ-3 disposition recorded at phase start) | new audit script (named in the phase plan), `scripts/em-trigger-index.mjs` | verdict matrix: post-success counting, window edges, insufficient-data | 1 PR | P4 |
+| P6 (R4) | Curated project-local nudge seed set as data; installer opt-in step with manifest-declared ownership; checksum-gated uninstall (fail-loud on revised seeds); `applies_to_projects: [*]` prohibited for the set (OQ-4 tolerance observed in burn-in) | seed data file(s), `install.mjs`, `scripts/install-wizard.mjs`, `scripts/lib/install-manifest.mjs` | mock-project install/uninstall E2E | 1 PR | — |
+| P7 (R9a–R9c) | Capture-heuristics extraction to a data file (named prerequisite); `proposal` category (shared with P8 — lands with whichever ships first); scaffold-revision proposals with the immutable constraint set and lagged/held-out evaluation; R9b opt-in agentic backend with up-front declared budget; R9c exemplar selection with the verbatim-match audit (OQ-7 revisable-set v1 at phase start) | `scripts/em-capture.mjs` + new data file, `scripts/em-consolidate.mjs`, `scripts/em-consolidate/prompts/clerk.md`, `categories.json`, writer/rebuild lockstep files | constraint-weakening auto-reject; verbatim-match audit; evidence-rule negatives | 2 PRs | P1, P6; R9b additionally gated on #531 |
+| P8 (R7a–R7d) | Propose-only evidence bundles (`proposal_kind: guard-review`, validated `target_store`); needs-enforcement session-start advisory; clerk lock + run-record; lexical form MAY ship before the agentic backend (OQ-5 decided at phase start; agentic form gated on #531) | clerk entry point (named in the phase plan), `scripts/em-pattern-health.mjs` (consumed), `categories.json` (if P7 has not landed), `scripts/lib/lock.mjs` (used) | write-time validation negatives: unknown kinds, unresolvable pointers, target-store scopes | 1–2 PRs | P2, P5 |
 
 ### Sequencing
 
@@ -159,7 +173,7 @@ graph TD
     R4[R4: nudge lessons]
     R7[R7: enforcement-promotion clerk]
     R9[R9: clerk scaffold self-revision]
-    R8[R8: charter errata - rides the acceptance PR with R3a]
+    R8[R8: charter errata - landed in the acceptance PR]
 
     R3a --> R3bc
     R2 --> R3bc
@@ -288,6 +302,12 @@ graph TD
 **Findings:** ACCEPT. The single-write clone-rebind verified RESOLVED (state model closed: one root simultaneously establishes fresh identity and suppresses the copied chain, defined crash outcomes, fixture coverage). One P3 note: filesystem atomicity requires the identity writer to stage/fsync/rename under the store lock — today's direct `writeFileSync` (`scripts/em-store.mjs:324`) can leave a partial file — plus a crash-during-write fixture. Folded in this revision.
 **AI-slop check:** clean (the atomicity wording was the only precision note, corrected)
 **Decision:** proceed — final verdict of the ten-round codex ladder (HOLD-12 → 7 → 2 → 2 → 2 → 1 → 1 → 1 → 1 → ACCEPT).
+
+**Reviewer (acceptance gate):** pi/GLM-5.2 (neuralwatt), two rounds on the frozen staged acceptance diff (`.review-store/rfc012-acceptance-r1.diff` / `-r2.diff`: status flip, Implementation-plan population, R8 errata)
+**Date:** 2026-07-14
+**Findings:** round 1 HOLD-1 — one P2: the R8 errata claimed "corrected accordingly" while two family-3 residues survived in the same RFC-009:175 sentence ("exactly the family-3 contract"; the stale `learning`-type no-bump justification) — accepted and corrected in place. Round 2 ACCEPT: residue repro returns empty, the no-bump conclusion holds at the charter level (`CAPABILITIES.md:40`; em-consolidate is a substrate script, not a registered plugin), the family-4 clause matches the curation definition, `em-rfc-validate` green, control-byte scan clean, all round-1 clean verdicts (citation audit, mermaid-vs-table dependency map, OQ consistency) re-confirmed. Informational, out of scope: the charter's `curation` plugin type is absent from the registry type enum (`plugins/_index.schema.json:33`) — pre-existing drift, tracked as its own issue.
+**AI-slop check:** clean (15-test count and CAPABILITIES.md anchors independently confirmed on disk)
+**Decision:** proceed — status flipped to accepted in this PR; Implementation plan populated (P0–P8); R8 errata landed.
 
 ---
 
