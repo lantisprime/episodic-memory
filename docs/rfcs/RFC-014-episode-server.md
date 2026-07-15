@@ -57,7 +57,41 @@ PUT  /v1/exchange/replicas/<self>/files/<relpath>   → upload (own subtree only
 PUT  /v1/exchange/replicas/<self>/manifest.json     → commit (validated: checksums must match uploads)
 ```
 
-The exchange invariants carry over unchanged: single writer per subtree (enforced now by auth — a replica's token can only write its own subtree), manifest-as-commit-point (the server rejects a manifest referencing missing/mismatched files, so torn pushes are impossible, strengthening the passive-medium guarantee), tombstones as specified. The server host itself typically also runs a replica, making it an always-on peer whose subtree is the freshest view for newcomers. `em-sync` gains `--transport https-exchange`; **merge logic does not move** — clients still union+reconcile locally exactly as in RFC-013.
+The exchange invariants carry over unchanged: single writer per subtree (enforced now by auth — a replica's token can only write its own subtree), manifest-as-commit-point (the server rejects a manifest referencing missing/mismatched files, so torn pushes are impossible, strengthening the passive-medium guarantee), tombstones as specified. The server host itself typically also runs a replica, making it an always-on peer whose subtree is the freshest view for newcomers. `em-sync` gains `--transport https-exchange`; **merge logic does not move** — clients still union+reconcile locally exactly as in RFC-013 (and can verify the server's merge, because reconcile is deterministic).
+
+#### 1a. Eager reconcile and the sync digest — the server merges eagerly and notifies loudly, but never decides
+
+Because the server hosts an ordinary replica, it does not wait for clients to do merge work: on every committed push it ingests the subtree into its own replica immediately — union, tombstones, mechanical reconcile (status recompute, pin-wins, archived-wins) — and detects forks as a by-product of the reconcile graph. Three consequences:
+
+- **`GET /v1/digest`** — one round-trip answers "how far behind am I and what needs a mind": `{ behind: <n>, latest_seq, forks: [{root, heads}], quarantined: [ids] }`. RFC-013's `session` mode calls this as its session-start ping; `manual` pulls get it for free in the pull response.
+- **Cheaper pulls.** A client may pull the server's single pre-merged replica subtree instead of unioning N foreign subtrees — and because reconcile is deterministic, the client can re-run it locally and get the identical result (trust, but verifiable).
+- **Fork notification is a server duty; fork resolution never is.** Forks and quarantines appear in the digest, in pull responses, and as M2 `fork` events. The server never writes a resolution episode, never orders heads, never drops one — mechanical conflicts are resolved identically everywhere by rules; semantic conflicts are routed to an agent or human at a client, whose resolution episode (RFC-013 D-3/D-4) propagates back like any other episode and closes the fork on every replica.
+
+```mermaid
+flowchart LR
+    subgraph HA["host A (session mode)"]
+        AG1["agent harness"] --> ST1[("local store A")]
+    end
+    subgraph SV["em-serve host"]
+        EX[("exchange subtrees<br/>one per replica")]
+        RR["eager reconcile<br/>on ingest"]
+        SR[("server replica store<br/>pre-merged view")]
+        DG["/GET /v1/digest/"]
+        EV["/SSE /v1/events/"]
+        EX --> RR --> SR
+        SR --> DG
+        SR --> EV
+    end
+    subgraph HB["host B (realtime mode)"]
+        AG2["agent harness"] --> ST2[("local store B")]
+        LV["em-sync live"]
+    end
+    ST1 -- "push at session end" --> EX
+    DG -- "digest ping at session start,<br/>then pull pre-merged subtree" --> ST1
+    LV -- "fs.watch → immediate push" --> EX
+    EV -- "episode + fork events,<br/>seconds after ingest" --> LV
+    LV --> ST2
+```
 
 ### 2. M2 — Live episode feed (SSE)
 
@@ -76,6 +110,7 @@ What it unlocks: a harness on host B learns *mid-session* that host A stored a d
 - **The event is a hint, not the payload.** An event carries the episode's index row plus `replica` + `relpath`; the body may not have reached B's replica yet. The consumer fetches the body through the M1 exchange endpoints (or M3 `em-search --full`), falling back to a targeted `em-sync pull` — never blocking on it.
 - **Disconnection loses nothing.** `Last-Event-ID` reconnect backfills from index order; a dead feed degrades to RFC-013's pull cadence, never below it. Heartbeat comments every ~30s keep intermediaries from silently killing idle streams.
 - **The reference consumer is `em-sync live`** (RFC-013 §5, `mode: "realtime"`): a session-scoped client that pairs this subscription with `fs.watch`-driven immediate push, giving seconds-wide end-to-end convergence while it runs and clean degradation to session-boundary sync when it doesn't.
+- **`fork` events ride the same stream.** When eager reconcile (§1a) detects a new fork or quarantine, subscribers receive `event: fork` / `event: quarantine` with `{root, heads}` — the notification half of the fork contract. Resolution stays client-side: an agent (within its remit) or the user writes the resolution episode; the server only carries the news, both ways.
 - **The window is seconds, never zero — and nothing may pretend otherwise.** If A and B cross inside the propagation gap, the result is a supersession fork, handled by RFC-013 §2.1 (detected at merge, disclosed on read, resolved by a multi-`supersedes` episode). The feed is what makes RFC-013's stale-base guard (D-5) effective across hosts; it is never a freshness guarantee, so no enforcement gate may key off it (RFC-008 discipline).
 
 ### 3. M3 — Thin-client store/recall for storeless hosts
@@ -105,7 +140,7 @@ The substrate already carries optional heavier recall (`em-embed`, `em-semantic`
 
 ### Scope
 
-- **In scope:** `em-serve.mjs` + shared request core with `em-console`; M1 https-exchange endpoints + `em-sync --transport https-exchange`; M2 SSE feed with Last-Event-ID backfill; M3 network-hardened command registry; token issue/revoke; `em-routines` service installation with P10 manifest; tier/topology docs.
+- **In scope:** `em-serve.mjs` + shared request core with `em-console`; M1 https-exchange endpoints + `em-sync --transport https-exchange`; eager reconcile-on-ingest, the `/v1/digest` endpoint, and pre-merged-subtree pulls (§1a); M2 SSE feed with Last-Event-ID backfill and `fork`/`quarantine` events; M3 network-hardened command registry; token issue/revoke; `em-routines` service installation with P10 manifest; tier/topology docs.
 - **Out of scope:** M4 implementation (specified, ships behind its own consent later); ACME/LetsEncrypt automation; multi-tenant SaaS concerns (quotas, billing, org ACLs — the ACL is the token set); federation between servers (two servers sync as ordinary RFC-013 peers, which already works); any client-side polling fallback.
 
 ---

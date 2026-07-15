@@ -86,6 +86,26 @@ The scenario: agent A revises decision E on one host while agent B revises the *
 - **D-4 Nothing auto-resolves.** The heads differ in *content* — picking one is a decision, and the substrate never decides (P11). The advisory plane (RFC-009 activation; RFC-014 M2 feed) surfaces "decision X has 2 active heads" as a bounded pointer to the agent or human who owns the call. Until resolved, heads render in deterministic (lexicographic-ID) order so all replicas at least *display* identically — explicitly a presentation rule, never a truth rule.
 - **D-5 Prevention is a freshness race, so make staleness loud.** `em-revise` gains a stale-base guard: revising an episode the local index already shows as superseded errors with the current head's ID (`--allow-fork` overrides for a deliberate branch). Its cross-host effectiveness equals the host's freshness — which is precisely what RFC-014's live feed buys: the fork window shrinks from "until next pull" to seconds. It never reaches zero; D-1–D-4 are the backstop, not the feed.
 
+The full fork lifecycle, end to end — detection and notification are machinery (deterministic, any replica or the server), resolution is a mind (an agent within its remit, or the user), and the resolution is itself an episode that closes the fork everywhere:
+
+```mermaid
+sequenceDiagram
+    participant A as agent, host A
+    participant S as em-serve (eager reconciler, RFC-014)
+    participant B as agent, host B
+    Note over A,B: both hosts hold decision E
+    A->>S: push rev-A (supersedes E)
+    B->>S: push rev-B (supersedes E)
+    Note over S: ingest + eager reconcile:<br/>fork detected {root E, heads rev-A, rev-B}<br/>server NEVER picks a head
+    S-->>A: fork notification (SSE event / pull digest)
+    S-->>B: fork notification (SSE event / pull digest)
+    Note over B: advisory plane surfaces fork;<br/>agent decides — or asks the user
+    B->>B: em-revise --original rev-A --original rev-B → resolution R
+    B->>S: push R
+    S-->>A: episode event R
+    Note over A,B: status recompute marks rev-A and rev-B superseded<br/>on every replica; chain E → fork → R stays in history
+```
+
 ### 3. `em-sync.mjs` — the CLI contract
 
 Zero external dependencies — Node stdlib only, including the reference transport. JSON to stdout, degrades gracefully (missing config → `{"status":"not-configured"}`, exit 0 on status/read paths).
@@ -171,12 +191,25 @@ One store, three named modes in `sync-config.json` (`"mode"`); hosts choose inde
 | Mode | Inbound | Outbound | Convergence latency | Requires | Idle cost |
 |---|---|---|---|---|---|
 | **`manual`** (default) | `em-sync pull` when invoked | `em-sync push` when invoked | next explicit invocation | any transport | zero — nothing runs, ever |
-| **`session`** | one bounded pull at session start (the `auto_update` hook pattern: single attempt, one-line `notice`, degrade-to-token, never blocks; per-project registration only, P12) | debounced push — session end or N minutes after the last store, whichever first | one session boundary | any transport | zero between sessions; two bounded actions per session |
+| **`session`** | one bounded pull at session start (the `auto_update` hook pattern: single attempt, one-line `notice`, degrade-to-token, never blocks; per-project registration only, P12). When the transport is `em-serve`, the pull consults the server's **sync digest** first (RFC-014 §1a) — one round-trip answers "how far behind, which forks are open" | debounced push — session end or N minutes after the last store, whichever first | one session boundary | any transport | zero between sessions; two bounded actions per session |
 | **`realtime`** | standing SSE subscription to `em-serve` (RFC-014 M2), events ingested as they arrive | immediate push-on-store | seconds, end to end | the server component + `em-sync live` running | one parked socket + one `fs.watch`, session-scoped; zero tokens while quiet |
 
 **`em-sync live` — the realtime client, session-scoped by construction.** One process in the `em-console` mold: started at session start (explicitly, or by the consented SessionStart adapter when `mode: "realtime"`, OQ-9), prints its single startup JSON line, and exits with the session (idle-timeout as backstop). It does two things: holds the M2 SSE subscription and ingests events per the delivery contract (idempotent by ID, dangling-tolerant, body fetched on demand); and watches the local `episodes/` directory with `fs.watch` — the mechanism P6 *names as the preferred listener* — pushing each new episode file as it lands, no debounce, no polling. Core stays untouched: `em-store` doesn't know it's being watched (P9); the watcher observes the filesystem, exactly like tombstone derivation observes manifests.
 
 **Degradation ladder, stated:** `realtime` with the server unreachable behaves as `session` (the client retries the subscription with backoff, syncs on session boundaries regardless, and says so in `em-sync status`); `session` with the medium unreachable behaves as `manual` (the hook degrades to its status token). No mode ever blocks a write or a session — writes are always local-first in every mode.
+
+```mermaid
+flowchart TD
+    RT["realtime — em-sync live<br/>SSE inbound, fs.watch push outbound<br/>latency: seconds"]
+    SES["session — start pull + digest ping,<br/>debounced push<br/>latency: one session boundary"]
+    MAN["manual — explicit pull / push<br/>latency: next invocation"]
+    LOCAL[("local store —<br/>reads and writes NEVER blocked")]
+    RT -- "server unreachable" --> SES
+    SES -- "medium unreachable" --> MAN
+    RT --- LOCAL
+    SES --- LOCAL
+    MAN --- LOCAL
+```
 
 Explicitly rejected still: any process that outlives sessions without being a user-installed service (that is `em-serve`'s consented territory, RFC-014 §6), any polling loop against the medium in any mode, and any watcher on the *exchange root* (inbound realtime goes through the server's push channel precisely so no client ever polls a shared folder).
 
