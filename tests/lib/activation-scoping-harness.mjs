@@ -219,10 +219,10 @@ export function mkMock(label = 'mock') {
  * defaults to [] (core install — no enforcement hooks). Caller cwd defaults to
  * the mock's caller dir (kept distinct from --project).
  */
-export function runInstall({ home, project, callerCwd, flags = [], tool = 'claude-code', extraEnv = {} }) {
+export function runInstall({ home, project, callerCwd, flags = [], tool = 'claude-code', extraEnv = {}, installerRepo = REPO_ROOT }) {
   const env = scrubEnv({ ...process.env, HOME: home, ...extraEnv })
   return spawnSync('node', [
-    path.join(REPO_ROOT, 'install.mjs'),
+    path.join(installerRepo, 'install.mjs'),
     '--tool', tool,
     '--project', project,
     ...flags,

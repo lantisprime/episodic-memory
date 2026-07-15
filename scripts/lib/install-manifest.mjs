@@ -508,3 +508,98 @@ export const ACTIVATION_SUPPORT_FILES = ['activation-hook-run.mjs']
 export function activationSupportFiles() {
   return [...ACTIVATION_SUPPORT_FILES]
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// ISSUE-531 — class-closing deployment of scripts/<name>/ subtrees.
+// Three disjoint classes extend the flat-scripts scheme:
+//   'global'    → recursive copy to ~/.episodic-memory/scripts/<name>/
+//   'repo-only' → ship NOWHERE (repo-dev data, e.g. scaffold-plugin/)
+//   'lib'       → special-case; copy of scripts/lib/ handled by relocatedOnlyLibs
+//                 (NOT a recursive data copy — entry-shape stays driven by the
+//                 existing global-lib filter; declared only so the classifier
+//                 never reports it as 'unclassified')
+//   'unclassified' → install throws (fail closed, #531)
+// ───────────────────────────────────────────────────────────────────────────
+export const GLOBAL_SCRIPT_SUBTREES = ['em-consolidate', 'second-opinion']
+export const REPO_ONLY_SCRIPT_SUBTREES = ['scaffold-plugin']
+
+/**
+ * Classify a direct child directory of scripts/ into exactly one deployment
+ * class. State table per §12: never throws.
+ */
+export function classifyScriptSubtree(name) {
+  if (name === 'lib') return 'lib'
+  if (GLOBAL_SCRIPT_SUBTREES.includes(name)) return 'global'
+  if (REPO_ONLY_SCRIPT_SUBTREES.includes(name)) return 'repo-only'
+  return 'unclassified'
+}
+
+/**
+ * Recursively collect repo-relative regular-file paths under `absDir`,
+ * skipping non-regular entries (symlinks, devices, …). Returns paths
+ * relative to `absDir` (no leading slash).
+ */
+function walkRegularFiles(absDir) {
+  const out = []
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const abs = path.join(d, e.name)
+      if (e.isFile()) out.push(path.relative(absDir, abs))
+      else if (e.isDirectory()) walk(abs)
+      // symlinks and other dirents are intentionally skipped
+    }
+  }
+  if (fs.existsSync(absDir)) walk(absDir)
+  return out
+}
+
+/**
+ * Compute the repo→install completeness findings for the global scripts
+ * directory. Returns a sorted array of repo-relative 'scripts/...' paths
+ * expected in a clean install but missing or byte-different under
+ * `installedScriptsDir`. Empty array = complete (§12 state A). Never throws
+ * on missing dirs (state B: missing file → finding, not exception).
+ */
+export function repoCompletenessFindings(repoDir, installedScriptsDir) {
+  // expected paths are relative to installedScriptsDir (no 'scripts/' prefix
+  // — installedScriptsDir is itself the scripts/ dir). The return value
+  // prepends 'scripts/' for repo-relative clarity in caller output.
+  const expected = new Set()
+  // Flat global scripts (em-*, second-opinion.mjs, em.mjs).
+  for (const f of globalEntryScripts(repoDir)) expected.add(f)
+  // Global lib closure (shared libs that stay in global alongside em-*).
+  // Filter to files that actually exist on disk: the closure is derived from
+  // regex-matching import statements, which can false-positive on quoted
+  // paths in comments (e.g. 'import \'./x.mjs\'' documentation); the install
+  // iterates the actual lib dir, so non-existent files are not deployable.
+  for (const f of globalScriptLibs(repoDir)) {
+    if (fs.existsSync(path.join(repoDir, 'scripts', 'lib', f))) expected.add(`lib/${f}`)
+  }
+  // Recursive regular-file walk of each global subtree that exists in the repo.
+  for (const s of GLOBAL_SCRIPT_SUBTREES) {
+    const abs = path.join(repoDir, 'scripts', s)
+    for (const rel of walkRegularFiles(abs)) expected.add(`${s}/${rel}`)
+  }
+  const findings = []
+  for (const p of [...expected].sort()) {
+    const installed = path.join(installedScriptsDir, p)
+    let repoBytes
+    try {
+      repoBytes = fs.readFileSync(path.join(repoDir, 'scripts', p))
+    } catch {
+      // Repo file missing on disk despite being enumerated — treat as
+      // finding so a degraded repo cannot vacuously report CLEAN.
+      findings.push(`scripts/${p}`)
+      continue
+    }
+    let installedBytes
+    try {
+      installedBytes = fs.readFileSync(installed)
+    } catch {
+      findings.push(`scripts/${p}`)
+      continue
+    }
+    if (!repoBytes.equals(installedBytes)) findings.push(`scripts/${p}`)
+  }
+  return findings
+}
