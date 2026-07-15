@@ -28,7 +28,7 @@ import {
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
   ACTIVATION_HOOK_SPECS, activationRegistrations, activationHookFileBasenames,
-  activationSupportFiles,
+  activationSupportFiles, classifyScriptSubtree,
 } from './scripts/lib/install-manifest.mjs'
 import { resolveRepoRoot } from './scripts/lib/local-dir.mjs'
 import {
@@ -365,6 +365,19 @@ async function quarantinePreExistingSnapshotForFailedInstall() {
 fs.mkdirSync(SCRIPTS_DIR, { recursive: true })
 fs.mkdirSync(path.join(GLOBAL_DIR, 'episodes'), { recursive: true })
 
+// ISSUE-531 fail-closed classification: every scripts/<name>/ subtree must be
+// classified before ANY copy under SCRIPTS_DIR (flat .mjs, lib/, or subtree). The
+// check sits OUTSIDE the try/catch below so a throw here can never route through
+// the second-opinion quarantine catch (no spurious snapshot quarantine under
+// --install-second-opinion — the quarantine's try only contains copy work).
+const scriptSubdirs = fs.readdirSync(REPO_SCRIPTS, { withFileTypes: true })
+  .filter(e => e.isDirectory()).map(e => e.name)
+for (const name of scriptSubdirs) {
+  if (classifyScriptSubtree(name) === 'unclassified') {
+    throw new Error(`scripts/${name}/ is not classified in install-manifest.mjs (add to GLOBAL_SCRIPT_SUBTREES or REPO_ONLY_SCRIPT_SUBTREES) — install aborted`)
+  }
+}
+
 let scriptFiles
 try {
   // P12 (RFC-008 P4d): global = SUBSTRATE ONLY — the em-* tools + the second-opinion
@@ -399,14 +412,14 @@ try {
     }
   }
 
-  // scripts/second-opinion/ — pluggable second-opinion review harness subtree.
-  // Recursively copy preambles/, providers/, storage/, lib/. Done unconditionally
-  // alongside scripts/*.mjs so the harness module imports resolve at runtime; the
-  // install snapshot at ~/.claude/hooks/second-opinion-providers.json is only
-  // written when --install-second-opinion is passed (separate concern).
-  if (fs.existsSync(REPO_SECOND_OPINION)) {
-    const soDst = path.join(SCRIPTS_DIR, 'second-opinion')
-    copyDirRecursive(REPO_SECOND_OPINION, soDst)
+  // scripts/<name>/ subtrees — classified in install-manifest.mjs (#531); 'global'
+  // copies recursively, 'repo-only' ships nowhere; unclassified already threw
+  // above (before any copy). Replaces the prior hardcoded second-opinion/ block;
+  // second-opinion/ migrates to the same mechanism with zero behavior change.
+  for (const name of scriptSubdirs) {
+    if (classifyScriptSubtree(name) === 'global') {
+      copyDirRecursive(path.join(REPO_SCRIPTS, name), path.join(SCRIPTS_DIR, name))
+    }
   }
 } catch (copyErr) {
   if (installSecondOpinion) {

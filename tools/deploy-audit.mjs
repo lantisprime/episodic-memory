@@ -41,6 +41,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { mkMock, runInstall } from '../tests/lib/activation-scoping-harness.mjs'
+import { repoCompletenessFindings } from '../scripts/lib/install-manifest.mjs'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -123,15 +124,18 @@ for (const d of DIRS) {
   }
 }
 
-const drift = findings.missing.length + findings.differ.length + findings.extra.length
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+findings.undeployed = repoCompletenessFindings(REPO_ROOT, path.join(M.home, '.episodic-memory', 'scripts'))
+const drift = findings.missing.length + findings.differ.length + findings.extra.length + findings.undeployed.length
 if (JSON_OUT) {
   console.log(JSON.stringify({ clean: drift === 0, ...findings }, null, 2))
 } else {
   for (const k of findings.missing) console.log(`  MISSING  ${k}  (an update never deployed)`)
   for (const k of findings.differ) console.log(`  DIFFER   ${k}  (real global is stale)`)
   for (const k of findings.extra) console.log(`  EXTRA    ${k}  (orphan — TRACE consumers before pruning)`)
+  for (const k of findings.undeployed) console.log(`  UNDEPLOYED  ${k}  (repo file a clean install does not produce — installer gap)`)
   for (const k of findings.cosmetic) console.log(`  (info)   ${k}  cosmetic DIFFER (install_timestamp only; content current)`)
-  console.log(`\nMISSING=${findings.missing.length}  DIFFER=${findings.differ.length}  EXTRA=${findings.extra.length}` +
+  console.log(`\nMISSING=${findings.missing.length}  DIFFER=${findings.differ.length}  EXTRA=${findings.extra.length}  UNDEPLOYED=${findings.undeployed.length}` +
     (findings.cosmetic.length ? `  (+${findings.cosmetic.length} cosmetic, ignored)` : ''))
   console.log(drift === 0
     ? 'CLEAN — real global == authoritative clean install.'

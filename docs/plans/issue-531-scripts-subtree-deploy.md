@@ -2,9 +2,9 @@
 
 ## §1 Status
 
-`Planning only.` Do not implement until this plan, the plan review, and the adversarial
-review are accepted (Rule 18). Current stage: **reviewed (planner HOLD folded; GLM r2
-ACCEPT) — awaiting user approval**.
+Current stage: **BUILT (user approved 2026-07-15; MiniMax-M3 builder seat executed §A.7
+1.0-1.8; orchestrator re-verified 9/9 + 6/6 + 6/6; GLM BUILD r1 ACCEPT with 0 blockers —
+see §19.2/§19.3 for the review round and the two ACCEPTed build deltas)**.
 
 | Field | Value |
 |---|---|
@@ -357,6 +357,20 @@ body = the y/n question — harness defect tracked in `#538`). Fallback per
 | 2 | Test-count inconsistency: §14 itemized 8 tests, plan said 7 and `7/7 pass` (GLM #2) | ACCEPT-WITH-MOD | Catalog restructured to 9 tests (the 9th, `testCompletenessSkipsSymlinks`, also resolves W3's vacuous-assertion finding); §14/§A.7 1.6/§A.8 all say 9/9 |
 | W1 | Step 1.5 cosmetic sub-actions lacked anchors | ACCEPT | Split into 1.5 (anchored core), 1.5b (print loop, anchor `deploy-audit.mjs:132`), 1.5c (summary line) |
 | W3 | Symlink-skip assertion vacuous at HEAD (zero symlinks under scripts/) | ACCEPT | Replaced with `testCompletenessSkipsSymlinks` on a synthetic fixture with a real injected symlink |
+
+### 19.2 BUILD review round (2026-07-15)
+
+| Pass | Reviewer | Provider/Model | Blocker count | Verdict | Reply artifact |
+|---|---|---|---|---|---|
+| BUILD r1 | GLM (interactive seat, frozen diff `.review-store/issue-531-build/diff-r1.patch`) | pi/GLM-5.2 neuralwatt | 0 | **ACCEPT** (all 6 MUST REQs by execution: 9/9 + 6/6 + 6/6; B3.3 both polarities; W1/W2 filed-issue, N1/N2 cosmetic) | `.review-store/issue-531-build/glm-r1.md` |
+
+### 19.3 Build deltas vs §A.7 as-written (both review-ACCEPTed)
+
+| # | Delta | Why | Review disposition |
+|---|---|---|---|
+| a | `repoCompletenessFindings` keeps expected paths RELATIVE to `installedScriptsDir` internally and prepends `scripts/` only on return (the §A.7 step 1.1 text's `scripts/`-prefixed expected set would double-join onto the scripts dir and false-RED every file) | First suite run failed 7/9; fix verified by execution (green `[]` / red includes deleted file) | GLM BUILD r1 C1: RESOLVED, contract honored |
+| b | `fs.existsSync` filter on the lib-closure leg of the expected set: `globalScriptLibs` carries a phantom `x.mjs` because `computeLibClosure`'s import regex (install-manifest.mjs:248) matches the doc-comment literal `import './x.mjs'` at install-manifest.mjs:246 (reached via `install-version.mjs` → `install-manifest.mjs`) | Without the filter the green control perpetually false-REDs on `scripts/lib/x.mjs` | GLM BUILD r1 C2: filter REQUIRED; residual (imported-but-deleted lib silently dropped; repo-side catch now dead/TOCTOU-only) = W1, filed as an issue, NOT a HOLD |
+| N1 | Deployed throw suffix is `— install aborted`; §A.7 step 1.3 verbatim text said `— #531 fail-closed` (the §A.8 invariant grep matches the classify-block COMMENT, which does say `#531 fail-closed`; REQ-3 message content fully met) | Builder drift, caught by review | Cosmetic; reconciled by this note — deployed message is canonical |
 
 ## §20 Lessons Encoded
 
