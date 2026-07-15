@@ -168,6 +168,9 @@ jobs:
       - name: Run second-opinion gate per-project install E2E (RFC-008 P4d — gate + libs + runbooks per-project; snapshot global)
         run: node tests/test-install-second-opinion-e2e.mjs
 
+      - name: Run scripts-subtree deploy + completeness suite (#531 — fail-closed classification, UNDEPLOYED audit)
+        run: node tests/test-install-scripts-subtrees.mjs
+
       - name: Run preflight-gate regression tests
         run: bash tests/test-preflight-gate.sh
 
