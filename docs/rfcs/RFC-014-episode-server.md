@@ -14,7 +14,7 @@ superseded_by: ~
 
 ## AI context
 
-> This RFC adds `em-serve` — an optional, user-started episode server: a Node-stdlib HTTP process fronting an ordinary episode store, giving RFC-013 sync an always-reachable rendezvous, harnesses a live cross-host episode feed (SSE), and storeless ephemeral hosts a thin-client store/recall path. It solves what passive replication cannot: hosts with no mutually reachable shared folder (CI runners, web containers), and the latency gap where a decision on host A is invisible on host B until B happens to pull. The key design decision is that the server is an **adjacent-layer adapter, not a second data layer**: its store is a normal on-disk episode store operated through the same CLI contract (the `em-console` architecture generalized), it is a *peer*, never a master — every harness with a local store stays offline-first, and losing the server degrades to plain RFC-013 sync latency, never to blindness.
+> This RFC adds `em-serve` — an optional, user-started episode server: a Node-stdlib HTTP process fronting an ordinary episode store, giving RFC-013 sync an always-reachable rendezvous, harnesses a live cross-host episode feed (SSE), and storeless ephemeral hosts a thin-client store/recall path. It solves what passive replication cannot: hosts with no mutually reachable shared folder (CI runners, web containers), and the latency gap where a decision on host A is invisible on host B until B happens to pull. The key design decision is that the server is an **adjacent-layer adapter, not a second data layer**: its store is a normal on-disk episode store operated through the same CLI contract (the `em-console` architecture generalized), it is a *peer*, never a master — every harness with a local store stays offline-first, and losing the server degrades to plain RFC-013 sync latency, never to blindness. Like all of distributed memory, em-serve ships inside the opt-in `episode-sync` plugin (RFC-013 §8) as a separately-consented component — users who don't want it never carry it.
 
 ---
 
@@ -43,7 +43,7 @@ What remains genuinely forbidden, and stays forbidden here: making the server *r
 
 ## Proposal
 
-`scripts/em-serve.mjs` — one stdlib-only process (`node:http`/`https`, `crypto`, `fs`), refactored to share its request core with `em-console` (closed command registry, shape validation, token auth, single-JSON-startup-line). Four modes, independently enableable in `serve-config.json`; everything is off by default.
+`em-serve.mjs` — one stdlib-only process (`node:http`/`https`, `crypto`, `fs`), refactored to share its request core with `em-console` (closed command registry, shape validation, token auth, single-JSON-startup-line). **Packaging:** em-serve ships inside the `episode-sync` plugin (RFC-013 §8, plugin type `sync-strategy`) as a separately-consented component — a default install has no server code, and even a sync-enabled install has no server until the user enables this component. The shared request core is extracted from `em-console` into a core lib (`scripts/lib/`), which the plugin imports (Principle 9); `em-console` itself stays core. Four modes, independently enableable in `serve-config.json`; everything is off by default.
 
 ### 1. M1 — Rendezvous sync (the server side of RFC-013)
 

@@ -14,7 +14,7 @@ superseded_by: ~
 
 ## AI context
 
-> This RFC adds `em-sync` — opt-in, transport-pluggable replication of episode stores across hosts, so every coding-harness instance working on the same repo (and every machine sharing one user's global store) sees the same episodes. It solves the problem that both store scopes are strictly host-local today: a fresh clone or a second machine starts blind, workplan discovery fails, and lessons learned on one host never reach another. The key design decision is twofold: only durable episode content replicates (derived indexes and usage counters stay host-local and are rebuilt after merge, reducing sync to file union plus a small deterministic reconcile), and the reference transport is a **plain-filesystem exchange directory driven by Node stdlib only** — no server, no daemon, no second data layer, and no external binary; git is an optional transport *plugin*, honestly labeled as the dependency it is (Principles 1, 5, 6).
+> This RFC adds `em-sync` — opt-in, transport-pluggable replication of episode stores across hosts, so every coding-harness instance working on the same repo (and every machine sharing one user's global store) sees the same episodes. It solves the problem that both store scopes are strictly host-local today: a fresh clone or a second machine starts blind, workplan discovery fails, and lessons learned on one host never reach another. The key design decision is twofold: only durable episode content replicates (derived indexes and usage counters stay host-local and are rebuilt after merge, reducing sync to file union plus a small deterministic reconcile), and the reference transport is a **plain-filesystem exchange directory driven by Node stdlib only** — no server, no daemon, no second data layer, and no external binary; git is an optional transport adapter, honestly labeled as the dependency it is (Principles 1, 5, 6). The whole capability ships as an **opt-in plugin** (`plugins/episode-sync/`, new `sync-strategy` plugin type): users who don't want distributed memory never see a single sync surface, and only probe-justified single-host bug fixes (fork disclosure, stale-base guard) land in core.
 
 ---
 
@@ -37,7 +37,9 @@ There is no supported mechanism — documented or scripted — to move a store b
 
 ## Proposal
 
-Add a **replication capability** for episode stores: a zero-dependency `scripts/em-sync.mjs` CLI operating per store (project or global), a per-store `sync-config.json` written only by explicit `em-sync init` consent, and a pluggable transport layer. The **reference transport is `fs-exchange`**: a shared exchange directory on any medium the user already has (a Syncthing/Dropbox/OneDrive-synced folder, an NFS/SMB mount, a cloud-drive mount, a USB stick), driven entirely by Node `fs`/`crypto` stdlib. Git is **not required**; it is available as an opt-in transport plugin for users whose only shared endpoint is their repo's remote — declared honestly as an external-binary dependency (Principle 5), never as "zero-dep". No daemon, no server, no new data layer: sync is an operation *over episode files*, and everything else in the store is rebuilt locally after a merge.
+Add a **replication capability** for episode stores — packaged as an **opt-in plugin, not core**. Not every user wants distributed episodic memory, and they should never see it: a default install carries zero sync code, zero sync config surface, zero new commands. The capability ships as plugin `plugins/episode-sync/` under a new plugin type (§8); installing the plugin *is* the consent act (Principle 3), and uninstalling it removes every artifact (Principle 10). What lands in core is only the substrate hardening this work surfaced — fork disclosure, multi-`supersedes` resolution, the stale-base guard, ID-suffix widening — each justified by single-host defects the probes demonstrated *without* any sync involved (§"Runtime evidence" 4–6: a lone host can mint a forked chain today).
+
+The plugin provides: a zero-dependency `em-sync.mjs` CLI operating per store (project or global), a per-store `sync-config.json` written only by explicit `em-sync init` consent, and a pluggable transport layer. The **reference transport is `fs-exchange`**: a shared exchange directory on any medium the user already has (a Syncthing/Dropbox/OneDrive-synced folder, an NFS/SMB mount, a cloud-drive mount, a USB stick), driven entirely by Node `fs`/`crypto` stdlib. Git is **not required**; it is available as an opt-in transport plugin for users whose only shared endpoint is their repo's remote — declared honestly as an external-binary dependency (Principle 5), never as "zero-dep". No daemon, no server, no new data layer: sync is an operation *over episode files*, and everything else in the store is rebuilt locally after a merge.
 
 ### 1. The replication model: synced set vs host-local set
 
@@ -89,13 +91,15 @@ The scenario: agent A revises decision E on one host while agent B revises the *
 Zero external dependencies — Node stdlib only, including the reference transport. JSON to stdout, degrades gracefully (missing config → `{"status":"not-configured"}`, exit 0 on status/read paths).
 
 ```
-node scripts/em-sync.mjs init   [--scope local|global] [--transport fs-exchange|git] [--exchange-root <dir>] [git plugin: --mode sidecar|in-repo|repo <url>]
-node scripts/em-sync.mjs status [--scope local|global|all]      # ahead/behind/conflicts, never writes
-node scripts/em-sync.mjs pull   [--scope ...]                   # ingest foreign replicas → union+reconcile → rebuild index
-node scripts/em-sync.mjs push   [--scope ...]                   # refresh this replica's published subtree
-node scripts/em-sync.mjs sync   [--scope ...]                   # pull then push
-node scripts/em-sync.mjs disable [--scope ...]
+node plugins/episode-sync/em-sync.mjs init   [--scope local|global] [--transport fs-exchange|git] [--exchange-root <dir>] [git transport: --mode sidecar|in-repo|repo <url>]
+node plugins/episode-sync/em-sync.mjs status [--scope local|global|all]   # ahead/behind/conflicts, never writes
+node plugins/episode-sync/em-sync.mjs pull   [--scope ...]                # ingest foreign replicas → union+reconcile → rebuild index
+node plugins/episode-sync/em-sync.mjs push   [--scope ...]                # refresh this replica's published subtree
+node plugins/episode-sync/em-sync.mjs sync   [--scope ...]                # pull then push
+node plugins/episode-sync/em-sync.mjs disable [--scope ...]
 ```
+
+(The `em sync <cmd>` umbrella alias registers only while the plugin is installed; on a plugin-free install the subcommand does not exist.) The plugin imports core libs (`lib/lock.mjs`, `lib/local-dir.mjs`, spawns `em-rebuild-index`); nothing in `scripts/` references the plugin (Principle 9). Tombstones honor the same direction: core `em-prune`/`em-move` emit **nothing** — the plugin *derives* tombstones at push time by diffing the store against its own last-published manifest (an ID that was under `episodes/` and is now under `archived/` ⇒ archive tombstone), so core scripts stay sync-unaware.
 
 Per-store config at `<store>/sync-config.json` (project) and `~/.episodic-memory/sync-config.json` (global):
 
@@ -139,7 +143,7 @@ Three rules give dumb storage strong semantics:
 
 #### 4.2 Transport plugins (opt-in, honestly labeled)
 
-The transport seam registers as a `sync-transport` plugin type (experimental tier per CAPABILITIES.md). `fs-exchange` is the built-in default; plugins trade the "any shared folder" requirement for other reach, and each declares its true dependencies:
+Transports are adapters *inside* the episode-sync plugin, declared in its manifest — not separate registry entries. `fs-exchange` is the plugin's built-in default; the others trade the "any shared folder" requirement for other reach, and each declares its true dependencies:
 
 | Transport | Scope | Mechanism | Dependencies | Tier |
 |---|---|---|---|---|
@@ -180,11 +184,22 @@ One deployment reality stated plainly (Principle 5): the fs-exchange medium must
 
 ### 8. Where this sits in the architecture
 
-By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a capability family"* — sync is a substrate capability, not distribution (distribution "moves artifacts, it never touches episodes"). It joins the **curation strategy** family: it maintains the corpus across replicas, derives no new knowledge, changes no ranking, enforces nothing, and honors the family invariant of reversibility (quarantine over overwrite, disable over delete). The transport seam registers as a new **experimental-tier plugin type `sync-transport`** (RFC-008 R8 additive MINOR bump): `fs-exchange` is the stdlib-only built-in; `git` and `https-exchange` are plugin members with declared external dependencies, and the promote-or-remove decision date is set at acceptance.
+By the CAPABILITIES.md test — *"if it operates ON episodes it belongs to a capability family"* — sync is a substrate capability (curation-family behavior: maintains the corpus across replicas, derives no new knowledge, changes no ranking, enforces nothing, reversibility as invariant). But **capability family ≠ core packaging**: not all users want distributed episodic memory, so the capability ships as a **plugin**, exactly the pattern the registry already reserves for substrate capabilities (`recall-strategy`/`store-strategy`/`learning` in the closed type enum, each "added as an additive-MINOR superset bump that ships its own registry sub-schema, descriptor schema, runtime-IO schema, and conformance gauntlet").
+
+Concretely: a new plugin type **`sync-strategy`** enters `plugins/_index.schema.json`'s type enum (additive-MINOR `schema_version` bump per RFC-008 R8, with descriptor + conformance gauntlet like every type before it); its first member is **`plugins/episode-sync/`** at the **experimental tier** (CAPABILITIES.md: declared side effects, honest EXPERIMENTAL label, promote-or-remove decision date set at acceptance). The plugin contains `em-sync.mjs`, all transports (fs-exchange built-in; git and https-exchange as internal adapters with declared external dependencies), the exchange-format library, and `em-serve` (RFC-014) as a separately-consented component. The division of labor is strict:
+
+| Lands in **core** (justified without sync) | Lands in the **plugin** (the distributed capability) |
+|---|---|
+| fork disclosure in `em-search --history` / search (`forked`, `fork_of`) — a lone host can fork today (probe 5) | `em-sync.mjs`, `sync-config.json`, all transports |
+| multi-`--original` resolution revisions in `em-revise` + scalar-or-list `supersedes` readers | exchange format, manifests, tombstone derivation |
+| stale-base guard in `em-revise` | seeding (`seed --to-repo`), session-start pull adapter, push-after-store |
+| `chain-fork` check in `em-doctor` | `em-serve` (RFC-014), replica provenance (`origin` field is written only in sync-enabled stores) |
+| ID-suffix widening in `em-store` (strictly reduces collision odds; benefits single-host too) | sync checks in `em-doctor` land as plugin-registered checks, not core edits |
 
 ### Scope
 
-- **In scope:** `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstones; global episode-ID identity invariant; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); fork handling (D-1–D-5: merge-time detection, disclosing read surfaces, multi-`--original` resolution revisions, stale-base guard in `em-revise`, `chain-fork` check in `em-doctor`); the `fs-exchange` reference transport; the git transport plugin (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; `em-doctor` sync checks; ID-suffix widening + `origin` provenance; docs/tier matrix.
+- **In scope — core substrate hardening** (ships regardless of the plugin; each item justified by single-host behavior): fork disclosure in read surfaces, multi-`--original` resolution revisions + scalar-or-list `supersedes` parsing, stale-base guard in `em-revise`, `chain-fork` check in `em-doctor`, ID-suffix widening.
+- **In scope — the `episode-sync` plugin** (opt-in; new `sync-strategy` plugin type): `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstone derivation; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); the `fs-exchange` reference transport; git transport adapter (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; plugin-side sync health checks; `origin` provenance; registry type bump + descriptor + conformance gauntlet; docs/tier matrix. The global episode-ID identity invariant governs both halves.
 - **Out of scope:** real-time sync or daemons; syncing usage counters (`access_count`/`feedback` — OQ-3); syncing derived indexes, locks, registry, dist cache, or enforcement config; multi-user permission models beyond what the shared medium's ACL provides; conflict *resolution* UI (quarantine + doctor flag only); the https-exchange plugin implementation (format is specified; plugin ships separately).
 
 ---
@@ -224,6 +239,7 @@ Every scenario the design must survive, not just the ones it enjoys. "Probe n" r
 | Peer-to-peer transport built into em-sync (sockets, mDNS discovery) | A listening process is a daemon by another name (Principle 6) and stdlib networking would still need discovery, auth, and NAT answers; a user-chosen shared medium already solves all three. |
 | Block-based (rolling-checksum) delta transfer inside files | Pays off on large internally-mutating files; the corpus is thousands of small write-once markdown files whose only in-place edits are one-line frontmatter flips. File-granular manifest diff already ships only what changed; block math would cost more than it saves (§4.3). |
 | Treating sync as future-episodes-only (a stream with a start date) | The accumulated corpus is the value — past decisions, workplans, lessons are exactly what joining agents are blind to. Backfill-by-construction (§1) and day-zero repo seeding (§4.4) make the existing store the payload, not an afterthought needing a separate migration tool. |
+| Shipping `em-sync` in core `scripts/` | Not all users want distributed episodic memory, and the local-only default must stay exactly as small as it is today: zero sync commands, zero config surface, zero code paths. Plugin packaging makes install the consent act (P3), uninstall complete (P10), and keeps core one-way-clean (P9). Only the single-host bug fixes the probes exposed belong in core (§8). |
 
 ---
 
@@ -235,12 +251,14 @@ Every scenario the design must survive, not just the ones it enjoys. "Probe n" r
 
 ```mermaid
 graph TD
-    PR1[PR-1: em-sync core — init/status/pull/push, fs-exchange transport, union+reconcile, tombstones, rebuild-after-merge]
+    PR0[PR-0: core substrate hardening — fork disclosure, multi-supersedes resolution, stale-base guard, chain-fork doctor check, ID suffix widening]
+    PR1[PR-1: plugin scaffold — sync-strategy registry type bump + descriptor + conformance gauntlet; em-sync init/status/pull/push, fs-exchange transport, union+reconcile, tombstone derivation, rebuild-after-merge]
     PR2[PR-2: global-store sync — sync-config at ~/.episodic-memory, exchange-root reuse across scopes]
-    PR3[PR-3: git transport plugin — sidecar ref, in-repo, dedicated-repo modes; sync-transport plugin type registration]
+    PR3[PR-3: git transport adapter — sidecar ref, in-repo, dedicated-repo modes; seed --to-repo]
     PR4[PR-4: opt-in lifecycle — SessionStart pull adapter, debounced push-after-store]
-    PR5[PR-5: hardening — em-doctor sync checks, ID suffix widening, origin provenance, tier matrix docs]
+    PR5[PR-5: polish — plugin-side sync health checks, origin provenance, tier matrix docs]
 
+    PR0 --> PR1
     PR1 --> PR2
     PR1 --> PR3
     PR1 --> PR4
@@ -275,7 +293,7 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 ## Related RFCs
 
 - **RFC-005 (em-move)** — establishes ID-preserving relocation and the found-in-both-places hard-error stance that §2's quarantine rule mirrors; scope moves are a mutation class sync must survive (tombstoned, OQ-5).
-- **RFC-008 (decoupled enforcement)** — sync is substrate-side and hook-free at core; the optional SessionStart pull follows RFC-008's per-project adapter discipline and the `sync-transport` plugin type rides its plugin registry (R8).
+- **RFC-008 (decoupled enforcement)** — sync is substrate-side and hook-free at core; the optional SessionStart pull follows RFC-008's per-project adapter discipline, and the `sync-strategy` plugin type enters the typed, versioned registry exactly via its R8 additive-MINOR mechanism.
 - **RFC-009 / RFC-012 (lesson activation, promotion arc)** — direct beneficiaries: cross-host recurrence becomes visible to promotion, and lessons activate on every replica, not just the authoring host.
 
 ---
@@ -303,6 +321,7 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 | OQ-5 | Does `em-move` (local↔global) need more than a tombstone — e.g. a cross-scope pointer so a chain split across scopes stays discoverable from either exchange? | — | open |
 | OQ-6 | Multi-`supersedes` frontmatter shape for fork resolutions (D-3): YAML list vs repeated scalar key — and the compatibility rule for pre-RFC-013 readers that assume a scalar. | — | open |
 | OQ-7 | Should the stale-base guard (D-5) consult only the local index, or also the last-seen exchange manifests, so a host that synced recently gets a stronger check without a network round-trip? | — | open |
+| OQ-8 | Plugin-registered `em-doctor` checks need a check-registration seam in core doctor (P9-clean: doctor discovers plugin checks via the registry, never imports the plugin). Does that seam ship in PR-0 or does the plugin carry its own `em-sync doctor` subcommand until doctor grows the seam? | — | open |
 
 ---
 
