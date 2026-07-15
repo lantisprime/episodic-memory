@@ -96,6 +96,7 @@ node plugins/episode-sync/em-sync.mjs status [--scope local|global|all]   # ahea
 node plugins/episode-sync/em-sync.mjs pull   [--scope ...]                # ingest foreign replicas → union+reconcile → rebuild index
 node plugins/episode-sync/em-sync.mjs push   [--scope ...]                # refresh this replica's published subtree
 node plugins/episode-sync/em-sync.mjs sync   [--scope ...]                # pull then push
+node plugins/episode-sync/em-sync.mjs live   [--scope ...]                # session-scoped realtime client (mode: realtime, §5)
 node plugins/episode-sync/em-sync.mjs disable [--scope ...]
 ```
 
@@ -107,8 +108,7 @@ Per-store config at `<store>/sync-config.json` (project) and `~/.episodic-memory
 {
   "transport": "fs-exchange",
   "exchange_root": "/path/to/shared/em-exchange",
-  "auto_pull_on_session_start": false,
-  "auto_push_after_store": false,
+  "mode": "manual",
   "replica_id": "<hostname>-<8hex>"
 }
 ```
@@ -164,12 +164,21 @@ Two honest boundaries (Principle 5): seeding is **team-visible by design** — t
 
 One deployment reality stated plainly (Principle 5): the fs-exchange medium must be reachable by every participating host. A laptop fleet shares a Syncthing folder trivially; an **ephemeral CI or remote-web container usually cannot mount one** — its only pre-provisioned shared endpoint is the repo's git remote. For those hosts the git plugin (or an https-exchange endpoint) is the practical medium; that is a deployment constraint of such hosts, not a git requirement in the design.
 
-### 5. Activation lifecycle — no daemons (Principle 6)
+### 5. Sync modes — latency is a per-store choice, not a fixed posture (Principle 6)
 
-- **Default:** manual. `em-sync pull` at session start and `em-sync push` when done are the documented workflow; the skill/instructions files gain one line each.
-- **Opt-in session-start pull:** mirrors the existing `auto_update` pattern (`em-sync-install.mjs` + SessionStart hook): one bounded pull attempt per session start, single-line `notice` in session output, degrade-to-token on any failure, never blocks a session. Per-project registration only (Principle 12) for project scope.
-- **Opt-in push-after-store:** a debounced push (fire at session end or N minutes after the last `em-store`, whichever first) — declared trigger, declared cost, off by default.
-- Explicitly rejected: any polling daemon, watcher service, or background timer not user-started and bounded. (An `fs.watch` on the exchange root would be cheap but is still a standing watcher; it stays out of core and out of v1.)
+One store, three named modes in `sync-config.json` (`"mode"`); hosts choose independently and interoperate freely, because every mode reduces to the same exchange operations — a `realtime` host and a `manual` host converge exactly like any two replicas.
+
+| Mode | Inbound | Outbound | Convergence latency | Requires | Idle cost |
+|---|---|---|---|---|---|
+| **`manual`** (default) | `em-sync pull` when invoked | `em-sync push` when invoked | next explicit invocation | any transport | zero — nothing runs, ever |
+| **`session`** | one bounded pull at session start (the `auto_update` hook pattern: single attempt, one-line `notice`, degrade-to-token, never blocks; per-project registration only, P12) | debounced push — session end or N minutes after the last store, whichever first | one session boundary | any transport | zero between sessions; two bounded actions per session |
+| **`realtime`** | standing SSE subscription to `em-serve` (RFC-014 M2), events ingested as they arrive | immediate push-on-store | seconds, end to end | the server component + `em-sync live` running | one parked socket + one `fs.watch`, session-scoped; zero tokens while quiet |
+
+**`em-sync live` — the realtime client, session-scoped by construction.** One process in the `em-console` mold: started at session start (explicitly, or by the consented SessionStart adapter when `mode: "realtime"`, OQ-9), prints its single startup JSON line, and exits with the session (idle-timeout as backstop). It does two things: holds the M2 SSE subscription and ingests events per the delivery contract (idempotent by ID, dangling-tolerant, body fetched on demand); and watches the local `episodes/` directory with `fs.watch` — the mechanism P6 *names as the preferred listener* — pushing each new episode file as it lands, no debounce, no polling. Core stays untouched: `em-store` doesn't know it's being watched (P9); the watcher observes the filesystem, exactly like tombstone derivation observes manifests.
+
+**Degradation ladder, stated:** `realtime` with the server unreachable behaves as `session` (the client retries the subscription with backoff, syncs on session boundaries regardless, and says so in `em-sync status`); `session` with the medium unreachable behaves as `manual` (the hook degrades to its status token). No mode ever blocks a write or a session — writes are always local-first in every mode.
+
+Explicitly rejected still: any process that outlives sessions without being a user-installed service (that is `em-serve`'s consented territory, RFC-014 §6), any polling loop against the medium in any mode, and any watcher on the *exchange root* (inbound realtime goes through the server's push channel precisely so no client ever polls a shared folder).
 
 ### 6. Consent, privacy, reversibility (Principles 3, 10)
 
@@ -199,7 +208,7 @@ Concretely: a new plugin type **`sync-strategy`** enters `plugins/_index.schema.
 ### Scope
 
 - **In scope — core substrate hardening** (ships regardless of the plugin; each item justified by single-host behavior): fork disclosure in read surfaces, multi-`--original` resolution revisions + scalar-or-list `supersedes` parsing, stale-base guard in `em-revise`, `chain-fork` check in `em-doctor`, ID-suffix widening.
-- **In scope — the `episode-sync` plugin** (opt-in; new `sync-strategy` plugin type): `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstone derivation; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); the `fs-exchange` reference transport; git transport adapter (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; opt-in session-start pull / push-after-store; plugin-side sync health checks; `origin` provenance; registry type bump + descriptor + conformance gauntlet; docs/tier matrix. The global episode-ID identity invariant governs both halves.
+- **In scope — the `episode-sync` plugin** (opt-in; new `sync-strategy` plugin type): `em-sync.mjs` (init/status/pull/push/sync/disable/seed); union+reconcile merge; tombstone derivation; backfill-by-construction; day-zero repo seeding (`seed --to-repo`); the `fs-exchange` reference transport; git transport adapter (sidecar-ref, in-repo, dedicated-repo modes); global-store sync; the three-mode system (`manual`/`session`/`realtime`) incl. `em-sync live`; plugin-side sync health checks; `origin` provenance; registry type bump + descriptor + conformance gauntlet; docs/tier matrix. The global episode-ID identity invariant governs both halves.
 - **Out of scope:** real-time sync or daemons; syncing usage counters (`access_count`/`feedback` — OQ-3); syncing derived indexes, locks, registry, dist cache, or enforcement config; multi-user permission models beyond what the shared medium's ACL provides; conflict *resolution* UI (quarantine + doctor flag only); the https-exchange plugin implementation (format is specified; plugin ships separately).
 
 ---
@@ -322,6 +331,7 @@ Per the repo convention (behavior simulation before design claims), the load-bea
 | OQ-6 | Multi-`supersedes` frontmatter shape for fork resolutions (D-3): YAML list vs repeated scalar key — and the compatibility rule for pre-RFC-013 readers that assume a scalar. | — | open |
 | OQ-7 | Should the stale-base guard (D-5) consult only the local index, or also the last-seen exchange manifests, so a host that synced recently gets a stronger check without a network round-trip? | — | open |
 | OQ-8 | Plugin-registered `em-doctor` checks need a check-registration seam in core doctor (P9-clean: doctor discovers plugin checks via the registry, never imports the plugin). Does that seam ship in PR-0 or does the plugin carry its own `em-sync doctor` subcommand until doctor grows the seam? | — | open |
+| OQ-9 | May the SessionStart adapter auto-start `em-sync live` when `mode: "realtime"` (consented once at mode selection), or must each session start it explicitly? Auto-start is one process per session, session-scoped — but it is still a process the user didn't type. | — | open |
 
 ---
 
