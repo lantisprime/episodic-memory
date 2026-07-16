@@ -46,6 +46,10 @@ node ~/.episodic-memory/scripts/em-search.mjs --project <name> [--query <text>] 
 node ~/.episodic-memory/scripts/em-search.mjs --history <episode-id> --full
 ```
 
+## Recall routing and stopping
+
+Route before searching — profile-class (standing rules, playbooks) is auto-loaded at session start or via `em-search.mjs --tag playbook --scope global --limit 1 --full`; event-class (past decisions, causes) via `em-search.mjs --query "<topic>"`; evolution-class (what is current) via `em-search.mjs --history <episode-id>`. Transcript-level and topic-track routes are not shipped; do not invent them. Routing never re-ranks results (RFC-001 score-merge contract). Stop when you can cite an episode id, or after two empty queries (broaden scope once first); at most 3 recall calls per question (operational guidance); the existing RFC-009 R3 max_matches/max_tokens caps and RFC-012 B-4 lifecycle gate are unchanged, so no separate recall budget is introduced.
+
 List recent:
 ```bash
 node ~/.episodic-memory/scripts/em-list.mjs --project <name> --limit 5
