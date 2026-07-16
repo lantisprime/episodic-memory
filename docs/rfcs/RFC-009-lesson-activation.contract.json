@@ -67,8 +67,11 @@
     "fields": ["schema_version", "verdict", "unhealthy", "pattern_ids", "computed_at"],
     "verdict_enum": ["healthy", "needs-attention", "needs-enforcement"]
   },
+  "cadence_shape": {
+    "fields": ["enabled", "phrase_sharing", "active_lessons", "k_shared", "n_lessons", "line"]
+  },
   "trigger_index_shape": {
-    "schema_version": 3,
+    "schema_version": 4,
     "entry_fields": [
       "trigger_kind",
       "value",

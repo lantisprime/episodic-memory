@@ -306,6 +306,9 @@ jobs:
       - name: Run trigger-index session_start suite (RFC-009 P1b S6)
         run: node tests/test-trigger-session-start.mjs
 
+      - name: Run trigger-index cadence suite (RFC-012 P1)
+        run: node tests/test-trigger-index-cadence.mjs
+
       # RFC-011 (Playbook Activation Preferences) suites — listed explicitly per
       # convention 8 (CI runs explicitly listed test files; unlisted suites
       # silently never run). S1: --read; S2: build derivation; S3: adapter.

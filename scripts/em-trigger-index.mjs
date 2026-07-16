@@ -44,6 +44,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadActivationClasses, parseTriggerKind } from './lib/activation.mjs'
+import { computeCadence } from './lib/activation-log.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
@@ -53,14 +54,12 @@ const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 // import.meta.url resolves to this script whether run as CLI or imported).
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url))
 
-// v3 (RFC-011 R2.6): additive bump — session_start.playbooks (+ playbooks_capped +
-// playbooks_capped_first), entry_class/read_command entry fields, the conditional
-// effective_priority minimum (0 for entry_class:"playbook" rows, 1 for lessons),
-// build_report.playbooks, and the extended source fingerprint (playbooks_*
-// unconditional zero-state-when-absent; global_index_* when a valid preference
-// file exists). The bump invalidates every cached v2 index so it rebuilds once
-// (T12) — intended. (v2 RFC-009 P2 added the top-level activity_phrases map.)
-export const TRIGGER_INDEX_SCHEMA_VERSION = 3
+// v4 (RFC-012 R3a, P1): additive bump — session_start.cadence (typed per-store K/N
+// gauge field; line present iff a gauge fired). Invalidates every cached v3 index
+// so it rebuilds once (T12). (v3 RFC-011 R2.6 added the session_start playbooks trio,
+// entry_class/read_command fields, the conditional effective_priority minimum, and
+// the extended source fingerprint; v2 RFC-009 P2 added activity_phrases.)
+export const TRIGGER_INDEX_SCHEMA_VERSION = 4
 // v3 (RFC-011 R2.6): entry_fields gains entry_class + read_command (the playbook-row
 // shape) and triggers_overridden (the R1 override-clause marker, F3 S2 fix). All
 // three are conditional on entry_class:'playbook' in the schema (a lesson row
@@ -756,6 +755,13 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date(), 
       session_start.pattern_health = priorPatternHealth
     }
   }
+  // RFC-012 R3a (P1): per-store cadence gauges from THIS store's rows+entries
+  // only. Typed field always stamped on success; degrade-not-throw (I5).
+  try {
+    session_start.cadence = computeCadence(entries, rows, now)
+  } catch (e) {
+    process.stderr.write(`em-trigger-index: cadence gauge failed (${e.message}); omitted\n`)
+  }
 
   const index = {
     schema_version: TRIGGER_INDEX_SCHEMA_VERSION,
@@ -970,6 +976,11 @@ export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
   }
   if (lp && Object.prototype.hasOwnProperty.call(lp, 'pattern_health')) {
     session_start.pattern_health = lp.pattern_health
+  }
+  // RFC-012 R3a: merged view threads the LOCAL store's cadence (pattern_health
+  // precedent); the global store's own stamp stays in its per-store artifact.
+  if (lp && Object.prototype.hasOwnProperty.call(lp, 'cadence')) {
+    session_start.cadence = lp.cadence
   }
   return { entries, session_start, local, global }
 }

@@ -16,8 +16,8 @@
     { "id": "rfc-009-codex-activation-session-start", "file": "activation-sessionstart.sh", "event": "SessionStart", "timeout": 10, "checksum": "sha256:f90557b032279799a3be34639b0c8946bb25015073b63c58e87296c582b01697" }
   ],
   "support_files": [
-    { "file": "activation-hook-run.mjs", "checksum": "sha256:4bc2605eda864e38fe6894b53690aafa20f64e18114788f661886a37aa53e844" },
-    { "file": "activation-match.mjs", "checksum": "sha256:e6cc87b0787b425c5a8d86a9e8847cc1a7d11b438e432d83e01624ed6f2d37af" },
+    { "file": "activation-hook-run.mjs", "checksum": "sha256:93ac3d22b460374438db6cfa614e7326a642ddd8ae2d84c7a1544cee359f90f8" },
+    { "file": "activation-match.mjs", "checksum": "sha256:2ed7c7df50003ba7bf3e3b8f7a170035e99d6ddaecd132221ab1c9a9494cb775" },
     { "file": "json-instance-validate.mjs", "checksum": "sha256:5ccf2b3121e0ec0631e39e583ecc30d98fe625f15c9810cdd9ae1e8675927528" }
   ],
   "io_schema": "schemas/runtime/activation-io.schema.json",

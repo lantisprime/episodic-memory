@@ -84,7 +84,7 @@ t('testTriggerIndexBuilds', () => {
   const r = build(cwd, home);
   assert.equal(r.json.built[0].entries, 1);
   const ti = readTi(cwd);
-  assert.equal(ti.schema_version, 3); // RFC-011 R2.6 bumped 2->3 (playbooks); was 2 at RFC-009 P2 (activity_phrases bake)
+  assert.equal(ti.schema_version, 4); // RFC-012 R3a bumped 3->4 (cadence); was 3 at RFC-011 R2.6 (playbooks)
   assert.ok(ti.source.index_sha256.match(/^[0-9a-f]{64}$/), 'sha256 fingerprint present');
   assert.equal(ti.entries[0].episode_id, id);
   assert.equal(ti.entries[0].value, 'second opinion');

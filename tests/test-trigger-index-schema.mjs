@@ -65,9 +65,9 @@ function seededIndex() {
 
 // --- The real seeded v2 index validates, with entries exercised ---
 
-t('schema validates a REAL seeded v3 trigger-index with non-empty entries', () => {
+t('schema validates a REAL seeded v4 trigger-index with non-empty entries', () => {
   const idx = seededIndex();
-  assert.equal(idx.schema_version, 3, 'live producer emits v3 (RFC-011 R2.6)');
+  assert.equal(idx.schema_version, 4, 'live producer emits v4 (RFC-012 R3a)');
   assert.ok(idx.entries.length > 0, `entries[] must be non-empty to exercise the entry subschema, got ${idx.entries.length}`);
   const res = validateInstance(idx, SCHEMA);
   assert.ok(res.valid, `real seeded index rejected: ${JSON.stringify(res.errors).slice(0, 400)}`);
@@ -92,12 +92,12 @@ t('schema validates a REAL seeded v3 trigger-index with non-empty entries', () =
 
 // --- Negative controls (each must be REJECTED) ---
 
-t('schema_version 1 AND 2 are REJECTED (const 3; a cached v2 is stale, T12)', () => {
+t('schema_version 1, 2, AND 3 are REJECTED (const 4; cached older is stale, T12)', () => {
   const idx = seededIndex();
-  for (const bad of [1, 2]) {
+  for (const bad of [1, 2, 3]) {
     const probe = { ...idx, schema_version: bad };
     const res = validateInstance(probe, SCHEMA);
-    assert.ok(!res.valid, `a v${bad} index must not validate against the v3 schema`);
+    assert.ok(!res.valid, `a v${bad} index must not validate against the v4 schema`);
     assert.ok(res.errors.some((e) => e.path.includes('schema_version')), `wrong error for v${bad}: ${JSON.stringify(res.errors)}`);
   }
 });
@@ -130,9 +130,9 @@ function seededIndexWithPlaybooks() {
   return JSON.parse(fs.readFileSync(path.join(cwd, '.episodic-memory', 'trigger-index.json'), 'utf8'));
 }
 
-t('a v3 index WITH playbooks validates (session_start trio + build_report.playbooks + entry_class rows)', () => {
+t('a v4 index WITH playbooks validates (session_start trio + build_report.playbooks + entry_class rows + cadence)', () => {
   const idx = seededIndexWithPlaybooks();
-  assert.equal(idx.schema_version, 3);
+  assert.equal(idx.schema_version, 4, 'live producer emits v4 (RFC-012 R3a)');
   // session_start.playbooks trio present (a valid preference file was processed)
   assert.ok(Array.isArray(idx.session_start.playbooks) && idx.session_start.playbooks.length === 1, 'session_start.playbooks array present');
   assert.equal(typeof idx.session_start.playbooks_capped, 'number');

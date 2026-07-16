@@ -30,6 +30,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { CADENCE_FIELDS } from './lib/activation-log.mjs'
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_REPO = path.resolve(SCRIPT_DIR, '..')
@@ -130,6 +131,11 @@ async function main() {
   if (di.max_matches !== inj.LESSON_MAX_MATCHES) errors.push(`dispatcher-injection: max_matches contract=${di.max_matches} code=${inj.LESSON_MAX_MATCHES}`)
   if (di.max_tokens !== inj.LESSON_MAX_TOKENS) errors.push(`dispatcher-injection: max_tokens contract=${di.max_tokens} code=${inj.LESSON_MAX_TOKENS}`)
   if (di.summary_cap !== inj.LESSON_SUMMARY_CAP) errors.push(`dispatcher-injection: summary_cap contract=${di.summary_cap} code=${inj.LESSON_SUMMARY_CAP}`)
+
+  // REQ-11 (RFC-012 P1): cadence field-shape pin — set-diff, same discipline as
+  // pattern_health_shape below.
+  const cs = contract.cadence_shape ?? {}
+  diffBoth('cadence-shape-fields', cs.fields ?? [], CADENCE_FIELDS)
 
   // P3: R5b pattern_health shape diffed against the trigger-index code exports.
   const phs = contract.pattern_health_shape ?? {}

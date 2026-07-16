@@ -443,6 +443,11 @@ function mergeSessionStart(localStatus, globalStatus) {
   if (localVal && Object.prototype.hasOwnProperty.call(localVal, 'pattern_health')) {
     out.pattern_health = localVal.pattern_health
   }
+  // RFC-012 R3a (P1): thread the LOCAL cadence field UNCHANGED — the hook's own
+  // merge site (this fn), NOT loadMergedTriggerIndex, feeds the renderer (GLM r1 F1).
+  if (localVal && Object.prototype.hasOwnProperty.call(localVal, 'cadence')) {
+    out.cadence = localVal.cadence
+  }
   return out
 }
 

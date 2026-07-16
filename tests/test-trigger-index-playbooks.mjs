@@ -709,7 +709,7 @@ t('T12 a cached v2 trigger-index.json is treated as stale and rebuilt to v3', ()
   const r = build(cwd, home);
   assert.equal(r.json.built[0].cache_hit, false, 'v2 cache is stale (schema_version mismatch) -> rebuilt');
   const ti = readTi(cwd);
-  assert.equal(ti.schema_version, 3, 'rebuilt to v3');
+  assert.equal(ti.schema_version, 4, 'rebuilt to v4');
   assert.ok('playbooks_mtime_ms' in ti.source, 'v3 source carries the unconditional playbooks_* fingerprint');
 });
 
@@ -731,7 +731,7 @@ t('T12b a v3-complete source block with ONLY schema_version forced to 2 rebuilds
   fs.writeFileSync(tiPath(cwd), JSON.stringify(v3complete, null, 2));
   const r = build(cwd, home);
   assert.equal(r.json.built[0].cache_hit, false, 'stale on schema_version ALONE (the complete v3 source otherwise matches)');
-  assert.equal(readTi(cwd).schema_version, 3, 'rebuilt to v3');
+  assert.equal(readTi(cwd).schema_version, 4, 'rebuilt to v4');
 });
 
 // ===========================================================================
