@@ -282,6 +282,10 @@ AI:   Here are the 5 most recent memories for this project:
       5. "Chose Stripe over PayPal" (Mar 12) — decision
 ```
 
+### Routing your question
+
+Before searching, identify what kind of answer you need. For profile-class questions about standing rules and playbooks, rely on what loaded at session start or use `em-search.mjs --tag playbook --scope global --limit 1 --full`. For event-class questions about past decisions or causes, use `em-search.mjs --query "<topic>"`; for evolution-class questions about what is current, use `em-search.mjs --history <episode-id>`. Transcript-level and topic-track routes are not shipped, and routing never re-ranks results (RFC-001 score-merge contract). Stop once an episode id grounds the answer, or after two empty queries (broaden scope once first); make at most 3 recall calls per question, and remember that session-start advisory bounds (RFC-009 R3 max_matches/max_tokens) never flex.
+
 ---
 
 ## Scenario 6: Reaching a Milestone

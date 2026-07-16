@@ -332,6 +332,8 @@ node ~/.episodic-memory/scripts/em-search.mjs \
   [--warn-time-ms <n>] [--warn-count <n>]
 ```
 
+`--history` is the evolution-class route: use it whenever the question is "what is the CURRENT version of this decision," not "did this happen."
+
 Output:
 
 ```json
@@ -467,6 +469,8 @@ Flags that matter: `--task-type implementation` adds the violation pre-flight;
 
 Common mistakes: skipping recall and re-deriving context that a past session already
 recorded.
+
+Stopping: stop when an episode id grounds the answer, or after two empty queries (broaden scope once); at most 3 recall calls per question; session-start advisory bounds (RFC-009 R3 max_matches/max_tokens) never flex.
 
 ### em-pin
 
