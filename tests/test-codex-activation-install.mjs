@@ -114,7 +114,7 @@ function testSessionStartOutput() {
   const localIndex = path.join(F.project, '.episodic-memory', 'index.jsonl')
   const indexStat = fs.existsSync(localIndex) ? fs.statSync(localIndex) : { mtimeMs: 0, size: 0 }
   const trigger = {
-    schema_version: 3,
+    schema_version: 4,
     source: { index_mtime_ms: indexStat.mtimeMs, index_size: indexStat.size, playbooks_mtime_ms: 0, playbooks_size: 0 },
     entries: [
       {

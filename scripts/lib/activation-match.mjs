@@ -470,6 +470,7 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   const entriesRaw = Array.isArray(ss.entries) ? ss.entries : [];
   const preflightRaw = ss.preflight && typeof ss.preflight === "object" && !Array.isArray(ss.preflight) ? ss.preflight : {};
   const patternHealthRaw = ss.pattern_health && typeof ss.pattern_health === "object" && !Array.isArray(ss.pattern_health) ? ss.pattern_health : null;
+  const cadenceRaw = ss.cadence && typeof ss.cadence === "object" && !Array.isArray(ss.cadence) ? ss.cadence : null;
 
   const s = suppress instanceof Set ? suppress : new Set();
   const maxMatches = Number.isInteger(bounds && bounds.max_matches) && bounds.max_matches > 0 ? bounds.max_matches : 3;
@@ -643,6 +644,18 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   }
   const overflowNote = notes.length > 0 ? notes.join("\n") : null;
 
+  // ---- Cadence advisory (RFC-012 R3a, P1): at most ONE line, data-only read
+  // (enabled compiled at build), budgeted drop-if-over — RFC-012 advisories
+  // truncate FIRST; fixed order puts cadence before needs-enforcement, whose
+  // carrier today is the pattern-health line below.
+  const cadenceLines = [];
+  if (cadenceRaw && cadenceRaw.enabled === true && typeof cadenceRaw.line === "string" && cadenceRaw.line) {
+    if (totalTokens + estimateTokens(cadenceRaw.line) <= maxTokens) {
+      cadenceLines.push(cadenceRaw.line);
+      totalTokens += estimateTokens(cadenceRaw.line);
+    }
+  }
+
   // ---- Pattern-health advisory (RFC-009 R5b, F3): exactly one line, strict
   // enum, BUDGETED against the same running totalTokens/maxTokens as the tiers.
   // A large unhealthy set can never exceed the R3 bound: ids are capped with an
@@ -668,7 +681,7 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
   }
 
   return {
-    lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines, ...patternHealthLines],
+    lines: [...tier1Lines, ...playbookLines, ...tier2Lines, ...preflightLines, ...cadenceLines, ...patternHealthLines],
     overflowNote,
     entries: [...tier1Entries, ...playbookEntries, ...tier2Entries], // RFC-009 P4-S1 (R6) telemetry
   };

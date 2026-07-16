@@ -56,3 +56,41 @@ export function appendActivationLine(dataDir, line) {
     return { error: true } // REQ-16: fire-and-forget, never a hook failure
   }
 }
+
+// computeCadence — RFC-012 R3a (P1): the two consolidation-cadence gauges,
+// shared by the trigger-index build (per-store stamp) and the em-consolidate
+// clerk report (REQ-23). Pure; malformed members are skipped, never thrown on.
+// K gauge wins when both fire (single line). Strings are load-bearing —
+// relocated byte-identical from em-consolidate REQ-23.
+export function computeCadence(entries, rows, now = new Date()) {
+  const todayStr = now.toISOString().slice(0, 10)
+  const entryList = Array.isArray(entries) ? entries : []
+  const rowList = Array.isArray(rows) ? rows : []
+  const map = new Map()
+  for (const e of entryList) {
+    if (!e || e.trigger_kind !== 'phrase' || typeof e.value !== 'string') continue
+    map.set(e.value, (map.get(e.value) || 0) + 1)
+  }
+  let phraseSharing = 0
+  for (const n of map.values()) if (n > phraseSharing) phraseSharing = n
+  const activeLessons = rowList.filter(r =>
+    r && r.category === 'lesson' && r.status === 'active' &&
+    !(typeof r.review_by === 'string' && r.review_by < todayStr)).length
+  let line
+  if (phraseSharing >= CADENCE_K_SHARED) {
+    line = `cadence: ${phraseSharing} trigger-index entries share a phrase (>= ${CADENCE_K_SHARED}); consider a clerk run`
+  } else if (activeLessons >= CADENCE_N_LESSONS) {
+    line = `cadence: ${activeLessons} active lessons (>= ${CADENCE_N_LESSONS}); consider a clerk run`
+  }
+  return {
+    enabled: true,
+    phrase_sharing: phraseSharing,
+    active_lessons: activeLessons,
+    k_shared: CADENCE_K_SHARED,
+    n_lessons: CADENCE_N_LESSONS,
+    ...(line ? { line } : {}),
+  }
+}
+
+// Contract-mirror pin (REQ-11): the full key set session_start.cadence can carry.
+export const CADENCE_FIELDS = ['enabled', 'phrase_sharing', 'active_lessons', 'k_shared', 'n_lessons', 'line']

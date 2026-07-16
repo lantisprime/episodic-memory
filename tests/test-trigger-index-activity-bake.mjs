@@ -98,7 +98,7 @@ t('per_store_output_backcompat', () => {
   const id = storeLesson(cwd, home, ['--trigger', 'second opinion', '--applies-to-project', 'x']);
   build(cwd, home);
   const ti = readTi(cwd);
-  assert.equal(ti.schema_version, 3, 'schema_version bumped to 3 (RFC-011 R2.6 playbooks)');
+  assert.equal(ti.schema_version, 4, 'schema_version bumped to 4 (RFC-012 R3a cadence)');
   const e = ti.entries.find((x) => x.episode_id === id);
   // Every pre-existing entry field still present + unchanged for a non-activity trigger.
   assert.equal(e.trigger_kind, 'phrase');

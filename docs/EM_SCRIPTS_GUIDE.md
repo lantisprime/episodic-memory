@@ -873,7 +873,8 @@ The artifact: `trigger-index.json` carries `schema_version`, a `source` fingerpr
 `trigger_kind` phrase|tool|activity and the DERIVED `effective_priority` 1-9), and a
 `session_start` section (`critical_entries` = every band-8/9 lesson, trigger-independent;
 `entries` = top-10 by the `static_score` blend; `preflight` = per-task-type recent
-violation counts keyed by `violated_pattern`; `pattern_health` = the R5b build-time verdict `{schema_version:1, verdict, unhealthy, pattern_ids, computed_at}`, computed only under `--with-pattern-health`, carried forward verbatim otherwise, local-store only) that the P2 session-start hook will read.
+violation counts keyed by `violated_pattern`; `pattern_health` = the R5b build-time verdict `{schema_version:1, verdict, unhealthy, pattern_ids, computed_at}`, computed only under `--with-pattern-health`, carried forward verbatim otherwise, local-store only;
+`cadence` = the RFC-012 R3a consolidation-cadence advisory `{enabled:true, phrase_sharing, active_lessons, k_shared:3, n_lessons:200, line?}`, stamped on every build from that store's own rows+entries, advisory-only) that the P2 session-start hook will read.
 
 **Playbooks (RFC-011 R1/R2).** An OPTIONAL per-project file
 `<project>/.episodic-memory/playbooks.json` declares which playbook lesson
@@ -918,7 +919,7 @@ section; config-free projects pay no cross-store coupling). The event-plane
 freshness check compares `playbooks_*`/`global_index_*` mtime+size only (sha256
 is recorded for the build's own cache probe). `--merged` threads the local
 `session_start.playbooks` through unchanged. (`trigger-index.json` is now
-`schema_version: 3`; a cached v2 index is rebuilt on upgrade.)
+`schema_version: 4`; v3->v4 added `session_start.cadence` (RFC-012 R3a); a cached older index is rebuilt on upgrade.)
 
 Common mistakes: confusing the stored `priority` (1-7, declared) with
 `effective_priority` (1-9, derived — the 8-9 band is earned from linked violations,

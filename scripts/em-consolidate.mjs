@@ -64,7 +64,7 @@ import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensInd
 import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
 import { resolveRegisteredStores, resolveRegisteredStoresWithStatus, realpathSafe } from './lib/registered-stores.mjs'
-import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER, ATTRIBUTION_WINDOW_MS, ACTIVATION_LOG_NAME, ACTIVATION_LOG_MAX_BYTES, LOG_FORMAT_VERSION } from './lib/activation-log.mjs'
+import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER, ATTRIBUTION_WINDOW_MS, ACTIVATION_LOG_NAME, ACTIVATION_LOG_MAX_BYTES, LOG_FORMAT_VERSION, computeCadence } from './lib/activation-log.mjs'
 import { illegalValueChar, illegalScalarChar, serializeInlineArray, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
 import { acquire, release } from './lib/lock.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
@@ -444,7 +444,8 @@ const CLERK_SCALAR_FM_FIELDS = ['id', 'date', 'project', 'category', 'status', '
 if (clerk && !apply && !enrich) {
   const _clerkBreakReportWrite = process.argv.includes('--break-report-write')
   const _clerkBreakDrain = process.argv.includes('--break-drain')
-  const _clerkActiveRaw = loadIndex(DATA_DIR, scope).filter(r =>
+  const _clerkAllRows = loadIndex(DATA_DIR, scope)
+  const _clerkActiveRaw = _clerkAllRows.filter(r =>
     r.status !== 'superseded' &&
     typeof r.id === 'string' &&
     typeof r.summary === 'string' &&
@@ -470,18 +471,9 @@ if (clerk && !apply && !enrich) {
   } catch {}
   clerkRegisterTriggers(_clerkTriggerIndex)
 
-  // REQ-23 cadence advisory inputs: phrase-sharing count + active-lesson count.
-  const phraseSharingCount = (() => {
-    const map = new Map()
-    for (const e of (_clerkTriggerIndex.entries || [])) {
-      if (!e || e.trigger_kind !== 'phrase' || typeof e.value !== 'string') continue
-      map.set(e.value, (map.get(e.value) || 0) + 1)
-    }
-    let max = 0
-    for (const n of map.values()) if (n > max) max = n
-    return max
-  })()
-  const activeCount = _clerkActiveRaw.length
+  // REQ-23 cadence advisory — shared gauge computation (RFC-012 R3a, P1): the
+  // N gauge now counts active category:lesson rows only (was: all eligible).
+  const _cadence = computeCadence(_clerkTriggerIndex.entries || [], _clerkAllRows)
 
   // Group by (project, category) — identical to existing consolidation grouping.
   const _groups = new Map()
@@ -583,12 +575,7 @@ if (clerk && !apply && !enrich) {
   }
 
   // REQ-23 cadence advisory (one-line string field; advisory ONLY, never a gate).
-  let advisory
-  if (phraseSharingCount >= CADENCE_K_SHARED) {
-    advisory = `cadence: ${phraseSharingCount} trigger-index entries share a phrase (>= ${CADENCE_K_SHARED}); consider a clerk run`
-  } else if (activeCount >= CADENCE_N_LESSONS) {
-    advisory = `cadence: ${activeCount} active lessons (>= ${CADENCE_N_LESSONS}); consider a clerk run`
-  }
+  const advisory = _cadence.line
 
   // S5 REQ-18/19/20: compute the R6 conversion metric under the SAME
   // CLERK_LOCK_FILE lock the apply mode holds (one lock, one writer). The

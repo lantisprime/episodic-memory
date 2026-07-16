@@ -134,7 +134,7 @@ function seedLesson({ dataDir, episodesDir, id, date, project, category, tags, s
 // with triggers and then call `buildFixtureTriggerIndex(root)`.
 function seedTriggerIndex({ dataDir, entries }) {
   const idx = {
-    schema_version: 3,
+    schema_version: 4,
     generated_at: new Date().toISOString(),
     source: { index_size: 0, index_sha256: '', playbooks_size: 0, playbooks_sha256: '' },
     entries,

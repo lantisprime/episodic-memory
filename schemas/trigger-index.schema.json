@@ -1,12 +1,12 @@
 {
   "$id": "https://episodic-memory/schemas/trigger-index.schema.json",
   "title": "Trigger index (per-store <store>/trigger-index.json) — RFC-009 R2 / RFC-011 R2",
-  "description": "Closed, versioned contract for the DERIVED trigger index emitted by em-trigger-index.mjs. schema_version is const 3 (v3, RFC-011 R2 R2.6): additive additions are session_start.playbooks (+ playbooks_capped + playbooks_capped_first), the entry_class/read_command entry fields, the conditional effective_priority minimum (0 for entry_class:'playbook' rows, 1 otherwise), build_report.playbooks, and the extended source fingerprint (playbooks_* unconditional, global_index_* when a valid preference file exists). A cached v2 index is treated as stale and rebuilt (T12). review_by is emitted only when the lesson carries one (em-trigger-index.mjs build), so it is optional. entry_class:'playbook' rows carry read_command (required on those rows; RFC-011 R2).",
+  "description": "Closed, versioned contract for the DERIVED trigger index emitted by em-trigger-index.mjs. schema_version is const 4 (v4, RFC-012 R3a): additive addition is session_start.cadence — typed per-store K/N gauge field, line present iff a gauge fired. Prior v3 surfaces (RFC-011 R2 R2.6: session_start.playbooks + playbooks_capped + playbooks_capped_first, entry_class/read_command entry fields, conditional effective_priority minimum, build_report.playbooks, extended source fingerprint) remain unchanged. A cached older index is treated as stale and rebuilt (T12). review_by is emitted only when the lesson carries one (em-trigger-index.mjs build), so it is optional. entry_class:'playbook' rows carry read_command (required on those rows; RFC-011 R2).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "source", "build_report", "entries", "activity_phrases", "session_start"],
   "properties": {
-    "schema_version": { "const": 3 },
+    "schema_version": { "const": 4 },
     "source": {
       "type": "object",
       "additionalProperties": false,
@@ -56,7 +56,20 @@
           "items": { "$ref": "#/$defs/playbookLine" }
         },
         "playbooks_capped": { "type": "integer", "minimum": 0 },
-        "playbooks_capped_first": { "type": ["string", "null"] }
+        "playbooks_capped_first": { "type": ["string", "null"] },
+        "cadence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "phrase_sharing", "active_lessons", "k_shared", "n_lessons"],
+          "properties": {
+            "enabled": { "const": true },
+            "phrase_sharing": { "type": "integer", "minimum": 0 },
+            "active_lessons": { "type": "integer", "minimum": 0 },
+            "k_shared": { "const": 3 },
+            "n_lessons": { "const": 200 },
+            "line": { "type": "string", "minLength": 1 }
+          }
+        }
       }
     }
   },
