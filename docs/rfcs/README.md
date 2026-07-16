@@ -20,6 +20,8 @@ RFCs document proposed changes to the episodic-memory system. Every non-trivial 
 | RFC-010 | Version-pinned central enforcement engine with per-project shims | draft | Charlton Ho |
 | RFC-011 | Playbook Activation Preferences: Per-Project Session-Start and On-Demand Playbook Loading | accepted | Charlton Ho |
 | RFC-012 | Promotion Arc: Evidence-Fed Knowledge Promotion, Advisory Cadence, and Stagnation Signals | accepted | Charlton Ho |
+| RFC-013 | Episode Sync: Cross-Host Replication of Project and Global Episode Stores | draft | Charlton Ho |
+| RFC-014 | em-serve — Episode Server: Rendezvous Sync, Live Episode Feed, and Remote Recall over the CLI Contract | draft | Charlton Ho |
 
 ---
 

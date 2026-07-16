@@ -97,6 +97,22 @@
       "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-012-promotion-arc.md"
+    },
+    {
+      "id": "RFC-013",
+      "slug": "episode-sync",
+      "title": "Episode Sync: Cross-Host Replication of Project and Global Episode Stores",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-013-episode-sync.md"
+    },
+    {
+      "id": "RFC-014",
+      "slug": "episode-server",
+      "title": "em-serve — Episode Server: Rendezvous Sync, Live Episode Feed, and Remote Recall over the CLI Contract",
+      "status": "draft",
+      "champion": "Charlton Ho",
+      "file": "RFC-014-episode-server.md"
     }
   ]
 }
