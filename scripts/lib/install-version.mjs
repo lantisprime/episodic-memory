@@ -514,7 +514,12 @@ export function updateConsumers({ repoDir, globalDir, dryRun = false }) {
   }
 
   if (!dryRun && (report.pruned.length > 0 || report.refreshed.length > 0)) {
-    writeRegistry(regPath, keptEntries)
+    // F2 fold (GLM r1 MAJOR-2): mirror store identities on the sweep path too,
+    // so a post-rebind/detach registry carries the fresh active id + aliases
+    // (otherwise the sweep writes the stale active id from the prior upsert and
+    // omits store_aliases). The merge happens through mirrorStoreIdentities,
+    // NOT upsertRegistryEntries — upsert would read-merge and resurrect pruned rows.
+    writeRegistry(regPath, mirrorStoreIdentities(keptEntries))
   }
   return report
 }
@@ -648,14 +653,33 @@ export function mirrorStoreIdentities(entries) {
     let idn = resolveStoreIdentity(dir)
     if (idn.error === 'no-identity') {
       const minted = mintStoreIdentity(dir)
-      if (minted.error) throw new Error(`identity-mint-failed: ${minted.error} at ${dir}`)
-      idn = resolveStoreIdentity(dir)
+      if (minted.error) {
+        // F3 fold (GLM r1 MAJOR-3): identity-exists / lock-timeout are benign
+        // concurrent-mint outcomes (the lib-level lock serialized us; another
+        // process minted, or its lock-holder just released after a retry budget).
+        // Re-resolve and mirror the EXISTING identity instead of throwing — this
+        // is the §8.2 EC12 "later holder re-resolves" pattern. Other mint errors
+        // (duplicate-identity-chain, identity-chain-cycle, reserved-id-invalid,
+        // break-identity-write, store-dir-missing, …) stay fatal.
+        if (minted.error === 'identity-exists' || minted.error === 'lock-timeout') {
+          idn = resolveStoreIdentity(dir)
+        } else {
+          throw new Error(`identity-mint-failed: ${minted.error} at ${dir}`)
+        }
+      } else {
+        idn = resolveStoreIdentity(dir)
+      }
     }
     if (idn.error) throw new Error(`${idn.error}: ${e.project_path}`)
     let dirReal
     try { dirReal = fs.realpathSync(dir) } catch { dirReal = dir }
     for (const [id, kind] of [[idn.active_id, 'active'], ...idn.aliases.map((a) => [a, 'alias'])]) {
-      if (id === 'global') continue // reserved id never competes with project rows
+      // F5 fold (GLM r1 MINOR-2): the reserved id `global` belongs only to the
+      // global store, which is never a registry row. A project row resolving
+      // active_id or alias === 'global' is a hand-forgery / misconfiguration
+      // — reject loudly rather than silently exempting it from the collision
+      // map (the old `continue` let two forged-global project rows coexist).
+      if (id === 'global') throw new Error(`reserved-id-abuse: ${e.project_path}`)
       const prev = claims.get(id)
       if (prev && prev.dir !== dirReal) {
         if (prev.kind === 'active' && kind === 'active') throw new Error(`copied-store-rejected: ${id} at ${prev.dir} + ${dirReal}`)

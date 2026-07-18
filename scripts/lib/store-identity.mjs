@@ -36,12 +36,23 @@ function sleepSync(ms) {
   }
 }
 
-function withStoreLockSync(storeDir, fn) {
+function withStoreLockSync(storeDir, fn, { timeoutS = LOCK_TIMEOUT_S } = {}) {
   const lockFile = path.join(storeDir, LOCK_BASENAME)
-  const deadlineMs = Date.now() + LOCK_TIMEOUT_S * 1000
+  const deadlineMs = Date.now() + timeoutS * 1000
   let handle = null
   while (true) {
-    const result = tryAcquire(lockFile)
+    let result
+    try {
+      // F4 fold (GLM r1 MINOR-1): mixed error contract — every other path
+      // returns { error }, but a missing storeDir lets tryAcquire throw raw
+      // ENOENT (lib/lock.mjs:28-30 rethrows non-EEXIST). Map the missing-dir
+      // case to a uniform { error: 'store-dir-missing' } so S2/S4 direct
+      // callers can branch on it; other errors propagate.
+      result = tryAcquire(lockFile)
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return { error: 'store-dir-missing' }
+      throw err
+    }
     if (result.ok) { handle = result.handle; break }
     if (Date.now() >= deadlineMs) return { error: 'lock-timeout' }
     sleepSync(100)
@@ -196,7 +207,7 @@ export function resolveStoreIdentity(storeDir) {
   }
 }
 
-export function mintStoreIdentity(storeDir, { reserved } = {}) {
+export function mintStoreIdentity(storeDir, { reserved, lockTimeoutS } = {}) {
   if (reserved !== undefined && reserved !== GLOBAL_STORE_ID) {
     return { error: 'reserved-id-invalid' }
   }
@@ -235,10 +246,10 @@ export function mintStoreIdentity(storeDir, { reserved } = {}) {
     const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
     if (writeResult.error) return writeResult
     return { active_id: storeId, root_id: id }
-  })
+  }, { timeoutS: lockTimeoutS })
 }
 
-export function rebindStoreIdentity(storeDir) {
+export function rebindStoreIdentity(storeDir, { lockTimeoutS } = {}) {
   return withStoreLockSync(storeDir, () => {
     const existing = resolveStoreIdentity(storeDir)
     if (existing.error) return { error: existing.error }
@@ -266,10 +277,10 @@ export function rebindStoreIdentity(storeDir) {
     const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
     if (writeResult.error) return writeResult
     return { active_id: newStoreId, prior_id: existing.active_id, root_id: existing.root_id }
-  })
+  }, { timeoutS: lockTimeoutS })
 }
 
-export function detachStoreIdentity(storeDir) {
+export function detachStoreIdentity(storeDir, { lockTimeoutS } = {}) {
   return withStoreLockSync(storeDir, () => {
     const existing = resolveStoreIdentity(storeDir)
     if (existing.error) return { error: existing.error }
@@ -297,5 +308,5 @@ export function detachStoreIdentity(storeDir) {
     const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
     if (writeResult.error) return writeResult
     return { active_id: newStoreId, detached_root_id: existing.root_id }
-  })
+  }, { timeoutS: lockTimeoutS })
 }

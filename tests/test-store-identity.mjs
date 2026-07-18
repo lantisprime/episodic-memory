@@ -21,7 +21,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { spawnSync, execFileSync } from 'node:child_process'
+import { spawnSync, execFileSync, spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 import { mintStoreIdentity, resolveStoreIdentity, rebindStoreIdentity, detachStoreIdentity, GLOBAL_STORE_ID } from '../scripts/lib/store-identity.mjs'
@@ -38,10 +38,21 @@ const ONLY_FLAG = (() => { const i = process.argv.indexOf('--only'); return i >=
 
 let pass = 0, fail = 0
 const failures = []
+const asyncTests = []
 function t(name, fn) {
   if (ONLY_FLAG && !name.includes(ONLY_FLAG)) return
   try { fn(); console.log(`ok ${name}`); pass++ }
   catch (e) { fail++; failures.push(`${name} - ${e && e.message}`); console.log(`FAIL ${name}: ${e && e.message}`) }
+}
+function tAsync(name, fn) {
+  if (ONLY_FLAG && !name.includes(ONLY_FLAG)) return
+  asyncTests.push({ name, fn })
+}
+async function runAsyncTests() {
+  for (const { name, fn } of asyncTests) {
+    try { await fn(); console.log(`ok ${name}`); pass++ }
+    catch (e) { fail++; failures.push(`${name} - ${e && e.message}`); console.log(`FAIL ${name}: ${e && e.message}`) }
+  }
 }
 function assert(cond, msg) { if (!cond) throw new Error(msg) }
 function eq(actual, expected, label) { if (actual !== expected) throw new Error(`${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(expected)}`) }
@@ -319,18 +330,51 @@ t('identity::testDetachCycleTerminates', () => {
   eq(r.error, 'identity-chain-cycle', 'mutual-detach cycle terminates as identity-chain-cycle')
 })
 
-t('identity::testConcurrentMintSingleChain', () => {
+t('identity::testSupersedesCycleFailsLoud', () => {
+  // F6 fold (GLM r1 MINOR-3): §A.5-S1 claims BOTH cycle classes (mutual
+  // detaches_identity_root AND a supersedes cycle) terminate as
+  // identity-chain-cycle. testDetachCycleTerminates covers the mutual-detach
+  // class; this one covers the supersedes class (the walk's revisit guard).
+  // Distinct store_id prefixes so the two handRoot calls produce distinct
+  // episode files (handRoot's id is `19990101-000000-store-identity-${slice(0,4)}`).
+  const s = mkStore('cycle-supersedes')
+  const aStoreId = '1111aaaa1111aaaa'
+  const bStoreId = '2222bbbb2222bbbb'
+  const aId = '19990101-000000-store-identity-1111'
+  const bId = '19990101-000000-store-identity-2222'
+  handRoot(s.dataDir, aStoreId, { supersedes: bId })
+  handRoot(s.dataDir, bStoreId, { supersedes: aId })
+  const r = resolveStoreIdentity(s.dataDir)
+  eq(r.error, 'identity-chain-cycle', 'supersedes cycle terminates as identity-chain-cycle')
+})
+
+tAsync('identity::testConcurrentMintSingleChain', async () => {
   const s = mkStore('concurrent')
-  // Two simultaneous children racing on mint — the lock + identity-exists check
-  // must let exactly one succeed and one fail with identity-exists.
-  const a = childMint(s.dataDir)
-  const b = childMint(s.dataDir)
-  const aOut = JSON.parse(a.stdout)
-  const bOut = JSON.parse(b.stdout)
+  // F1 fold (GLM r1 MAJOR-1): use async spawn + Promise.all so the children
+  // truly race. spawnSync would block until each child exits → overlap 0ms,
+  // no EC3 contention. Under REAL concurrency, exactly one mints and the
+  // other's lock-acquire-retry observes the winner and returns identity-exists.
+  const code = (dir) => `
+    import { mintStoreIdentity } from ${JSON.stringify(LIB_URL)}
+    process.stdout.write(JSON.stringify(mintStoreIdentity(${JSON.stringify(dir)})))
+  `
+  const runChild = (dir) => new Promise((resolveChild, rejectChild) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code(dir)], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = '', err = ''
+    child.stdout.on('data', (d) => { out += d.toString() })
+    child.stderr.on('data', (d) => { err += d.toString() })
+    child.on('error', rejectChild)
+    child.on('close', (code) => resolveChild({ code, out, err }))
+  })
+  const [a, b] = await Promise.all([runChild(s.dataDir), runChild(s.dataDir)])
+  eq(a.code, 0, `child A exit 0: stderr=${a.err}`)
+  eq(b.code, 0, `child B exit 0: stderr=${b.err}`)
+  const aOut = JSON.parse(a.out)
+  const bOut = JSON.parse(b.out)
   const successes = [aOut, bOut].filter((o) => o.active_id)
-  const failures = [aOut, bOut].filter((o) => o.error === 'identity-exists')
-  eq(successes.length, 1, 'exactly one successful mint')
-  eq(failures.length, 1, 'exactly one identity-exists rejection')
+  const rejected = [aOut, bOut].filter((o) => o.error === 'identity-exists')
+  eq(successes.length, 1, 'exactly one successful mint under real concurrency')
+  eq(rejected.length, 1, 'exactly one identity-exists rejection (lock-serialized loser)')
   const r = resolveStoreIdentity(s.dataDir)
   assert(!r.error, `resolve after concurrent mint: ${JSON.stringify(r)}`)
 })
@@ -345,6 +389,38 @@ t('identity::testIdentityProtectionArm', () => {
   assert(m.has('idr1'), 'identity row must be protected')
   eq(m.get('idr1').reason, 'store-identity-chain', 'reason')
   assert(!m.has('plain1'), 'plain context row must NOT be protected by identity arm')
+})
+
+t('identity::testMintMissingStoreDirErrors', () => {
+  // F4 fold (GLM r1 MINOR-1): mixed error contract was inconsistent — every
+  // other path returned { error }, but a missing storeDir let tryAcquire throw
+  // raw ENOENT. The lib now maps ENOENT to { error: 'store-dir-missing' } so
+  // S2/S4 direct callers can branch on it uniformly.
+  const ghostDir = path.join(os.tmpdir(), `store-identity-ghost-${process.pid}-${Date.now()}`, 'never-created', '.episodic-memory')
+  assert(!fs.existsSync(ghostDir), 'ghost dir must not exist on disk')
+  let result
+  try {
+    result = mintStoreIdentity(ghostDir)
+  } catch (e) {
+    throw new Error(`mint must not throw on missing storeDir: ${e && e.message}`)
+  }
+  eq(result.error, 'store-dir-missing', 'mint on missing storeDir returns { error: store-dir-missing }')
+})
+
+t('identity::testLockTimeoutSurfaces', () => {
+  // F7 fold (GLM r1 NIT-1): the 30s `lock-timeout` return path was untested.
+  // Pre-create clerk-apply.lock with our pid so the lib's tryAcquire observes
+  // a held lock, then mint with lockTimeoutS=0 to force the deadline branch
+  // (default 30s would block the suite).
+  const s = mkStore('lock-timeout')
+  const lockFile = path.join(s.dataDir, 'clerk-apply.lock')
+  fs.writeFileSync(lockFile, `${process.pid}\n${new Date().toISOString()}\n${process.ppid}\n`)
+  try {
+    const result = mintStoreIdentity(s.dataDir, { lockTimeoutS: 0 })
+    eq(result.error, 'lock-timeout', 'mint with held lock + lockTimeoutS=0 surfaces lock-timeout')
+  } finally {
+    try { fs.unlinkSync(lockFile) } catch { /* ignore */ }
+  }
 })
 
 t('identity::testIndexCarriesIdentityFields', () => {
@@ -533,7 +609,35 @@ t('registry::testRelocationIdStable', () => {
   eq(a2Row.store_id, captured, 'store_id stable across relocation (identity is episode-carried)')
 })
 
+t('registry::testReservedGlobalForgeryFailsLoud', () => {
+  // F5 fold (GLM r1 MINOR-2): the `global` reserved id belongs only to the
+  // global store, which is never a registry row. The old `if (id === 'global')
+  // continue` skip let two hand-forged-`global` project rows coexist silently.
+  // The mirror now throws `reserved-id-abuse: <project_path>` instead, closing
+  // the project-forgery path.
+  const s = mkHome('global-forgery')
+  const fProj = path.join(s.root, 'F')
+  fs.mkdirSync(fProj, { recursive: true })
+  execFileSync('git', ['init', '-q'], { cwd: fProj })
+  // Hand-write an identity root with the reserved `global` store_id BEFORE install.
+  const fStore = path.join(fProj, '.episodic-memory')
+  fs.mkdirSync(path.join(fStore, 'episodes'), { recursive: true })
+  handRoot(fStore, 'global')
+  const r = runInstall(fProj, s.home)
+  const combined = (r.stdout || '') + (r.stderr || '')
+  assert(combined.includes('reserved-id-abuse'),
+    `install output must include reserved-id-abuse (last 600 chars): ${combined.slice(-600)}`)
+  const regPath = path.join(s.home, '.episodic-memory', 'installs.json')
+  let fRow = null
+  if (fs.existsSync(regPath)) {
+    const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'))
+    fRow = (reg.entries || []).find((e) => e.project_path === fProj)
+  }
+  assert(!fRow, 'forged-global project must NOT have a registry row')
+})
+
 // --- main ---
+await runAsyncTests()
 console.log(`\n${pass} passed, ${fail} failed`)
 if (fail > 0) {
   console.log('\nFailures:')
