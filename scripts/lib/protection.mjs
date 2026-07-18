@@ -166,7 +166,8 @@ export function resolvePlaybookProtection({ localStoreDir, willArchiveLocal = fa
 // NO id-dedupe). playbookIds = the playbook-referenced episode ids harvested by
 // resolvePlaybookProtection (R5b). Returns Map<id, {reason, via}>; first-set reason
 // wins in the order: pinned, evidence-linked-violation, trigger-bearing-lesson,
-// consolidates-member, latest-run-record, playbook-referenced, chain-member.
+// consolidates-member, latest-run-record, store-identity-chain,
+// playbook-referenced, chain-member.
 export function computeProtectedIds(rows, todayStr, playbookIds = []) {
   const map = new Map()
   // via normalizes to null when the protecting referencer row has no string id
@@ -225,6 +226,13 @@ export function computeProtectedIds(rows, todayStr, playbookIds = []) {
     }
   }
   for (const v of latestByStore.values()) set(v.id, 'latest-run-record', v.id)
+  // class d2 (RFC-012 P2 REQ-18): store-identity chain episodes are prune-protected
+  // in FULL — aliases resolve through superseded revisions and a detached root is
+  // still referenced by its successor's detaches_identity_root — so EVERY revision
+  // is reserved, not just the terminal (contrast class d's latest-only rule).
+  for (const r of rows) {
+    if (r.record_type === 'store-identity' && typeof r.id === 'string') set(r.id, 'store-identity-chain', r.id)
+  }
   // class e: RFC-011 R5(b) playbook-referenced. Each configured playbook id is
   // resolved to its terminal over the continuing-chain-precedence union (R2.1: a
   // stale superseded copy in one store must not shadow the live chain in the other

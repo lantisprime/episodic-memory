@@ -272,6 +272,8 @@ jobs:
 
       - name: Run em-promote experimental suite (APC-S5)
         run: node tests/test-em-promote.mjs
+      - name: Run store-identity suite (RFC-012 P2 S1)
+        run: node tests/test-store-identity.mjs
 
       - name: Run em-console web console suite
         run: node tests/test-em-console.mjs

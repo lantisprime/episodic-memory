@@ -31,6 +31,7 @@ import os from 'os'
 import path from 'path'
 import { resolveLocalDir } from './local-dir.mjs'
 import { readRegistry, registryPath } from './install-version.mjs'
+import { resolveStoreIdentity } from './store-identity.mjs'
 
 export const STORE_DIR_BASENAME = '.episodic-memory'
 export const PROJECT_SCOPE_PREFIX = 'project:'
@@ -91,11 +92,17 @@ export function resolveRegisteredStoresWithStatus({ globalDir } = {}) {
     const storeMatches =
       path.resolve(resolved) === path.resolve(plainJoin) &&
       containedIn(dataDirReal, projectReal)
+    // RFC-012 P2 REQ-6 (read side): surface the store's episode-carried identity
+    // to --all-projects consumers. Degrade-not-throw: hard resolution errors
+    // attach as store_identity_error; absent identity attaches nothing (mint is
+    // lazy — registration mints, readers never do).
+    const idn = fs.existsSync(resolved) ? resolveStoreIdentity(dataDirReal) : { error: 'no-identity' }
     out.push({
       project_path: projectReal,
       data_dir: fs.existsSync(resolved) ? dataDirReal : resolved,
       label: `${PROJECT_SCOPE_PREFIX}${path.basename(projectReal)}`,
       store_matches_project: storeMatches,
+      ...(idn.error ? (idn.error !== 'no-identity' ? { store_identity_error: idn.error } : {}) : { store_id: idn.active_id, ...(idn.aliases.length ? { store_aliases: idn.aliases } : {}) }),
     })
   }
   return { stores: out, registryRebuilt: rebuilt, registryPath: regPath }
