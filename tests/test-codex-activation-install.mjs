@@ -66,10 +66,24 @@ function treeHash(dir) {
   return hash.digest('hex')
 }
 
+function fileHashes(dir) {
+  const out = {}
+  const walk = (current, rel = '') => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const nextRel = rel ? `${rel}/${entry.name}` : entry.name
+      const abs = path.join(current, entry.name)
+      if (entry.isDirectory()) walk(abs, nextRel)
+      else out[nextRel] = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex')
+    }
+  }
+  walk(dir)
+  return out
+}
+
 function testInstallAndUninstall() {
   const F = fixture('cycle')
   const episodes = path.join(F.project, '.episodic-memory', 'episodes')
-  const beforeEpisodes = treeHash(episodes)
+  const beforeHashes = fileHashes(episodes)
 
   const result = install(F, '--install-activation')
   assert.equal(result.status, 0, `install failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
@@ -89,7 +103,17 @@ function testInstallAndUninstall() {
     assert.equal(fs.existsSync(path.join(pluginDir, 'hooks', file)), true, `${file} must be installed`)
   }
   assert.match(result.stdout, /Run "\/hooks" inside Codex.*trust/i)
-  assert.equal(treeHash(episodes), beforeEpisodes, 'install must preserve local episodes byte-for-byte')
+  const afterHashes = fileHashes(episodes)
+  const newFiles = Object.keys(afterHashes).filter((name) => !(name in beforeHashes))
+  for (const [name, hash] of Object.entries(beforeHashes)) {
+    assert.equal(afterHashes[name], hash, `install must preserve ${name} byte-for-byte`)
+  }
+  assert.equal(newFiles.length, 1, `install may add exactly one store-identity episode, got ${newFiles.length}: ${newFiles.join(', ')}`)
+  const newContent = fs.readFileSync(path.join(episodes, newFiles[0]), 'utf8')
+  assert.match(newContent, /^record_type: store-identity$/m, 'new episode must carry record_type: store-identity')
+  assert.match(newContent, /^category: context$/m, 'new episode must carry category: context')
+  assert.match(newContent, /^store_id: ([0-9a-f]{16}|global)$/m, 'new episode must carry a valid store_id')
+  const afterEpisodes = treeHash(episodes)
 
   const registry = readJson(path.join(F.home, '.episodic-memory', 'installs.json'))
   const row = registry.entries.find((entry) => entry.tool === 'codex' && entry.project_path === F.project)
@@ -103,7 +127,7 @@ function testInstallAndUninstall() {
       `${event} activation registration must be removed`)
   }
   assert.equal(fs.existsSync(pluginDir), false, 'Codex activation plugin directory must be removed')
-  assert.equal(treeHash(episodes), beforeEpisodes, 'uninstall must preserve local episodes byte-for-byte')
+  assert.equal(treeHash(episodes), afterEpisodes, 'uninstall must preserve local episodes byte-for-byte')
 }
 
 function testSessionStartOutput() {
@@ -176,12 +200,22 @@ function testFailurePaths() {
   const malformed = fixture('malformed')
   fs.mkdirSync(path.join(malformed.project, '.codex'), { recursive: true })
   fs.writeFileSync(path.join(malformed.project, '.codex', 'hooks.json'), '{bad')
-  const beforeEpisodes = treeHash(path.join(malformed.project, '.episodic-memory', 'episodes'))
+  const malformedEpisodes = path.join(malformed.project, '.episodic-memory', 'episodes')
+  const beforeHashes = fileHashes(malformedEpisodes)
   const rejected = install(malformed, '--install-activation')
   assert.equal(rejected.status, 0)
   assert.match(rejected.stdout, /aborted — nothing changed/)
   assert.equal(fs.existsSync(path.join(malformed.project, '.codex', 'episodic-memory-activation')), false)
-  assert.equal(treeHash(path.join(malformed.project, '.episodic-memory', 'episodes')), beforeEpisodes)
+  const afterHashes = fileHashes(malformedEpisodes)
+  const newFiles = Object.keys(afterHashes).filter((name) => !(name in beforeHashes))
+  for (const [name, hash] of Object.entries(beforeHashes)) {
+    assert.equal(afterHashes[name], hash, `install must preserve ${name} byte-for-byte`)
+  }
+  assert.equal(newFiles.length, 1, `install may add exactly one store-identity episode, got ${newFiles.length}: ${newFiles.join(', ')}`)
+  const newContent = fs.readFileSync(path.join(malformedEpisodes, newFiles[0]), 'utf8')
+  assert.match(newContent, /^record_type: store-identity$/m, 'new episode must carry record_type: store-identity')
+  assert.match(newContent, /^category: context$/m, 'new episode must carry category: context')
+  assert.match(newContent, /^store_id: ([0-9a-f]{16}|global)$/m, 'new episode must carry a valid store_id')
 
   const idempotent = fixture('idempotent')
   fs.mkdirSync(path.join(idempotent.project, '.codex'), { recursive: true })

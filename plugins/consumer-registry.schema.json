@@ -1,12 +1,12 @@
 {
   "$id": "https://episodic-memory/plugins/consumer-registry.schema.json",
   "title": "Consumer registry (~/.episodic-memory/installs.json) — RFC-009 P2 / #492",
-  "description": "Closed, versioned contract for the consumer registry rows that carry the enforcement_installed / activation_installed install flags. installed-state.schema.json covers a DIFFERENT artifact (the per-project installed_state block); this schema covers the registry rows. schema_version is const 1; a new row field is an additive schema_version bump, not a silent extension (not future-tolerant by design).",
+  "description": "Closed, versioned contract for the consumer registry rows that carry the enforcement_installed / activation_installed install flags. installed-state.schema.json covers a DIFFERENT artifact (the per-project installed_state block); this schema covers the registry rows. schema_version is const 1; a new row field is an additive schema_version bump, not a silent extension (not future-tolerant by design). v2 (RFC-012 P2 REQ-6): optional store_id + store_aliases identity-mirror row fields (mirror is derived, never authoritative).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "entries"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "entries": {
       "type": "array",
       "items": { "$ref": "#/$defs/registryEntry" }
@@ -23,7 +23,9 @@
         "version": { "type": "string" },
         "enforcement_installed": { "type": "boolean" },
         "activation_installed": { "type": "boolean" },
-        "last_install_ts": { "type": "string", "format": "date-time" }
+        "last_install_ts": { "type": "string", "format": "date-time" },
+        "store_id": { "type": "string", "pattern": "^([0-9a-f]{16}|global)$" },
+        "store_aliases": { "type": "array", "items": { "type": "string", "pattern": "^([0-9a-f]{16}|global)$" } }
       }
     }
   }

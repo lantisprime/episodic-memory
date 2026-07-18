@@ -16,6 +16,7 @@ import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { episodeTokens, DF_DROP_RATIO, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
+import { resolveStoreIdentity } from './lib/store-identity.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -217,6 +218,10 @@ function rebuildDir(dataDir, label) {
       // this pair in LOCKSTEP with em-store/em-revise's index fields.
       ...((fm.record_type && !BREAK_REBUILD_WHITELIST) ? { record_type: fm.record_type } : {}),
       ...(fm.clerk_cutover ? { clerk_cutover: fm.clerk_cutover } : {}),
+      // RFC-012 P2 S1 (REQ-1/REQ-5 lockstep, §8.2): identity fields written by
+      // scripts/lib/store-identity.mjs round-trip the rebuild.
+      ...(typeof fm.store_id === 'string' ? { store_id: fm.store_id } : {}),
+      ...(typeof fm.detaches_identity_root === 'string' ? { detaches_identity_root: fm.detaches_identity_root } : {}),
       access_count: accessCount,
       last_accessed: lastAccessed,
       ...(feedback !== 0 ? { feedback } : {}),
@@ -242,6 +247,15 @@ function rebuildDir(dataDir, label) {
         driftDeprecated[name] = (driftDeprecated[name] || 0) + 1
       }
     }
+  }
+
+  // RFC-012 P2 REQ-4: exactly one active identity chain per store — a duplicate
+  // (or cyclic) chain fails the build LOUDLY before any index write (EC6:
+  // validate-then-write). 'no-identity' stays normal (mint is lazy, REQ-6).
+  const identity = resolveStoreIdentity(dataDir)
+  if (identity.error && identity.error !== 'no-identity') {
+    console.log(JSON.stringify({ status: 'error', error: identity.error, scope: label }))
+    process.exit(1)
   }
 
   const tmpFile = indexFile + '.tmp'
