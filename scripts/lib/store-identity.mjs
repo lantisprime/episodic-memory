@@ -163,6 +163,81 @@ function writeIdentityEpisodeAtomic(episodesDir, id, content) {
   return { ok: true }
 }
 
+// --- incremental index helpers (RFC-012 P2 S1, REQ-1..6 / §8.2) ---
+// After a successful atomic episode write, the store's index.jsonl + tags.json
+// MUST be brought into sync under the SAME per-store lock so a fresh install
+// doesn't leave em-doctor reporting "episode file(s) not in index". The episode
+// file is authoritative — a later rebuild heals any drift — so these helpers
+// degrade-not-throw on failure. Field ORDER mirrors em-rebuild-index.mjs's
+// emit object exactly so a post-mint rebuild is a byte-stable no-op for the
+// row we just appended.
+
+function buildIdentityIndexRow(fields) {
+  // Order matches em-rebuild-index.mjs's emit object for store-identity rows
+  // (id, date, time, project, category, status, supersedes, tags, summary,
+  // record_type, store_id, [detaches_identity_root], access_count, last_accessed).
+  const row = {
+    id: fields.id,
+    date: fields.date,
+    time: fields.time,
+    project: fields.project,
+    category: 'context',
+    status: 'active',
+    supersedes: fields.supersedes || null,
+    tags: ['store-identity'],
+    summary: fields.summary,
+    record_type: STORE_IDENTITY_RECORD_TYPE,
+    store_id: fields.store_id,
+  }
+  if (fields.detaches_identity_root) {
+    row.detaches_identity_root = fields.detaches_identity_root
+  }
+  row.access_count = 0
+  row.last_accessed = null
+  return JSON.stringify(row)
+}
+
+function appendIdentityIndex(storeDir, fields) {
+  // (1) Append one row to <storeDir>/index.jsonl. Create the file if absent
+  // (appendFileSync lazily creates; explicit mkdirSync guards the storeDir
+  // itself in case the caller raced an rm).
+  const indexFile = path.join(storeDir, 'index.jsonl')
+  fs.mkdirSync(storeDir, { recursive: true })
+  fs.appendFileSync(indexFile, buildIdentityIndexRow(fields) + '\n', 'utf8')
+}
+
+function updateIdentityTagsIndex(storeDir, episodeId) {
+  // (2) Update <storeDir>/tags.json via the SAME read-modify-tmp-rename pattern
+  // em-store.mjs's updateTagsIndex uses (issue #469 null-proto guard).
+  const tagsFile = path.join(storeDir, 'tags.json')
+  let index = Object.create(null)
+  try {
+    index = Object.assign(Object.create(null), JSON.parse(fs.readFileSync(tagsFile, 'utf8')))
+  } catch { /* fresh store — index stays empty */ }
+  if (!index['store-identity']) index['store-identity'] = []
+  if (!index['store-identity'].includes(episodeId)) {
+    index['store-identity'].push(episodeId)
+  }
+  const tmp = tagsFile + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(index, null, 2), 'utf8')
+  fs.renameSync(tmp, tagsFile)
+}
+
+// Degrade-not-throw: a failure in the index/tags update must NOT fail the
+// mint (the episode file is authoritative; em-rebuild-index heals). On error
+// we emit a stderr warning and signal index_stale via the wrapper below so
+// callers can surface it (or just rebuild) if they care.
+function applyIdentityIndexUpdate(storeDir, fields) {
+  try {
+    appendIdentityIndex(storeDir, fields)
+    updateIdentityTagsIndex(storeDir, fields.id)
+    return { stale: false }
+  } catch (err) {
+    try { process.stderr.write(`store-identity: index/tags update failed (rebuild heals): ${err && err.message}\n`) } catch { /* ignore */ }
+    return { stale: true }
+  }
+}
+
 // --- exports ---
 
 export function resolveStoreIdentity(storeDir) {
@@ -245,7 +320,10 @@ export function mintStoreIdentity(storeDir, { reserved, lockTimeoutS } = {}) {
     const content = identityEpisodeContent(fields)
     const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
     if (writeResult.error) return writeResult
-    return { active_id: storeId, root_id: id }
+    const idx = applyIdentityIndexUpdate(storeDir, fields)
+    const out = { active_id: storeId, root_id: id }
+    if (idx.stale) out.index_stale = true
+    return out
   }, { timeoutS: lockTimeoutS })
 }
 
@@ -276,7 +354,10 @@ export function rebindStoreIdentity(storeDir, { lockTimeoutS } = {}) {
     const content = identityEpisodeContent(fields)
     const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
     if (writeResult.error) return writeResult
-    return { active_id: newStoreId, prior_id: existing.active_id, root_id: existing.root_id }
+    const idx = applyIdentityIndexUpdate(storeDir, fields)
+    const out = { active_id: newStoreId, prior_id: existing.active_id, root_id: existing.root_id }
+    if (idx.stale) out.index_stale = true
+    return out
   }, { timeoutS: lockTimeoutS })
 }
 
@@ -307,6 +388,9 @@ export function detachStoreIdentity(storeDir, { lockTimeoutS } = {}) {
     const content = identityEpisodeContent(fields)
     const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
     if (writeResult.error) return writeResult
-    return { active_id: newStoreId, detached_root_id: existing.root_id }
+    const idx = applyIdentityIndexUpdate(storeDir, fields)
+    const out = { active_id: newStoreId, detached_root_id: existing.root_id }
+    if (idx.stale) out.index_stale = true
+    return out
   }, { timeoutS: lockTimeoutS })
 }

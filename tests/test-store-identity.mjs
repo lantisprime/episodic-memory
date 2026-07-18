@@ -423,6 +423,19 @@ t('identity::testLockTimeoutSurfaces', () => {
   }
 })
 
+t('identity::testMintUpdatesIndexIncrementally', () => {
+  const s = mkStore('incr-index')
+  const r = mintStoreIdentity(s.dataDir)
+  assert(!r.error, `mint must succeed: ${JSON.stringify(r)}`)
+  const rows = fs.readFileSync(path.join(s.dataDir, 'index.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const mine = rows.filter((row) => row.id === r.root_id)
+  eq(mine.length, 1, 'index.jsonl carries exactly one row for the minted id without any rebuild')
+  eq(mine[0].record_type, 'store-identity', 'incremental row carries record_type')
+  eq(mine[0].store_id, r.active_id, 'incremental row carries store_id')
+  const tags = JSON.parse(fs.readFileSync(path.join(s.dataDir, 'tags.json'), 'utf8'))
+  assert(Array.isArray(tags['store-identity']) && tags['store-identity'].includes(r.root_id), 'tags.json lists the minted id under store-identity')
+})
+
 t('identity::testIndexCarriesIdentityFields', () => {
   const s = mkStore('index-fields')
   mintStoreIdentity(s.dataDir)
