@@ -43,7 +43,7 @@ import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs"
 import { TIER_RANK, effectiveTier, eventActionId, GATE_CONTRACT_KEY } from "./lib/effective-tier.mjs";
 
 // --- closed vocabularies (re-asserted even where a schema already closes them) ---
-export const MAX_SUPPORTED = "1.1.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality). RFC-009 P2-S6 MINOR bump: registry gains the `activation` plugin type.
+export const MAX_SUPPORTED = "1.2.0"; // byte-equal'd to _corpus-index.current_schema_version (a test asserts equality). RFC-012 P2-S3 MINOR bump: registry gains the `learning` plugin type.
 const HARNESS_IDS = ["claude-code", "opencode", "codex", "pi-agent", "cursor", "windsurf"];
 export const EVENT_IDS = ["pre_tool_use", "tool_result", "stop", "session_start", "session_end"]; // exported for the Rule-14 binding check in tests/test-validate-bp-contract.mjs (EVENT_IDS ≡ live events[].id)
 const TIERS = ["STRONG", "MEDIUM", "WEAK", "TBD"];
@@ -143,6 +143,7 @@ function loadContext(root, readJson, bypassKnownPath) {
     structured_alert: readJson(path.join(root, "schemas/runtime/structured-alert.schema.json")),
     runbook_agent_manifest: readJson(path.join(root, "schemas/runbook-agent-manifest.schema.json")),
     activation_manifest: readJson(path.join(root, "plugins/activation-manifest.schema.json")),
+    learning_descriptor: readJson(path.join(root, "plugins/learning-descriptor.schema.json")),
   };
   assertAllSchemasModeled(schemas); // throws SchemaModelingError if any schema escapes the modeled subset
   const taxonomy = readJson(path.join(root, "patterns/taxonomy.json"));
@@ -498,6 +499,36 @@ function validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, a
   }
 }
 
+// ---------------------------------------------------------------------------
+// Learning-descriptor sub-gauntlet (RFC-012 P2-S3, R2b). Schema-validates the
+// descriptor against plugins/learning-descriptor.schema.json and runs L-path authority
+// over module / io_schema / gauntlet. The activation MINOR-bump precedent
+// (RFC-009 P2-S2) extended CONTEXT_FILES/LIVE_FILES when loadContext gained a
+// schema; here, the schema is loaded into ctx.schemas.learning_descriptor and
+// the path authority calls mirror resolveAuthorityPath's contract.
+// ---------------------------------------------------------------------------
+function validateLearningDescriptor(ctx, descriptor, root, add) {
+  // Step 1: schema-validate the descriptor instance; emit L-schema per error.
+  const r = validateInstance(descriptor, ctx.schemas.learning_descriptor);
+  if (!r.valid) for (const e of r.errors) add("L-schema", "error", `${e.path}: ${e.keyword} — ${e.detail}`, { keyword: e.keyword });
+
+  // JSON-`null`/non-object descriptor: the L-schema emission above is the only
+  // signal we have (validateInstance accepts primitives). The path loop below
+  // would crash on `descriptor[key]` reads — return instead. (§19.3e B2b.)
+  if (descriptor === null || typeof descriptor !== "object" || Array.isArray(descriptor)) return;
+
+  // Step 2: L-path — module / io_schema / gauntlet must exist under the root.
+  // Guard `typeof` first: an absent field is already an L-schema violation in
+  // step 1; an unguarded `path.join(root, undefined)` would throw TypeError and
+  // crash validateRegistry instead of being reported.
+  for (const key of ["module", "io_schema", "gauntlet"]) {
+    if (typeof descriptor[key] !== "string") continue;
+    const absLex = path.join(root, descriptor[key]);
+    const res = resolveAuthorityPath(absLex, fs.realpathSync(root), descriptor[key], add, "L-path", key, "repo root");
+    if (res.status === "absent") add("L-path", "error", `${key} path ${JSON.stringify(descriptor[key])} does not exist`, { keyword: "missing", key });
+  }
+}
+
 function extractCommonBlock(text) {
   // line-based: the COMMON block is every line strictly between the two marker
   // lines (each on its own line), joined with \n + a trailing \n. The scaffold
@@ -685,7 +716,17 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
     let manifest;
     try { manifest = readJson(resolveContained(root, manifestPath, "manifest")); }
     catch (e) { return { status: "usage_error", project_root: root, checks: 0, violations: [{ check: "manifest", severity: "error", detail: e.message }], read_trace, exit: 2 }; }
+    // §19.3e B2b parity: JSON-`null`/non-object manifest crashes the .type
+    // branch switch below. Surface an L-schema (or M2-equivalent) violation
+    // instead. Without this, callers using `--manifest` against a `null`
+    // file get the catch-all internal usage_error (exit 2) instead of a
+    // typed signal.
+    if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+      add("L-schema", "error", `manifest is not a JSON object`);
+      return { status: "fail", project_root: root, checks: checkCount, violations, read_trace, exit: 1 };
+    }
     if (manifest.type === "activation") validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, add);
+    else if (manifest.type === "learning") validateLearningDescriptor(ctx, manifest, root, add);
     else validateManifest(ctx, manifest, root, readMaybe, add);
   } else {
     // --- live registry mode: version gate -> M1 -> per-entry type switch -> M-cross -> M8.
@@ -710,6 +751,10 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
       // (RFC-009 R3, P2-S2) -> activation sub-gauntlet; other substrate capability
       // types -> descriptor-only (gauntlet deferred P9); unknown -> reject.
       if (entry.type === "activation") {
+        // Fix-parity (§19.3e B2c + playbook §9): same crash class as the learning
+        // branch — an absent/non-string `manifest` is already an M1 violation,
+        // but `path.join(root, undefined)` would TypeError and crash. Guard first.
+        if (typeof entry.manifest !== "string") continue;
         const manAbs = path.join(root, entry.manifest);
         let manifest;
         try { manifest = readJson(manAbs); }
@@ -723,10 +768,35 @@ export function validateRegistry({ projectRoot, manifestPath = null, indexPath =
         }
         continue;
       }
+      if (entry.type === "learning") {
+        // L-* gauntlet: descriptor file readable + schema-valid + module/io_schema/gauntlet
+        // path authority, then L-cross mirror against entry id/version/module.
+        // Guard entry.descriptor first: an absent/non-string one is already an
+        // M1 violation in the entry-level schema. Without this check,
+        // `path.join(root, undefined)` throws TypeError and crashes
+        // validateRegistry instead of reporting. (§19.3e B2a fix-parity.)
+        if (typeof entry.descriptor !== "string") continue;
+        const descAbs = path.join(root, entry.descriptor);
+        let descriptor;
+        try { descriptor = readJson(descAbs); }
+        catch (e) { add("L2", "error", `entry ${entry.id} descriptor unreadable: ${e.message}`); continue; }
+        // JSON-`null`/non-object descriptor crashes the descriptor[key] reads
+        // below and crashes validateLearningDescriptor's path loop — report an
+        // L-schema violation instead. (§19.3e B2b.)
+        if (descriptor === null || typeof descriptor !== "object" || Array.isArray(descriptor)) {
+          add("L-schema", "error", `entry ${entry.id} descriptor is not a JSON object`);
+          continue;
+        }
+        validateLearningDescriptor(ctx, descriptor, root, add);
+        for (const key of ["id", "version", "module"]) {
+          if (!deepEqualJson(entry[key], descriptor[key])) add("L-cross", "error", `entry ${entry.id} ${key} differs from descriptor ${key}`, { keyword: key });
+        }
+        continue;
+      }
       if (entry.type !== "enforcement") {
-        // Substrate capability types (recall-strategy/store-strategy/learning):
+        // Substrate capability types (recall-strategy/store-strategy):
         // descriptor-only (gauntlet deferred, P9); unknown type -> reject.
-        if (!["recall-strategy", "store-strategy", "learning"].includes(entry.type)) {
+        if (!["recall-strategy", "store-strategy"].includes(entry.type)) {
           add("typed_versioned", "error", `entry ${JSON.stringify(entry.id)} has unknown type ${JSON.stringify(entry.type)}`);
         }
         continue; // descriptor-only types validated by the _index schema (M1); no manifest gauntlet

@@ -578,15 +578,15 @@ test('worktree_roundtrip', () => {
 // ── pre_amendment_schema_rejects: the 1.1.0 MINOR bump is load-bearing ───────
 test('pre_amendment_schema_rejects', () => {
   const idx = readParsed(path.join(REPO_ROOT, 'plugins', '_index.json'))
-  assert.strictEqual(idx.schema_version, '1.1.0', 'registry declares schema_version 1.1.0 (activation entry)')
+  assert.strictEqual(idx.schema_version, '1.2.0', 'registry declares schema_version 1.2.0 (activation + learning entries)')
   assert.ok((idx.entries || idx.plugins || []).length >= 0, 'registry parsed')
   // A pre-amendment validator (MAX_SUPPORTED=1.0.0) must REJECT the bumped registry…
   assert.strictEqual(gateSchemaVersion(idx.schema_version, '1.0.0').ok, false,
-    'schema_version 1.1.0 must be rejected under a 1.0.0 forward gate (bump is load-bearing)')
-  // …and the current MAX_SUPPORTED (1.1.0) must ACCEPT it.
+    'schema_version 1.2.0 must be rejected under a 1.0.0 forward gate (bump is load-bearing)')
+  // …and the current MAX_SUPPORTED (1.2.0) must ACCEPT it.
   assert.strictEqual(gateSchemaVersion(idx.schema_version, MAX_SUPPORTED).ok, true,
-    'schema_version 1.1.0 must be accepted under the current MAX_SUPPORTED')
-  ok('pre_amendment_schema_rejects — 1.1.0 rejected pre-amendment (1.0.0 gate), accepted at MAX_SUPPORTED')
+    'schema_version 1.2.0 must be accepted under the current MAX_SUPPORTED')
+  ok('pre_amendment_schema_rejects — 1.2.0 rejected pre-amendment (1.0.0 gate), accepted at MAX_SUPPORTED')
 })
 
 // ── install_divergent_runner_withholds (Finding F1) ──────────────────────────

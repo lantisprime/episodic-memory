@@ -13,7 +13,8 @@
       "items": {
         "oneOf": [
           { "$ref": "#/$defs/enforcementDescriptor" },
-          { "$ref": "#/$defs/activationDescriptor" }
+          { "$ref": "#/$defs/activationDescriptor" },
+          { "$ref": "#/$defs/learningDescriptor" }
         ]
       }
     },
@@ -28,7 +29,7 @@
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
     },
     "pluginType": {
-      "description": "Closed plugin-type space — the R8 typed-registry discriminator (RFC-008 L116). `enforcement` is the sole enforcement-layer type (bound to bp-XXX, R2); `recall-strategy` / `store-strategy` / `learning` are substrate capabilities (CAPABILITIES.md) that USE episodes and contain no gate/marker/workflow logic (R1). store-strategy and learning have NO descriptor or registry slot yet — each is added later as an additive-MINOR superset bump that ships its own registry sub-schema, descriptor schema, runtime-IO schema, and conformance gauntlet (R11 -> RFC-007 store; R12 -> RFC-001 learning).",
+      "description": "Closed plugin-type space — the R8 typed-registry discriminator (RFC-008 L116). `enforcement` is the sole enforcement-layer type (bound to bp-XXX, R2); `recall-strategy` / `store-strategy` / `learning` are substrate capabilities (CAPABILITIES.md) that USE episodes and contain no gate/marker/workflow logic (R1). store-strategy has NO descriptor or registry slot yet (added later as an additive-MINOR superset bump shipping its own registry sub-schema, descriptor schema, runtime-IO schema, and conformance gauntlet, R11 -> RFC-007 store); learning shipped its slot + descriptor + runtime-IO schema + gauntlet in schema 1.2.0 (R12 -> RFC-012 P2-S3).",
       "type": "string",
       "enum": ["enforcement", "activation", "recall-strategy", "store-strategy", "learning"]
     },
@@ -109,6 +110,20 @@
           "type": "object",
           "description": "Optional (M9). When present, validated against installed-state.schema.json."
         }
+      }
+    },
+    "learningDescriptor": {
+      "description": "RFC-012 P2-S3 / R2b — the substrate learning-strategy slot (CAPABILITIES.md: capability tier WEAK by default, no gate/marker/workflow logic, R1). No `directory`/`harness`/`capabilities`/`manifest` fields: the slot carries no directory or harness binding (M8 and RESERVED_DIRS untouched). The module points at a scripts/em-<name>.mjs entry, the descriptor at learning/<name>.json under the type-owned tree, the IO schema at schemas/runtime/learning-io.schema.json, and the gauntlet at tests/test-<name>.mjs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "version", "module", "descriptor", "status"],
+      "properties": {
+        "type": { "allOf": [{ "$ref": "#/$defs/pluginType" }, { "const": "learning" }] },
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]+$" },
+        "version": { "$ref": "#/$defs/semver" },
+        "module": { "type": "string", "pattern": "^scripts/em-[a-z0-9-]+\\.mjs$" },
+        "descriptor": { "type": "string", "pattern": "^learning/[a-z0-9-]+\\.json$" },
+        "status": { "type": "string", "enum": ["active", "deprecated", "disabled"] }
       }
     }
   }

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/learning-io.schema.json",
+  "title": "Learning-strategy runtime IO schema (RFC-012 R2/R12, P2-S3)",
+  "description": "The dry-run JSON output of scripts/em-promote.mjs (the canonical learning member of the registry's `learning` plugin type). Closed at every level (additionalProperties:false) so unknown extra keys are surfaced as L-schema violations instead of silently passing. The dry-run shape covers dry-run only; the --apply output (S4 REQ-16) is out of scope here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "dry_run", "min_sim", "candidates", "skipped", "warnings", "missing_sources"],
+  "properties": {
+    "status": { "const": "ok" },
+    "dry_run": { "const": true },
+    "min_sim": { "type": "number", "minimum": 0 },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/candidate" }
+    },
+    "skipped": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/skippedCandidate" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/warning" }
+    },
+    "missing_sources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceRef" }
+    },
+    "note": { "type": "string" }
+  },
+  "$defs": {
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "episode_id", "content_sha256"],
+      "properties": {
+        "store_id": { "type": "string", "pattern": "^([0-9a-f]{16}|global)$" },
+        "episode_id": { "type": "string", "minLength": 1 },
+        "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "project", "summary", "stores"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "project": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "stores": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "stores", "promotion_sources", "members"],
+      "properties": {
+        "hash": { "type": "string", "minLength": 1 },
+        "stores": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string" }
+        },
+        "promotion_sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourceRef" }
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/member" }
+        },
+        "supersedes_promotion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "skippedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "reason"],
+      "properties": {
+        "hash": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "enum": ["already-promoted"] },
+        "existing": { "type": "string", "minLength": 1 }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["problem"],
+      "properties": {
+        "problem": { "type": "string", "minLength": 1 },
+        "store": { "type": "string" },
+        "episode": { "type": "string" }
+      }
+    }
+  }
+}
