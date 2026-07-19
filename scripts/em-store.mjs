@@ -35,6 +35,7 @@ import { loadCategories, validateCategory, canonicalCategory } from './lib/categ
 import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, illegalValueChar, illegalScalarChar } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
+import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -45,7 +46,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope local|global] [--pin] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 
@@ -91,6 +92,7 @@ const appliesToTools = flagAll('--applies-to-tool')
 const priorityFlag = flag('--priority')
 const reviewBy = flag('--review-by')
 const evidence = flagAll('--evidence')
+const promotionSourcesJson = flag('--promotion-sources-json')
 // Typed T6 passthrough scalar (REQ-8): set by em-violation's handoff; generic
 // flag, violation-only in practice.
 const violatedPattern = flag('--violated-pattern')
@@ -164,6 +166,25 @@ if (!catV.ok) {
     : `Invalid category "${category}". Must be one of: ${(() => { try { return loadCategories().categories.map(c => c.name).join(', ') } catch { return 'see categories.json' } })()}`
   console.log(JSON.stringify({ status: 'error', message }))
   process.exit(1)
+}
+
+let promotionSources
+if (promotionSourcesJson !== undefined) {
+  let parsed
+  try { parsed = JSON.parse(promotionSourcesJson) } catch {
+    console.log(JSON.stringify({ status: 'error', error: 'promotion-sources-shape' }))
+    process.exit(1)
+  }
+  if (category !== 'lesson') {
+    console.log(JSON.stringify({ status: 'error', error: 'lesson-only' }))
+    process.exit(1)
+  }
+  const pv = validatePromotionSources(parsed)
+  if (!pv.ok) {
+    console.log(JSON.stringify({ status: 'error', error: pv.error, ...(pv.index !== undefined ? { index: pv.index } : {}) }))
+    process.exit(1)
+  }
+  promotionSources = canonicalizePromotionSources(parsed)
 }
 
 // RFC-009 R1: validate activation fields BEFORE any write (I4 — a rejected
@@ -302,6 +323,7 @@ if (activation) {
   fmLines.push(`priority: ${activation.priority}`)
   if (activation.review_by !== undefined) fmLines.push(`review_by: ${activation.review_by}`)
 }
+if (promotionSources) fmLines.push(`promotion_sources: ${serializePromotionSources(promotionSources)}`)
 // REQ-7 violation-side forward-links (validated above; unquoted inline array).
 if (lessonLinks.length) fmLines.push(`lessons: [${serializeInlineArray(lessonLinks)}]`)
 // T6 typed scalar (REQ-8): violation-side passthrough from em-violation's handoff.
@@ -336,6 +358,7 @@ const activationIndexFields = {
   ...(activation ? { priority: activation.priority } : {}),
   ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
   ...(violatedPattern !== undefined ? { violated_pattern: violatedPattern } : {}),
+  ...(promotionSources ? { promotion_sources: promotionSources } : {}),
 }
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project, category,

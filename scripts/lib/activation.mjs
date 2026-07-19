@@ -16,6 +16,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { resolveLocalDir } from './local-dir.mjs'
+import { STRUCTURED_FIELDS } from './promotion-sources.mjs'
+export { STRUCTURED_FIELDS } from './promotion-sources.mjs'
 
 // Resolved relative to this file so the path is symmetric in-repo
 // (<repo>/activation-classes.json) and deployed (~/.episodic-memory/activation-classes.json).
@@ -269,7 +271,7 @@ export function validateActivation(fields, { category } = {}) {
  * @param {string} content full episode .md content
  * @returns {{triggers?:string[], applies_to_projects?:string[], applies_to_tools?:string[],
  *            evidence?:string[], lessons?:string[], priority?:number, review_by?:string,
- *            violated_pattern?:string}}
+ *            violated_pattern?:string, promotion_sources?:object[]}}
  */
 export function parseActivationFromFrontmatter(content) {
   const out = {}
@@ -279,7 +281,9 @@ export function parseActivationFromFrontmatter(content) {
     const m = line.match(/^(\w+):\s*(.*)$/)
     if (!m) continue
     const [, key, raw] = m
-    if (ACTIVATION_ARRAY_FIELDS.includes(key)) {
+    if (STRUCTURED_FIELDS.includes(key)) {
+      out[key] = JSON.parse(raw)
+    } else if (ACTIVATION_ARRAY_FIELDS.includes(key)) {
       const arr = raw.match(/^\[(.*)\]$/)
       if (arr) out[key] = arr[1].split(',').map(s => s.trim()).filter(Boolean)
     } else if (key === 'priority') {
