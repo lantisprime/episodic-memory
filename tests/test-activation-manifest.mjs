@@ -46,6 +46,7 @@ const CONTEXT_FILES = [
   "plugins/_index.schema.json", "plugins/manifest.schema.json", "plugins/bypass_known.schema.json",
   "plugins/installed-state.schema.json", "schemas/runtime/structured-alert.schema.json",
   "schemas/runbook-agent-manifest.schema.json", "plugins/activation-manifest.schema.json",
+  "plugins/learning-descriptor.schema.json", // RFC-012 P2-S3 learning descriptor context schema
   "patterns/taxonomy.json", "patterns/events.json", "plugins/bypass_known.json",
 ];
 function buildMinimalContext(tmp) {
