@@ -17,6 +17,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { episodeTokens, DF_DROP_RATIO, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { resolveStoreIdentity } from './lib/store-identity.mjs'
+import { STRUCTURED_FIELDS } from './lib/promotion-sources.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -65,7 +66,11 @@ if (checkMode) {
       let files = []
       try { files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort() } catch { continue }
       for (const file of files) {
-        const fm = parseFrontmatter(fs.readFileSync(path.join(episodesDir, file), 'utf8'))
+        let fm
+        try { fm = parseFrontmatter(fs.readFileSync(path.join(episodesDir, file), 'utf8')) } catch (e) {
+          console.log(JSON.stringify({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null }))
+          process.exit(1)
+        }
         if (!fm || !fm.id) continue
         const v = validateCategory(fm.category, { allowDeprecated: true })
         if (!v.ok) drift.push({ id: fm.id, category: fm.category ?? null, kind: 'unknown' })
@@ -93,13 +98,22 @@ function parseFrontmatter(content) {
     const m = line.match(/^(\w+):\s*(.*)$/)
     if (!m) continue
     const [, key, raw] = m
-    const arrMatch = raw.match(/^\[(.*)\]$/)
-    if (arrMatch) {
-      data[key] = arrMatch[1].split(',').map(s => s.trim()).filter(Boolean)
-    } else if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-      data[key] = raw.slice(1, -1)
+    if (STRUCTURED_FIELDS.includes(key)) {
+      try { data[key] = JSON.parse(raw) } catch {
+        const e = new Error('structured-frontmatter-invalid')
+        e.field = key
+        e.id = data.id
+        throw e
+      }
     } else {
-      data[key] = raw === 'null' ? null : raw
+      const arrMatch = raw.match(/^\[(.*)\]$/)
+      if (arrMatch) {
+        data[key] = arrMatch[1].split(',').map(s => s.trim()).filter(Boolean)
+      } else if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+        data[key] = raw.slice(1, -1)
+      } else {
+        data[key] = raw === 'null' ? null : raw
+      }
     }
   }
   return data
@@ -156,7 +170,11 @@ function rebuildDir(dataDir, label) {
 
   for (const file of files) {
     const content = fs.readFileSync(path.join(episodesDir, file), 'utf8')
-    const fm = parseFrontmatter(content)
+    let fm
+    try { fm = parseFrontmatter(content) } catch (e) {
+      console.log(JSON.stringify({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null, scope: label }))
+      process.exit(1)
+    }
     if (!fm || !fm.id) continue
     const normalizedTags = normalizeTags(Array.isArray(fm.tags) ? fm.tags : [])
 
@@ -211,6 +229,7 @@ function rebuildDir(dataDir, label) {
       ...(fm.priority !== undefined ? { priority: Number.isFinite(priorityNum) ? priorityNum : fm.priority } : {}),
       ...(typeof fm.review_by === 'string' ? { review_by: fm.review_by } : {}),
       ...(typeof fm.violated_pattern === 'string' ? { violated_pattern: fm.violated_pattern } : {}),
+      ...(Array.isArray(fm.promotion_sources) ? { promotion_sources: fm.promotion_sources } : {}),
       ...(fm.pinned === true || fm.pinned === 'true' ? { pinned: true } : {}),
       // RFC-009 P4-S4 (round-2 N2): clerk run-record + digest markers. record_type
       // feeds protection.mjs class-d (latest-run-record reservation) + the crash

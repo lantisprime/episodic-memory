@@ -35,6 +35,7 @@ import { validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, parseActivationFromFrontmatter, illegalScalarChar } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
+import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -45,7 +46,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before this script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 
@@ -87,6 +88,7 @@ const appliesToTools = flagAll('--applies-to-tool')
 const priorityFlag = flag('--priority')
 const reviewBy = flag('--review-by')
 const evidence = flagAll('--evidence')
+const promotionSourcesJson = flag('--promotion-sources-json')
 
 const VALID_SCOPES_REVISE = ['inherit', 'local', 'global']
 if (!VALID_SCOPES_REVISE.includes(scope)) {
@@ -162,6 +164,7 @@ if (!original) {
 let activation = null // normalized RFC-009 activation fields (set in the block below)
 let inheritedLessons = [] // violation-side forward-links, inherited verbatim (F3)
 let inheritedViolatedPattern // T6 typed scalar, inherited verbatim (F3)
+let promotionSources
 {
   const origRaw = fs.readFileSync(original.filePath, 'utf8')
   const fm = origRaw.match(/^---\n([\s\S]*?)\n---/)
@@ -194,7 +197,11 @@ let inheritedViolatedPattern // T6 typed scalar, inherited verbatim (F3)
   // links). A flag passed on the revise OVERRIDES that field; absent flags keep
   // the original's values. Validation runs on the MERGED result against the
   // inherited category, BEFORE the supersede mutation below (I4).
-  const inherited = parseActivationFromFrontmatter(origRaw)
+  let inherited
+  try { inherited = parseActivationFromFrontmatter(origRaw) } catch {
+    console.log(JSON.stringify({ status: 'error', error: 'structured-frontmatter-invalid', field: 'promotion_sources', id: originalId }))
+    process.exit(1)
+  }
   inheritedLessons = Array.isArray(inherited.lessons) ? inherited.lessons : []
   inheritedViolatedPattern = inherited.violated_pattern
   const merged = {
@@ -211,6 +218,26 @@ let inheritedViolatedPattern // T6 typed scalar, inherited verbatim (F3)
     process.exit(1)
   }
   activation = av.fields // null when neither flags nor the original carry activation
+
+  let sourceValue = inherited.promotion_sources
+  if (promotionSourcesJson !== undefined) {
+    try { sourceValue = JSON.parse(promotionSourcesJson) } catch {
+      console.log(JSON.stringify({ status: 'error', error: 'promotion-sources-shape' }))
+      process.exit(1)
+    }
+  }
+  if (sourceValue !== undefined) {
+    if (cat !== 'lesson') {
+      console.log(JSON.stringify({ status: 'error', error: 'lesson-only' }))
+      process.exit(1)
+    }
+    const pv = validatePromotionSources(sourceValue)
+    if (!pv.ok) {
+      console.log(JSON.stringify({ status: 'error', error: pv.error, ...(pv.index !== undefined ? { index: pv.index } : {}) }))
+      process.exit(1)
+    }
+    promotionSources = canonicalizePromotionSources(sourceValue)
+  }
 
   // REQ-6 (revise-side parity): merged-index resolution, never per-active-scope
   // (F1). Only NEWLY passed --evidence re-validates — inherited links carry
@@ -367,6 +394,7 @@ if (activation) {
 // F3: violation-side fields inherit verbatim (no revise-side flags exist for them)
 if (inheritedLessons.length) activationFmLines.push(`lessons: [${serializeInlineArray(inheritedLessons)}]`)
 if (inheritedViolatedPattern !== undefined) activationFmLines.push(`violated_pattern: ${inheritedViolatedPattern}`)
+if (promotionSources) activationFmLines.push(`promotion_sources: ${serializePromotionSources(promotionSources)}`)
 
 const frontmatter = [
   '---',
@@ -401,6 +429,7 @@ const activationIndexFields = {
   ...(activation ? { priority: activation.priority } : {}),
   ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
   ...(inheritedViolatedPattern !== undefined ? { violated_pattern: inheritedViolatedPattern } : {}),
+  ...(promotionSources ? { promotion_sources: promotionSources } : {}),
 }
 const indexEntry = JSON.stringify({
   id, date: dateStr, time: timeStr, project: resolvedProject,

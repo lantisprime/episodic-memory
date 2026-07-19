@@ -13,6 +13,7 @@ import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { isSubstrateScript } from '../scripts/lib/install-manifest.mjs'
+import { mintStoreIdentity, resolveStoreIdentity } from '../scripts/lib/store-identity.mjs'
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const PROMOTE = path.join(REPO, 'scripts', 'em-promote.mjs')
@@ -28,15 +29,17 @@ function mkWorld(name) {
   fs.mkdirSync(path.join(home, '.episodic-memory'), { recursive: true })
   const world = {
     root, home, entries: [],
-    register(projectPath) {
-      world.entries.push({ project_path: projectPath, tool: 'claude-code', version: 'v1', enforcement_installed: false, last_install_ts: '2026-07-08T00:00:00Z' })
+    register(projectPath, identity) {
+      world.entries.push({ project_path: projectPath, tool: 'claude-code', version: 'v1', enforcement_installed: false, last_install_ts: '2026-07-08T00:00:00Z', store_id: identity.active_id, store_aliases: identity.aliases })
       fs.writeFileSync(path.join(home, '.episodic-memory', 'installs.json'),
-        JSON.stringify({ schema_version: 1, entries: world.entries }, null, 2))
+        JSON.stringify({ schema_version: 2, entries: world.entries }, null, 2))
     },
     project(name) {
       const p = path.join(root, name)
-      fs.mkdirSync(p, { recursive: true })
-      world.register(p)
+      const data = path.join(p, '.episodic-memory')
+      fs.mkdirSync(data, { recursive: true })
+      mintStoreIdentity(data)
+      world.register(p, resolveStoreIdentity(data))
       return p
     },
     lesson(project, summary, body) {
@@ -67,6 +70,21 @@ const t = (name, fn) => tests.push([name, fn])
 function assert(cond, msg) { if (!cond) throw new Error(msg) }
 function parse(r) {
   try { return JSON.parse(r.stdout) } catch { throw new Error(`non-JSON stdout: ${r.stdout}\n${r.stderr}`) }
+}
+function textSha8(value) { return crypto.createHash('sha256').update(value).digest('hex').slice(0, 8) }
+function legacyCandidateHash(members) {
+  return textSha8(members.map(m => `${m.id}#${textSha8(m.summary)}`).sort().join('\n'))
+}
+function seedLegacyPromotion(w, members) {
+  const hash = legacyCandidateHash(members)
+  const body = `Legacy recurring lesson fixture.\n\n## Sources\n${members.map(m => `- ${m.id} (${m.project}, legacy-store)`).join('\n')}`
+  const r = spawnSync(process.execPath, [STORE,
+    '--scope', 'global', '--project', 'cross-project', '--category', 'lesson',
+    '--tags', `promoted-lesson,promoted:${hash}`, '--summary', 'Legacy recurring lesson', '--body', body],
+  { cwd: w.root, env: { ...process.env, HOME: w.home, USERPROFILE: w.home }, encoding: 'utf8' })
+  const out = parse(r)
+  if (r.status !== 0 || out.status !== 'ok') throw new Error(`legacy seed failed: ${r.stdout}${r.stderr}`)
+  return { id: out.id, hash }
 }
 
 t('testPromoteFindsCrossStoreRecurrence', () => {
@@ -101,7 +119,8 @@ t('testPromoteSkipsReplicaMembers', () => {
   const a = w.project('projA')
   const b = w.project('projB')
   const id = w.lesson(a, 'always quote hook command paths', RECUR_BODY)
-  fs.cpSync(path.join(a, '.episodic-memory'), path.join(b, '.episodic-memory'), { recursive: true })
+  fs.copyFileSync(path.join(a, '.episodic-memory', 'episodes', `${id}.md`), path.join(b, '.episodic-memory', 'episodes', `${id}.md`))
+  fs.copyFileSync(path.join(a, '.episodic-memory', 'index.jsonl'), path.join(b, '.episodic-memory', 'index.jsonl'))
   const out = parse(w.promote())
   assert(out.candidates.length === 0, `replica must not count as recurrence: ${JSON.stringify(out.candidates)}`)
   assert(id, 'seed id must exist')
@@ -115,18 +134,31 @@ t('testPromoteSameIdDifferentContentStaysDistinct', () => {
   const w = mkWorld('sameid')
   const a = w.project('projA')
   const b = w.project('projB')
-  const id = w.lesson(a, 'always quote hook command paths', RECUR_BODY)
-  fs.cpSync(path.join(a, '.episodic-memory'), path.join(b, '.episodic-memory'), { recursive: true })
+  const summaryA = 'always quote hook command paths'
+  const summaryB = 'always quote hook command paths differently worded'
+  const id = w.lesson(a, summaryA, RECUR_BODY)
+  fs.copyFileSync(path.join(a, '.episodic-memory', 'episodes', `${id}.md`), path.join(b, '.episodic-memory', 'episodes', `${id}.md`))
+  fs.copyFileSync(path.join(a, '.episodic-memory', 'index.jsonl'), path.join(b, '.episodic-memory', 'index.jsonl'))
   // Hand-edit projB's copy to a DIFFERENT summary (same id) — index row + file.
   const idxPath = path.join(b, '.episodic-memory', 'index.jsonl')
   const rows = fs.readFileSync(idxPath, 'utf8').trim().split('\n').map(l => JSON.parse(l))
-  rows[0].summary = 'always quote hook command paths differently worded'
+  rows[0].summary = summaryB
   fs.writeFileSync(idxPath, rows.map(r => JSON.stringify(r)).join('\n') + '\n')
+  const episodePath = path.join(b, '.episodic-memory', 'episodes', `${id}.md`)
+  fs.writeFileSync(episodePath, fs.readFileSync(episodePath, 'utf8').replace(RECUR_BODY, RECUR_BODY + ' independently changed bytes'))
   const out = parse(w.promote())
   assert(out.candidates.length === 1, `distinct-content same-id must form a candidate: ${JSON.stringify(out)}`)
   const memberIds = out.candidates[0].members.map(m => m.id)
   assert(memberIds.length === 2 && memberIds[0] === id && memberIds[1] === id,
     `both same-id members must be listed distinctly: ${JSON.stringify(out.candidates[0].members)}`)
+  const ambiguousLegacy = seedLegacyPromotion(w, [
+    { id, summary: summaryA, project: 'projA' },
+    { id, summary: summaryB, project: 'projB' },
+  ])
+  const applied = parse(w.promote(['--apply']))
+  assert(applied.promoted.length === 1 && applied.promoted[0].supersedes_promotion === undefined,
+    `ambiguous legacy bare id suppressed/fabricated a typed relationship: ${JSON.stringify(applied)}`)
+  assert(!applied.skipped.some(s => s.existing === ambiguousLegacy.id), 'ambiguous legacy row must not exact-match typed identity')
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
@@ -143,7 +175,9 @@ t('testPromoteApplyWritesGlobalEpisode', () => {
   assert(globals.length === 1, `global index rows ${globals.length}, want 1`)
   const tags = globals[0].tags.map(String)
   assert(tags.includes('promoted-lesson'), `promoted-lesson tag missing: ${JSON.stringify(tags)}`)
-  assert(tags.some(t2 => /^promoted:[0-9a-f]{8}$/.test(t2)), `promoted:<sha8> tag missing: ${JSON.stringify(tags)}`)
+  assert(!tags.some(t2 => /^promoted:[0-9a-f]{8}$/.test(t2)), `legacy promoted:<sha8> tag must be absent: ${JSON.stringify(tags)}`)
+  assert(Array.isArray(globals[0].promotion_sources) && globals[0].promotion_sources.length === 2,
+    `typed promotion_sources missing: ${JSON.stringify(globals[0])}`)
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
@@ -199,6 +233,66 @@ t('testPromoteApplyIdempotent', () => {
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
+t('testPromoteLegacyExactIdempotent', () => {
+  const w = mkWorld('legacy-idem')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  const members = [
+    { id: w.lesson(a, 'always quote hook command paths', RECUR_BODY), summary: 'always quote hook command paths', project: 'projA' },
+    { id: w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY), summary: 'always quote hook command paths in hooks', project: 'projB' },
+  ]
+  const legacy = seedLegacyPromotion(w, members)
+  const globalEpisodes = path.join(w.home, '.episodic-memory', 'episodes')
+  const before = fs.readdirSync(globalEpisodes).sort()
+  const out = parse(w.promote(['--apply']))
+  assert(out.promoted.length === 0, `legacy exact recurrence was duplicated: ${JSON.stringify(out)}`)
+  assert(out.skipped.some(s => s.reason === 'already-promoted' && s.existing === legacy.id),
+    `legacy skip does not reference ${legacy.id}: ${JSON.stringify(out.skipped)}`)
+  assert(JSON.stringify(fs.readdirSync(globalEpisodes).sort()) === JSON.stringify(before), 'legacy replay wrote a new global episode')
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
+t('testPromoteLegacySupersetBackref', () => {
+  const w = mkWorld('legacy-superset')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  const c = w.project('projC')
+  const priorMembers = [
+    { id: w.lesson(a, 'always quote hook command paths', RECUR_BODY), summary: 'always quote hook command paths', project: 'projA' },
+    { id: w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY), summary: 'always quote hook command paths in hooks', project: 'projB' },
+  ]
+  const legacy = seedLegacyPromotion(w, priorMembers)
+  w.lesson(c, 'always quote hook command paths everywhere', RECUR_BODY)
+  const out = parse(w.promote(['--apply']))
+  assert(out.promoted.length === 1 && out.promoted[0].supersedes_promotion === legacy.id,
+    `legacy strict-superset backref missing: ${JSON.stringify(out)}`)
+  const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${out.promoted[0].digest_id}.md`), 'utf8')
+  assert(content.includes(`Supersedes-promotion: ${legacy.id}`), 'human Supersedes-promotion line missing')
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
+t('testPromoteLegacyContractedAmbiguityNoBackref', () => {
+  const w = mkWorld('legacy-contracted')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  const summaryA = 'always quote hook command paths'
+  const idA = w.lesson(a, summaryA, RECUR_BODY)
+  w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
+  // The legacy row's two source lines collapse to one bare id. Without the
+  // pre-collapse ambiguity bit, {idA} looks like a strict subset of the
+  // current unique-id candidate and fabricates a back-reference.
+  const legacy = seedLegacyPromotion(w, [
+    { id: idA, summary: summaryA, project: 'projA' },
+    { id: idA, summary: `${summaryA} independently`, project: 'projB' },
+  ])
+  const out = parse(w.promote(['--apply']))
+  assert(out.promoted.length === 1 && out.promoted[0].supersedes_promotion === undefined,
+    `ambiguous contracted legacy row fabricated a superset: ${JSON.stringify(out)}`)
+  const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${out.promoted[0].digest_id}.md`), 'utf8')
+  assert(!content.includes(`Supersedes-promotion: ${legacy.id}`), 'ambiguous legacy row leaked a human back-reference')
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
 t('testPromoteSupersetClusterPromotesWithBackref', () => {
   const w = mkWorld('superset')
   const a = w.project('projA')
@@ -229,7 +323,15 @@ t('testPromoteWarnsOnMalformedPromotedEpisode', () => {
   const digest = first.promoted[0].digest_id
   // Hand-break the written episode: strip the Sources section.
   const p = path.join(w.home, '.episodic-memory', 'episodes', `${digest}.md`)
-  fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(/^## Sources$[\s\S]*$/m, ''))
+  const indexPath = path.join(w.home, '.episodic-memory', 'index.jsonl')
+  const rows = w.globalIndexRows()
+  delete rows[0].promotion_sources
+  rows[0].tags.push('promoted:deadbeef')
+  fs.writeFileSync(indexPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+  fs.writeFileSync(p, fs.readFileSync(p, 'utf8')
+    .replace(/^promotion_sources: .*\n/m, '')
+    .replace(/^tags: \[(.*)\]$/m, 'tags: [$1, promoted:deadbeef]')
+    .replace(/^## Sources$[\s\S]*$/m, ''))
   const r = w.promote()
   const out = parse(r)
   assert(r.status === 0, `warnings must never block: exit ${r.status}`)
@@ -249,6 +351,7 @@ t('testPromoteCloneStoreCannotFabricateRecurrence', () => {
   const b = w.project('projB')
   w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   w.lesson(a, 'always quote hook command paths again', RECUR_BODY + ' second authored copy same store')
+  fs.rmSync(path.join(b, '.episodic-memory'), { recursive: true, force: true })
   fs.cpSync(path.join(a, '.episodic-memory'), path.join(b, '.episodic-memory'), { recursive: true })
   let out = parse(w.promote())
   assert(out.candidates.length === 0, `full clone fabricated recurrence: ${JSON.stringify(out.candidates)}`)
@@ -309,7 +412,7 @@ t('testPromoteStripsForeignIdentityTags', () => {
   const tags = row.tags.map(String)
   assert(!tags.includes('promoted:deadbeef'), `stray identity tag leaked onto digest: ${JSON.stringify(tags)}`)
   assert(tags.includes('shell-quoting'), `legitimate member tag must survive the filter: ${JSON.stringify(tags)}`)
-  assert(tags.filter(t2 => /^promoted:/.test(t2)).length === 1, `digest must carry exactly ONE identity tag: ${JSON.stringify(tags)}`)
+  assert(tags.filter(t2 => /^promoted:/.test(t2)).length === 0, `new digest must carry zero legacy identity tags: ${JSON.stringify(tags)}`)
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
@@ -319,6 +422,7 @@ t('testPromoteHelpCarriesExperimental', () => {
   assert(out.tier === 'EXPERIMENTAL', `help tier: ${out.tier}`)
   assert(out.decision_date === '2026-10-08', `decision_date: ${out.decision_date}`)
   assert(/EXPERIMENTAL/.test(out.usage), 'usage text must carry EXPERIMENTAL')
+  assert(/legacy promoted:<sha8> rows remain read-only-compatible/.test(out.usage), 'help must state the bounded legacy read contract')
 })
 
 t('testPromoteIsSubstrateScript', () => {

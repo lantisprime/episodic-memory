@@ -16,30 +16,29 @@
  * episodes; clusters them by token-set Jaccard (episodeTokens over
  * summary+tags+body — the same vocabulary em-consolidate uses); a cluster is
  * a promotion candidate only when it spans >=2 DISTINCT project stores with
- * >=2 distinct member identities. Replicas (same id AND same summary in
+ * >=2 distinct member identities. Replicas (same id AND same normalized file bytes in
  * multiple stores — clone/fork stores) collapse to one member and are NOT
- * recurrence by themselves; a coincident id with DIFFERENT content stays two
+ * recurrence by themselves; a coincident id with DIFFERENT bytes stays two
  * distinct members (episode ids are not proven globally unique across
  * independent stores).
  *
- * Idempotency keys on SOURCE IDENTITY, never similarity (a digest is a token
- * superset of its members, so similarity dilutes as clusters grow): each
- * member's key is `<id>#<sha8(summary)>` (stable — episode files are
- * immutable; revisions mint new ids), and the candidate hash is
- * sha8 over the newline-joined sorted key list, carried as a `promoted:<sha8>`
- * tag on the written episode. A candidate whose hash tag already exists on an
- * ACTIVE global episode is skipped (`already-promoted`). A grown cluster
- * (strict superset of an already-promoted member set) promotes under its new
- * hash with a `Supersedes-promotion:` back-reference in its Sources.
+ * Idempotency keys on typed SOURCE IDENTITY, never similarity (a digest is a
+ * token superset of its members, so similarity dilutes as clusters grow).
+ * Members bind `<episode_id>#<content_sha256>` and candidates bind the sorted
+ * canonical SourceRefs written in `promotion_sources`. A matching ACTIVE
+ * global typed promotion is skipped (`already-promoted`). A grown cluster
+ * promotes with a `Supersedes-promotion:` human-readable back-reference.
  *
- * Drift detection: existing active `promoted-lesson` episodes with a
- * malformed hash tag or an absent/malformed `## Sources` section are reported
- * in `warnings` (correction flows through em-revise; never blocks).
+ * Legacy active promotions remain read-compatible: an unambiguous candidate
+ * retains the old sorted `<id>#<sha8(summary)>` hash for exact idempotency,
+ * while final `## Sources` bare ids support fail-safe strict-superset backrefs.
+ * Typed identity remains authoritative for every new write. Malformed legacy
+ * rows surface warnings and never block.
  *
- * Candidate ordering is deterministic: sorted by promoted-hash ascending.
+ * Candidate ordering is deterministic: sorted by typed SourceRef hash.
  *
  * Outputs JSON: { status, dry_run, min_sim, candidates|promoted, skipped,
- * warnings, note? }. Exit 0; exit 1 when an --apply spawn failed; exit 2 on
+ * warnings, missing_sources, note? }. Exit 0; exit 1 when an --apply spawn failed; exit 2 on
  * usage errors.
  */
 
@@ -52,6 +51,7 @@ import { fileURLToPath } from 'url'
 import { loadIndex, episodeTokens, normalizeTags } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import { resolveRegisteredStores } from './lib/registered-stores.mjs'
+import { canonicalizePromotionSources, computeContentSha256, resolveSourceRefs, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -70,7 +70,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
     script: 'em-promote.mjs',
     tier: 'EXPERIMENTAL',
     decision_date: PROMOTE_DECISION_DATE,
-    usage: `node em-promote.mjs [--min-sim <0..1>] [--apply] — EXPERIMENTAL (promote-or-remove decision ${PROMOTE_DECISION_DATE}): detect lessons recurring across >=2 consumer-registry project stores; dry-run by default; --apply writes ONE global lesson episode per recurrence (tags ${PROMOTED_TAG} + ${PROMOTED_HASH_TAG_PREFIX}<sha8>, body carries a ## Sources section); source stores are never written`,
+    usage: `node em-promote.mjs [--min-sim <0..1>] [--apply] — EXPERIMENTAL (promote-or-remove decision ${PROMOTE_DECISION_DATE}): detect lessons recurring across >=2 consumer-registry project stores; dry-run by default; --apply writes ONE global lesson episode per recurrence (tag ${PROMOTED_TAG}, typed promotion_sources provenance, and a human-readable ## Sources section); legacy promoted:<sha8> rows remain read-only-compatible; source stores are never written`,
   }))
   process.exit(0)
 }
@@ -110,27 +110,39 @@ function jaccard(a, b) {
 // Gather candidate members from every registered store (read-only).
 // ---------------------------------------------------------------------------
 const stores = resolveRegisteredStores()
-if (stores.length < 2) {
-  console.log(JSON.stringify({ status: 'ok', dry_run: !apply, min_sim: minSim, candidates: [], skipped: [], warnings: [], note: 'needs >=2 registered stores (consumer registry lists ' + stores.length + ')' }))
-  process.exit(0)
-}
+const insufficientStores = stores.length < 2
 
-// memberKey `<id>#<sha8(summary)>` collapses replicas (same id + same summary)
-// while keeping coincident-id-different-content rows distinct.
+const warnings = []
+const missingSources = []
+
+// Member identity binds the immutable episode bytes. Replicas collapse only
+// when id and normalized-byte content hash both match.
 const byKey = new Map() // key -> {id, summary, project, tags, tokens, stores: Set, storeShown: string}
 for (const st of stores) {
+  if (typeof st.store_id !== 'string') {
+    warnings.push({ store: st.label, problem: `store identity unavailable${st.store_identity_error ? `: ${st.store_identity_error}` : ''}` })
+    continue
+  }
   const rows = loadIndex(st.data_dir, st.label)
   for (const r of rows) {
     if (r.status === 'superseded') continue
     if (typeof r.id !== 'string' || typeof r.summary !== 'string') continue
     if (canonicalCategory(r.category) !== 'lesson') continue
-    const key = `${r.id}#${sha8(r.summary)}`
-    if (byKey.has(key)) {
-      byKey.get(key).stores.add(st.data_dir)
+    let content
+    try { content = fs.readFileSync(path.join(st.data_dir, 'episodes', `${r.id}.md`)) } catch {
+      warnings.push({ episode: r.id, store: st.label, problem: 'episode file missing' })
       continue
     }
-    let body = ''
-    try { body = bodyOf(fs.readFileSync(path.join(st.data_dir, 'episodes', `${r.id}.md`), 'utf8')) } catch {}
+    const contentSha256 = computeContentSha256(content)
+    const key = `${r.id}#${contentSha256}`
+    const source = { store_id: st.store_id, episode_id: r.id, content_sha256: contentSha256 }
+    if (byKey.has(key)) {
+      const member = byKey.get(key)
+      member.stores.add(st.data_dir)
+      member.sources.push(source)
+      continue
+    }
+    const body = bodyOf(content.toString('utf8'))
     byKey.set(key, {
       key,
       id: r.id,
@@ -140,6 +152,7 @@ for (const st of stores) {
       body,
       tokens: episodeTokens({ summary: r.summary, tags: r.tags, body }),
       stores: new Set([st.data_dir]),
+      sources: [source],
     })
   }
 }
@@ -190,11 +203,16 @@ for (const cluster of byRoot.values()) {
   if (!independent) continue
   const storeUnion = new Set(cluster.flatMap(m => [...m.stores]))
   cluster.sort((a, b) => a.id.localeCompare(b.id) || a.key.localeCompare(b.key))
-  const keys = cluster.map(m => m.key).sort()
+  const promotionSources = canonicalizePromotionSources(cluster.flatMap(m => m.sources))
+  // Transition-only compatibility identity: this is exactly the pre-S2
+  // candidate hash input. New writes never serialize it as a tag.
+  const legacyKeys = [...new Set(cluster.map(m => `${m.id}#${sha8(m.summary)}`))].sort()
   candidates.push({
-    hash: sha8(keys.join('\n')),
+    hash: sha8(serializePromotionSources(promotionSources)),
+    legacy_hash: sha8(legacyKeys.join('\n')),
     members: cluster,
     store_dirs: [...storeUnion].sort(),
+    promotion_sources: promotionSources,
   })
 }
 candidates.sort((a, b) => a.hash.localeCompare(b.hash))
@@ -205,12 +223,21 @@ candidates.sort((a, b) => a.hash.localeCompare(b.hash))
 const HASH_TAG_RE = /^promoted:[0-9a-f]{8}$/
 const globalRows = loadIndex(GLOBAL_DIR, 'global')
 const existingByHashTag = new Map() // 'promoted:<sha8>' -> episode id
-const existingSourceSets = []       // {id, ids: Set<member episode id>}
-const warnings = []
+const existingSourceSets = []       // {id, representation:'typed'|'legacy', ids:Set<string>}
 for (const r of globalRows) {
   if (r.status === 'superseded') continue
   const tags = Array.isArray(r.tags) ? r.tags.map(String) : []
   if (!tags.includes(PROMOTED_TAG)) continue
+  const typed = validatePromotionSources(r.promotion_sources)
+  if (typed.ok) {
+    const canonical = canonicalizePromotionSources(r.promotion_sources)
+    existingByHashTag.set(`typed:${serializePromotionSources(canonical)}`, r.id)
+    const resolution = resolveSourceRefs(canonical, stores)
+    missingSources.push(...resolution.missing)
+    existingSourceSets.push({ id: r.id, representation: 'typed', ids: new Set(canonical.map(s => `${s.episode_id}#${s.content_sha256}`)) })
+    continue
+  }
+  if (r.promotion_sources !== undefined) warnings.push({ episode: r.id, problem: `invalid promotion_sources: ${typed.error}` })
   const hashTags = tags.filter(t => t.startsWith(PROMOTED_HASH_TAG_PREFIX))
   for (const ht of hashTags) {
     if (HASH_TAG_RE.test(ht)) existingByHashTag.set(ht, r.id)
@@ -239,25 +266,44 @@ for (const r of globalRows) {
   }
   const srcSection = segments[segments.length - 1]
   const ids = new Set()
-  for (const m of srcSection.matchAll(/^- (\S+) \(/gm)) ids.add(m[1])
+  let ambiguous = false
+  for (const m of srcSection.matchAll(/^- (\S+) \(/gm)) {
+    if (ids.has(m[1])) ambiguous = true
+    ids.add(m[1])
+  }
   if (ids.size === 0) warnings.push({ episode: r.id, problem: 'empty/malformed ## Sources list' })
-  else existingSourceSets.push({ id: r.id, ids })
+  else existingSourceSets.push({ id: r.id, representation: 'legacy', ids, ambiguous })
 }
 
 const fresh = []
 const skipped = []
 for (const c of candidates) {
-  const tag = `${PROMOTED_HASH_TAG_PREFIX}${c.hash}`
-  const existing = existingByHashTag.get(tag)
-  if (existing) {
-    skipped.push({ hash: c.hash, reason: 'already-promoted', existing })
+  const typedKey = `typed:${serializePromotionSources(c.promotion_sources)}`
+  const typedExisting = existingByHashTag.get(typedKey)
+  if (typedExisting) {
+    skipped.push({ hash: c.hash, reason: 'already-promoted', existing: typedExisting })
     continue
   }
   // Strict-superset of an already-promoted member set → defined disposition:
-  // promote under the new hash, back-referencing the prior digest.
-  const memberIds = new Set(c.members.map(m => m.id))
-  const prior = existingSourceSets.find(s =>
-    s.ids.size < memberIds.size && [...s.ids].every(id => memberIds.has(id)))
+  // promote under the new typed hash, back-referencing the prior digest.
+  const typedMemberIds = new Set(c.members.map(m => m.key))
+  const bareMemberIds = new Set(c.members.map(m => m.id))
+  // A bare legacy id cannot distinguish two independent same-id contents.
+  // In that shape the weaker representation may neither suppress a typed
+  // write nor fabricate a superset relationship.
+  const legacyAmbiguous = bareMemberIds.size !== typedMemberIds.size
+  if (!legacyAmbiguous) {
+    const legacyExisting = existingByHashTag.get(`${PROMOTED_HASH_TAG_PREFIX}${c.legacy_hash}`)
+    if (legacyExisting) {
+      skipped.push({ hash: c.hash, reason: 'already-promoted', existing: legacyExisting })
+      continue
+    }
+  }
+  const prior = existingSourceSets.find(s => {
+    const candidateIds = s.representation === 'typed' ? typedMemberIds : bareMemberIds
+    if (s.representation === 'legacy' && (legacyAmbiguous || s.ambiguous)) return false
+    return s.ids.size < candidateIds.size && [...s.ids].every(id => candidateIds.has(id))
+  })
   if (prior) c.supersedes_promotion = prior.id
   fresh.push(c)
 }
@@ -267,12 +313,13 @@ function candidateReport(c) {
     hash: c.hash,
     stores: c.store_dirs,
     ...(c.supersedes_promotion ? { supersedes_promotion: c.supersedes_promotion } : {}),
+    promotion_sources: c.promotion_sources,
     members: c.members.map(m => ({ id: m.id, project: m.project, summary: m.summary, stores: [...m.stores].sort() })),
   }
 }
 
 if (!apply) {
-  console.log(JSON.stringify({ status: 'ok', dry_run: true, min_sim: minSim, candidates: fresh.map(candidateReport), skipped, warnings }))
+  console.log(JSON.stringify({ status: 'ok', dry_run: true, min_sim: minSim, candidates: fresh.map(candidateReport), skipped, warnings, missing_sources: missingSources, ...(insufficientStores ? { note: 'needs >=2 registered stores (consumer registry lists ' + stores.length + ')' } : {}) }))
   process.exit(0)
 }
 
@@ -293,12 +340,10 @@ for (const c of fresh) {
   const newest = c.members[c.members.length - 1]
   const summary = `Recurring lesson: ${newest.summary}`
   // Reviewer F3: member tags are untrusted for the IDENTITY axis — a stray
-  // promoted:* member tag unioned onto the digest would enter the dedupe set
-  // and silently skip a future legitimate candidate. Only OUR hash tag rides.
+  // promoted:* member tags are legacy identity and never ride a new digest.
   const tags = normalizeTags([
     ...c.members.flatMap(m => m.tags).filter(t => !String(t).startsWith(PROMOTED_HASH_TAG_PREFIX) && String(t) !== PROMOTED_TAG),
     PROMOTED_TAG,
-    `${PROMOTED_HASH_TAG_PREFIX}${c.hash}`,
   ])
   // Reviewer F2 (write side): excerpts and summaries are untrusted markdown —
   // quote any heading line so member text can never mint a section marker
@@ -320,11 +365,12 @@ for (const c of fresh) {
   const r = spawnSync(process.execPath, [
     EM_STORE,
     '--scope', 'global',
-    '--project', 'cross-project',
+    '--project', newest.project,
     '--category', 'lesson',
     '--tags', tags.join(','),
     '--summary', summary,
     '--body-file', bodyFile,
+    '--promotion-sources-json', serializePromotionSources(c.promotion_sources),
   ], { cwd: GLOBAL_DIR, encoding: 'utf8' })
   let child = null
   try { child = JSON.parse(r.stdout) } catch {}
@@ -337,5 +383,5 @@ for (const c of fresh) {
 }
 try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
 
-console.log(JSON.stringify({ status: 'ok', dry_run: false, min_sim: minSim, promoted, skipped, warnings }))
+console.log(JSON.stringify({ status: 'ok', dry_run: false, min_sim: minSim, promoted, skipped, warnings, missing_sources: missingSources, ...(insufficientStores ? { note: 'needs >=2 registered stores (consumer registry lists ' + stores.length + ')' } : {}) }))
 process.exit(anyFailure ? 1 : 0)
