@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/learning/descriptor.schema.json",
+  "title": "Learning-strategy descriptor meta-schema (RFC-012 R2/R12, P2-S3)",
+  "description": "Closed schema for the per-capability descriptor instance files under learning/<id>.json (RFC-012 P2 REQ-13). Each capability descriptor points at a runtime IO schema (learning-io.schema.json), the owning module (scripts/em-<name>.mjs), and the conformance gauntlet (tests/test-<name>.mjs). The activation.mode 'on-demand' const enforces the RFC-012:71 never-at-build/event-time contract as a schema invariant. No directory/harness/capabilities/manifest fields: the slot carries no directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type", "id", "version", "module", "io_schema", "gauntlet", "tier",
+    "experimental", "decision_date", "activation", "side_effects", "summary"
+  ],
+  "properties": {
+    "type": { "const": "learning" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]+$" },
+    "version": { "$ref": "#/$defs/semver" },
+    "module": { "type": "string", "pattern": "^scripts/em-[a-z0-9-]+\\.mjs$" },
+    "io_schema": { "const": "schemas/runtime/learning-io.schema.json" },
+    "gauntlet": { "type": "string", "pattern": "^tests/test-[a-z0-9-]+\\.mjs$" },
+    "tier": { "type": "string", "enum": ["STRONG", "MEDIUM", "WEAK"] },
+    "experimental": { "type": "boolean" },
+    "decision_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "const": "on-demand" }
+      }
+    },
+    "side_effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["writes", "confirm_gated"],
+      "properties": {
+        "writes": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["global-episodes"] }
+        },
+        "confirm_gated": { "type": "boolean" }
+      }
+    },
+    "summary": { "type": "string" }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    }
+  }
+}

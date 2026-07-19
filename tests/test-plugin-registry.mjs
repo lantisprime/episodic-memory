@@ -48,6 +48,7 @@ const CONTEXT_FILES = [
   "plugins/installed-state.schema.json", "schemas/runtime/structured-alert.schema.json",
   "schemas/runbook-agent-manifest.schema.json", // M7e context schema (P1c)
   "plugins/activation-manifest.schema.json", // RFC-009 P2-S2 activation sub-gauntlet context schema
+  "learning/descriptor.schema.json", // RFC-012 P2-S3 learning descriptor context schema
   "patterns/taxonomy.json", "patterns/events.json", "plugins/bypass_known.json",
 ];
 
@@ -456,6 +457,12 @@ function buildLiveProject() {
     "plugins/codex-activation/hooks/json-instance-validate.mjs",
     // A-io-schema reads the manifest's io_schema off disk.
     "schemas/runtime/activation-io.schema.json",
+    // RFC-012 P2-S3: the learning entry's descriptor + its L-path targets must be
+    // on disk too, else L2/L-path fire (descriptor unreadable / path missing).
+    "learning/em-promote.json",
+    "schemas/runtime/learning-io.schema.json",
+    "scripts/em-promote.mjs",
+    "tests/test-em-promote.mjs",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {

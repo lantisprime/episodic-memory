@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "plugins": [
     {
       "type": "enforcement",
@@ -79,6 +79,14 @@
         "session_start": "MEDIUM"
       },
       "manifest": "plugins/codex-activation/manifest.json",
+      "status": "active"
+    },
+    {
+      "type": "learning",
+      "id": "em-promote",
+      "version": "1.0.0",
+      "module": "scripts/em-promote.mjs",
+      "descriptor": "learning/em-promote.json",
       "status": "active"
     }
   ]

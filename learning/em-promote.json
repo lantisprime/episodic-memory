@@ -1,0 +1,14 @@
+{
+  "type": "learning",
+  "id": "em-promote",
+  "version": "1.0.0",
+  "module": "scripts/em-promote.mjs",
+  "io_schema": "schemas/runtime/learning-io.schema.json",
+  "gauntlet": "tests/test-em-promote.mjs",
+  "tier": "WEAK",
+  "experimental": true,
+  "decision_date": "2026-10-08",
+  "activation": { "mode": "on-demand" },
+  "side_effects": { "writes": ["global-episodes"], "confirm_gated": false },
+  "summary": "Cross-store recurring-lesson promotion (RFC-012 R2). EXPERIMENTAL under the charter 2026-10-08 promote-or-remove rule: dry-run proposes derived global lessons from typed promotion_sources provenance; --apply writes one global episode per fresh candidate via em-store (per-candidate fingerprint confirm ships in P2-S4, REQ-16)."
+}
