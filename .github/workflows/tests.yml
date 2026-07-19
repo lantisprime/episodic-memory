@@ -1,10 +1,24 @@
-name: Plan-marker enforcement validation
+name: Tests
 
+# The repo's full test gauntlet (formerly "Plan-marker enforcement validation";
+# renamed 2026-07-19 — the workflow had grown far beyond enforcement).
+#
 # #268 fix F16: this workflow runs on EVERY PR/push (no `paths:` filter)
 # because the validator's job is to DETECT new unregistered enforcement
 # sites. A paths-filtered workflow can't catch sites added in files
 # outside the filter — the same class as plan v6's own call-site-closure
 # lesson, just moved to workflow triggering (codex r1 F5).
+#
+# Sharding (2026-07-19): the single sequential validate job took ~6min of
+# wall clock; total step time is ~370s with two dominant suites (clerk
+# report 72s, checkpoint-gate 40s). The suites now run in four parallel
+# shard jobs balanced by measured step time (~80-95s each), and `validate`
+# is a fan-in job that fails unless every shard succeeded. Branch
+# protection keeps requiring `validate` + `p12-invariant-gate` — the
+# fan-in preserves the required-check name, so no protection-rule change.
+# Suite wiring stays bare `run: node|bash tests/<file>` steps per the
+# test-ci-suite-registration.mjs contract; which shard a suite lives in is
+# free choice, the lint only requires it be wired in SOME job's steps.
 
 on:
   pull_request:
@@ -12,7 +26,7 @@ on:
     branches: [main]
 
 jobs:
-  validate:
+  gates-classifiers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,27 +50,6 @@ jobs:
       - name: Run checkpoints-migration regression (verifies F12 + legacy preserved)
         run: node tests/test-checkpoints-migration.mjs
 
-      - name: Run em-recall session-start orphan-sweep regression
-        run: node tests/test-em-recall-session-start-early-exit.mjs
-
-      - name: Run em-recall plan-marker sweep regression (2026-05-18 concurrent-session fix)
-        run: node tests/test-em-recall-plan-marker-sweep.mjs
-
-      - name: Run em-recall force-monotonic baseline regression (2026-05-18 orphan-deadlock fix)
-        run: node tests/test-em-recall-baseline-monotonic.mjs
-
-      - name: Run session-start repo-root/worktree resolution regression (#106)
-        run: node tests/test-em-repo-root-worktree.mjs
-
-      - name: Run bp-001 per-project arming regression (advisory, RFC-008 P3d)
-        run: node tests/test-bp001-per-project-arming.mjs
-
-      - name: Run em-recall-sessionstart hook-wrapper integration (cwd + stdin sid binding)
-        run: bash tests/test-em-recall-sessionstart-hook-binding.sh
-
-      - name: Run em-recall-sessionstart hook regression (incl. F1 freshness-probe layout fix)
-        run: bash tests/test-em-recall-sessionstart.sh
-
       - name: Run preflight-marker reapers (F4 SessionEnd reap + SessionStart 7d orphan sweep)
         run: node tests/test-preflight-marker-reapers.mjs
 
@@ -68,9 +61,6 @@ jobs:
 
       - name: Run no-legacy-plan-marker-writes detector (Rule 13)
         run: node tests/test-no-legacy-plan-marker-writes.mjs
-
-      - name: Run em-strict-lstat regression
-        run: node tests/test-em-strict-lstat.mjs
 
       - name: Run marker-state carve-out unit tests (incl. #268 cross-session foreign-sid exclusion)
         run: node tests/test-marker-state.mjs
@@ -105,12 +95,6 @@ jobs:
       - name: Run plan-gate regression (incl. P4a/P4d session_id fail-closed guard)
         run: bash tests/test-plan-gate.sh
 
-      - name: Run install-hooks regression (incl. PR-B orphan sweep + manifest count)
-        run: bash tests/test-install-hooks.sh
-
-      - name: Run install dedup regression (RFC-008 P4d double-registration prune)
-        run: node tests/test-install-dedup.mjs
-
       - name: Run stop-gate regression
         run: bash tests/test-stop-gate.sh
 
@@ -132,6 +116,45 @@ jobs:
       - name: Run enforce-contract --session-start side-effects relocation (RFC-008 P3d)
         run: node tests/test-enforce-contract-session-start.mjs
 
+      - name: Run enforce-config loader + clamp integration (RFC-008 P3b-2, R5/P4)
+        run: node tests/test-enforce-config.mjs
+
+  recall-activation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run em-recall session-start orphan-sweep regression
+        run: node tests/test-em-recall-session-start-early-exit.mjs
+
+      - name: Run em-recall plan-marker sweep regression (2026-05-18 concurrent-session fix)
+        run: node tests/test-em-recall-plan-marker-sweep.mjs
+
+      - name: Run em-recall force-monotonic baseline regression (2026-05-18 orphan-deadlock fix)
+        run: node tests/test-em-recall-baseline-monotonic.mjs
+
+      - name: Run session-start repo-root/worktree resolution regression (#106)
+        run: node tests/test-em-repo-root-worktree.mjs
+
+      - name: Run bp-001 per-project arming regression (advisory, RFC-008 P3d)
+        run: node tests/test-bp001-per-project-arming.mjs
+
+      - name: Run em-recall-sessionstart hook-wrapper integration (cwd + stdin sid binding)
+        run: bash tests/test-em-recall-sessionstart-hook-binding.sh
+
+      - name: Run em-recall-sessionstart hook regression (incl. F1 freshness-probe layout fix)
+        run: bash tests/test-em-recall-sessionstart.sh
+
+      - name: Run install-hooks regression (incl. PR-B orphan sweep + manifest count)
+        run: bash tests/test-install-hooks.sh
+
+      - name: Run install dedup regression (RFC-008 P4d double-registration prune)
+        run: node tests/test-install-dedup.mjs
+
       - name: Run bp-001 advisory lib regression (RFC-008 P3d, F7)
         run: node tests/test-bp001-advisory.mjs
 
@@ -140,9 +163,6 @@ jobs:
 
       - name: Run install-time em-recall purity sentinel (RFC-008 P3d, F45)
         run: node tests/test-install-em-recall-purified.mjs
-
-      - name: Run enforce-config loader + clamp integration (RFC-008 P3b-2, R5/P4)
-        run: node tests/test-enforce-config.mjs
 
       - name: Run install-runtime contract-set deploy coupling (RFC-008 P3b-2, §10)
         run: node tests/test-install-contract-deploy.mjs
@@ -170,124 +190,6 @@ jobs:
 
       - name: Run scripts-subtree deploy + completeness suite (#531 — fail-closed classification, UNDEPLOYED audit)
         run: node tests/test-install-scripts-subtrees.mjs
-
-      - name: Run preflight-gate regression tests
-        run: bash tests/test-preflight-gate.sh
-
-      - name: Run preflight-prompt-helper regression tests
-        run: bash tests/test-preflight-prompt-helper.sh
-
-      - name: Run RFC-009 P0 hermetic pattern-health tests
-        run: node tests/test-pattern-health-hermetic.mjs
-
-      - name: Run RFC-009 P0 prune-protection tests
-        run: node tests/test-prune-protection.mjs
-
-      - name: Validate schemas (RFC-009 P1a — categories.schema.json discovered + MIN_SCHEMA_DOCS floor)
-        run: node scripts/validate-schemas.mjs --project "$PWD"
-
-      - name: Run RFC-009 P1a categories lib + schema tests
-        run: node tests/test-categories-lib.mjs
-
-      - name: Run RFC-009 P1a strict write-surface tests (store/revise/restore matrix)
-        run: node tests/test-category-write.mjs
-
-      - name: Run RFC-009 P1a category-index + --check drift tests
-        run: node tests/test-category-index.mjs
-
-      - name: Run RFC-009 P1a read-surface tolerance + index-backed --category tests
-        run: node tests/test-category-search.mjs
-
-      - name: Run RFC-009 P1a --history multi-parent walk tests
-        run: node tests/test-history-walk.mjs
-
-      - name: Run RFC-009 P1a per-category prune lifecycle tests
-        run: node tests/test-prune-lifecycle.mjs
-
-      - name: Run RFC-009 P1a categories.json global-deploy mock E2E
-        run: node tests/test-install-categories.mjs
-
-      - name: Run issue #469 prototype-key-collision regression tests
-        run: node tests/test-prototype-key-collision.mjs
-
-      - name: Run recall-v2 token-index suite (tokens.json write/read parity)
-        run: node tests/test-recall-v2.mjs
-
-      # Wave 1-6 suites (PRs #464-#468): previously local-only; registered here
-      # per docs/plans/PLAN-session-auto-capture.md convention 8 (CI runs
-      # explicitly listed test files — unlisted suites silently never run).
-      - name: Run relevance suite (wave 1)
-        run: node tests/test-relevance.mjs
-
-      - name: Run em-move suite (RFC-005)
-        run: node tests/test-em-move.mjs
-
-      - name: Run em-stats + semantic recall suite
-        run: node tests/test-em-stats-semantic.mjs
-
-      - name: Run em-consolidate suite
-        run: node tests/test-em-consolidate.mjs
-
-      - name: Run embedder-presets suite
-        run: node tests/test-embedder-presets.mjs
-
-      - name: Run em-routines suite
-        run: node tests/test-em-routines.mjs
-
-      - name: Run em-graph suite (RFC-007 core + wave-6 hardening)
-        run: node tests/test-em-graph.mjs
-
-      - name: Run em-doctor suite
-        run: node tests/test-em-doctor.mjs
-
-      - name: Run em CLI dispatcher suite
-        run: node tests/test-em-cli.mjs
-
-      - name: Run install-wizard suite
-        run: node tests/test-install-wizard.mjs
-
-      - name: Guard against raw control bytes in tracked source (wave-6 hardening)
-        run: node tests/test-no-raw-control-bytes.mjs
-
-      - name: Run em-capture session auto-capture suite (wave-6 second deliverable)
-        run: node tests/test-em-capture.mjs
-
-      - name: Run tokens.json df-diet suite (S2)
-        run: node tests/test-tokens-diet.mjs
-
-      - name: Run em-feedback --scan-text suite (S3)
-        run: node tests/test-feedback-scan.mjs
-
-      - name: Run em-consolidate fold-superseded suite (S4)
-        run: node tests/test-fold-superseded.mjs
-
-      - name: Run registered-stores lib suite (APC-S1)
-        run: node tests/test-registered-stores.mjs
-
-      - name: Run all-projects stats+doctor observability suite (APC-S2/S3)
-        run: node tests/test-all-projects-observability.mjs
-
-      - name: Run fold --all-projects suite (APC-S4)
-        run: node tests/test-fold-all-projects.mjs
-
-      - name: Run em-promote experimental suite (APC-S5)
-        run: node tests/test-em-promote.mjs
-      - name: Run store-identity suite (RFC-012 P2 S1)
-        run: node tests/test-store-identity.mjs
-      - name: Run promotion-sources suite (RFC-012 P2 S2)
-        run: node tests/test-promotion-sources.mjs
-
-      - name: Run em-console web console suite
-        run: node tests/test-em-console.mjs
-
-      - name: Run em-manage wizard suite
-        run: node tests/test-em-manage.mjs
-
-      - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
-        run: node tests/test-install-manifest.mjs
-
-      - name: Run SessionStart drift-notice + opt-in auto-update suite (Layer 1)
-        run: node tests/test-install-drift-notice.mjs
 
       - name: Run activation lib + activity-class vocab suite (RFC-009 P1b S1)
         run: node tests/test-activation-lib.mjs
@@ -346,6 +248,30 @@ jobs:
       - name: Run activation-match core conformance suite (#504)
         run: node tests/test-activation-match.mjs
 
+      - name: Run uninstall-activation round-trip suite (#504)
+        run: node tests/test-uninstall-activation.mjs
+
+  clerk-consolidation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run RFC-009 P0 hermetic pattern-health tests
+        run: node tests/test-pattern-health-hermetic.mjs
+
+      - name: Run RFC-009 P0 prune-protection tests
+        run: node tests/test-prune-protection.mjs
+
+      - name: Run em-consolidate suite
+        run: node tests/test-em-consolidate.mjs
+
+      - name: Run em-consolidate fold-superseded suite (S4)
+        run: node tests/test-fold-superseded.mjs
+
       - name: Run RFC-009 P4-S1 telemetry suite (#505 / REQ-22)
         run: node tests/test-rfc-009-p4-telemetry.mjs
 
@@ -364,8 +290,123 @@ jobs:
       - name: Run RFC-009 P4-S7 clerk prompt conformance (REQ-15)
         run: node tests/test-rfc-009-p4-prompt.mjs
 
-      - name: Run uninstall-activation round-trip suite (#504)
-        run: node tests/test-uninstall-activation.mjs
+  substrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run em-strict-lstat regression
+        run: node tests/test-em-strict-lstat.mjs
+
+      - name: Run preflight-gate regression tests
+        run: bash tests/test-preflight-gate.sh
+
+      - name: Run preflight-prompt-helper regression tests
+        run: bash tests/test-preflight-prompt-helper.sh
+
+      - name: Validate schemas (RFC-009 P1a — categories.schema.json discovered + MIN_SCHEMA_DOCS floor)
+        run: node scripts/validate-schemas.mjs --project "$PWD"
+
+      - name: Run RFC-009 P1a categories lib + schema tests
+        run: node tests/test-categories-lib.mjs
+
+      - name: Run RFC-009 P1a strict write-surface tests (store/revise/restore matrix)
+        run: node tests/test-category-write.mjs
+
+      - name: Run RFC-009 P1a category-index + --check drift tests
+        run: node tests/test-category-index.mjs
+
+      - name: Run RFC-009 P1a read-surface tolerance + index-backed --category tests
+        run: node tests/test-category-search.mjs
+
+      - name: Run RFC-009 P1a --history multi-parent walk tests
+        run: node tests/test-history-walk.mjs
+
+      - name: Run RFC-009 P1a per-category prune lifecycle tests
+        run: node tests/test-prune-lifecycle.mjs
+
+      - name: Run RFC-009 P1a categories.json global-deploy mock E2E
+        run: node tests/test-install-categories.mjs
+
+      - name: Run issue #469 prototype-key-collision regression tests
+        run: node tests/test-prototype-key-collision.mjs
+
+      - name: Run recall-v2 token-index suite (tokens.json write/read parity)
+        run: node tests/test-recall-v2.mjs
+
+      # Wave 1-6 suites (PRs #464-#468): previously local-only; registered here
+      # per docs/plans/PLAN-session-auto-capture.md convention 8 (CI runs
+      # explicitly listed test files — unlisted suites silently never run).
+      - name: Run relevance suite (wave 1)
+        run: node tests/test-relevance.mjs
+
+      - name: Run em-move suite (RFC-005)
+        run: node tests/test-em-move.mjs
+
+      - name: Run em-stats + semantic recall suite
+        run: node tests/test-em-stats-semantic.mjs
+
+      - name: Run embedder-presets suite
+        run: node tests/test-embedder-presets.mjs
+
+      - name: Run em-routines suite
+        run: node tests/test-em-routines.mjs
+
+      - name: Run em-graph suite (RFC-007 core + wave-6 hardening)
+        run: node tests/test-em-graph.mjs
+
+      - name: Run em-doctor suite
+        run: node tests/test-em-doctor.mjs
+
+      - name: Run em CLI dispatcher suite
+        run: node tests/test-em-cli.mjs
+
+      - name: Run install-wizard suite
+        run: node tests/test-install-wizard.mjs
+
+      - name: Guard against raw control bytes in tracked source (wave-6 hardening)
+        run: node tests/test-no-raw-control-bytes.mjs
+
+      - name: Run em-capture session auto-capture suite (wave-6 second deliverable)
+        run: node tests/test-em-capture.mjs
+
+      - name: Run tokens.json df-diet suite (S2)
+        run: node tests/test-tokens-diet.mjs
+
+      - name: Run em-feedback --scan-text suite (S3)
+        run: node tests/test-feedback-scan.mjs
+
+      - name: Run registered-stores lib suite (APC-S1)
+        run: node tests/test-registered-stores.mjs
+
+      - name: Run all-projects stats+doctor observability suite (APC-S2/S3)
+        run: node tests/test-all-projects-observability.mjs
+
+      - name: Run fold --all-projects suite (APC-S4)
+        run: node tests/test-fold-all-projects.mjs
+
+      - name: Run em-promote experimental suite (APC-S5)
+        run: node tests/test-em-promote.mjs
+      - name: Run store-identity suite (RFC-012 P2 S1)
+        run: node tests/test-store-identity.mjs
+      - name: Run promotion-sources suite (RFC-012 P2 S2)
+        run: node tests/test-promotion-sources.mjs
+
+      - name: Run em-console web console suite
+        run: node tests/test-em-console.mjs
+
+      - name: Run em-manage wizard suite
+        run: node tests/test-em-manage.mjs
+
+      - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
+        run: node tests/test-install-manifest.mjs
+
+      - name: Run SessionStart drift-notice + opt-in auto-update suite (Layer 1)
+        run: node tests/test-install-drift-notice.mjs
 
       # #504 class closure: every top-level tests/test-*.{mjs,sh} must be
       # referenced by a workflow, run by the P12 meta-runner, or listed in the
@@ -373,6 +414,18 @@ jobs:
       # not wired anywhere fails this step instead of silently never running.
       - name: Lint CI suite registration (#504 — class-closing, shrink-only baseline)
         run: node tests/test-ci-suite-registration.mjs
+
+  # Fan-in for branch protection: the required check stays named `validate`
+  # (same as before the 2026-07-19 sharding), so the protection rule needs no
+  # change. `if: always()` so a failed shard yields a FAILED validate check
+  # instead of a skipped job leaving the required check forever pending.
+  validate:
+    needs: [gates-classifiers, recall-activation, clerk-consolidation, substrate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every shard green
+        run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "false"
 
   p12-invariant-gate:
     # RFC-008 P4d S8 (REQ-10 / REQ-11): the three Principle-12 invariants as ONE
