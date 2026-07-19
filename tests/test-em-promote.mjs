@@ -464,7 +464,7 @@ const CONTEXT_FILES = [
   'plugins/_index.schema.json', 'plugins/manifest.schema.json', 'plugins/bypass_known.schema.json',
   'plugins/installed-state.schema.json', 'schemas/runtime/structured-alert.schema.json',
   'schemas/runbook-agent-manifest.schema.json', 'plugins/activation-manifest.schema.json',
-  'learning/descriptor.schema.json', 'learning/em-promote.json',
+  'plugins/learning-descriptor.schema.json', 'learning/em-promote.json',
   'patterns/taxonomy.json', 'patterns/events.json', 'plugins/bypass_known.json',
   'plugins/_index.json', 'schemas/runtime/learning-io.schema.json',
   'scripts/em-promote.mjs', 'tests/test-em-promote.mjs',

@@ -48,7 +48,7 @@ const CONTEXT_FILES = [
   "plugins/installed-state.schema.json", "schemas/runtime/structured-alert.schema.json",
   "schemas/runbook-agent-manifest.schema.json", // M7e context schema (P1c)
   "plugins/activation-manifest.schema.json", // RFC-009 P2-S2 activation sub-gauntlet context schema
-  "learning/descriptor.schema.json", // RFC-012 P2-S3 learning descriptor context schema
+  "plugins/learning-descriptor.schema.json", // RFC-012 P2-S3 learning descriptor context schema
   "patterns/taxonomy.json", "patterns/events.json", "plugins/bypass_known.json",
 ];
 

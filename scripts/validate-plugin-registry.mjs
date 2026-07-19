@@ -143,7 +143,7 @@ function loadContext(root, readJson, bypassKnownPath) {
     structured_alert: readJson(path.join(root, "schemas/runtime/structured-alert.schema.json")),
     runbook_agent_manifest: readJson(path.join(root, "schemas/runbook-agent-manifest.schema.json")),
     activation_manifest: readJson(path.join(root, "plugins/activation-manifest.schema.json")),
-    learning_descriptor: readJson(path.join(root, "learning/descriptor.schema.json")),
+    learning_descriptor: readJson(path.join(root, "plugins/learning-descriptor.schema.json")),
   };
   assertAllSchemasModeled(schemas); // throws SchemaModelingError if any schema escapes the modeled subset
   const taxonomy = readJson(path.join(root, "patterns/taxonomy.json"));
@@ -501,7 +501,7 @@ function validateActivationManifest(ctx, manifest, root, readMaybe, readBytes, a
 
 // ---------------------------------------------------------------------------
 // Learning-descriptor sub-gauntlet (RFC-012 P2-S3, R2b). Schema-validates the
-// descriptor against learning/descriptor.schema.json and runs L-path authority
+// descriptor against plugins/learning-descriptor.schema.json and runs L-path authority
 // over module / io_schema / gauntlet. The activation MINOR-bump precedent
 // (RFC-009 P2-S2) extended CONTEXT_FILES/LIVE_FILES when loadContext gained a
 // schema; here, the schema is loaded into ctx.schemas.learning_descriptor and

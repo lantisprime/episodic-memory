@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://episodic-memory/learning/descriptor.schema.json",
+  "$id": "https://episodic-memory/plugins/learning-descriptor.schema.json",
   "title": "Learning-strategy descriptor meta-schema (RFC-012 R2/R12, P2-S3)",
   "description": "Closed schema for the per-capability descriptor instance files under learning/<id>.json (RFC-012 P2 REQ-13). Each capability descriptor points at a runtime IO schema (learning-io.schema.json), the owning module (scripts/em-<name>.mjs), and the conformance gauntlet (tests/test-<name>.mjs). The activation.mode 'on-demand' const enforces the RFC-012:71 never-at-build/event-time contract as a schema invariant. No directory/harness/capabilities/manifest fields: the slot carries no directory.",
   "type": "object",
