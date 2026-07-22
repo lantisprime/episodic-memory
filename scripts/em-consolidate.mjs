@@ -67,6 +67,14 @@ import { resolveRegisteredStores, resolveRegisteredStoresWithStatus, realpathSaf
 import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER, ATTRIBUTION_WINDOW_MS, ACTIVATION_LOG_NAME, ACTIVATION_LOG_MAX_BYTES, LOG_FORMAT_VERSION, computeCadence } from './lib/activation-log.mjs'
 import { illegalValueChar, illegalScalarChar, serializeInlineArray, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
 import { acquire, release } from './lib/lock.mjs'
+// Issue 546 (S3b): the legacy non-clerk --apply digest writer races against
+// any concurrent writer that mutates the same store. The shared
+// `<DATA_DIR>/clerk-apply.lock` is the canonical per-store mutex; the
+// clerk paths ALREADY hold it via `acquire`/`release` from lock.mjs, so
+// the legacy path adopts the same lock through the store-write-lock helper
+// (which collapses same-process inheritance onto the helper's own internal
+// tryAcquire gate). Help/dry-run/invalid-input paths stay lock-free.
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { spawnSync } from 'node:child_process'
 
@@ -799,6 +807,13 @@ if (!apply) {
   console.log(JSON.stringify({ status: 'ok', dry_run: true, clusters: report, applied: 0, hint: clusters.length ? 'Re-run with --apply to consolidate.' : undefined }))
   process.exit(0)
 }
+// No-clusters fast path: lock-free exit when --apply --confirm produced
+// zero clusters. Preserves the apply envelope exactly: status ok, clusters
+// empty, applied 0 — no dry_run field.
+if (clusters.length === 0) {
+  console.log(JSON.stringify({ status: 'ok', clusters: [], applied: 0 }))
+  process.exit(0)
+}
 if (clusters.length > 5 && !confirm) {
   console.log(JSON.stringify({ status: 'error', message: `${clusters.length} clusters would be folded (> 5). Re-run with --confirm (or narrow with --category/--project/--min-sim).` }))
   process.exit(2)
@@ -972,87 +987,197 @@ function updateInverted(fileName, id, keys, pretty) {
 }
 
 const applied = []
-for (let c = 0; c < clusters.length; c++) {
-  const members = clusters[c]
-  const memberIds = members.map(m => m.id)
-  const category = canonicalCategory(members[0].category)
-  const project = members[0].project
-  const tags = normalizeTags(members.flatMap(m => Array.isArray(m.tags) ? m.tags : []))
-  const pinned = members.some(m => m.pinned === true)
-  const summary = `Consolidated: ${members[members.length - 1].summary} (+${members.length - 1} related)`
-
-  const { dateStr, timeStr, idStamp } = nowParts()
-  const digestId = `${idStamp}-${slugify(summary)}-${crypto.randomBytes(2).toString('hex')}`
-
-  const bodySections = members.map(m =>
-    `## ${m.summary}\n\n(id: \`${m.id}\`, ${m.date})\n\n${bodyOf(contents.get(m.id))}`
-  )
-  const digestBody = [
-    `Digest of ${members.length} related episodes (em-consolidate, ${dateStr}).`,
-    '',
-    ...bodySections,
-  ].join('\n\n')
-
-  const fmLines = [
-    '---',
-    `id: ${digestId}`,
-    `date: ${dateStr}`,
-    `time: "${timeStr}"`,
-    `project: ${project}`,
-    `category: ${category}`,
-    'status: active',
-    `consolidates: [${memberIds.join(', ')}]`,
-    `tags: [${tags.join(', ')}]`,
-    `summary: ${summary}`,
-    ...(pinned ? ['pinned: true'] : []),
-    '---',
-  ]
-  const digestContent = `${fmLines.join('\n')}\n\n# ${summary}\n\n${digestBody}\n`
-
-  // 1. digest file + index row + inverted indexes
-  fs.mkdirSync(EPISODES_DIR, { recursive: true })
-  fs.writeFileSync(path.join(EPISODES_DIR, `${digestId}.md`), digestContent, 'utf8')
-  const digestRow = {
-    id: digestId, date: dateStr, time: timeStr, project, category,
-    status: 'active', supersedes: null, consolidates: memberIds,
-    tags, summary,
-    ...(pinned ? { pinned: true } : {}),
+// Issue 546 (S3b): wrap the legacy non-clerk --apply transaction in the
+// canonical per-store clerk-apply.lock. The same lockfile the clerk apply
+// path already holds (CLERK_LOCK_FILE = <DATA_DIR>/clerk-apply.lock); the
+// store-write-lock helper collapses same-process inheritance onto its
+// internal tryAcquire gate, so an em-promote-style direct-child spawn
+// inherits the parent's lock without re-acquisition or deadlock. Help,
+// dry-run, --confirm-gate, --scope validation, and the no-clusters fast
+// path stay LOCK-FREE per REQ-8/REQ-9. Collision reread (inside the lock):
+// re-read the index.jsonl-derived row map so a concurrent apply that
+// superseded one of our members between the top-level `loadIndex` and
+// this transaction surfaces as a SKIPPED cluster, not a silent double-
+// supersede. Existing tests run single-process; the skip path is silent
+// for them. Report fields preserve the prior contract (`clusters`, `applied`).
+// Collision-safe atomic replacements: every shared derived-index write
+// (digest file, member file, index.jsonl, tags.json, category-index.json)
+// routes through atomicReplaceFileSync so the same-directory tmp name is
+// PID+random and `wx` so two writers can never collide on rename. The
+// result envelope is collected INSIDE the lock, release runs in the
+// finally, and the JSON is printed AFTER the finally — release precedes
+// final output per REQ-13.
+let _csLockHandles = null
+let _applyEnvelope = null
+try {
+  // Helper owns EPISODIC_MEMORY_STORE_WRITE_LOCK_TIMEOUT_MS parsing and
+  // honors zero; no hand-parsed option.
+  const lockRes = acquireStoreWriteLocksSync([DATA_DIR])
+  if (!lockRes.ok) {
+    console.log(JSON.stringify({ status: 'error', code: lockRes.code, heldBy: lockRes.heldBy, message: `em-consolidate: store lock acquisition timed out (heldBy=${lockRes.heldBy}); no writes performed.` }))
+    process.exit(1)
   }
-  fs.appendFileSync(path.join(DATA_DIR, 'index.jsonl'), JSON.stringify(digestRow) + '\n', 'utf8')
-  updateInverted('tags.json', digestId, tags, true)
-  updateInverted('category-index.json', digestId, [category], true)
-  updateTokensIndex(DATA_DIR, digestId, episodeTokens({ summary, tags, body: digestContent }))
+  _csLockHandles = lockRes.handles
 
-  // 2. members: status superseded + superseded_by in file and index row
-  for (const m of members) {
-    const content = contents.get(m.id)
-    let updated = content.replace(/^status: active$/m, `status: superseded\nsuperseded_by: ${digestId}`)
-    if (updated === content) updated = content.replace(/^---\n/, `---\nsuperseded_by: ${digestId}\n`)
-    const tmp = path.join(EPISODES_DIR, `${m.id}.md.tmp`)
-    fs.writeFileSync(tmp, updated, 'utf8')
-    fs.renameSync(tmp, path.join(EPISODES_DIR, `${m.id}.md`))
+  // Re-read index rows under the lock, then read episode files only for
+  // members of the precomputed clusters. A cluster is accepted only when
+  // every fresh row and fresh file still reports status active.
+  const freshLiveRows = loadIndex(DATA_DIR, scope)
+  const freshById = new Map(freshLiveRows.map(r => [r.id, r]))
+  const freshContents = new Map()
+  const collisionSkips = []
+  const clustersToApply = [] // [{ originalIndex, members: fresh rows, memberIds }]
+  for (let c = 0; c < clusters.length; c++) {
+    const originalMembers = clusters[c]
+    const rebuilt = []
+    let skipReason = null
+    for (const m of originalMembers) {
+      const row = freshById.get(m.id)
+      if (!row) { skipReason = 'member-missing-in-index'; break }
+      if (row.status === 'superseded') { skipReason = `member-already-superseded:${m.id}`; break }
+      if (row.status !== 'active') { skipReason = `member-row-not-active:${m.id}:${String(row.status)}`; break }
+      const content = readEpisode(m.id)
+      if (content === null) { skipReason = `member-file-missing:${m.id}`; break }
+      const fileStatus = content.match(/^status:\s*(\S+)$/m)?.[1]
+      if (fileStatus !== 'active') { skipReason = `member-file-not-active:${m.id}`; break }
+      freshContents.set(m.id, content)
+      rebuilt.push(row)
+    }
+    if (skipReason) {
+      collisionSkips.push({
+        cluster_index: c,
+        members: originalMembers.map(m => m.id),
+        reason: skipReason,
+      })
+    } else {
+      clustersToApply.push({ originalIndex: c, members: rebuilt, memberIds: rebuilt.map(m => m.id) })
+    }
   }
-  const idsSet = new Set(memberIds)
+
   const indexFile = path.join(DATA_DIR, 'index.jsonl')
-  const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-  const rewritten = lines.map(line => {
-    try {
-      const entry = JSON.parse(line)
-      if (idsSet.has(entry.id)) {
-        entry.status = 'superseded'
-        entry.superseded_by = digestId
-      }
-      return JSON.stringify(entry)
-    } catch { return line }
-  })
-  const tmp = indexFile + '.tmp'
-  fs.writeFileSync(tmp, rewritten.join('\n') + '\n', 'utf8')
-  fs.renameSync(tmp, indexFile)
+  const tagsFile = path.join(DATA_DIR, 'tags.json')
+  const categoryIndexFile = path.join(DATA_DIR, 'category-index.json')
 
-  applied.push({ ...report[c], digest_id: digestId, digest_summary: summary })
+  for (let c = 0; c < clustersToApply.length; c++) {
+    const { members, memberIds, originalIndex } = clustersToApply[c]
+    const category = canonicalCategory(members[0].category)
+    const project = members[0].project
+    const tags = normalizeTags(members.flatMap(m => Array.isArray(m.tags) ? m.tags : []))
+    const pinned = members.some(m => m.pinned === true)
+    const summary = `Consolidated: ${members[members.length - 1].summary} (+${members.length - 1} related)`
+
+    const { dateStr, timeStr, idStamp } = nowParts()
+    const digestId = `${idStamp}-${slugify(summary)}-${crypto.randomBytes(2).toString('hex')}`
+
+    const bodySections = members.map(m =>
+      `## ${m.summary}\n\n(id: \`${m.id}\`, ${m.date})\n\n${bodyOf(freshContents.get(m.id))}`
+    )
+    const digestBody = [
+      `Digest of ${members.length} related episodes (em-consolidate, ${dateStr}).`,
+      '',
+      ...bodySections,
+    ].join('\n\n')
+
+    const fmLines = [
+      '---',
+      `id: ${digestId}`,
+      `date: ${dateStr}`,
+      `time: "${timeStr}"`,
+      `project: ${project}`,
+      `category: ${category}`,
+      'status: active',
+      `consolidates: [${memberIds.join(', ')}]`,
+      `tags: [${tags.join(', ')}]`,
+      `summary: ${summary}`,
+      ...(pinned ? ['pinned: true'] : []),
+      '---',
+    ]
+    const digestContent = `${fmLines.join('\n')}\n\n# ${summary}\n\n${digestBody}\n`
+
+    // 1. digest file (collision-safe atomic replace).
+    fs.mkdirSync(EPISODES_DIR, { recursive: true })
+    atomicReplaceFileSync(path.join(EPISODES_DIR, `${digestId}.md`), digestContent)
+
+    // 2. members: flip status + superseded_by via collision-safe atomic replace.
+    // Use fresh contents (post-lock), not the pre-lock `contents` map: a
+    // concurrent pin / revise could have changed the file between the
+    // pre-lock scan and this transaction.
+    for (const m of members) {
+      const content = freshContents.get(m.id)
+      let updated = content.replace(/^status: active$/m, `status: superseded\nsuperseded_by: ${digestId}`)
+      if (updated === content) updated = content.replace(/^---\n/, `---\nsuperseded_by: ${digestId}\n`)
+      atomicReplaceFileSync(path.join(EPISODES_DIR, `${m.id}.md`), updated)
+    }
+
+    // 3. index.jsonl: read, append digest row, flip member rows, atomic-replace.
+    // Single read+rewrite avoids two appendFileSync windows where a concurrent
+    // reader could observe a half-written state.
+    const idsSet = new Set(memberIds)
+    let existingLines = []
+    try { existingLines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean) } catch {}
+    const digestRow = {
+      id: digestId, date: dateStr, time: timeStr, project, category,
+      status: 'active', supersedes: null, consolidates: memberIds,
+      tags, summary,
+      ...(pinned ? { pinned: true } : {}),
+    }
+    const rewritten = existingLines.map(line => {
+      try {
+        const entry = JSON.parse(line)
+        if (idsSet.has(entry.id)) {
+          entry.status = 'superseded'
+          entry.superseded_by = digestId
+        }
+        return JSON.stringify(entry)
+      } catch { return line }
+    })
+    rewritten.push(JSON.stringify(digestRow))
+    atomicReplaceFileSync(indexFile, rewritten.join('\n') + '\n')
+
+    // 4. tags.json: read, append digest id to each tag's posting, atomic-replace.
+    // Null-proto (#469/#470): a tag literally named "constructor"/"__proto__"
+    // must not resolve to an inherited Object.prototype member.
+    let tagsIndex = Object.create(null)
+    try { tagsIndex = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
+    if (Object.getPrototypeOf(tagsIndex) !== null) tagsIndex = Object.assign(Object.create(null), tagsIndex)
+    for (const tag of tags) {
+      if (!tagsIndex[tag]) tagsIndex[tag] = []
+      if (!tagsIndex[tag].includes(digestId)) tagsIndex[tag].push(digestId)
+    }
+    atomicReplaceFileSync(tagsFile, JSON.stringify(tagsIndex, null, 2))
+
+    // 5. category-index.json: read, append digest id under canonical category.
+    let catIndex = Object.create(null)
+    try { catIndex = JSON.parse(fs.readFileSync(categoryIndexFile, 'utf8')) } catch {}
+    if (Object.getPrototypeOf(catIndex) !== null) catIndex = Object.assign(Object.create(null), catIndex)
+    if (!catIndex[category]) catIndex[category] = []
+    if (!catIndex[category].includes(digestId)) catIndex[category].push(digestId)
+    atomicReplaceFileSync(categoryIndexFile, JSON.stringify(catIndex, null, 2))
+
+    // 6. tokens.json via the helper (already repaired in S2b).
+    updateTokensIndex(DATA_DIR, digestId, episodeTokens({ summary, tags, body: digestContent }))
+
+    // Report index in the loop preserved (clusters were not filtered
+    // structurally — we walk clustersToApply, so `report[c]` no longer
+    // indexes 1:1 with the outer `c`. Re-derive via the original cluster
+    // index captured in collisionSkips / by reverse lookup.)
+    const reportEntry = report[originalIndex]
+    applied.push({ ...reportEntry, digest_id: digestId, digest_summary: summary })
+  }
+
+  _applyEnvelope = {
+    status: 'ok',
+    clusters: applied,
+    applied: applied.length,
+    ...(collisionSkips.length ? { collision_skips: collisionSkips } : {}),
+  }
+} finally {
+  // Release BEFORE final JSON output (REQ-13). Inherited handles, if any,
+  // are no-ops; owned handles unlink their lockfile.
+  if (_csLockHandles) releaseStoreWriteLocks(_csLockHandles)
 }
 
-console.log(JSON.stringify({ status: 'ok', clusters: applied, applied: applied.length }))
+if (_applyEnvelope) console.log(JSON.stringify(_applyEnvelope))
 
 // ===========================================================================
 // clerkWrite(kind, frontmatter, dataDir) — the F2 DIRECT-write primitive

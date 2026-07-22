@@ -36,6 +36,7 @@ import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinka
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -257,19 +258,66 @@ let promotionSources
 }
 
 // ---------------------------------------------------------------------------
-// Mark original as superseded
+// Resolve BOTH store directories BEFORE ordered lock acquisition (issue 546 /
+// REQ-5): the original's store (supersession target) and the revision's store
+// (successor target). Cross-scope revisions lock both stores in canonical
+// order; a same-store revision dedupes to a single lock.
 // ---------------------------------------------------------------------------
-let originalContent = fs.readFileSync(original.filePath, 'utf8')
-originalContent = originalContent.replace(/^status: active$/m, 'status: superseded')
-const origTmpFile = original.filePath + '.tmp'
-fs.writeFileSync(origTmpFile, originalContent, 'utf8')
-fs.renameSync(origTmpFile, original.filePath)
+const dataDir = scope === 'inherit'
+  ? original.dir
+  : (scope === 'global' ? GLOBAL_DIR : LOCAL_DIR)
+const episodesDir = path.join(dataDir, 'episodes')
+const indexFile = path.join(dataDir, 'index.jsonl')
 
-// Update the index entry for the original + capture origTags in one pass
-const originalIndexFile = path.join(original.dir, 'index.jsonl')
-let origTagsFromIndex = []
-let origPinned = false
-if (fs.existsSync(originalIndexFile)) {
+const lockResult = acquireStoreWriteLocksSync([original.dir, dataDir])
+if (!lockResult.ok) {
+  console.log(JSON.stringify({ status: 'error', code: lockResult.code, heldBy: lockResult.heldBy }))
+  process.exit(1)
+}
+const lockHandles = lockResult.handles
+
+// Final payload + revision id. Emitted ONLY after the locks are released:
+// no process.exit while a lock is held, and the collision report runs
+// post-release (revise-side parity with em-store).
+let result
+let newId
+try {
+  // ---------------------------------------------------------------------------
+  // Reread the mutable original state UNDER the lock and verify BOTH the
+  // episode file and its index row are still active BEFORE any write (§8.2
+  // in-lock reread). A stale original fails the transaction with zero writes.
+  // ---------------------------------------------------------------------------
+  const currentOriginalContent = fs.readFileSync(original.filePath, 'utf8')
+  const originalIndexFile = path.join(original.dir, 'index.jsonl')
+  let originalRow = null
+  if (fs.existsSync(originalIndexFile)) {
+    for (const line of fs.readFileSync(originalIndexFile, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const entry = JSON.parse(line)
+        if (entry && entry.id === originalId) { originalRow = entry; break }
+      } catch { /* tolerate a malformed index line */ }
+    }
+  }
+  const fileActive = /^status: active$/m.test(currentOriginalContent)
+  const rowActive = originalRow !== null && originalRow.status === 'active'
+  if (!fileActive || !rowActive) {
+    result = {
+      status: 'error',
+      code: 'stale-original',
+      message: `Original episode "${originalId}" is not active (file active: ${fileActive}, index row status: ${originalRow ? originalRow.status : 'missing'}); no revision written.`
+    }
+  } else {
+
+  // ---------------------------------------------------------------------------
+  // Mark original as superseded
+  // ---------------------------------------------------------------------------
+  const supersededContent = currentOriginalContent.replace(/^status: active$/m, 'status: superseded')
+  atomicReplaceFileSync(original.filePath, supersededContent)
+
+  // Update the index entry for the original + capture origTags in one pass
+  let origTagsFromIndex = []
+  let origPinned = false
   const lines = fs.readFileSync(originalIndexFile, 'utf8').trim().split('\n').filter(Boolean)
   const updated = lines.map(line => {
     try {
@@ -283,185 +331,183 @@ if (fs.existsSync(originalIndexFile)) {
       return line
     } catch { return line }
   })
-  // Atomic write — best-effort file integrity, not full concurrency protection
-  const idxTmpFile = originalIndexFile + '.tmp'
-  fs.writeFileSync(idxTmpFile, updated.join('\n') + '\n', 'utf8')
-  fs.renameSync(idxTmpFile, originalIndexFile)
-}
+  // Collision-safe atomic replacement (issue 546 / REQ-10)
+  atomicReplaceFileSync(originalIndexFile, updated.join('\n') + '\n')
 
-// ---------------------------------------------------------------------------
-// Extract original's metadata for inheritance
-// ---------------------------------------------------------------------------
-const origFmMatch = originalContent.match(/^---\n([\s\S]*?)\n---/)
-let origProject = project
-let origCategory = 'decision'
-if (origFmMatch) {
-  const fmLines = origFmMatch[1].split('\n')
-  for (const line of fmLines) {
-    const m = line.match(/^(\w+):\s*(.*)$/)
-    if (!m) continue
-    if (m[1] === 'project' && !project) origProject = m[2]
-    if (m[1] === 'category') origCategory = m[2]
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Create the revision episode in the same store as the original
-// ---------------------------------------------------------------------------
-const dataDir = scope === 'inherit'
-  ? original.dir
-  : (scope === 'global' ? GLOBAL_DIR : LOCAL_DIR)
-const episodesDir = path.join(dataDir, 'episodes')
-const indexFile = path.join(dataDir, 'index.jsonl')
-
-const now = new Date()
-const dateStr = now.toISOString().slice(0, 10)
-const timeStr = now.toISOString().slice(11, 16)
-const ts = now.toISOString().slice(0, 19).replace(/[-:T]/g, '').replace(/(\d{8})(\d{6})/, '$1-$2')
-const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
-const randSuffix = crypto.randomBytes(2).toString('hex')
-const id = `${ts}-${slug}-${randSuffix}`
-
-function normalizeTags(raw, repeats = []) {
-  let fromRaw = []
-  if (Array.isArray(raw)) {
-    fromRaw = raw
-  } else if (raw) {
-    fromRaw = raw.split(',')
-  }
-  const all = [...fromRaw, ...repeats]
-    .map(t => t.trim().toLowerCase())
-    .filter(Boolean)
-  return [...new Set(all)].sort()
-}
-
-function updateTagsIndex(dataDir, episodeId, tags) {
-  const tagsFile = path.join(dataDir, 'tags.json')
-  // Null-proto: a tag named "constructor" must not resolve to Object.prototype (issue #469)
-  let index = Object.create(null)
-  try {
-    index = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8')))
-  } catch {}
-  for (const tag of tags) {
-    if (!index[tag]) index[tag] = []
-    if (!index[tag].includes(episodeId)) index[tag].push(episodeId)
-  }
-  const tmpFile = tagsFile + '.tmp'
-  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
-  fs.renameSync(tmpFile, tagsFile)
-}
-
-// Mirror em-store's category-index maintenance (RFC-009 R10d); duplicated locally the same
-// way updateTagsIndex is, rather than imported from em-store (which runs top-level on import).
-function updateCategoryIndex(dataDir, episodeId, category) {
-  const catFile = path.join(dataDir, 'category-index.json')
-  // Null-proto: unknown categories index under their literal key, which could
-  // collide with Object.prototype names (issue #469)
-  let index = Object.create(null)
-  try {
-    index = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8')))
-  } catch {}
-  const key = canonicalCategory(category)
-  if (!index[key]) index[key] = []
-  if (!index[key].includes(episodeId)) index[key].push(episodeId)
-  const tmpFile = catFile + '.tmp'
-  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
-  fs.renameSync(tmpFile, catFile)
-}
-
-const tags = normalizeTags(tagsRaw, tagRepeats)
-const resolvedProject = origProject || path.basename(process.cwd())
-
-// Inherit original episode's tags (captured during first index pass above)
-const mergedTags = normalizeTags([...origTagsFromIndex, ...tags])
-
-// Pinning survives revision: a corrected pinned decision is still a pinned
-// decision. --pin additionally pins an unpinned chain at revision time.
-const pinned = origPinned || argv.includes('--pin')
-
-// RFC-009 R1 activation frontmatter — present-only, arrays UNQUOTED inline
-// (REQ-2/I4); mirrors em-store's serialization (revise-side parity).
-const activationFmLines = []
-if (activation) {
-  for (const field of ACTIVATION_ARRAY_FIELDS) {
-    if (Array.isArray(activation[field]) && activation[field].length) {
-      activationFmLines.push(`${field}: [${serializeInlineArray(activation[field])}]`)
+  // ---------------------------------------------------------------------------
+  // Extract original's metadata for inheritance
+  // ---------------------------------------------------------------------------
+  const origFmMatch = currentOriginalContent.match(/^---\n([\s\S]*?)\n---/)
+  let origProject = project
+  let origCategory = 'decision'
+  if (origFmMatch) {
+    const fmLines = origFmMatch[1].split('\n')
+    for (const line of fmLines) {
+      const m = line.match(/^(\w+):\s*(.*)$/)
+      if (!m) continue
+      if (m[1] === 'project' && !project) origProject = m[2]
+      if (m[1] === 'category') origCategory = m[2]
     }
   }
-  activationFmLines.push(`priority: ${activation.priority}`)
-  if (activation.review_by !== undefined) activationFmLines.push(`review_by: ${activation.review_by}`)
+
+  // ---------------------------------------------------------------------------
+  // Create the revision episode in the revision's store
+  // ---------------------------------------------------------------------------
+  const now = new Date()
+  const dateStr = now.toISOString().slice(0, 10)
+  const timeStr = now.toISOString().slice(11, 16)
+  const ts = now.toISOString().slice(0, 19).replace(/[-:T]/g, '').replace(/(\d{8})(\d{6})/, '$1-$2')
+  const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+  const randSuffix = crypto.randomBytes(2).toString('hex')
+  const id = `${ts}-${slug}-${randSuffix}`
+
+  function normalizeTags(raw, repeats = []) {
+    let fromRaw = []
+    if (Array.isArray(raw)) {
+      fromRaw = raw
+    } else if (raw) {
+      fromRaw = raw.split(',')
+    }
+    const all = [...fromRaw, ...repeats]
+      .map(t => t.trim().toLowerCase())
+      .filter(Boolean)
+    return [...new Set(all)].sort()
+  }
+
+  function updateTagsIndex(dataDir, episodeId, tags) {
+    const tagsFile = path.join(dataDir, 'tags.json')
+    // Null-proto: a tag named "constructor" must not resolve to Object.prototype (issue #469)
+    let index = Object.create(null)
+    try {
+      index = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8')))
+    } catch {}
+    for (const tag of tags) {
+      if (!index[tag]) index[tag] = []
+      if (!index[tag].includes(episodeId)) index[tag].push(episodeId)
+    }
+    atomicReplaceFileSync(tagsFile, JSON.stringify(index, null, 2))
+  }
+
+  // Mirror em-store's category-index maintenance (RFC-009 R10d); duplicated locally the same
+  // way updateTagsIndex is, rather than imported from em-store (which runs top-level on import).
+  function updateCategoryIndex(dataDir, episodeId, category) {
+    const catFile = path.join(dataDir, 'category-index.json')
+    // Null-proto: unknown categories index under their literal key, which could
+    // collide with Object.prototype names (issue #469)
+    let index = Object.create(null)
+    try {
+      index = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8')))
+    } catch {}
+    const key = canonicalCategory(category)
+    if (!index[key]) index[key] = []
+    if (!index[key].includes(episodeId)) index[key].push(episodeId)
+    atomicReplaceFileSync(catFile, JSON.stringify(index, null, 2))
+  }
+
+  const tags = normalizeTags(tagsRaw, tagRepeats)
+  const resolvedProject = origProject || path.basename(process.cwd())
+
+  // Inherit original episode's tags (captured during first index pass above)
+  const mergedTags = normalizeTags([...origTagsFromIndex, ...tags])
+
+  // Pinning survives revision: a corrected pinned decision is still a pinned
+  // decision. --pin additionally pins an unpinned chain at revision time.
+  const pinned = origPinned || argv.includes('--pin')
+
+  // RFC-009 R1 activation frontmatter — present-only, arrays UNQUOTED inline
+  // (REQ-2/I4); mirrors em-store's serialization (revise-side parity).
+  const activationFmLines = []
+  if (activation) {
+    for (const field of ACTIVATION_ARRAY_FIELDS) {
+      if (Array.isArray(activation[field]) && activation[field].length) {
+        activationFmLines.push(`${field}: [${serializeInlineArray(activation[field])}]`)
+      }
+    }
+    activationFmLines.push(`priority: ${activation.priority}`)
+    if (activation.review_by !== undefined) activationFmLines.push(`review_by: ${activation.review_by}`)
+  }
+  // F3: violation-side fields inherit verbatim (no revise-side flags exist for them)
+  if (inheritedLessons.length) activationFmLines.push(`lessons: [${serializeInlineArray(inheritedLessons)}]`)
+  if (inheritedViolatedPattern !== undefined) activationFmLines.push(`violated_pattern: ${inheritedViolatedPattern}`)
+  if (promotionSources) activationFmLines.push(`promotion_sources: ${serializePromotionSources(promotionSources)}`)
+
+  const frontmatter = [
+    '---',
+    `id: ${id}`,
+    `date: ${dateStr}`,
+    `time: "${timeStr}"`,
+    `project: ${resolvedProject}`,
+    `category: ${origCategory}`,
+    `status: active`,
+    `supersedes: ${originalId}`,
+    `tags: [${mergedTags.join(', ')}]`,
+    `summary: ${summary}`,
+    ...activationFmLines,
+    ...(pinned ? ['pinned: true'] : []),
+    '---',
+  ].join('\n')
+
+  const episodeContent = `${frontmatter}\n\n# ${summary}\n\nRevises: \`${originalId}\`\n\n${body}\n`
+
+  fs.mkdirSync(episodesDir, { recursive: true })
+
+  const filePath = path.join(episodesDir, `${id}.md`)
+  atomicReplaceFileSync(filePath, episodeContent)
+
+  // Keep in LOCKSTEP with em-rebuild-index.mjs's emit (REQ-9 parity note).
+  const activationIndexFields = {
+    ...(activation ? Object.fromEntries(
+      ACTIVATION_ARRAY_FIELDS.filter(f => Array.isArray(activation[f]) && activation[f].length)
+        .map(f => [f, activation[f]])
+    ) : {}),
+    ...(inheritedLessons.length ? { lessons: inheritedLessons } : {}),
+    ...(activation ? { priority: activation.priority } : {}),
+    ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
+    ...(inheritedViolatedPattern !== undefined ? { violated_pattern: inheritedViolatedPattern } : {}),
+    ...(promotionSources ? { promotion_sources: promotionSources } : {}),
+  }
+  const indexEntry = JSON.stringify({
+    id, date: dateStr, time: timeStr, project: resolvedProject,
+    category: origCategory, status: 'active', supersedes: originalId,
+    tags: mergedTags, summary,
+    ...activationIndexFields,
+    ...(pinned ? { pinned: true } : {})
+  })
+  fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
+
+  // Update tags.json
+  updateTagsIndex(dataDir, id, mergedTags)
+  updateCategoryIndex(dataDir, id, origCategory)
+  // Token source is the FULL FILE content (frontmatter + body): the search
+  // body tier greps the whole file, so pruning must see the same text.
+  updateTokensIndex(dataDir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
+  // If revision crosses scopes, also update original scope's tags.json + category-index.json
+  if (original.dir !== dataDir) {
+    updateTagsIndex(original.dir, id, mergedTags)
+    updateCategoryIndex(original.dir, id, origCategory)
+    updateTokensIndex(original.dir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
+  }
+
+  newId = id
+  result = {
+    status: 'ok', id, file: filePath,
+    supersedes: originalId, scope: dataDir === GLOBAL_DIR ? 'global' : 'local'
+  }
+  }
+} finally {
+  releaseStoreWriteLocks(lockHandles)
 }
-// F3: violation-side fields inherit verbatim (no revise-side flags exist for them)
-if (inheritedLessons.length) activationFmLines.push(`lessons: [${serializeInlineArray(inheritedLessons)}]`)
-if (inheritedViolatedPattern !== undefined) activationFmLines.push(`violated_pattern: ${inheritedViolatedPattern}`)
-if (promotionSources) activationFmLines.push(`promotion_sources: ${serializePromotionSources(promotionSources)}`)
 
-const frontmatter = [
-  '---',
-  `id: ${id}`,
-  `date: ${dateStr}`,
-  `time: "${timeStr}"`,
-  `project: ${resolvedProject}`,
-  `category: ${origCategory}`,
-  `status: active`,
-  `supersedes: ${originalId}`,
-  `tags: [${mergedTags.join(', ')}]`,
-  `summary: ${summary}`,
-  ...activationFmLines,
-  ...(pinned ? ['pinned: true'] : []),
-  '---',
-].join('\n')
-
-const episodeContent = `${frontmatter}\n\n# ${summary}\n\nRevises: \`${originalId}\`\n\n${body}\n`
-
-fs.mkdirSync(episodesDir, { recursive: true })
-
-const filePath = path.join(episodesDir, `${id}.md`)
-fs.writeFileSync(filePath, episodeContent, 'utf8')
-
-// Keep in LOCKSTEP with em-rebuild-index.mjs's emit (REQ-9 parity note).
-const activationIndexFields = {
-  ...(activation ? Object.fromEntries(
-    ACTIVATION_ARRAY_FIELDS.filter(f => Array.isArray(activation[f]) && activation[f].length)
-      .map(f => [f, activation[f]])
-  ) : {}),
-  ...(inheritedLessons.length ? { lessons: inheritedLessons } : {}),
-  ...(activation ? { priority: activation.priority } : {}),
-  ...(activation && activation.review_by !== undefined ? { review_by: activation.review_by } : {}),
-  ...(inheritedViolatedPattern !== undefined ? { violated_pattern: inheritedViolatedPattern } : {}),
-  ...(promotionSources ? { promotion_sources: promotionSources } : {}),
-}
-const indexEntry = JSON.stringify({
-  id, date: dateStr, time: timeStr, project: resolvedProject,
-  category: origCategory, status: 'active', supersedes: originalId,
-  tags: mergedTags, summary,
-  ...activationIndexFields,
-  ...(pinned ? { pinned: true } : {})
-})
-fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
-
-// Update tags.json
-updateTagsIndex(dataDir, id, mergedTags)
-updateCategoryIndex(dataDir, id, origCategory)
-// Token source is the FULL FILE content (frontmatter + body): the search
-// body tier greps the whole file, so pruning must see the same text.
-updateTokensIndex(dataDir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
-// If revision crosses scopes, also update original scope's tags.json + category-index.json
-if (original.dir !== dataDir) {
-  updateTagsIndex(original.dir, id, mergedTags)
-  updateCategoryIndex(original.dir, id, origCategory)
-  updateTokensIndex(original.dir, id, episodeTokens({ summary, tags: mergedTags, body: episodeContent }))
-}
-
-// R9a write-time collision report (REQ-18) — mirrors em-store's post-write
-// block (revise-side parity): stderr-only, self-excluded, never fatal.
-if (activation && Array.isArray(activation.triggers) && activation.triggers.length) {
+// R9a write-time collision report (REQ-18) — mirrors em-store's post-release
+// block (revise-side parity): stderr-only, self-excluded, never fatal, and
+// only AFTER the store-write locks are released (issue 546).
+if (result.status === 'ok' && activation && Array.isArray(activation.triggers) && activation.triggers.length) {
   try {
     const merged = loadMergedTriggerIndex()
     const mine = new Set(activation.triggers)
     const reported = new Set()
     for (const e of merged.entries) {
-      if (e.episode_id === id) continue // self-exclusion (CX5)
+      if (e.episode_id === newId) continue // self-exclusion (CX5)
       if (!mine.has(e.value)) continue
       const key = `${e.episode_id} ${e.value}`
       if (reported.has(key)) continue
@@ -471,7 +517,5 @@ if (activation && Array.isArray(activation.triggers) && activation.triggers.leng
   } catch {}
 }
 
-console.log(JSON.stringify({
-  status: 'ok', id, file: filePath,
-  supersedes: originalId, scope: dataDir === GLOBAL_DIR ? 'global' : 'local'
-}))
+console.log(JSON.stringify(result))
+if (result.status === 'error') process.exit(1)

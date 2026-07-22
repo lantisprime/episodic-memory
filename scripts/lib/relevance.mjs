@@ -23,6 +23,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './store-write-lock.mjs'
 
 // Per-token field weights for the multi-term tier. Summary tokens count just
 // under a contiguous summary substring (0.7); tags sit between summary and
@@ -32,6 +33,20 @@ export const FIELD_WEIGHTS = { summary: 0.7, tags: 0.6, body: 0.4 }
 // Discount applied to the averaged token weights so a scattered token match
 // can never tie a contiguous substring match in the same field.
 const TOKEN_MATCH_DISCOUNT = 0.95
+
+// Access tracking is interactive best-effort work, not a durable writer.
+// Keep it responsive by default while preserving the shared timeout override
+// used by deterministic contention tests. Invalid, negative, or blank values
+// fall back to the relevance-local default rather than weakening the bound.
+const DEFAULT_ACCESS_TRACKING_TIMEOUT_MS = 250
+function resolveAccessTrackingTimeoutMs() {
+  const raw = process.env.EPISODIC_MEMORY_STORE_WRITE_LOCK_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return DEFAULT_ACCESS_TRACKING_TIMEOUT_MS
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 0
+    ? value
+    : DEFAULT_ACCESS_TRACKING_TIMEOUT_MS
+}
 
 // ---------------------------------------------------------------------------
 // normalizeTags(raw) — comma string or array → lowercased, trimmed, deduped,
@@ -156,12 +171,21 @@ export function writeBackAccessTracking(results) {
   }
 
   const now = new Date().toISOString().slice(0, 19) + 'Z'
+  const lockTimeoutMs = resolveAccessTrackingTimeoutMs()
 
   for (const [dataDir, ids] of byDir) {
     const indexFile = path.join(dataDir, 'index.jsonl')
+    let lockResult
     try {
-      // Re-read just before writing to narrow race window with concurrent em-store appends.
-      // This is best-effort — last-writer-wins for concurrent searches is acceptable.
+      // Access tracking is best-effort, but its read-modify-write is still a
+      // canonical per-store transaction. The helper's bounded acquisition
+      // honors the shared timeout environment and a contended store is simply
+      // skipped so search/recall remains successful.
+      lockResult = acquireStoreWriteLocksSync(dataDir, { timeoutMs: lockTimeoutMs })
+      if (!lockResult.ok) continue
+
+      // Reread only after acquisition. An em-store append that was waiting on
+      // this lock is therefore retained in the replacement snapshot.
       const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
       const updated = lines.map(line => {
         try {
@@ -173,11 +197,11 @@ export function writeBackAccessTracking(results) {
           return JSON.stringify(entry)
         } catch { return line }
       })
-      const tmpFile = indexFile + '.tmp'
-      fs.writeFileSync(tmpFile, updated.join('\n') + '\n', 'utf8')
-      fs.renameSync(tmpFile, indexFile)
+      atomicReplaceFileSync(indexFile, updated.join('\n') + '\n')
     } catch {
       // Access tracking is best-effort — skip silently on failure
+    } finally {
+      if (lockResult?.ok) releaseStoreWriteLocks(lockResult.handles)
     }
   }
 }
@@ -312,19 +336,31 @@ export function loadTokensIndex(dataDir) {
 // Dropped stays dropped until the next em-rebuild-index recomputes df.
 export function updateTokensIndex(dataDir, episodeId, tokens) {
   const tokensFile = path.join(dataDir, 'tokens.json')
-  let index = Object.create(null)
-  try {
-    index = nullProtoIndex(JSON.parse(fs.readFileSync(tokensFile, 'utf8')))
-  } catch {}
-  const dropped = new Set(Array.isArray(index[TOKENS_DROPPED_KEY]) ? index[TOKENS_DROPPED_KEY] : [])
-  for (const tok of tokens) {
-    if (dropped.has(tok)) continue
-    if (!index[tok]) index[tok] = []
-    if (!index[tok].includes(episodeId)) index[tok].push(episodeId)
+  const lockResult = acquireStoreWriteLocksSync(dataDir)
+  if (!lockResult.ok) {
+    const error = new Error(`Token index write failed: ${lockResult.code}`)
+    error.code = lockResult.code
+    error.heldBy = lockResult.heldBy
+    throw error
   }
-  const tmpFile = tokensFile + '.tmp'
-  fs.writeFileSync(tmpFile, JSON.stringify(index), 'utf8')
-  fs.renameSync(tmpFile, tokensFile)
+  try {
+    // The nested acquire is inherited when em-store/em-revise already hold
+    // the canonical store lock. This keeps direct callers safe without
+    // introducing a second lock protocol or a self-deadlock.
+    let index = Object.create(null)
+    try {
+      index = nullProtoIndex(JSON.parse(fs.readFileSync(tokensFile, 'utf8')))
+    } catch {}
+    const dropped = new Set(Array.isArray(index[TOKENS_DROPPED_KEY]) ? index[TOKENS_DROPPED_KEY] : [])
+    for (const tok of tokens) {
+      if (dropped.has(tok)) continue
+      if (!index[tok]) index[tok] = []
+      if (!index[tok].includes(episodeId)) index[tok].push(episodeId)
+    }
+    atomicReplaceFileSync(tokensFile, JSON.stringify(index))
+  } finally {
+    releaseStoreWriteLocks(lockResult.handles)
+  }
 }
 
 // tokenCandidates(indexes, queryTokens) — resolve query tokens against one or

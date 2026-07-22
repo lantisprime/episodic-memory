@@ -383,6 +383,9 @@ jobs:
       - name: Run registered-stores lib suite (APC-S1)
         run: node tests/test-registered-stores.mjs
 
+      - name: Run store-write concurrency suite (issue 546)
+        run: node tests/test-store-write-concurrency.mjs
+
       - name: Run all-projects stats+doctor observability suite (APC-S2/S3)
         run: node tests/test-all-projects-observability.mjs
 

@@ -33,6 +33,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -92,37 +93,61 @@ if (scanTextFile !== undefined) {
   const dirs = []
   if (scanScope === 'local' || scanScope === 'all') dirs.push(['local', LOCAL_DIR])
   if (scanScope === 'global' || scanScope === 'all') dirs.push(['global', GLOBAL_DIR])
-  const idsByDir = new Map(dirs.map(([name]) => [name, new Set()]))
-  const dirIndexIds = dirs.map(([name, dir]) => {
-    const ids = new Set()
-    try {
-      for (const line of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n')) {
-        if (!line.trim()) continue
-        try {
-          const e = JSON.parse(line)
-          if (typeof e.id === 'string') ids.add(e.id)
-        } catch {}
+
+  // Dry-run remains a read-only path: it does not wait for a writer lock and
+  // preserves the historical report exactly. The real write path acquires
+  // every existing selected store before rereading its index, so resolving an
+  // id and incrementing its counter are one serialized read-modify-write.
+  const resolveIds = () => {
+    const idsByDir = new Map(dirs.map(([name]) => [name, new Set()]))
+    const dirIndexIds = dirs.map(([name, dir]) => {
+      const ids = new Set()
+      try {
+        for (const line of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n')) {
+          if (!line.trim()) continue
+          try {
+            const e = JSON.parse(line)
+            if (typeof e.id === 'string') ids.add(e.id)
+          } catch {}
+        }
+      } catch {}
+      return [name, ids]
+    })
+    const resolved = []
+    const skipped = []
+    for (const cid of unique) {
+      const hit = dirIndexIds.find(([, ids]) => ids.has(cid))
+      if (hit) {
+        resolved.push(cid)
+        idsByDir.get(hit[0]).add(cid)
+      } else {
+        skipped.push(cid)
       }
-    } catch {}
-    return [name, ids]
-  })
-  const resolved = []
-  const skipped = []
-  for (const cid of unique) {
-    const hit = dirIndexIds.find(([, ids]) => ids.has(cid))
-    if (hit) {
-      resolved.push(cid)
-      idsByDir.get(hit[0]).add(cid)
-    } else {
-      skipped.push(cid)
     }
+    return { idsByDir, resolved, skipped }
   }
 
-  // Record: one +1 per resolved id, one atomic index rewrite per store.
-  // Writer surface — fail CLOSED on any write error.
+  let resolved
+  let skipped
   let recorded = 0
-  if (!dryRun) {
+  if (dryRun) {
+    ({ resolved, skipped } = resolveIds())
+  } else {
+    const lockDirs = dirs
+      .map(([, dir]) => dir)
+      .filter(dir => fs.existsSync(path.join(dir, 'index.jsonl')))
+    const lockResult = lockDirs.length
+      ? acquireStoreWriteLocksSync(lockDirs)
+      : { ok: true, handles: [] }
+    if (!lockResult.ok) {
+      console.log(JSON.stringify({ status: 'error', message: `Feedback write failed: ${lockResult.code}`, recorded_before_failure: recorded }))
+      process.exit(1)
+    }
     try {
+      // This is deliberately after acquisition. A concurrent store append or
+      // feedback event must be part of the snapshot that is rewritten.
+      let idsByDir
+      ({ idsByDir, resolved, skipped } = resolveIds())
       for (const [name, dir] of dirs) {
         const targetIds = idsByDir.get(name)
         if (targetIds.size === 0) continue
@@ -139,14 +164,14 @@ if (scanTextFile !== undefined) {
             return JSON.stringify(entry)
           } catch { return line }
         })
-        const tmpFile = indexFile + '.tmp'
-        fs.writeFileSync(tmpFile, updated.join('\n') + '\n', 'utf8')
-        fs.renameSync(tmpFile, indexFile)
+        atomicReplaceFileSync(indexFile, updated.join('\n') + '\n')
       }
     } catch (e) {
       console.log(JSON.stringify({ status: 'error', message: `Feedback write failed: ${e.message}`, recorded_before_failure: recorded }))
+      releaseStoreWriteLocks(lockResult.handles)
       process.exit(1)
     }
+    releaseStoreWriteLocks(lockResult.handles)
   }
 
   console.log(JSON.stringify({
@@ -176,35 +201,57 @@ if (!id || useful === noise) {
 
 const delta = useful ? 1 : -1
 
-// Find the index row across stores (local priority, matching read dedupe).
-let updatedRow = null
-let scopeName = null
-for (const dir of [LOCAL_DIR, GLOBAL_DIR]) {
-  const indexFile = path.join(dir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) continue
-  const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-  let found = false
-  const updated = lines.map(line => {
-    try {
-      const entry = JSON.parse(line)
-      if (entry.id === id) {
-        found = true
-        const current = typeof entry.feedback === 'number' ? entry.feedback : 0
-        entry.feedback = Math.max(-10, Math.min(10, current + delta))
-        updatedRow = entry
-      }
-      return JSON.stringify(entry)
-    } catch { return line }
-  })
-  if (found) {
-    const tmpFile = indexFile + '.tmp'
-    fs.writeFileSync(tmpFile, updated.join('\n') + '\n', 'utf8')
-    fs.renameSync(tmpFile, indexFile)
-    scopeName = dir === GLOBAL_DIR ? 'global' : 'local'
-    break
-  }
+// Lock every existing candidate store before reading the mutable rows. Local
+// remains first in the scan, so the historical local-priority resolution is
+// unchanged while two feedback writers now serialize the whole counter RMW.
+const candidateDirs = [LOCAL_DIR, GLOBAL_DIR]
+  .filter(dir => fs.existsSync(path.join(dir, 'index.jsonl')))
+const lockResult = candidateDirs.length
+  ? acquireStoreWriteLocksSync(candidateDirs)
+  : { ok: true, handles: [] }
+if (!lockResult.ok) {
+  console.log(JSON.stringify({ status: 'error', message: `Feedback write failed: ${lockResult.code}`, recorded_before_failure: 0 }))
+  process.exit(1)
 }
 
+let updatedRow = null
+let scopeName = null
+let writeError = null
+try {
+  // Reread only after the lock is held. The row may have changed since the
+  // command began, especially when several useful/noise votes overlap.
+  for (const dir of candidateDirs) {
+    const indexFile = path.join(dir, 'index.jsonl')
+    const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+    let found = false
+    const updated = lines.map(line => {
+      try {
+        const entry = JSON.parse(line)
+        if (entry.id === id) {
+          found = true
+          const current = typeof entry.feedback === 'number' ? entry.feedback : 0
+          entry.feedback = Math.max(-10, Math.min(10, current + delta))
+          updatedRow = entry
+        }
+        return JSON.stringify(entry)
+      } catch { return line }
+    })
+    if (found) {
+      atomicReplaceFileSync(indexFile, updated.join('\n') + '\n')
+      scopeName = dir === GLOBAL_DIR ? 'global' : 'local'
+      break
+    }
+  }
+} catch (e) {
+  writeError = e
+} finally {
+  releaseStoreWriteLocks(lockResult.handles)
+}
+
+if (writeError) {
+  console.log(JSON.stringify({ status: 'error', message: `Feedback write failed: ${writeError.message}`, recorded_before_failure: 0 }))
+  process.exit(1)
+}
 if (!updatedRow) {
   console.log(JSON.stringify({ status: 'error', message: `Episode "${id}" not found in local or global index.` }))
   process.exit(1)
