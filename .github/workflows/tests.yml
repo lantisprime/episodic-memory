@@ -398,6 +398,12 @@ jobs:
       - name: Run promote-apply suite (RFC-012 P2 S4)
         run: node tests/test-promote-apply.mjs
 
+      - name: Run workflow validator suite
+        run: node tests/test-workflow-validate.mjs
+
+      - name: Run workflow non-event classification suite (issue 558)
+        run: node tests/test-workflow-non-event-classification.mjs
+
       - name: Run em-console web console suite
         run: node tests/test-em-console.mjs
 

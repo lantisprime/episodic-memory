@@ -63,6 +63,13 @@ const strict = argv.includes('--strict')
 const VALID_GATES = ['pre-checkpoint', 'post-checkpoint', 'review-request', 'push-allowed']
 const VALID_SCOPES = ['local', 'global', 'all']
 const RUN_RECORD_TYPES = new Set(['clerk-run', 'promote-run'])
+// Issue 558 — known BP-1 operational record frontmatter types that are NOT
+// workflow events. The validator reads only the frontmatter `type:` scalar
+// in the FIRST YAML block (closed allowlist, CRLF-tolerant, exact-prefix
+// match, no quote decoding) and returns a discriminated non-event before
+// any body parsing. See docs/plans/issue-558-workflow-event-classification.md
+// §8 Invariants + §12 Contracts.
+const NON_WORKFLOW_EVENT_TYPES = new Set(['evidence', 'failure', 'state-transition'])
 
 
 // Lifecycle event order per RFC-002:262.
@@ -130,14 +137,55 @@ function loadIndex(dataDir, source) {
 }
 
 // ---------------------------------------------------------------------------
+// Frontmatter scalar read (issue 558, §12 frontmatterScalar contract).
+//
+// Mechanical implementation: split on CRLF or LF; require line zero to be
+// exactly `---`; locate the next line exactly equal to `---`; inspect only
+// the lines between those delimiters (the FIRST YAML block). Match a field
+// only when the line starts with the exact prefix `${key}:`, then return
+// the remainder after that prefix with `.trim()` applied. Quoted values
+// retain their quote characters and therefore do not match the plain BP-1
+// producer allowlist; they follow the strict path. No scanner resilience
+// beyond the contract — defensive untested branches were removed per the
+// round-1 finding F7 disposition.
+// ---------------------------------------------------------------------------
+function frontmatterScalar(text, key) {
+  const lines = text.split(/\r?\n/)
+  if (lines.length === 0 || lines[0] !== '---') return null
+  let closeIdx = -1
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '---') { closeIdx = i; break }
+  }
+  if (closeIdx === -1) return null
+  const prefix = `${key}:`
+  for (let i = 1; i < closeIdx; i++) {
+    const line = lines[i]
+    if (line.startsWith(prefix)) {
+      return line.slice(prefix.length).trim()
+    }
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Payload extraction. Episodes are .md files; the lifecycle payload is the
-// first ```json fenced code block in the body. Returns parsed JSON or throws.
+// first ```json fenced code block in the body. Issue 558 rewire: the
+// frontmatter `type:` scalar is consulted FIRST. Known BP-1 producer types
+// (the closed NON_WORKFLOW_EVENT_TYPES allowlist) return a discriminated
+// non-event WITHOUT touching the body. Missing/unknown type falls through
+// to the existing strict fence + JSON parse path; the existing missing-
+// fence error text and JSON.parse failure remain unchanged so external
+// JSON contracts and exit codes are preserved.
 // ---------------------------------------------------------------------------
 function extractPayload(filePath) {
   const text = fs.readFileSync(filePath, 'utf8')
+  const t = frontmatterScalar(text, 'type')
+  if (t !== null && NON_WORKFLOW_EVENT_TYPES.has(t)) {
+    return { kind: 'non-event', payload: null }
+  }
   const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
   if (!m) throw new Error(`No \`\`\`json fenced block found in ${filePath}`)
-  return JSON.parse(m[1])
+  return { kind: 'event', payload: JSON.parse(m[1]) }
 }
 
 // ---------------------------------------------------------------------------
@@ -890,13 +938,19 @@ for (const entry of workflowEntries) {
     warnings.push(`episode:${entry.id}: file ${filePath} not found (orphaned index entry)`)
     continue
   }
-  let payload
+  let extracted
   try {
-    payload = extractPayload(filePath)
+    extracted = extractPayload(filePath)
   } catch (e) {
     errors.push(`episode:${entry.id}: ${e.message}`)
     continue
   }
+  // Issue 558: known BP-1 operational records (type: evidence / failure /
+  // state-transition) carry no JSON fence and are explicitly excluded from
+  // lifecycle payload parsing. Continue past the entry; no event is added
+  // to `events`, no error is emitted, no warning is migrated downstream.
+  if (extracted.kind === 'non-event') continue
+  const payload = extracted.payload
   // Pre-filter: must be the same task + pattern
   if (payload.task !== task || payload.pattern_id !== patternId) continue
   validatePayload(payload, entry, errors, warnings, indexById)
