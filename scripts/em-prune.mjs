@@ -28,6 +28,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { categoryLifecycle, canonicalCategory } from './lib/categories.mjs'
 import { computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
 import { resolveRegisteredStoresWithStatus } from './lib/registered-stores.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -82,23 +83,19 @@ function loadIndexRows(dataDir, storeLabel) {
 }
 
 
-function loadTagsIndex(dataDir) {
-  const tagsFile = path.join(dataDir, 'tags.json')
+function loadInvertedIndex(dataDir, fileName) {
+  const indexPath = path.join(dataDir, fileName)
   try {
-    return JSON.parse(fs.readFileSync(tagsFile, 'utf8'))
+    return JSON.parse(fs.readFileSync(indexPath, 'utf8'))
   } catch {
     return {}
   }
 }
 
-function pruneDir(dataDir, label, protectedIds) {
+function partitionPrunable(dataDir, protectedIds) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  const episodesDir = path.join(dataDir, 'episodes')
-  const archivedDir = path.join(dataDir, 'archived')
-  const archivedIndexFile = path.join(dataDir, 'archived-index.jsonl')
-
   if (!fs.existsSync(indexFile)) {
-    return { scope: label, pruned: 0, remaining: 0, freed_bytes: 0, protected: 0, episodes: [] }
+    return { missing: true, entries: [], toPrune: [], toKeep: [], protectedEntries: [] }
   }
 
   const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
@@ -140,71 +137,102 @@ function pruneDir(dataDir, label, protectedIds) {
     }
   }
 
+  return { missing: false, entries, toPrune, toKeep, protectedEntries }
+}
+
+function pruneDir(dataDir, label, protectedIds) {
+  const indexFile = path.join(dataDir, 'index.jsonl')
+  const episodesDir = path.join(dataDir, 'episodes')
+  const archivedDir = path.join(dataDir, 'archived')
+  const archivedIndexFile = path.join(dataDir, 'archived-index.jsonl')
+  const initial = partitionPrunable(dataDir, protectedIds)
+
+  if (initial.missing) {
+    return { scope: label, pruned: 0, remaining: 0, freed_bytes: 0, protected: 0, episodes: [] }
+  }
+
   if (checkOnly) {
-    return { scope: label, prunable: toPrune.length, remaining: toKeep.length, protected: protectedEntries.length }
+    return { scope: label, prunable: initial.toPrune.length, remaining: initial.toKeep.length, protected: initial.protectedEntries.length }
   }
 
   if (dryRun) {
     let totalSize = 0
-    const preview = toPrune.map(e => {
+    const preview = initial.toPrune.map(e => {
       const filePath = path.join(episodesDir, `${e.id}.md`)
       let size = 0
       try { size = fs.statSync(filePath).size } catch {}
       totalSize += size
       return { id: e.id, score: Math.round(e._pruneScore * 1000) / 1000, size }
     })
-    return { scope: label, prunable: toPrune.length, remaining: toKeep.length, freed_bytes: totalSize, protected: protectedEntries.length, protected_episodes: protectedEntries, episodes: preview }
+    return { scope: label, prunable: initial.toPrune.length, remaining: initial.toKeep.length, freed_bytes: totalSize, protected: initial.protectedEntries.length, protected_episodes: initial.protectedEntries, episodes: preview }
   }
 
-  // Actual prune
-  if (toPrune.length === 0) {
-    return { scope: label, pruned: 0, remaining: toKeep.length, freed_bytes: 0, protected: protectedEntries.length }
+  // A true no-op is lock-free. If the unlocked preview found work, acquire
+  // the canonical store lock and repeat the mutable-state read before the
+  // first archive/index write (Issue 546 REQ-8).
+  if (initial.toPrune.length === 0) {
+    return { scope: label, pruned: 0, remaining: initial.toKeep.length, freed_bytes: 0, protected: initial.protectedEntries.length }
   }
 
-  fs.mkdirSync(archivedDir, { recursive: true })
-
-  let freedBytes = 0
-  const archivedEntries = []
-
-  for (const entry of toPrune) {
-    const srcFile = path.join(episodesDir, `${entry.id}.md`)
-    const dstFile = path.join(archivedDir, `${entry.id}.md`)
-    try {
-      const stat = fs.statSync(srcFile)
-      freedBytes += stat.size
-      fs.renameSync(srcFile, dstFile)
-    } catch {}
-    const { _pruneScore, ...clean } = entry
-    archivedEntries.push(JSON.stringify(clean))
+  const lockResult = acquireStoreWriteLocksSync(dataDir)
+  if (!lockResult.ok) {
+    const error = new Error(`em-prune: ${lockResult.code}`)
+    error.code = lockResult.code
+    error.heldBy = lockResult.heldBy
+    throw error
   }
 
-  // Update index.jsonl — keep only non-pruned entries
-  const tmpIndex = indexFile + '.tmp'
-  fs.writeFileSync(tmpIndex, toKeep.map(e => JSON.stringify(e)).join('\n') + (toKeep.length ? '\n' : ''), 'utf8')
-  fs.renameSync(tmpIndex, indexFile)
+  try {
+    const current = partitionPrunable(dataDir, protectedIds)
+    const { toPrune, toKeep, protectedEntries } = current
+    if (current.missing || toPrune.length === 0) {
+      return { scope: label, pruned: 0, remaining: toKeep.length, freed_bytes: 0, protected: protectedEntries.length }
+    }
 
-  // Update tags.json — remove pruned episode IDs
-  const prunedIds = new Set(toPrune.map(e => e.id))
-  const tagsIndex = loadTagsIndex(dataDir)
-  for (const tag of Object.keys(tagsIndex)) {
-    tagsIndex[tag] = tagsIndex[tag].filter(id => !prunedIds.has(id))
-    if (tagsIndex[tag].length === 0) delete tagsIndex[tag]
+    fs.mkdirSync(archivedDir, { recursive: true })
+
+    let freedBytes = 0
+    const archivedEntries = []
+
+    for (const entry of toPrune) {
+      const srcFile = path.join(episodesDir, `${entry.id}.md`)
+      const dstFile = path.join(archivedDir, `${entry.id}.md`)
+      try {
+        const stat = fs.statSync(srcFile)
+        freedBytes += stat.size
+        fs.renameSync(srcFile, dstFile)
+      } catch {}
+      const { _pruneScore, ...clean } = entry
+      archivedEntries.push(JSON.stringify(clean))
+    }
+
+    // Update index.jsonl — keep only non-pruned entries.
+    atomicReplaceFileSync(indexFile, toKeep.map(e => JSON.stringify(e)).join('\n') + (toKeep.length ? '\n' : ''))
+
+    // Remove pruned IDs from every present inverted index. Keeping category
+    // and token postings in step with index.jsonl is part of the transaction,
+    // not a later rebuild obligation.
+    const prunedIds = new Set(toPrune.map(e => e.id))
+    for (const [fileName, pretty] of [['tags.json', true], ['category-index.json', true], ['tokens.json', false]]) {
+      const indexPath = path.join(dataDir, fileName)
+      if (!fs.existsSync(indexPath)) continue
+      const inverted = loadInvertedIndex(dataDir, fileName)
+      for (const key of Object.keys(inverted)) {
+        if (!Array.isArray(inverted[key])) continue
+        inverted[key] = inverted[key].filter(id => !prunedIds.has(id))
+        if (inverted[key].length === 0) delete inverted[key]
+      }
+      atomicReplaceFileSync(indexPath, JSON.stringify(inverted, ...(pretty ? [null, 2] : [])))
+    }
+
+    // Read-merge-replace archived-index while still holding the same lock.
+    const existingArchived = fs.existsSync(archivedIndexFile) ? fs.readFileSync(archivedIndexFile, 'utf8') : ''
+    atomicReplaceFileSync(archivedIndexFile, existingArchived + archivedEntries.join('\n') + '\n')
+
+    return { scope: label, pruned: toPrune.length, remaining: toKeep.length, freed_bytes: freedBytes, protected: protectedEntries.length }
+  } finally {
+    releaseStoreWriteLocks(lockResult.handles)
   }
-  const tagsFile = path.join(dataDir, 'tags.json')
-  const tagsTmp = tagsFile + '.tmp'
-  fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
-  fs.renameSync(tagsTmp, tagsFile)
-
-  // Append to archived-index.jsonl (read-merge-write, preserves previous prune runs)
-  // Note: prune has a read-rewrite race with em-store.mjs (same pattern as search write-back).
-  // A concurrent append between read and rename could lose the appended entry. This is a known
-  // limitation — prune is a maintenance operation, not a hot path.
-  const existingArchived = fs.existsSync(archivedIndexFile) ? fs.readFileSync(archivedIndexFile, 'utf8') : ''
-  const archivedTmp = archivedIndexFile + '.tmp'
-  fs.writeFileSync(archivedTmp, existingArchived + archivedEntries.join('\n') + '\n', 'utf8')
-  fs.renameSync(archivedTmp, archivedIndexFile)
-
-  return { scope: label, pruned: toPrune.length, remaining: toKeep.length, freed_bytes: freedBytes, protected: protectedEntries.length }
 }
 
 // R6 reference scan: UNION of both stores regardless of prune scope — a global
@@ -246,8 +274,16 @@ if (pbAbort) {
 const protectedIds = computeProtectedIds(referenceRows, TODAY, playbookIds)
 
 const results = []
-if (scope === 'local' || scope === 'all') results.push(pruneDir(LOCAL_DIR, 'local', protectedIds))
-if (scope === 'global' || scope === 'all') results.push(pruneDir(GLOBAL_DIR, 'global', protectedIds))
+try {
+  if (scope === 'local' || scope === 'all') results.push(pruneDir(LOCAL_DIR, 'local', protectedIds))
+  if (scope === 'global' || scope === 'all') results.push(pruneDir(GLOBAL_DIR, 'global', protectedIds))
+} catch (error) {
+  if (error?.code === 'store-write-lock-timeout') {
+    console.log(JSON.stringify({ status: 'error', code: error.code, heldBy: error.heldBy, message: error.message }))
+    process.exit(1)
+  }
+  throw error
+}
 
 const totalPruned = results.reduce((sum, r) => sum + (r.pruned || r.prunable || 0), 0)
 

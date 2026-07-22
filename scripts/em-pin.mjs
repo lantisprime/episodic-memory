@@ -23,6 +23,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -60,43 +61,64 @@ if (!dataDir) {
   process.exit(1)
 }
 
-// --- frontmatter: insert or remove the `pinned: true` line -----------------
-const content = fs.readFileSync(filePath, 'utf8')
-const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
-if (!fmMatch) {
-  console.log(JSON.stringify({ status: 'error', message: `Episode "${id}" has no parseable frontmatter.` }))
+// Pinning is one transaction over the episode frontmatter and its index row.
+// Locate the immutable path above, then acquire before rereading either
+// mutable representation so a concurrent rebuild/pin cannot lose one side.
+const lockResult = acquireStoreWriteLocksSync(dataDir)
+if (!lockResult.ok) {
+  console.log(JSON.stringify({ status: 'error', message: `Pin write failed: ${lockResult.code}` }))
   process.exit(1)
 }
-const fmLines = fmMatch[1].split('\n').filter(l => !/^pinned:/.test(l))
-if (!unpin) fmLines.push('pinned: true')
-const newContent = content.replace(fmMatch[0], `---\n${fmLines.join('\n')}\n---`)
-const tmpFile = filePath + '.tmp'
-fs.writeFileSync(tmpFile, newContent, 'utf8')
-fs.renameSync(tmpFile, filePath)
 
-// --- index row: set/delete pinned (atomic rewrite, mirrors access tracking) -
-const indexFile = path.join(dataDir, 'index.jsonl')
+let result
+let exitCode = 0
 try {
-  const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-  const updated = lines.map(line => {
+  // --- frontmatter: insert or remove the `pinned: true` line -------------
+  const content = fs.readFileSync(filePath, 'utf8')
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
+  if (!fmMatch) {
+    result = { status: 'error', message: `Episode "${id}" has no parseable frontmatter.` }
+    exitCode = 1
+  } else {
+    const fmLines = fmMatch[1].split('\n').filter(l => !/^pinned:/.test(l))
+    if (!unpin) fmLines.push('pinned: true')
+    const newContent = content.replace(fmMatch[0], `---\n${fmLines.join('\n')}\n---`)
+
+    // Read and prepare the index snapshot before the first durable write.
+    // Missing/corrupt index behavior remains unchanged: frontmatter is the
+    // durable source and a later rebuild can regenerate its row.
+    const indexFile = path.join(dataDir, 'index.jsonl')
+    let indexReplacement = null
     try {
-      const entry = JSON.parse(line)
-      if (entry.id === id) {
-        if (unpin) delete entry.pinned
-        else entry.pinned = true
-      }
-      return JSON.stringify(entry)
-    } catch { return line }
-  })
-  const idxTmp = indexFile + '.tmp'
-  fs.writeFileSync(idxTmp, updated.join('\n') + '\n', 'utf8')
-  fs.renameSync(idxTmp, indexFile)
-} catch {
-  // Index missing/corrupt: frontmatter is the durable source; a rebuild
-  // regenerates the row with the new pinned state.
+      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+      const updated = lines.map(line => {
+        try {
+          const entry = JSON.parse(line)
+          if (entry.id === id) {
+            if (unpin) delete entry.pinned
+            else entry.pinned = true
+          }
+          return JSON.stringify(entry)
+        } catch { return line }
+      })
+      indexReplacement = { indexFile, data: updated.join('\n') + '\n' }
+    } catch {
+      // Keep the historical best-effort index behavior.
+    }
+
+    atomicReplaceFileSync(filePath, newContent)
+    if (indexReplacement) atomicReplaceFileSync(indexReplacement.indexFile, indexReplacement.data)
+    result = {
+      status: 'ok', id, pinned: !unpin,
+      scope: dataDir === GLOBAL_DIR ? 'global' : 'local'
+    }
+  }
+} catch (e) {
+  result = { status: 'error', message: `Pin write failed: ${e.message}` }
+  exitCode = 1
+} finally {
+  releaseStoreWriteLocks(lockResult.handles)
 }
 
-console.log(JSON.stringify({
-  status: 'ok', id, pinned: !unpin,
-  scope: dataDir === GLOBAL_DIR ? 'global' : 'local'
-}))
+console.log(JSON.stringify(result))
+if (exitCode) process.exit(exitCode)

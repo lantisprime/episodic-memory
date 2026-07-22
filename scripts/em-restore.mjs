@@ -31,6 +31,16 @@ import os from 'os'
 import { execFileSync } from 'child_process'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { nullProtoIndex } from './lib/relevance.mjs'
+// Issue 546 (S3b): the legacy fixed-temporary writers in em-restore used a
+// process+timestamp+random suffix that still races against a concurrent
+// collision on rename when two em-restore writers target the same file from
+// different processes. The canonical helper's atomicReplaceFileSync adds
+// cryptographic randomness and the `wx` (O_EXCL) flag so the temp file is
+// created exclusively and never silently loses a writer's rename. The store
+// lock acquisition in run() spans episode persistence through every
+// derived-index merge so two restore targets cannot diverge before both
+// locks are held.
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -377,13 +387,16 @@ function ensureUnder(root, candidate) {
 // Atomic write helpers
 // ---------------------------------------------------------------------------
 function writeAtomic(filePath, content) {
+  // Issue 546 (S3b): route the same-directory atomic replacement through
+  // the canonical helper. The helper generates a unique tmp name with PID
+  // + 8 bytes of cryptographic randomness and uses the `wx` (O_EXCL) flag
+  // so two concurrent em-restore writers on the same final path never
+  // silently lose a rename (the prior `${pid}.${ts}.${rand6}` suffix
+  // collided under fast repeat writes). The mkdirSync stays here because
+  // writeAtomic is also called for first-time episode targets whose
+  // parent dir does not yet exist.
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  // F12 (code review): unique tmp suffix per process+timestamp so concurrent
-  // em-restore runs targeting the same file can't overwrite each other's
-  // tmp before rename (last-rename-wins would silently lose A's writes).
-  const tmp = `${filePath}.em-restore.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
-  fs.writeFileSync(tmp, content)
-  fs.renameSync(tmp, filePath)
+  atomicReplaceFileSync(filePath, content)
 }
 
 function writeJSONAtomic(filePath, obj) {
@@ -1071,129 +1084,153 @@ function run(opts) {
     sidecarRefuseExisting: true
   })
 
-  // Codex round-1 F1: validation-timing checklist (`feedback_validation_
-  // timing_checklist.md`) step 3 — "imagine the validator throws AFTER the
-  // operation is partway done. What state is left on disk?" Pre-PR, an
-  // applyDocWrites mkdir failure (e.g. target has 'dir' as a regular file
-  // blocking 'dir/file.md') threw AFTER applyEpisodeWrites already wrote
-  // episodes, leaving episodes on disk but indexes unwritten — exactly the
-  // partial-state class the checklist closes. Solution: writability preflight
-  // collects every unique parent dir across the plan and pre-creates them.
-  // Any mkdir failure is raised BEFORE any episode write.
-  if (apply) {
+  // Issue 546 (S3b): one try/finally wraps the entire post-acquisition
+  // restore region — preflightTargetDirs, ref-integrity, summary build,
+  // episode/doc writes, and every derived-index merge. The canonical store
+  // locks are acquired BEFORE preflight (mkdir is a disk write) and held
+  // through every write so a concurrent restore target cannot interleave.
+  // Release runs in exactly one finally; inherited handles are no-ops.
+  // The every-target resolution: canonicalize, dedupe, sort per §12 so two
+  // restore runs targeting the same pair of stores acquire the same order.
+  // Dry-run returns BEFORE acquisition so it stays lock-free.
+  let _lockHandles = null
+  try {
+    if (apply) {
+      const targetDirs = []
+      const seenDirs = new Set()
+      for (const targetDir of sourceMap.values()) {
+        const key = targetDir
+        if (!seenDirs.has(key)) { seenDirs.add(key); targetDirs.push(targetDir) }
+      }
+      // Helper owns EPISODIC_MEMORY_STORE_WRITE_LOCK_TIMEOUT_MS parsing and
+      // honors zero; no hand-parsed option.
+      const lockRes = acquireStoreWriteLocksSync(targetDirs)
+      if (!lockRes.ok) {
+        out({ status: 'error', code: lockRes.code, heldBy: lockRes.heldBy, message: `em-restore: store lock acquisition timed out (heldBy=${lockRes.heldBy}); no writes performed.` })
+        process.exit(1)
+      }
+      _lockHandles = lockRes.handles
+    }
+
+    // MEMORY.md ref-integrity
+    const refReports = includeDocs ? buildRefIntegrityReport(plan, sourceMap, docs) : []
+
+    // Skipped-files manifest summary
+    const skipManifest = readSkipManifest(backupDir)
+
+    const summary = {
+      matched: { episodes: filteredIds.size, after_chain_expansion: expanded.size, docs: includeDocs ? docs.length : 0 },
+      expansion_added: expansionAdded,
+      by_category: countBy(expanded, e => e.fm.category),
+      by_label: countBy(expanded, e => e.label),
+      conflicts: countBy(plan.episodeWrites, w => w.conflict),
+      actions: countBy(plan.episodeWrites, w => w.action),
+      doc_actions: countBy(plan.docWrites, w => w.action),
+      refused_claude_md: plan.refusedClaudeMd,
+      sidecar_collisions: plan.sidecarConflicts,
+      symlink_rejects: { source: [...epSymlinkRejects, ...docSymlinkRejects], target: plan.symlinkSkips },
+      duplicate_skips: plan.duplicateSkips,
+      category_skips: plan.categorySkips,
+      ref_integrity: refReports,
+      chain_breaks: chainBreaks, // reviewer n1: actually surface dangling supersedes refs
+      skipped_in_backup: skipManifest
+    }
+
+    if (!apply) {
+      return { status: 'ok', mode: 'dry-run', summary, plan: { episodeWrites: plan.episodeWrites.map(redactPlanItem), docWrites: plan.docWrites.map(redactPlanItem) } }
+    }
+
+    // Apply: preflight target dirs (mkdir pre-check), writes, merges.
+    // Codex round-1 F1: validation-timing checklist step 3 — any mkdir failure
+    // raises BEFORE any episode write.
     preflightTargetDirs(plan, sourceMap)
-  }
 
-  // MEMORY.md ref-integrity
-  const refReports = includeDocs ? buildRefIntegrityReport(plan, sourceMap, docs) : []
+    const epResult = applyEpisodeWrites(plan)
+    const docResult = applyDocWrites(plan, sourceMap)
 
-  // Skipped-files manifest summary
-  const skipManifest = readSkipManifest(backupDir)
-
-  const summary = {
-    matched: { episodes: filteredIds.size, after_chain_expansion: expanded.size, docs: includeDocs ? docs.length : 0 },
-    expansion_added: expansionAdded,
-    by_category: countBy(expanded, e => e.fm.category),
-    by_label: countBy(expanded, e => e.label),
-    conflicts: countBy(plan.episodeWrites, w => w.conflict),
-    actions: countBy(plan.episodeWrites, w => w.action),
-    doc_actions: countBy(plan.docWrites, w => w.action),
-    refused_claude_md: plan.refusedClaudeMd,
-    sidecar_collisions: plan.sidecarConflicts,
-    symlink_rejects: { source: [...epSymlinkRejects, ...docSymlinkRejects], target: plan.symlinkSkips },
-    duplicate_skips: plan.duplicateSkips,
-    category_skips: plan.categorySkips,
-    ref_integrity: refReports,
-    chain_breaks: chainBreaks, // reviewer n1: actually surface dangling supersedes refs
-    skipped_in_backup: skipManifest
-  }
-
-  if (!apply) {
-    return { status: 'ok', mode: 'dry-run', summary, plan: { episodeWrites: plan.episodeWrites.map(redactPlanItem), docWrites: plan.docWrites.map(redactPlanItem) } }
-  }
-
-  // Apply
-  const epResult = applyEpisodeWrites(plan)
-  const docResult = applyDocWrites(plan, sourceMap)
-
-  // Index merge per target dir
-  const indexResults = []
-  const warnings = []
-  if (rebuildIndex !== false) {
-    const writtenByTarget = new Map()
-    for (const w of epResult.written) {
-      const targetDir = sourceMap.get(w.label)
-      if (!writtenByTarget.has(targetDir)) writtenByTarget.set(targetDir, [])
-      // Codex round-1 F2: w.fm is the per-(label,id) frontmatter, not byId's
-      // first-encountered version. Each cross-label dup updates ITS target's
-      // index correctly.
-      writtenByTarget.get(targetDir).push(w.fm)
-    }
-    for (const [targetDir, fms] of writtenByTarget) {
-      const restoredEntries = fms.map(fm => ({
-        id: fm.id,
-        date: fm.date,
-        time: fm.time,
-        project: fm.project,
-        category: fm.category,
-        status: fm.status || 'active',
-        supersedes: fm.supersedes || null,
-        tags: Array.isArray(fm.tags) ? fm.tags.map(t => String(t).toLowerCase()) : [],
-        summary: fm.summary,
-        access_count: 0,
-        last_accessed: null
-      }))
-      mergeIndexes(targetDir, restoredEntries, force ? 'force' : conflictMode)
-      // RFC-009 R10d: merge the restored ids into category-index.json under their canonical
-      // category key (temp+rename), mirroring the store/revise incremental maintenance.
-      const catFile = path.join(targetDir, 'category-index.json')
-      // Null-proto: unknown categories index under their literal key (issue #469)
-      let catIndex = Object.create(null)
-      try { catIndex = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8'))) } catch {}
-      for (const fm of fms) {
-        const key = canonicalCategory(fm.category)
-        if (!catIndex[key]) catIndex[key] = []
-        if (!catIndex[key].includes(fm.id)) catIndex[key].push(fm.id)
+    // Index merge per target dir
+    const indexResults = []
+    const warnings = []
+    if (rebuildIndex !== false) {
+      const writtenByTarget = new Map()
+      for (const w of epResult.written) {
+        const targetDir = sourceMap.get(w.label)
+        if (!writtenByTarget.has(targetDir)) writtenByTarget.set(targetDir, [])
+        // Codex round-1 F2: w.fm is the per-(label,id) frontmatter, not byId's
+        // first-encountered version. Each cross-label dup updates ITS target's
+        // index correctly.
+        writtenByTarget.get(targetDir).push(w.fm)
       }
-      const catTmp = catFile + '.tmp'
-      fs.writeFileSync(catTmp, JSON.stringify(catIndex, null, 2), 'utf8')
-      fs.renameSync(catTmp, catFile)
-      indexResults.push({ targetDir, merged: restoredEntries.length })
-    }
-  } else {
-    // #495 review finding (codex + negative-scenario-reviewer, converged):
-    // --no-rebuild-index skips the merge block above, so index.jsonl is never
-    // written (applyDocWrites also skips it — single-writer discipline). Since
-    // backups now EXCLUDE index.jsonl (#495 never carries it), a restore into a
-    // target that ends up with NO index.jsonl leaves a store em-list/em-search
-    // read as EMPTY (count:0) — silently unreadable, with no backup artifact to
-    // recover from. Warn LOUDLY per such target, naming the recovery command.
-    // A target that already carries its own index.jsonl is legitimate (the
-    // operator opted out to preserve it), so it draws no warning. Warn, not
-    // hard-error: --no-rebuild-index is a deliberate opt-out and the
-    // already-indexed path is a valid workflow that a hard error would break.
-    const targetDirs = new Set()
-    for (const w of epResult.written) {
-      const t = sourceMap.get(w.label)
-      if (t) targetDirs.add(t)
-    }
-    for (const targetDir of targetDirs) {
-      if (!fs.existsSync(path.join(targetDir, 'index.jsonl'))) {
-        const msg = `em-restore: --no-rebuild-index left ${targetDir} with NO index.jsonl (backups exclude derived indexes since #495); em-list/em-search will read this store as EMPTY. Recover with: node em-rebuild-index.mjs, or re-run restore WITHOUT --no-rebuild-index.`
-        warnings.push(msg)
-        process.stderr.write(msg + '\n')
+      for (const [targetDir, fms] of writtenByTarget) {
+        const restoredEntries = fms.map(fm => ({
+          id: fm.id,
+          date: fm.date,
+          time: fm.time,
+          project: fm.project,
+          category: fm.category,
+          status: fm.status || 'active',
+          supersedes: fm.supersedes || null,
+          tags: Array.isArray(fm.tags) ? fm.tags.map(t => String(t).toLowerCase()) : [],
+          summary: fm.summary,
+          access_count: 0,
+          last_accessed: null
+        }))
+        mergeIndexes(targetDir, restoredEntries, force ? 'force' : conflictMode)
+        // RFC-009 R10d: merge the restored ids into category-index.json under
+        // their canonical category key. atomicReplaceFileSync gives collision-
+        // safe same-directory tmp+rename so a concurrent reader on a
+        // different process can never observe a torn snapshot.
+        const catFile = path.join(targetDir, 'category-index.json')
+        // Null-proto: unknown categories index under their literal key (issue #469)
+        let catIndex = Object.create(null)
+        try { catIndex = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8'))) } catch {}
+        for (const fm of fms) {
+          const key = canonicalCategory(fm.category)
+          if (!catIndex[key]) catIndex[key] = []
+          if (!catIndex[key].includes(fm.id)) catIndex[key].push(fm.id)
+        }
+        atomicReplaceFileSync(catFile, JSON.stringify(catIndex, null, 2))
+        indexResults.push({ targetDir, merged: restoredEntries.length })
+      }
+    } else {
+      // #495 review finding (codex + negative-scenario-reviewer, converged):
+      // --no-rebuild-index skips the merge block above, so index.jsonl is never
+      // written (applyDocWrites also skips it — single-writer discipline). Since
+      // backups now EXCLUDE index.jsonl (#495 never carries it), a restore into a
+      // target that ends up with NO index.jsonl leaves a store em-list/em-search
+      // read as EMPTY (count:0) — silently unreadable, with no backup artifact to
+      // recover from. Warn LOUDLY per such target, naming the recovery command.
+      // A target that already carries its own index.jsonl is legitimate (the
+      // operator opted out to preserve it), so it draws no warning. Warn, not
+      // hard-error: --no-rebuild-index is a deliberate opt-out and the
+      // already-indexed path is a valid workflow that a hard error would break.
+      const targetDirs = new Set()
+      for (const w of epResult.written) {
+        const t = sourceMap.get(w.label)
+        if (t) targetDirs.add(t)
+      }
+      for (const targetDir of targetDirs) {
+        if (!fs.existsSync(path.join(targetDir, 'index.jsonl'))) {
+          const msg = `em-restore: --no-rebuild-index left ${targetDir} with NO index.jsonl (backups exclude derived indexes since #495); em-list/em-search will read this store as EMPTY. Recover with: node em-rebuild-index.mjs, or re-run restore WITHOUT --no-rebuild-index.`
+          warnings.push(msg)
+          process.stderr.write(msg + '\n')
+        }
       }
     }
-  }
 
-  return {
-    status: 'ok',
-    mode: 'apply',
-    summary,
-    written: { episodes: epResult.written.length, docs: docResult.written.length, sidecars: epResult.sidecarsWritten.length + docResult.sidecarsWritten.length },
-    skipped: { episodes: epResult.skipped.length, docs: docResult.skipped.length },
-    indexes: indexResults,
-    ...(warnings.length ? { warnings } : {})
+    return {
+      status: 'ok',
+      mode: 'apply',
+      summary,
+      written: { episodes: epResult.written.length, docs: docResult.written.length, sidecars: epResult.sidecarsWritten.length + docResult.sidecarsWritten.length },
+      skipped: { episodes: epResult.skipped.length, docs: docResult.skipped.length },
+      indexes: indexResults,
+      ...(warnings.length ? { warnings } : {})
+    }
+  } finally {
+    // Issue 546 (S3b): every-target reverse-order release in ONE finally.
+    // Inherited handles, if any, are no-ops; owned handles unlink their lockfile.
+    if (_lockHandles) releaseStoreWriteLocks(_lockHandles)
   }
 }
 

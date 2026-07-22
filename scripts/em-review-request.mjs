@@ -47,7 +47,8 @@ import os from 'os'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { nullProtoIndex } from './lib/relevance.mjs'
+import { nullProtoIndex, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -462,18 +463,7 @@ const frontmatter = fmLines.join('\n')
 const bodyJson = JSON.stringify(payload, null, 2)
 const episodeContent = `${frontmatter}\n\n# ${summary}\n\nReview-request lifecycle event for task **${task}** at HEAD ${headFlag}.\n\n\`\`\`json\n${bodyJson}\n\`\`\`\n`
 
-fs.mkdirSync(episodesDir, { recursive: true })
 const filePath = path.join(episodesDir, `${id}.md`)
-fs.writeFileSync(filePath, episodeContent, 'utf8')
-
-// Index entry: clean serialization. _source / _dataDir are load-time
-// decorations added by loadIndex (review n3 — explicit so future readers
-// don't "fix" the apparent omission).
-const indexEntry = JSON.stringify({
-  id, date: dateStr, time: timeStr, project,
-  category: 'workflow.lifecycle', status: 'active', supersedes: null, tags, summary,
-})
-fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
 function updateTagsIndex(dir, episodeId, tagList) {
   const tagsFile = path.join(dir, 'tags.json')
@@ -484,11 +474,61 @@ function updateTagsIndex(dir, episodeId, tagList) {
     if (!idx[t]) idx[t] = []
     if (!idx[t].includes(episodeId)) idx[t].push(episodeId)
   }
-  const tmp = tagsFile + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(idx, null, 2), 'utf8')
-  fs.renameSync(tmp, tagsFile)
+  atomicReplaceFileSync(tagsFile, JSON.stringify(idx, null, 2))
 }
-updateTagsIndex(dataDir, id, tags)
+
+function updateCategoryIndex(dir, episodeId, category) {
+  const categoryFile = path.join(dir, 'category-index.json')
+  let idx = Object.create(null)
+  try { idx = nullProtoIndex(JSON.parse(fs.readFileSync(categoryFile, 'utf8'))) } catch {}
+  if (!idx[category]) idx[category] = []
+  if (!idx[category].includes(episodeId)) idx[category].push(episodeId)
+  atomicReplaceFileSync(categoryFile, JSON.stringify(idx, null, 2))
+}
+
+const lockResult = acquireStoreWriteLocksSync(dataDir)
+if (!lockResult.ok) {
+  console.log(JSON.stringify({ status: 'error', message: `em-review-request: ${lockResult.code}`, errors: [], code: lockResult.code, heldBy: lockResult.heldBy }))
+  process.exit(1)
+}
+
+try {
+  // The generated ID participated in pre-write self-reference validation.
+  // Re-read both collision surfaces under lock rather than silently
+  // overwriting an episode or duplicating its index row.
+  let idInIndex = false
+  if (fs.existsSync(indexFile)) {
+    for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        if (JSON.parse(line).id === id) { idInIndex = true; break }
+      } catch {}
+    }
+  }
+  if (idInIndex || fs.existsSync(filePath)) {
+    console.log(JSON.stringify({ status: 'error', message: `Generated episode id collision: ${id}`, errors: [], code: 'episode-id-collision' }))
+    process.exitCode = 1
+  } else {
+    fs.mkdirSync(episodesDir, { recursive: true })
+    atomicReplaceFileSync(filePath, episodeContent)
+
+    // Index entry: clean serialization. _source / _dataDir are load-time
+    // decorations added by loadIndex (review n3 — explicit so future readers
+    // don't "fix" the apparent omission).
+    const indexEntry = JSON.stringify({
+      id, date: dateStr, time: timeStr, project,
+      category: 'workflow.lifecycle', status: 'active', supersedes: null, tags, summary,
+    })
+    fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
+    updateTagsIndex(dataDir, id, tags)
+    updateCategoryIndex(dataDir, id, 'workflow.lifecycle')
+    updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeContent }))
+  }
+} finally {
+  releaseStoreWriteLocks(lockResult.handles)
+}
+
+if (process.exitCode) process.exit(process.exitCode)
 
 console.log(JSON.stringify({ status: 'ok', id, file: filePath, scope: resolvedScope, valid: true }))
 process.exit(0)

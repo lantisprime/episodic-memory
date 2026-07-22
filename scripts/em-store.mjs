@@ -36,6 +36,7 @@ import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinka
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -263,16 +264,41 @@ const dataDir = scope === 'global' ? GLOBAL_DIR : LOCAL_DIR
 const episodesDir = path.join(dataDir, 'episodes')
 const indexFile = path.join(dataDir, 'index.jsonl')
 
-// ---------------------------------------------------------------------------
-// Generate episode
-// ---------------------------------------------------------------------------
+// Issue 546 / REQ-4: hold the canonical store-write lock across episode
+// persistence and every derived-index update. Validation above stays before
+// the first durable write; the collision report and final JSON emit only
+// after the lock is released.
+const lockResult = acquireStoreWriteLocksSync(dataDir)
+if (!lockResult.ok) {
+  console.log(JSON.stringify({ status: 'error', code: lockResult.code, heldBy: lockResult.heldBy }))
+  process.exit(1)
+}
+const lockHandles = lockResult.handles
+let successPayload
+let storedId
+try {
+// Issue 546 (S3c ID-collision retry): under the lock, re-read the index
+// ids and generate an ID absent from both the index and episode path.
+// Timestamp + slug stay fixed; only the 2-byte suffix is regenerated.
 const now = new Date()
 const dateStr = now.toISOString().slice(0, 10)
 const timeStr = now.toISOString().slice(11, 16)
 const ts = now.toISOString().slice(0, 19).replace(/[-:T]/g, '').replace(/(\d{8})(\d{6})/, '$1-$2')
 const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
-const randSuffix = crypto.randomBytes(2).toString('hex')
-const id = `${ts}-${slug}-${randSuffix}`
+const indexIdSet = (() => {
+  const set = new Set()
+  try {
+    for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try { const e = JSON.parse(line); if (e && typeof e.id === 'string') set.add(e.id) } catch {}
+    }
+  } catch {}
+  return set
+})()
+let id
+do {
+  id = `${ts}-${slug}-${crypto.randomBytes(2).toString('hex')}`
+} while (indexIdSet.has(id) || fs.existsSync(path.join(episodesDir, `${id}.md`)))
 
 function normalizeTags(raw, repeats = []) {
   const fromComma = raw ? raw.split(',') : []
@@ -293,9 +319,7 @@ function updateTagsIndex(dataDir, episodeId, tags) {
     if (!index[tag]) index[tag] = []
     if (!index[tag].includes(episodeId)) index[tag].push(episodeId)
   }
-  const tmpFile = tagsFile + '.tmp'
-  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
-  fs.renameSync(tmpFile, tagsFile)
+  atomicReplaceFileSync(tagsFile, JSON.stringify(index, null, 2))
 }
 
 const tags = normalizeTags(tagsRaw, tagRepeats)
@@ -344,7 +368,7 @@ const episodeContent = `${frontmatter}\n\n# ${summary}\n\n${body}\n`
 fs.mkdirSync(episodesDir, { recursive: true })
 
 const filePath = path.join(episodesDir, `${id}.md`)
-fs.writeFileSync(filePath, episodeContent, 'utf8')
+atomicReplaceFileSync(filePath, episodeContent)
 
 // Activation/T6 index fields — keep this list in LOCKSTEP with
 // em-rebuild-index.mjs's emit object (present-only, same key names) so a
@@ -375,17 +399,24 @@ updateCategoryIndex(dataDir, id, category)
 // body tier greps the whole file, so pruning must see the same text.
 updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeContent }))
 
+  storedId = id
+  successPayload = { status: 'ok', id, file: filePath, scope }
+} finally {
+  releaseStoreWriteLocks(lockHandles)
+}
+
 // R9a write-time collision report (REQ-18) — INFORMATIONAL, stderr-only, runs
-// AFTER the write so the lazy R2 rebuild it triggers already contains this
-// episode (self-excluded, CX5). Best-effort: any failure means NO report,
-// never a blocked write; stdout JSON below is untouched.
+// AFTER the write AND after the store-write lock is released (issue 546) so
+// the lazy R2 rebuild it triggers already contains this episode
+// (self-excluded, CX5). Best-effort: any failure means NO report, never a
+// blocked write; stdout JSON below is untouched.
 if (activation && Array.isArray(activation.triggers) && activation.triggers.length) {
   try {
     const merged = loadMergedTriggerIndex()
     const mine = new Set(activation.triggers)
     const reported = new Set()
     for (const e of merged.entries) {
-      if (e.episode_id === id) continue // self-exclusion: the just-written episode
+      if (e.episode_id === storedId) continue // self-exclusion: the just-written episode
       if (!mine.has(e.value)) continue
       const key = `${e.episode_id} ${e.value}`
       if (reported.has(key)) continue
@@ -395,7 +426,7 @@ if (activation && Array.isArray(activation.triggers) && activation.triggers.leng
   } catch {}
 }
 
-console.log(JSON.stringify({ status: 'ok', id, file: filePath, scope }))
+console.log(JSON.stringify(successPayload))
 
 // Incrementally maintain category-index.json under the episode's canonical category key,
 // structurally mirroring updateTagsIndex (RFC-009 R10d). Deprecated names map to the successor
@@ -411,7 +442,5 @@ export function updateCategoryIndex(dataDir, episodeId, category) {
   const key = canonicalCategory(category)
   if (!index[key]) index[key] = []
   if (!index[key].includes(episodeId)) index[key].push(episodeId)
-  const tmpFile = catFile + '.tmp'
-  fs.writeFileSync(tmpFile, JSON.stringify(index, null, 2), 'utf8')
-  fs.renameSync(tmpFile, catFile)
+  atomicReplaceFileSync(catFile, JSON.stringify(index, null, 2))
 }

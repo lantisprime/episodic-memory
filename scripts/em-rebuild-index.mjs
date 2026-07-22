@@ -18,6 +18,7 @@ import { loadCategories, validateCategory, canonicalCategory } from './lib/categ
 import { episodeTokens, DF_DROP_RATIO, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { resolveStoreIdentity } from './lib/store-identity.mjs'
 import { STRUCTURED_FIELDS } from './lib/promotion-sources.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -49,6 +50,13 @@ function normalizeTags(raw) {
     .map(t => t.trim().toLowerCase())
     .filter(Boolean)
   return [...new Set(arr)].sort()
+}
+
+class RebuildFailure extends Error {
+  constructor(payload) {
+    super(payload.error || 'rebuild failed')
+    this.payload = payload
+  }
 }
 
 // --check: drift DETECTION only (R10f). Lists every episode whose stored category is unknown or
@@ -139,13 +147,20 @@ function loadOldIndex(dataDir) {
 }
 
 function rebuildDir(dataDir, label) {
+  // Hold the per-store lock from the episode scan through every derived
+  // replacement. Rebuild is a full snapshot transaction, not four unrelated
+  // renames that can interleave with a writer.
+  const lockResult = acquireStoreWriteLocksSync(dataDir)
+  if (!lockResult.ok) throw new RebuildFailure({ status: 'error', code: lockResult.code, heldBy: lockResult.heldBy, scope: label })
+  const lockHandles = lockResult.handles
+  try {
   // Scans episodes/ only — archived/ is intentionally ignored
   const episodesDir = path.join(dataDir, 'episodes')
   const indexFile = path.join(dataDir, 'index.jsonl')
 
   if (!fs.existsSync(episodesDir)) {
     fs.mkdirSync(episodesDir, { recursive: true })
-    fs.writeFileSync(indexFile, '', 'utf8')
+    atomicReplaceFileSync(indexFile, '')
     return { scope: label, count: 0 }
   }
 
@@ -172,8 +187,7 @@ function rebuildDir(dataDir, label) {
     const content = fs.readFileSync(path.join(episodesDir, file), 'utf8')
     let fm
     try { fm = parseFrontmatter(content) } catch (e) {
-      console.log(JSON.stringify({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null, scope: label }))
-      process.exit(1)
+      throw new RebuildFailure({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null, scope: label })
     }
     if (!fm || !fm.id) continue
     const normalizedTags = normalizeTags(Array.isArray(fm.tags) ? fm.tags : [])
@@ -273,18 +287,13 @@ function rebuildDir(dataDir, label) {
   // validate-then-write). 'no-identity' stays normal (mint is lazy, REQ-6).
   const identity = resolveStoreIdentity(dataDir)
   if (identity.error && identity.error !== 'no-identity') {
-    console.log(JSON.stringify({ status: 'error', error: identity.error, scope: label }))
-    process.exit(1)
+    throw new RebuildFailure({ status: 'error', error: identity.error, scope: label })
   }
 
-  const tmpFile = indexFile + '.tmp'
-  fs.writeFileSync(tmpFile, entries.join('\n') + (entries.length ? '\n' : ''), 'utf8')
-  fs.renameSync(tmpFile, indexFile)
+  atomicReplaceFileSync(indexFile, entries.join('\n') + (entries.length ? '\n' : ''))
 
   const tagsFile = path.join(dataDir, 'tags.json')
-  const tagsTmp = tagsFile + '.tmp'
-  fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
-  fs.renameSync(tagsTmp, tagsFile)
+  atomicReplaceFileSync(tagsFile, JSON.stringify(tagsIndex, null, 2))
 
   // tokens.json diet (S2): drop posting lists for tokens whose document
   // frequency exceeds DF_DROP_RATIO (40%) of the corpus. Such tokens do not
@@ -306,24 +315,30 @@ function rebuildDir(dataDir, label) {
   // tokens.json — compact (no pretty-print: the vocabulary is large and this
   // file is machine-read only).
   const tokensFile = path.join(dataDir, 'tokens.json')
-  const tokensTmp = tokensFile + '.tmp'
-  fs.writeFileSync(tokensTmp, JSON.stringify(tokensIndex), 'utf8')
-  fs.renameSync(tokensTmp, tokensFile)
+  atomicReplaceFileSync(tokensFile, JSON.stringify(tokensIndex))
 
   if (vocabLoaded) {
     const catFile = path.join(dataDir, 'category-index.json')
-    const catTmp = catFile + '.tmp'
-    fs.writeFileSync(catTmp, JSON.stringify(categoryIndex, null, 2), 'utf8')
-    fs.renameSync(catTmp, catFile)
+    atomicReplaceFileSync(catFile, JSON.stringify(categoryIndex, null, 2))
   } else {
     process.stderr.write(`em-rebuild-index: categories.json unloadable; ${label} category-index.json skipped (index.jsonl + tags.json built normally)\n`)
   }
 
   return { scope: label, count: entries.length, category_drift: { unknown: driftUnknown, deprecated: driftDeprecated } }
+  } finally {
+    releaseStoreWriteLocks(lockHandles)
+  }
 }
 
 const rebuilt = []
-if (scope === 'local' || scope === 'all') rebuilt.push(rebuildDir(LOCAL_DIR, 'local'))
-if (scope === 'global' || scope === 'all') rebuilt.push(rebuildDir(GLOBAL_DIR, 'global'))
-
-console.log(JSON.stringify({ status: 'ok', rebuilt }))
+try {
+  if (scope === 'local' || scope === 'all') rebuilt.push(rebuildDir(LOCAL_DIR, 'local'))
+  if (scope === 'global' || scope === 'all') rebuilt.push(rebuildDir(GLOBAL_DIR, 'global'))
+  console.log(JSON.stringify({ status: 'ok', rebuilt }))
+} catch (e) {
+  if (e instanceof RebuildFailure) {
+    console.log(JSON.stringify(e.payload))
+    process.exit(1)
+  }
+  throw e
+}

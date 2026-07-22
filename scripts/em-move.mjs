@@ -45,6 +45,7 @@ import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { normalizeTags, episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
+import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -102,9 +103,7 @@ function readIndexRows(dataDir) {
 
 function writeIndexRows(dataDir, rows) {
   const p = path.join(dataDir, 'index.jsonl')
-  const tmp = p + '.tmp'
-  fs.writeFileSync(tmp, rows.map(r => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''), 'utf8')
-  fs.renameSync(tmp, p)
+  atomicReplaceFileSync(p, rows.map(r => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''))
 }
 
 // Remove an id from a { key: [ids] } inverted index; drop emptied keys.
@@ -123,9 +122,7 @@ function removeFromInverted(dataDir, fileName, id, warnings, pretty) {
     else if (filtered.length !== idx[key].length) idx[key] = filtered
     else continue
   }
-  const tmp = p + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(idx, ...(pretty ? [null, 2] : [])), 'utf8')
-  fs.renameSync(tmp, p)
+  atomicReplaceFileSync(p, JSON.stringify(idx, ...(pretty ? [null, 2] : [])))
 }
 
 function addToInverted(dataDir, fileName, id, keys, pretty) {
@@ -139,9 +136,7 @@ function addToInverted(dataDir, fileName, id, keys, pretty) {
     if (!idx[key]) idx[key] = []
     if (!idx[key].includes(id)) idx[key].push(id)
   }
-  const tmp = p + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(idx, ...(pretty ? [null, 2] : [])), 'utf8')
-  fs.renameSync(tmp, p)
+  atomicReplaceFileSync(p, JSON.stringify(idx, ...(pretty ? [null, 2] : [])))
 }
 
 function sha256(p) {
@@ -255,28 +250,71 @@ for (const id of ids) {
     continue
   }
 
-  const srcFile = path.join(srcDir, 'episodes', `${id}.md`)
-  const dstFile = path.join(DEST_DIR, 'episodes', `${id}.md`)
+  let srcFile = path.join(srcDir, 'episodes', `${id}.md`)
 
   // Defensive: frontmatter id must match the filename.
-  const content = fs.readFileSync(srcFile, 'utf8')
-  const fmId = (content.match(/^id:\s*(.+)$/m) || [])[1]
+  let content = fs.readFileSync(srcFile, 'utf8')
+  let fmId = (content.match(/^id:\s*(.+)$/m) || [])[1]
   if (fmId && fmId.trim() !== id) {
     errors.push({ id, error: `Frontmatter id "${fmId.trim()}" does not match filename — refusing to move.` })
     continue
   }
-
-  // Source row carries the counters + metadata to preserve.
-  const srcRows = readIndexRows(srcDir)
-  const srcRow = srcRows.find(r => r.id === id)
 
   if (dryRun) {
     moved.push({ id, from, to, dry_run: true })
     continue
   }
 
-  const steps = { preflight: true, file_move: false, src_index: false, dst_index: false, src_inverted: false, dst_inverted: false }
+  // Source and destination are one transaction. Acquire both canonical
+  // stores in helper order before the first file move/index replacement,
+  // then re-resolve location, content, and both index snapshots under lock.
+  const lockResult = acquireStoreWriteLocksSync([srcDir, DEST_DIR])
+  if (!lockResult.ok) {
+    errors.push({ id, error: `store-write-lock-timeout (heldBy=${lockResult.heldBy ?? 'unknown'})`, code: lockResult.code, heldBy: lockResult.heldBy })
+    continue
+  }
+
+  let steps = null
   try {
+    const currentInLocal = fs.existsSync(path.join(LOCAL_DIR, 'episodes', `${id}.md`))
+    const currentInGlobal = fs.existsSync(path.join(GLOBAL_DIR, 'episodes', `${id}.md`))
+    resumeCleanup = false
+    if (currentInLocal && currentInGlobal) {
+      const hLocal = sha256(path.join(LOCAL_DIR, 'episodes', `${id}.md`))
+      const hGlobal = sha256(path.join(GLOBAL_DIR, 'episodes', `${id}.md`))
+      if (hLocal !== hGlobal) {
+        errors.push({ id, error: 'Present in BOTH scopes with DIFFERENT content — manual reconciliation required (compare the two files, delete the stale one, run em-rebuild-index --scope all).' })
+        continue
+      }
+      srcDir = to === 'global' ? LOCAL_DIR : GLOBAL_DIR
+      resumeCleanup = true
+    } else if (currentInLocal) srcDir = LOCAL_DIR
+    else if (currentInGlobal) srcDir = GLOBAL_DIR
+    else {
+      errors.push({ id, error: 'Not found in local or global stores after lock acquisition.' })
+      continue
+    }
+
+    if (srcDir === DEST_DIR && !resumeCleanup) {
+      noop.push({ id, scope: to })
+      continue
+    }
+
+    const currentFrom = SRC_SCOPE_OF(srcDir)
+    srcFile = path.join(srcDir, 'episodes', `${id}.md`)
+    const dstFile = path.join(DEST_DIR, 'episodes', `${id}.md`)
+    content = fs.readFileSync(srcFile, 'utf8')
+    fmId = (content.match(/^id:\s*(.+)$/m) || [])[1]
+    if (fmId && fmId.trim() !== id) {
+      errors.push({ id, error: `Frontmatter id "${fmId.trim()}" does not match filename — refusing to move.` })
+      continue
+    }
+
+    const srcRows = readIndexRows(srcDir)
+    const dstRows = readIndexRows(DEST_DIR)
+    const srcRow = srcRows.find(r => r.id === id)
+    steps = { preflight: true, file_move: false, src_index: false, dst_index: false, src_inverted: false, dst_inverted: false }
+
     // 1. file move (atomic same-fs; copy+unlink cross-device — RFC-005 F9)
     fs.mkdirSync(path.join(DEST_DIR, 'episodes'), { recursive: true })
     if (!resumeCleanup) {
@@ -303,9 +341,9 @@ for (const id of ids) {
     steps.src_index = true
 
     // 3. destination index: append the preserved row (dedupe first)
-    const dstRows = readIndexRows(DEST_DIR).filter(r => r.id !== id)
-    if (srcRow) dstRows.push(srcRow)
-    writeIndexRows(DEST_DIR, dstRows)
+    const nextDstRows = dstRows.filter(r => r.id !== id)
+    if (srcRow) nextDstRows.push(srcRow)
+    writeIndexRows(DEST_DIR, nextDstRows)
     steps.dst_index = true
 
     // 4. inverted indexes both sides (tags pretty-printed, category pretty,
@@ -320,38 +358,40 @@ for (const id of ids) {
     if (srcRow?.category) addToInverted(DEST_DIR, 'category-index.json', id, [canonicalCategory(srcRow.category)], true)
     updateTokensIndex(DEST_DIR, id, episodeTokens({ summary: srcRow?.summary || '', tags, body: content }))
     steps.dst_inverted = true
-  } catch (e) {
-    errors.push({ id, error: e.message, steps_succeeded: steps, recovery: 'run em-rebuild-index --scope all after resolving the reported paths' })
-    continue
-  }
-
-  // 5. audit episode — written LAST, to the DESTINATION scope, only on full
-  //    success (RFC-005 F4/F8). em-store is the writer so the audit episode
-  //    is itself a first-class, indexed record.
-  let auditId = null
-  if (!noAudit) {
-    try {
-      const body = [
-        `ts: ${new Date().toISOString()}`,
-        `reason: ${JSON.stringify(reason)}`,
-        `steps_succeeded: ${JSON.stringify(steps)}`,
-      ].join('\n')
-      const r = execFileSync(process.execPath, [
-        path.join(SCRIPT_DIR, 'em-store.mjs'),
-        '--project', srcRow?.project || 'em-move',
-        '--category', 'context',
-        '--tags', ['em-move', 'audit', from, to].join(','),
-        '--summary', `em-move: ${id} moved from ${from} to ${to}`,
-        '--body', body,
-        '--scope', to,
-      ], { encoding: 'utf8', cwd: process.cwd() })
-      try { auditId = JSON.parse(r.trim()).id || null } catch {}
-    } catch {
-      warnings.push(`audit episode write failed for ${id} (move itself completed)`)
+    // 5. audit episode — written LAST, to the DESTINATION scope, only on full
+    //    success (RFC-005 F4/F8). The direct child inherits the destination
+    //    lock, so the move keeps both locks until all destination persistence
+    //    for this operation is complete.
+    let auditId = null
+    if (!noAudit) {
+      try {
+        const body = [
+          `ts: ${new Date().toISOString()}`,
+          `reason: ${JSON.stringify(reason)}`,
+          `steps_succeeded: ${JSON.stringify(steps)}`,
+        ].join('\n')
+        const r = execFileSync(process.execPath, [
+          path.join(SCRIPT_DIR, 'em-store.mjs'),
+          '--project', srcRow?.project || 'em-move',
+          '--category', 'context',
+          '--tags', ['em-move', 'audit', currentFrom, to].join(','),
+          '--summary', `em-move: ${id} moved from ${currentFrom} to ${to}`,
+          '--body', body,
+          '--scope', to,
+        ], { encoding: 'utf8', cwd: process.cwd() })
+        try { auditId = JSON.parse(r.trim()).id || null } catch {}
+      } catch {
+        warnings.push(`audit episode write failed for ${id} (move itself completed)`)
+      }
     }
-  }
 
-  moved.push({ id, from, to, ...(auditId ? { audit_id: auditId } : {}) })
+    moved.push({ id, from: currentFrom, to, ...(auditId ? { audit_id: auditId } : {}) })
+  } catch (e) {
+    errors.push({ id, error: e.message, ...(steps ? { steps_succeeded: steps } : {}), recovery: 'run em-rebuild-index --scope all after resolving the reported paths' })
+    continue
+  } finally {
+    releaseStoreWriteLocks(lockResult.handles)
+  }
 }
 
 const result = {
