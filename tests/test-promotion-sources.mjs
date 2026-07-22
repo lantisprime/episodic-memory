@@ -26,6 +26,12 @@ function json(result) {
 function run(script, args, cwd, home) {
   return spawnSync(process.execPath, [script, ...args], { cwd, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' })
 }
+function promoteApply(cwd, home) {
+  const preview = json(run(PROMOTE, [], cwd, home))
+  const args = preview.candidates.flatMap(candidate => ['--confirm', candidate.fingerprint])
+  return run(PROMOTE, ['--apply', ...args], cwd, home)
+}
+
 function treeDigest(dir) {
   if (!fs.existsSync(dir)) return 'absent'
   const h = crypto.createHash('sha256')
@@ -181,7 +187,7 @@ t('testReplicaCollapseOnHashMatch', () => {
 t('testNewPromotionTyped', () => {
   const w = world('typed'); const a = w.project('a'); const b = w.project('b'); const body = 'always quote hook command paths because paths with spaces split execution'
   w.lesson(a, 'always quote hook command paths', body); w.lesson(b, 'always quote hook paths in commands', body)
-  const r = run(PROMOTE, ['--apply'], w.root, w.home); const out = json(r); assert(r.status === 0 && out.promoted.length === 1, r.stdout + r.stderr)
+  const r = promoteApply(w.root, w.home); const out = json(r); assert(r.status === 0 && out.promoted.length === 1, r.stdout + r.stderr)
   const row = w.rows(path.join(w.home, '.episodic-memory'))[0]
   assert(Array.isArray(row.promotion_sources) && row.promotion_sources.length === 2, JSON.stringify(row)); w.cleanup()
 })
@@ -189,7 +195,7 @@ t('testNewPromotionTyped', () => {
 t('testNoSentinelOnNewWrites', () => {
   const w = world('sentinel'); const a = w.project('a'); const b = w.project('b'); const body = 'always quote hook command paths because paths with spaces split execution'
   w.lesson(a, 'always quote hook command paths', body); w.lesson(b, 'always quote hook paths in commands', body)
-  json(run(PROMOTE, ['--apply'], w.root, w.home)); const row = w.rows(path.join(w.home, '.episodic-memory'))[0]
+  json(promoteApply(w.root, w.home)); const row = w.rows(path.join(w.home, '.episodic-memory'))[0]
   assert(row.project !== 'cross-project', JSON.stringify(row)); assert(!row.tags.some(x => /^promoted:[0-9a-f]{8}$/.test(x)), JSON.stringify(row.tags)); w.cleanup()
 })
 

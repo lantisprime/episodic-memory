@@ -395,6 +395,8 @@ jobs:
         run: node tests/test-store-identity.mjs
       - name: Run promotion-sources suite (RFC-012 P2 S2)
         run: node tests/test-promotion-sources.mjs
+      - name: Run promote-apply suite (RFC-012 P2 S4)
+        run: node tests/test-promote-apply.mjs
 
       - name: Run em-console web console suite
         run: node tests/test-em-console.mjs

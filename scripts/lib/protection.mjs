@@ -166,7 +166,7 @@ export function resolvePlaybookProtection({ localStoreDir, willArchiveLocal = fa
 // NO id-dedupe). playbookIds = the playbook-referenced episode ids harvested by
 // resolvePlaybookProtection (R5b). Returns Map<id, {reason, via}>; first-set reason
 // wins in the order: pinned, evidence-linked-violation, trigger-bearing-lesson,
-// consolidates-member, latest-run-record, store-identity-chain,
+// consolidates-member, latest-run-record, latest-promote-run, store-identity-chain,
 // playbook-referenced, chain-member.
 export function computeProtectedIds(rows, todayStr, playbookIds = []) {
   const map = new Map()
@@ -226,6 +226,15 @@ export function computeProtectedIds(rows, todayStr, playbookIds = []) {
     }
   }
   for (const v of latestByStore.values()) set(v.id, 'latest-run-record', v.id)
+  // class d3 (RFC-012 P2 REQ-17): latest promote-run record per store.
+  const latestPromoteByStore = new Map()
+  for (const r of rows) {
+    if (r.record_type !== 'promote-run' || typeof r.id !== 'string') continue
+    const canonical = CANONICAL_ID.test(r.id)
+    const cur = latestPromoteByStore.get(r._store)
+    if (!cur || (canonical === cur.canonical ? r.id > cur.id : canonical)) latestPromoteByStore.set(r._store, { id: r.id, canonical })
+  }
+  for (const v of latestPromoteByStore.values()) set(v.id, 'latest-promote-run', v.id)
   // class d2 (RFC-012 P2 REQ-18): store-identity chain episodes are prune-protected
   // in FULL — aliases resolve through superseded revisions and a detached root is
   // still referenced by its successor's detaches_identity_root — so EVERY revision
@@ -287,7 +296,7 @@ export function computeProtectedIds(rows, todayStr, playbookIds = []) {
   const anchorOf = new Map()
   const queue = []
   for (const [id, v] of map.entries()) {
-    if (v.reason === 'latest-run-record') continue
+    if (v.reason === 'latest-run-record' || v.reason === 'latest-promote-run') continue
     anchorOf.set(id, id)
     queue.push(id)
   }

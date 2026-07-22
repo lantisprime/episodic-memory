@@ -62,6 +62,8 @@ const strict = argv.includes('--strict')
 
 const VALID_GATES = ['pre-checkpoint', 'post-checkpoint', 'review-request', 'push-allowed']
 const VALID_SCOPES = ['local', 'global', 'all']
+const RUN_RECORD_TYPES = new Set(['clerk-run', 'promote-run'])
+
 
 // Lifecycle event order per RFC-002:262.
 // classified and scope-change are not required for any gate by default.
@@ -875,7 +877,7 @@ allEntries = allEntries.filter(e => {
 
 // Filter to active workflow.lifecycle episodes
 const workflowEntries = allEntries.filter(e =>
-  e.status !== 'superseded' && e.category === 'workflow.lifecycle'
+  e.status !== 'superseded' && e.category === 'workflow.lifecycle' && !RUN_RECORD_TYPES.has(e.record_type)
 )
 
 const errors = []

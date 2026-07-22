@@ -56,9 +56,10 @@
     "candidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hash", "stores", "promotion_sources", "members"],
+      "required": ["hash", "stores", "promotion_sources", "members", "fingerprint"],
       "properties": {
         "hash": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "stores": {
           "type": "array",
           "minItems": 2,
