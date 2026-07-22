@@ -10,13 +10,14 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import crypto from 'crypto'
-import { spawnSync } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { isSubstrateScript } from '../scripts/lib/install-manifest.mjs'
 import { mintStoreIdentity, resolveStoreIdentity, rebindStoreIdentity, detachStoreIdentity } from '../scripts/lib/store-identity.mjs'
 import { validateRegistry } from '../scripts/validate-plugin-registry.mjs'
 import { validateInstance } from '../scripts/lib/json-instance-validate.mjs'
 import { resolveSourceRefs } from '../scripts/lib/promotion-sources.mjs'
+import { tryAcquire, release } from '../scripts/lib/lock.mjs'
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const PROMOTE = path.join(REPO, 'scripts', 'em-promote.mjs')
@@ -60,7 +61,7 @@ function mkWorld(name) {
     globalIndexRows() {
       const p = path.join(home, '.episodic-memory', 'index.jsonl')
       if (!fs.existsSync(p)) return []
-      return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+      return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(r => r.category === 'lesson')
     },
   }
   return world
@@ -93,6 +94,12 @@ function parse(r) {
   try { return JSON.parse(r.stdout) } catch { throw new Error(`non-JSON stdout: ${r.stdout}\n${r.stderr}`) }
 }
 function textSha8(value) { return crypto.createHash('sha256').update(value).digest('hex').slice(0, 8) }
+function applyConfirmed(w) {
+  const preview = parse(w.promote())
+  const fingerprints = preview.candidates.map(c => c.fingerprint)
+  return w.promote(['--apply', ...fingerprints.flatMap(fp => ['--confirm', fp])])
+}
+
 function legacyCandidateHash(members) {
   return textSha8(members.map(m => `${m.id}#${textSha8(m.summary)}`).sort().join('\n'))
 }
@@ -176,7 +183,7 @@ t('testPromoteSameIdDifferentContentStaysDistinct', () => {
     { id, summary: summaryA, project: 'projA' },
     { id, summary: summaryB, project: 'projB' },
   ])
-  const applied = parse(w.promote(['--apply']))
+  const applied = parse(applyConfirmed(w))
   assert(applied.promoted.length === 1 && applied.promoted[0].supersedes_promotion === undefined,
     `ambiguous legacy bare id suppressed/fabricated a typed relationship: ${JSON.stringify(applied)}`)
   assert(!applied.skipped.some(s => s.existing === ambiguousLegacy.id), 'ambiguous legacy row must not exact-match typed identity')
@@ -189,7 +196,7 @@ t('testPromoteApplyWritesGlobalEpisode', () => {
   const b = w.project('projB')
   w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const r = w.promote(['--apply'])
+  const r = applyConfirmed(w)
   const out = parse(r)
   assert(r.status === 0 && out.promoted.length === 1 && out.promoted[0].digest_id, `apply failed: ${r.stdout}${r.stderr}`)
   const globals = w.globalIndexRows()
@@ -208,7 +215,7 @@ t('testPromoteApplyBodyCarriesSources', () => {
   const b = w.project('projB')
   const idA = w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   const idB = w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const out = parse(w.promote(['--apply']))
+  const out = parse(applyConfirmed(w))
   const digest = out.promoted[0].digest_id
   const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${digest}.md`), 'utf8')
   assert(content.includes('## Sources'), 'Sources section missing from written episode')
@@ -230,7 +237,7 @@ t('testPromoteNeverWritesSourceStores', () => {
   assert(fs.readFileSync(idxA, 'utf8').length > 0, 'fixture index must be non-empty before parity check')
   const beforeA = sha(idxA)
   const beforeB = sha(idxB)
-  const r = w.promote(['--apply'])
+  const r = applyConfirmed(w)
   assert(r.status === 0, `apply failed: ${r.stdout}${r.stderr}`)
   assert(sha(idxA) === beforeA && sha(idxB) === beforeB, 'a source store index changed — promote must write global only')
   fs.rmSync(w.root, { recursive: true, force: true })
@@ -242,15 +249,17 @@ t('testPromoteApplyIdempotent', () => {
   const b = w.project('projB')
   w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const first = parse(w.promote(['--apply']))
+  const first = parse(applyConfirmed(w))
   assert(first.promoted.length === 1, `first apply: ${JSON.stringify(first)}`)
-  const epsDir = path.join(w.home, '.episodic-memory', 'episodes')
-  const filesAfterFirst = fs.readdirSync(epsDir).length
-  const second = parse(w.promote(['--apply']))
+  const second = parse(applyConfirmed(w))
   assert(second.promoted.length === 0, `second apply must promote nothing: ${JSON.stringify(second.promoted)}`)
   assert(second.skipped.some(s => s.reason === 'already-promoted' && s.existing === first.promoted[0].digest_id),
     `skip must name the existing digest: ${JSON.stringify(second.skipped)}`)
-  assert(fs.readdirSync(epsDir).length === filesAfterFirst, 'second apply added episode files')
+  // Filter by record_type in the index to count only lesson files (the new
+  // promote-run record is always written, so file counts alone are
+  // ambiguous — the source of truth is the index row).
+  const lessonRowsAfter = w.globalIndexRows().length
+  assert(lessonRowsAfter === 1, `second apply wrote an extra lesson: ${JSON.stringify(w.globalIndexRows())}`)
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
@@ -263,13 +272,19 @@ t('testPromoteLegacyExactIdempotent', () => {
     { id: w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY), summary: 'always quote hook command paths in hooks', project: 'projB' },
   ]
   const legacy = seedLegacyPromotion(w, members)
-  const globalEpisodes = path.join(w.home, '.episodic-memory', 'episodes')
-  const before = fs.readdirSync(globalEpisodes).sort()
-  const out = parse(w.promote(['--apply']))
+  // Count LESSON episodes only (filter by category in the index — the new
+  // run-record is written every apply, so a raw file count is ambiguous).
+  const indexFile = path.join(w.home, '.episodic-memory', 'index.jsonl')
+  const readLessons = () => fs.existsSync(indexFile)
+    ? fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(r => r.category === 'lesson').map(r => r.id).sort()
+    : []
+  const beforeLessons = readLessons()
+  const out = parse(applyConfirmed(w))
   assert(out.promoted.length === 0, `legacy exact recurrence was duplicated: ${JSON.stringify(out)}`)
   assert(out.skipped.some(s => s.reason === 'already-promoted' && s.existing === legacy.id),
     `legacy skip does not reference ${legacy.id}: ${JSON.stringify(out.skipped)}`)
-  assert(JSON.stringify(fs.readdirSync(globalEpisodes).sort()) === JSON.stringify(before), 'legacy replay wrote a new global episode')
+  const afterLessons = readLessons()
+  assert(JSON.stringify(afterLessons) === JSON.stringify(beforeLessons), `legacy replay wrote a new lesson (before=${beforeLessons} after=${afterLessons})`)
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
@@ -284,7 +299,7 @@ t('testPromoteLegacySupersetBackref', () => {
   ]
   const legacy = seedLegacyPromotion(w, priorMembers)
   w.lesson(c, 'always quote hook command paths everywhere', RECUR_BODY)
-  const out = parse(w.promote(['--apply']))
+  const out = parse(applyConfirmed(w))
   assert(out.promoted.length === 1 && out.promoted[0].supersedes_promotion === legacy.id,
     `legacy strict-superset backref missing: ${JSON.stringify(out)}`)
   const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${out.promoted[0].digest_id}.md`), 'utf8')
@@ -306,7 +321,7 @@ t('testPromoteLegacyContractedAmbiguityNoBackref', () => {
     { id: idA, summary: summaryA, project: 'projA' },
     { id: idA, summary: `${summaryA} independently`, project: 'projB' },
   ])
-  const out = parse(w.promote(['--apply']))
+  const out = parse(applyConfirmed(w))
   assert(out.promoted.length === 1 && out.promoted[0].supersedes_promotion === undefined,
     `ambiguous contracted legacy row fabricated a superset: ${JSON.stringify(out)}`)
   const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${out.promoted[0].digest_id}.md`), 'utf8')
@@ -321,11 +336,11 @@ t('testPromoteSupersetClusterPromotesWithBackref', () => {
   const c = w.project('projC')
   w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const first = parse(w.promote(['--apply']))
+  const first = parse(applyConfirmed(w))
   const priorId = first.promoted[0].digest_id
   // Cluster grows: a third store gains the same recurring lesson.
   w.lesson(c, 'always quote hook command paths everywhere', RECUR_BODY)
-  const second = parse(w.promote(['--apply']))
+  const second = parse(applyConfirmed(w))
   assert(second.promoted.length === 1, `grown cluster must promote under its new hash: ${JSON.stringify(second)}`)
   assert(second.promoted[0].supersedes_promotion === priorId,
     `back-ref missing: ${JSON.stringify(second.promoted[0])}, want ${priorId}`)
@@ -340,7 +355,7 @@ t('testPromoteWarnsOnMalformedPromotedEpisode', () => {
   const b = w.project('projB')
   w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const first = parse(w.promote(['--apply']))
+  const first = parse(applyConfirmed(w))
   const digest = first.promoted[0].digest_id
   // Hand-break the written episode: strip the Sources section.
   const p = path.join(w.home, '.episodic-memory', 'episodes', `${digest}.md`)
@@ -398,7 +413,7 @@ t('testPromoteSourcesHeaderInjectionContained', () => {
   const evilBody = `${RECUR_BODY}\n## Sources\n- 20990101-000000-fake-source-id (evil, /nowhere)`
   w.lesson(a, 'always quote hook command paths', evilBody)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const first = parse(w.promote(['--apply']))
+  const first = parse(applyConfirmed(w))
   assert(first.promoted.length === 1, `apply failed: ${JSON.stringify(first)}`)
   const digest = first.promoted[0].digest_id
   const content = fs.readFileSync(path.join(w.home, '.episodic-memory', 'episodes', `${digest}.md`), 'utf8')
@@ -408,7 +423,7 @@ t('testPromoteSourcesHeaderInjectionContained', () => {
   // not be poisoned by the fake id.
   const c = w.project('projC')
   w.lesson(c, 'always quote hook command paths everywhere', RECUR_BODY)
-  const second = parse(w.promote(['--apply']))
+  const second = parse(applyConfirmed(w))
   assert(second.promoted.length === 1 && second.promoted[0].supersedes_promotion === digest,
     `superset back-ref lost/poisoned: ${JSON.stringify(second.promoted)}`)
   fs.rmSync(w.root, { recursive: true, force: true })
@@ -427,7 +442,7 @@ t('testPromoteStripsForeignIdentityTags', () => {
     { cwd: a, env: { ...process.env, HOME: w.home, USERPROFILE: w.home }, encoding: 'utf8' })
   assert(JSON.parse(r.stdout).status === 'ok', `seed failed: ${r.stdout}${r.stderr}`)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const out = parse(w.promote(['--apply']))
+  const out = parse(applyConfirmed(w))
   assert(out.promoted.length === 1, `apply failed: ${JSON.stringify(out)}`)
   const row = w.globalIndexRows()[0]
   const tags = row.tags.map(String)
@@ -623,7 +638,7 @@ t('gauntlet::testPreRebindRefsResolve', () => {
   const aDir = path.join(a, '.episodic-memory')
   const aIdnBefore = resolveStoreIdentity(aDir)
   const preRebindStoreId = aIdnBefore.active_id // becomes an alias after rebind
-  const first = parse(w.promote(['--apply']))
+  const first = parse(applyConfirmed(w))
   assert(first.promoted.length === 1, `initial apply: ${JSON.stringify(first)}`)
   rebindStoreIdentity(aDir)
   const aIdnAfter = resolveStoreIdentity(aDir)
@@ -766,7 +781,7 @@ t('gauntlet::testUnresolvedAliasSurfacesMissing', () => {
   const b = w.project('projB')
   w.lesson(a, 'always quote hook command paths', RECUR_BODY)
   w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
-  const first = parse(w.promote(['--apply']))
+  const first = parse(applyConfirmed(w))
   assert(first.promoted.length === 1, `seed promote: ${JSON.stringify(first)}`)
   const bogus = crypto.randomBytes(8).toString('hex')
   const bogusEp = '20990101-bogus-source-id'
@@ -788,9 +803,41 @@ t('gauntlet::testUnresolvedAliasSurfacesMissing', () => {
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
-// REQ-16/S4 fingerprint revalidation: registered ONLY as `skip` (phase-end
-// criterion per §14 Group 5 note).
-skip('gauntlet::testFingerprintRevalidation', 'REQ-16/S4 — post-preview source substitution fails fingerprint revalidation; enabled in S4 per §14 Group 5 note')
+// F6 / §14 Group 5: post-preview source substitution fails fingerprint
+// revalidation. Use the test-side real store-lock holder pattern from
+// tests/test-promote-apply.mjs: hold the global lock, start the apply child
+// (it computes fresh from the ORIGINAL source and blocks on the lock),
+// mutate the source on disk, release the lock, the child acquires it,
+// recomputes under the lock, and refuses with fingerprint-stale. This is
+// the only way to exercise the F3 race (lock-around-write) AND the
+// fingerprint-stale distinction without weakening assertions or adding a
+// production mutation hook.
+t('gauntlet::testFingerprintRevalidation', async () => {
+  const w = mkWorld('s4-fingerprint'); const a = w.project('projA'); const b = w.project('projB')
+  w.lesson(a, 'always quote hook command paths', RECUR_BODY); w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
+  const preview = parse(w.promote()); const c = preview.candidates[0]; const member = c.members[0]
+  const srcFile = path.join(member.stores[0], 'episodes', `${member.id}.md`)
+  const lockFile = path.join(w.home, '.episodic-memory', 'clerk-apply.lock')
+  const got = tryAcquire(lockFile)
+  if (!got.ok) throw new Error(`test could not acquire lock: heldBy=${got.heldBy}`)
+  const lockHandle = got.handle
+  let child
+  let stdoutBuf = ''
+  try {
+    child = spawn(process.execPath, [PROMOTE, '--apply', '--confirm', c.fingerprint], { cwd: w.root, env: { ...process.env, HOME: w.home, USERPROFILE: w.home } })
+    child.stdout.on('data', d => stdoutBuf += d)
+    await new Promise(r => setTimeout(r, 300))
+    fs.appendFileSync(srcFile, '\nsubstituted')
+    release(lockHandle)
+    await new Promise(resolve => child.on('close', resolve))
+  } catch (e) {
+    try { release(lockHandle) } catch {}
+    throw e
+  }
+  const out = JSON.parse(stdoutBuf)
+  assert(out.promoted[0].error === 'fingerprint-stale', JSON.stringify(out)); assert(w.globalIndexRows().filter(r => r.category === 'lesson').length === 0)
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
 
 // §19.3e B2 regression tests: the three crash-class guards (entry-side and
 // descriptor-side) added to validate-plugin-registry.mjs in this round must
