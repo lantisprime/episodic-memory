@@ -263,7 +263,7 @@ remains unnecessary if the typed producer boundary stays stable.
 - [x] Existing validator and promote suites pass.
 - [x] CI registration and P12 checks pass.
 - [x] Frozen-diff reviewer accepts or every finding is dispositioned.
-- [ ] Draft PR checks are green.
+- [x] Draft PR checks are green.
 - [x] Deferred-finding sweep has an issue, comment, or violation for every item.
 
 ## §19 Review Consensus
