@@ -151,7 +151,6 @@ const KNOWN_UNWIRED = [
   'test-tier0-overrides.mjs',
   'test-transcript-walker.mjs',
   'test-validate-discipline-load-bundles.mjs',
-  'test-workflow-validate.mjs',
   'test-worktree-marker-write.sh',
 ]
 
