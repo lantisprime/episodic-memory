@@ -111,7 +111,7 @@ receives only its slice files and shared contracts.
 - Every acquired handle is released in reverse order; inherited handles are never released.
 - Inheritance is evaluated only from a failed `tryAcquire` result with a positive live `heldBy`; malformed and null owners never inherit.
 - Validation finishes before acquisition where it does not depend on mutable store state.
-- Each writer re-reads the mutable rows and files it will modify after acquisition: collision state for store and seed/review writers, original status for revise, current counters for feedback, frontmatter and index rows for pin, current episode set for rebuild and prune, source/destination rows for move, source cluster rows for legacy consolidate, target indexes for restore, and index rows for relevance writeback.
+- Each writer re-reads the mutable rows and files it will modify after acquisition: collision state for store and seed/review writers, pre-lock vs in-lock (file status, index status, direct-successor set) for revise so a stable superseded original may still be revived while an actually concurrent revision is detected as stale, current counters for feedback, frontmatter and index rows for pin, current episode set for rebuild and prune, source/destination rows for move, source cluster rows for legacy consolidate, target indexes for restore, and index rows for relevance writeback.
 - No transaction reports success until all in-scope derived indexes are updated.
 - Temporary files stay in the destination directory and are unique per write.
 - Cross-platform behavior uses Node standard-library APIs only.
@@ -219,7 +219,8 @@ caller may retry the whole operation after inspecting the collision.
 New suite: `tests/test-store-write-concurrency.mjs`.
 
 - Helper: acquire, release, inherited handles, malformed-owner timeout, lexical ordering, symlink dedupe, partial cleanup, unique temporary paths, `wx` collision, and atomic replacement cleanup.
-- Deterministic writer blocking: real external holder against store, revise, feedback, pin, rebuild, prune, move, seed, review-request, restore, and legacy consolidate.
+- Deterministic writer blocking: real external holder against store, revise (including cross-scope snapshot-drift detection), feedback, pin, rebuild, prune, move, seed, review-request, restore, and legacy consolidate.
+- Deterministic cross-scope revise race: a fixture-local CJS preload fixes the pre-lock snapshot instant; the holder mutates the other store before the revise acquires its locks, proving `stale-original` with `snapshot drift` reason and no writes.
 - Concurrency parity: 16 real `em-store` processes with distinct sentinel tags and bodies.
 - Cross-store revise: local original plus global successor with both stores consistent.
 - Search writeback: concurrent append remains present after access tracking.
@@ -238,6 +239,8 @@ external child. On unmodified main, the ordinary writer does not wait, so the ob
 |---|---|---|
 | New regression suite passes | `node tests/test-store-write-concurrency.mjs` | named pass count, zero failures |
 | Suite is falsifiable on main | `node tests/test-store-write-concurrency.mjs --expect-main-red` before product edits | non-zero exit with `writerExitedBeforeRelease=true` |
+| Cross-scope revise stale-original guard (snapshot-drift) | `node tests/test-store-write-concurrency.mjs` (cross-scope snapshot-drift subtest) | `stale-original` with `snapshot drift` reason, exit 1, no writes |
+| Revise stale-original guard preserves superseded-member revival | `node tests/test-rfc-009-p4-apply.mjs --only mergeReversibleViaRevive` | one pass |
 | Store tag compatibility | `node tests/test-em-store-tag-flags.mjs` | zero failures |
 | Feedback compatibility | `node tests/test-feedback-scan.mjs` | zero failures |
 | Category compatibility | `node tests/test-category-index.mjs` | zero failures |

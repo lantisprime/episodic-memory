@@ -269,6 +269,59 @@ const dataDir = scope === 'inherit'
 const episodesDir = path.join(dataDir, 'episodes')
 const indexFile = path.join(dataDir, 'index.jsonl')
 
+// ---------------------------------------------------------------------------
+// PR-562 snapshot helper (§8.2 in-lock reread, file/index coherence, and the
+// direct-successor set): captures (fileStatus, indexStatus, successors) so
+// the in-lock state can be compared to the pre-lock snapshot. A change in
+// any field between the two reads indicates a concurrent writer mutated the
+// original between snapshot and lock acquisition, which fails the
+// transaction. This lets a stable superseded original be revised (the
+// accepted clerk merge-Revive path) while still serializing an actually
+// concurrent revision. The helper tolerates missing files and missing index
+// rows (status=null in both cases) so the snapshot shape is stable.
+// ---------------------------------------------------------------------------
+function snapshotOriginalState(filePath, statusDir, successorDirs, id) {
+  let fileStatus = null
+  try {
+    const content = fs.readFileSync(filePath, 'utf8')
+    const m = content.match(/^status:\s*(\S+)$/m)
+    if (m) fileStatus = m[1]
+  } catch { /* missing file → null status */ }
+  let indexStatus = null
+  const statusIndexPath = path.join(statusDir, 'index.jsonl')
+  if (fs.existsSync(statusIndexPath)) {
+    for (const line of fs.readFileSync(statusIndexPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const entry = JSON.parse(line)
+        if (entry && entry.id === id) indexStatus = entry.status || null
+      } catch { /* tolerate a malformed index line */ }
+    }
+  }
+  const successors = []
+  for (const storeDir of successorDirs) {
+    const indexFilePath = path.join(storeDir, 'index.jsonl')
+    if (!fs.existsSync(indexFilePath)) continue
+    for (const line of fs.readFileSync(indexFilePath, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const entry = JSON.parse(line)
+        if (entry && entry.id !== id && entry.supersedes === id) successors.push(entry.id)
+      } catch { /* tolerate a malformed index line */ }
+    }
+  }
+  successors.sort()
+  return { fileStatus, indexStatus, successors: [...new Set(successors)] }
+}
+
+// Pre-lock snapshot (before acquireStoreWriteLocksSync). findEpisode already
+// confirmed the file exists; the snapshot captures the mutable triple so
+// the in-lock check below can prove no concurrent writer raced ahead. The
+// direct-successor set is unioned across both locked stores
+// ([original.dir, dataDir]) so a cross-scope revision detects a successor
+// appended in either the original's store or the successor's store.
+const preLock = snapshotOriginalState(original.filePath, original.dir, [original.dir, dataDir], originalId)
+
 const lockResult = acquireStoreWriteLocksSync([original.dir, dataDir])
 if (!lockResult.ok) {
   console.log(JSON.stringify({ status: 'error', code: lockResult.code, heldBy: lockResult.heldBy }))
@@ -283,35 +336,48 @@ let result
 let newId
 try {
   // ---------------------------------------------------------------------------
-  // Reread the mutable original state UNDER the lock and verify BOTH the
-  // episode file and its index row are still active BEFORE any write (§8.2
-  // in-lock reread). A stale original fails the transaction with zero writes.
+  // In-lock reread (§8.2): re-snapshot under the lock and compare to the
+  // pre-lock snapshot. A difference in any field means a concurrent writer
+  // mutated the original between snapshot and lock acquisition, which fails
+  // the transaction with stale-original and zero writes.
+  //
+  // Coherence guards (§8.2 in-lock reread + reviewer F1): the original's
+  // file status and index-row status must agree AND the index row must
+  // exist. A missing index row is a known-bad anchor (no provenance for the
+  // supersession) and is rejected even when the snapshot is stable. A
+  // stable superseded original (file: superseded, index: superseded) passes
+  // both guards and is revivable — the accepted clerk merge-Revive path.
   // ---------------------------------------------------------------------------
-  const currentOriginalContent = fs.readFileSync(original.filePath, 'utf8')
   const originalIndexFile = path.join(original.dir, 'index.jsonl')
-  let originalRow = null
-  if (fs.existsSync(originalIndexFile)) {
-    for (const line of fs.readFileSync(originalIndexFile, 'utf8').split('\n')) {
-      if (!line.trim()) continue
-      try {
-        const entry = JSON.parse(line)
-        if (entry && entry.id === originalId) { originalRow = entry; break }
-      } catch { /* tolerate a malformed index line */ }
-    }
-  }
-  const fileActive = /^status: active$/m.test(currentOriginalContent)
-  const rowActive = originalRow !== null && originalRow.status === 'active'
-  if (!fileActive || !rowActive) {
+  const inLock = snapshotOriginalState(original.filePath, original.dir, [original.dir, dataDir], originalId)
+
+  const snapshotStable =
+    preLock.fileStatus === inLock.fileStatus &&
+    preLock.indexStatus === inLock.indexStatus &&
+    preLock.successors.length === inLock.successors.length &&
+    preLock.successors.every((id, i) => id === inLock.successors[i])
+  const indexRowPresent = inLock.indexStatus !== null
+  const fileAndIndexAgree =
+    inLock.fileStatus !== null &&
+    inLock.indexStatus !== null &&
+    inLock.fileStatus === inLock.indexStatus
+
+  if (!snapshotStable || !indexRowPresent || !fileAndIndexAgree) {
+    const reasons = []
+    if (!snapshotStable) reasons.push(`snapshot drift (pre file=${preLock.fileStatus}/idx=${preLock.indexStatus}/succ=${preLock.successors.join(',')} -> in-lock file=${inLock.fileStatus}/idx=${inLock.indexStatus}/succ=${inLock.successors.join(',')})`)
+    if (!indexRowPresent) reasons.push('index row status: missing')
+    if (!fileAndIndexAgree) reasons.push(`file/index incoherent (file=${inLock.fileStatus}, index=${inLock.indexStatus})`)
     result = {
       status: 'error',
       code: 'stale-original',
-      message: `Original episode "${originalId}" is not active (file active: ${fileActive}, index row status: ${originalRow ? originalRow.status : 'missing'}); no revision written.`
+      message: `Original episode "${originalId}" is stale (${reasons.join('; ')}); no revision written.`
     }
   } else {
 
   // ---------------------------------------------------------------------------
   // Mark original as superseded
   // ---------------------------------------------------------------------------
+  const currentOriginalContent = fs.readFileSync(original.filePath, 'utf8')
   const supersededContent = currentOriginalContent.replace(/^status: active$/m, 'status: superseded')
   atomicReplaceFileSync(original.filePath, supersededContent)
 

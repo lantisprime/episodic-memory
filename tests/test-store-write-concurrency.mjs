@@ -1204,6 +1204,122 @@ async function testMissingOriginalIndexRowNoWrite() {
   }
 }
 
+async function testReviseCrossScopeStaleOriginalSnapshotDrift() {
+  const fixture = mkStoreFixture('store-write-revise-snapshot-drift-')
+  // Seed original in local and a first global successor so the original is
+  // stably superseded.
+  const original = seedLocalOriginal(fixture, 'cross-drift')
+  const firstRevise = runJsonSync(REVISE, [
+    '--original', original.id,
+    '--project', 'issue-546-fixture',
+    '--tag', 'cross-drift-first',
+    '--summary', 'first cross scope successor',
+    '--body', 'first cross scope body crossdriftfirsttoken',
+    '--scope', 'global',
+  ], fixture)
+  assert.equal(firstRevise.code, 0, `first revise seed failed: ${firstRevise.stdout} ${firstRevise.stderr}`)
+  assert.equal(firstRevise.json?.status, 'ok', `first revise JSON: ${firstRevise.stdout}`)
+  assert.equal(episodeStatus(fixture.localDir, original.id), 'superseded')
+
+  const originalDir = fs.realpathSync(fixture.localDir)
+  const dataDir = fs.realpathSync(fixture.globalDir)
+  const canonical = [originalDir, dataDir].sort()
+  const firstLockFile = path.join(canonical[0], 'clerk-apply.lock')
+  const otherStoreDir = canonical[1]
+  const markerFile = path.join(fixture.root, 'prelock-marker')
+
+  // CJS preload: intercept the first fs.readFileSync of the successor-store
+  // index (dataDir), write a marker, and patch the builtin ESM exports so
+  // the em-revise ESM import sees the wrapped function.
+  const preloadPath = path.join(fixture.root, 'snapshot-drift-preload.cjs')
+  fs.writeFileSync(preloadPath, `
+    const fs = require('fs');
+    const moduleObj = require('module');
+    const origReadFileSync = fs.readFileSync;
+    const markerFile = ${JSON.stringify(markerFile)};
+    const targetIndex = ${JSON.stringify(path.join(dataDir, 'index.jsonl'))};
+    let marked = false;
+    fs.readFileSync = function (...args) {
+      const result = origReadFileSync.apply(fs, args);
+      if (!marked && args[0] === targetIndex) {
+        fs.writeFileSync(markerFile, 'prelock-complete');
+        marked = true;
+      }
+      return result;
+    };
+    moduleObj.syncBuiltinESMExports();
+  `)
+
+  await withLiveHolder(firstLockFile, async ({ child }) => {
+    // Spawn a cross-scope revise. The preload fixes the instant when the
+    // pre-lock snapshot has completed, so we can mutate the other store
+    // before the revise acquires its locks.
+    const completion = spawnJson(REVISE, [
+      '--original', original.id,
+      '--project', 'issue-546-fixture',
+      '--tag', 'cross-drift-second',
+      '--summary', 'second cross scope successor',
+      '--body', 'second cross scope body crossdriftsecondtoken',
+      '--scope', 'global',
+    ], fixture, { NODE_OPTIONS: `--require ${preloadPath}` })
+
+    await waitForFile(markerFile, 5000)
+
+    // Holder-owned mutation in the other store: append a direct successor
+    // episode + index row. The pre-lock snapshot has already completed, so
+    // this new successor is not in preLock.successors.
+    const holderId = `${original.id}-holder-successor`
+    const holderFile = path.join(otherStoreDir, 'episodes', `${holderId}.md`)
+    fs.mkdirSync(path.dirname(holderFile), { recursive: true })
+    const holderContent = [
+      '---',
+      `id: ${holderId}`,
+      'date: 2026-07-15',
+      'time: "12:00"',
+      'project: issue-546-fixture',
+      'category: decision',
+      'status: active',
+      `supersedes: ${original.id}`,
+      'tags: [holder-successor]',
+      'summary: holder injected successor',
+      '---',
+      '',
+      '# holder injected successor',
+      '',
+      'holder body holdersuccessortoken\n',
+    ].join('\n')
+    fs.writeFileSync(holderFile, holderContent)
+    const indexFile = path.join(otherStoreDir, 'index.jsonl')
+    const indexRow = JSON.stringify({
+      id: holderId, date: '2026-07-15', time: '12:00', project: 'issue-546-fixture',
+      category: 'decision', status: 'active', supersedes: original.id,
+      tags: ['holder-successor'], summary: 'holder injected successor',
+    })
+    fs.appendFileSync(indexFile, indexRow + '\n', 'utf8')
+
+    // Snapshot bytes after the holder mutation; the revise must not write
+    // anything once it detects the drift.
+    const expected = [storeDataSnapshot(fixture.localDir), storeDataSnapshot(fixture.globalDir)]
+
+    releaseChild(child)
+    const result = await completion
+    assert.equal(result.code, 1, `revise must exit 1 on stale original; got ${result.code}; stdout=${result.stdout}; stderr=${result.stderr}`)
+    assert.equal(result.json?.status, 'error', `stale JSON status missing: ${result.stdout}`)
+    assert.equal(result.json?.code, 'stale-original', `stale reason must be stale-original: ${result.stdout}`)
+    assert.match(result.json?.message || '', /snapshot drift/, `stale message must mention snapshot drift: ${result.stdout}`)
+
+    const actual = [storeDataSnapshot(fixture.localDir), storeDataSnapshot(fixture.globalDir)]
+    assert.deepEqual(actual, expected, 'revise mutated store bytes after detecting snapshot drift')
+
+    telemetry.reviseCrossScopeSnapshotDrift = {
+      heldFirst: path.basename(path.dirname(canonical[0])),
+      mutatedStore: otherStoreDir === originalDir ? 'original' : 'data',
+      staleCode: result.json?.code,
+      unchanged: true,
+    }
+  })
+}
+
 async function runS2aIntegrationTests() {
   console.log('# S2a real-process store/revise integration tests')
   await asyncTap('S2a: 16 concurrent stores preserve episode/index/tag/category/token parity with no temp litter', testConcurrentStoreParity)
@@ -1211,6 +1327,7 @@ async function runS2aIntegrationTests() {
   await asyncTap('S2a: cross-store revise preserves source/destination derived-index parity', testCrossStoreReviseParity)
   await asyncTap('S2a: revise lock timeout is a byte-for-byte no-write', testReviseTimeoutNoWrite)
   await asyncTap('S2a: same-store lock inputs dedupe and revise preserves full parity', testSameStoreReviseParity)
+  await asyncTap('S2a: cross-scope revise detects a successor appended in the other store as snapshot-drift stale-original', testReviseCrossScopeStaleOriginalSnapshotDrift)
   await asyncTap('S2a: missing original index row is stale and writes nothing', testMissingOriginalIndexRowNoWrite)
 }
 
@@ -1357,7 +1474,14 @@ async function testSearchWritebackRetainsConcurrentAppend() {
   const lockFile = path.join(fixture.localDir, 'clerk-apply.lock')
 
   await withLiveHolder(lockFile, async ({ child }) => {
-    const search = spawnJson(SEARCH, ['--query', 'original', '--scope', 'local'], fixture)
+    // PR-562 (issue 546 substrate repair): production best-effort access
+    // tracking intentionally times out at 250 ms. The 300 ms assertion
+    // exceeds that bound, but on a fast runner or due to startup variance
+    // the search may exit before the window. Bump the per-process shared
+    // timeout ONLY in this test's spawn env so the search stays blocked
+    // until the holder releases — production timing is unchanged.
+    const raceEnvExtra = { EPISODIC_MEMORY_STORE_WRITE_LOCK_TIMEOUT_MS: '5000' }
+    const search = spawnJson(SEARCH, ['--query', 'original', '--scope', 'local'], fixture, raceEnvExtra)
     const append = spawnJson(STORE, [
       '--project', 'issue-546-fixture', '--category', 'decision',
       '--tag', 'search-race-append', '--summary', 'search race append',
@@ -1432,6 +1556,21 @@ async function runS2bIntegrationTests() {
   await asyncTap('S2b: concurrent pin and rebuild preserve episode/index parity', testPinAndRebuildConcurrentParity)
   await asyncTap('S2b: search writeback retains an append serialized through the store lock', testSearchWritebackRetainsConcurrentAppend)
   await asyncTap('S2b: contended search store is skipped while another store writes back', testSearchWritebackSkipsOnlyContendedStore)
+}
+
+function waitForFile(filePath, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(() => {
+      if (fs.existsSync(filePath)) {
+        clearInterval(timer)
+        resolve()
+      } else if (Date.now() >= deadline) {
+        clearInterval(timer)
+        reject(new Error(`timeout waiting for marker file ${filePath}`))
+      }
+    }, 50)
+  })
 }
 
 function waitForMarker(child, marker, timeoutMs) {
