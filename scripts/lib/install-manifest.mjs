@@ -520,7 +520,7 @@ export function activationSupportFiles() {
 //                 never reports it as 'unclassified')
 //   'unclassified' → install throws (fail closed, #531)
 // ───────────────────────────────────────────────────────────────────────────
-export const GLOBAL_SCRIPT_SUBTREES = ['em-consolidate', 'second-opinion']
+export const GLOBAL_SCRIPT_SUBTREES = ['em-consolidate', 'second-opinion', 'topic-tracks']
 export const REPO_ONLY_SCRIPT_SUBTREES = ['scaffold-plugin']
 
 /**

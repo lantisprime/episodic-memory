@@ -41,7 +41,7 @@ Route the query to the right abstraction level first; then search within it. Rou
 | Event-class — what happened: decisions, bug root causes, milestones | "what did we decide about X", "why did Y break" | Episodes | `node ~/.episodic-memory/scripts/em-search.mjs --query "<topic>" [--tag <t>] [--scope local\|global\|all] [--full]` |
 | Evolution-class — how a decision changed; what is current | "what is the latest revision of X" | Supersedes chains | `node ~/.episodic-memory/scripts/em-search.mjs --history <episode-id> [--full]` |
 
-No transcript-level or topic-track routes exist: those levels are not shipped (`em-mine-transcripts.mjs` is a one-way staging miner, not a recall surface; topic tracks are not implemented). Honest capability labels (Principle 5): route only to what ships.
+Transcript-level routes remain unshipped; topic-track derivation ships on-demand via `em-topic-tracks` — run dry-run preview, then `--apply --confirm <fingerprint>` for each selected global lesson; sources remain untouched; ordinary search/ranking unchanged. Honest capability labels (Principle 5): route only to what ships.
 
 ### When to stop (recall budget)
 

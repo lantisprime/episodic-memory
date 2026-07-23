@@ -14,7 +14,7 @@
     "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]+$" },
     "version": { "$ref": "#/$defs/semver" },
     "module": { "type": "string", "pattern": "^scripts/em-[a-z0-9-]+\\.mjs$" },
-    "io_schema": { "const": "schemas/runtime/learning-io.schema.json" },
+    "io_schema": { "type": "string", "pattern": "^schemas/runtime/[a-z][a-z0-9-]*-io\\.schema\\.json$" },
     "gauntlet": { "type": "string", "pattern": "^tests/test-[a-z0-9-]+\\.mjs$" },
     "tier": { "type": "string", "enum": ["STRONG", "MEDIUM", "WEAK"] },
     "experimental": { "type": "boolean" },

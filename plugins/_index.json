@@ -88,6 +88,14 @@
       "module": "scripts/em-promote.mjs",
       "descriptor": "learning/em-promote.json",
       "status": "active"
+    },
+    {
+      "type": "learning",
+      "id": "em-topic-tracks",
+      "version": "1.0.0",
+      "module": "scripts/em-topic-tracks.mjs",
+      "descriptor": "learning/em-topic-tracks.json",
+      "status": "active"
     }
   ]
 }

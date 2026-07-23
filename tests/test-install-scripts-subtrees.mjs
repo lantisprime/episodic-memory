@@ -236,6 +236,8 @@ if (failed > 0) {
   process.exit(1)
 }
 
-// Sanity: GLOBAL_SCRIPT_SUBTREES is the §A.5 verbatim pair.
-assert.deepStrictEqual(GLOBAL_SCRIPT_SUBTREES, ['em-consolidate', 'second-opinion'],
+// Sanity: GLOBAL_SCRIPT_SUBTREES is the §A.5 verbatim pair plus topic-tracks
+// (NAPMEM-C §A.7 S2 row 2.3a — appended after the committed 'em-consolidate',
+// 'second-opinion' list; functional test bodies above are unchanged).
+assert.deepStrictEqual(GLOBAL_SCRIPT_SUBTREES, ['em-consolidate', 'second-opinion', 'topic-tracks'],
   'GLOBAL_SCRIPT_SUBTREES drifted from §A.5')

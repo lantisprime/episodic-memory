@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "tag_jaccard_min": 0.3,
+  "summary_jaccard_min": 0.2,
+  "min_cluster": 3,
+  "warn_episodes": 1000,
+  "max_episodes": 2000,
+  "common_tag_support": 0.5,
+  "source_categories": ["decision", "lesson", "research"]
+}

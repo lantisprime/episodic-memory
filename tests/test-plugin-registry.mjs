@@ -463,6 +463,12 @@ function buildLiveProject() {
     "schemas/runtime/learning-io.schema.json",
     "scripts/em-promote.mjs",
     "tests/test-em-promote.mjs",
+    // RFC-012 P2-S3: em-topic-tracks is the second live learning entry — its
+    // descriptor + L-path targets must be on disk too, else L2/L-path fire.
+    "learning/em-topic-tracks.json",
+    "schemas/runtime/topic-tracks-io.schema.json",
+    "scripts/em-topic-tracks.mjs",
+    "tests/test-topic-tracks.mjs",
     "scripts/scaffold-plugin/templates/common-rows.md",
   ];
   for (const rel of LIVE_FILES) {

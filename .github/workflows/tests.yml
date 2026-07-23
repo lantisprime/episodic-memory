@@ -394,6 +394,8 @@ jobs:
 
       - name: Run em-promote experimental suite (APC-S5)
         run: node tests/test-em-promote.mjs
+      - name: Run topic-tracks runtime suite (NAPMEM-C-S2/S3)
+        run: node tests/test-topic-tracks.mjs
       - name: Run store-identity suite (RFC-012 P2 S1)
         run: node tests/test-store-identity.mjs
       - name: Run promotion-sources suite (RFC-012 P2 S2)
@@ -412,6 +414,9 @@ jobs:
 
       - name: Run em-manage wizard suite
         run: node tests/test-em-manage.mjs
+
+      - name: Run topic-tracks install suite (NAPMEM-C-S2/S3)
+        run: node tests/test-install-topic-tracks.mjs
 
       - name: Run install version-manifest + registry + update-sweep suite (Layer 1)
         run: node tests/test-install-manifest.mjs
