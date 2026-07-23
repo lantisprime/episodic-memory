@@ -58,6 +58,7 @@ import { spawnSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
+import { findContradictionCandidates, SUMMARY_JACCARD_MIN } from './lib/contradiction.mjs'
 import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
@@ -252,6 +253,28 @@ function checkStore(dataDir, scopeName) {
     report('supersedes-links', scopeName, 'warn', `${dangling.length} episode(s) supersede id(s) not present in this scope`, verbose ? { episodes: dangling } : undefined)
   } else {
     report('supersedes-links', scopeName, 'ok', 'all supersedes pointers resolve')
+  }
+
+  // --- contradiction-candidates (#537) --------------------------------------
+  // Two ACTIVE decision episodes in one project with near-identical summaries
+  // are very likely the same decision stored twice — the correction written
+  // with em-store instead of em-revise, so nothing links them and both stay
+  // searchable. Advisory only: warn, no fix hint (the repair is human judgment,
+  // em-rebuild-index cannot do it), and never an error.
+  const contradiction = findContradictionCandidates(entries)
+  if (contradiction.pairs.length) {
+    report('contradiction-candidates', scopeName, 'warn',
+      `${contradiction.pairs.length} pair(s) of active decision episodes share >= ${SUMMARY_JACCARD_MIN} summary-token similarity — one may be an unlinked correction; link them with em-revise --original <id>`,
+      {
+        ...(verbose ? { pairs: contradiction.pairs } : {}),
+        ...(contradiction.skipped.length ? { skipped_projects: contradiction.skipped } : {})
+      })
+  } else if (contradiction.skipped.length) {
+    report('contradiction-candidates', scopeName, 'warn',
+      `${contradiction.skipped.length} project group(s) above the pairwise scan cap were not checked for contradictions`,
+      { skipped_projects: contradiction.skipped })
+  } else {
+    report('contradiction-candidates', scopeName, 'ok', 'no active decision episodes with near-identical summaries')
   }
 
   // --- tmp-litter -----------------------------------------------------------

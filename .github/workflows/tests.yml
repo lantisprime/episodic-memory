@@ -344,6 +344,9 @@ jobs:
       - name: Run relevance suite (wave 1)
         run: node tests/test-relevance.mjs
 
+      - name: Run contradiction advisory suite (#537)
+        run: node tests/test-contradiction.mjs
+
       - name: Run em-move suite (RFC-005)
         run: node tests/test-em-move.mjs
 
