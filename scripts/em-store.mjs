@@ -34,7 +34,8 @@ import { readBodyFile } from './lib/body-file.mjs'
 import { loadCategories, validateCategory, canonicalCategory } from './lib/categories.mjs'
 import { validateActivation, serializeInlineArray, loadMergedIndex, resolveLinkage, ACTIVATION_ARRAY_FIELDS, illegalValueChar, illegalScalarChar } from './lib/activation.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
-import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
+import { episodeTokens, updateTokensIndex, nullProtoIndex, loadIndex } from './lib/relevance.mjs'
+import { findContradictionsFor } from './lib/contradiction.mjs'
 import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 
@@ -422,6 +423,25 @@ if (activation && Array.isArray(activation.triggers) && activation.triggers.leng
       if (reported.has(key)) continue
       reported.add(key)
       process.stderr.write(`collision: trigger "${e.value}" also on ${e.episode_id}: ${e.summary}\n`)
+    }
+  } catch {}
+}
+
+// #537 contradiction advisory — INFORMATIONAL, stderr-only, best-effort, and
+// runs AFTER the write and AFTER the store-write lock is released, exactly like
+// the R9a collision report above. Any failure means NO advisory, never a
+// blocked or altered write; the stdout JSON below is untouched.
+if (category === 'decision') {
+  try {
+    const near = findContradictionsFor(
+      { id: storedId, project, category: 'decision', status: 'active', supersedes: null, summary },
+      loadIndex(dataDir, scope)
+    )
+    for (const c of near) {
+      process.stderr.write(`similar active decision: ${c.id} (summary-token similarity ${c.similarity}): ${c.summary}\n`)
+    }
+    if (near.length) {
+      process.stderr.write(`hint: if this corrects an earlier decision, store it with em-revise --original <id> so the chain links them\n`)
     }
   } catch {}
 }
