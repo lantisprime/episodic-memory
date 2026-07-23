@@ -1,0 +1,14 @@
+{
+  "type": "learning",
+  "id": "em-topic-tracks",
+  "version": "1.0.0",
+  "module": "scripts/em-topic-tracks.mjs",
+  "io_schema": "schemas/runtime/topic-tracks-io.schema.json",
+  "gauntlet": "tests/test-topic-tracks.mjs",
+  "tier": "WEAK",
+  "experimental": false,
+  "decision_date": "2026-07-23",
+  "activation": { "mode": "on-demand" },
+  "side_effects": { "writes": ["global-episodes"], "confirm_gated": true },
+  "summary": "On-demand global topic-track derivation (NAPMEM-C, RFC-001 Phase 4). Deterministic clustering of three or more related primary source episodes into per-topic lesson candidates; dry-run previews one global lesson per topic; --apply writes only explicitly confirmed candidates as global category lesson episodes through em-store with typed promotion_sources provenance; --auto is rejected; source episodes remain byte-identical."
+}

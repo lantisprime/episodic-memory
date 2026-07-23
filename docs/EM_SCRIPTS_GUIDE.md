@@ -54,6 +54,7 @@ Match your intent to the command. The third column is the wrong habit it replace
 | Session start printed an install version-drift notice | `em-sync-install` (this project, from the dist cache) or `node <repo>/install.mjs --update-consumers` (all registered projects) | Hand-copying hook/skill files, or re-running full installs in every consuming project |
 | One view of EVERY registered project's store (analytics/health/fold) | `em-stats --all-projects`, `em-doctor --all-projects`, `em-consolidate --fold-superseded --all-projects --dry-run` | Cd-ing into each project and running per-store commands |
 | The same lesson keeps recurring across projects | `em-promote` (dry-run), then `em-promote --apply` (EXPERIMENTAL) | Re-learning it per project, or hand-copying lesson episodes to global |
+| Derive a topic track from related primary episodes (manual curation) | `em-topic-tracks` (dry-run preview), then `--apply --confirm <fingerprint>` | Hand-crafting a global lesson by eye, or skipping provenance links so future sessions lose the source chain |
 | User wants to SEE the store (dashboard, browse, drafts, hygiene) | `em-console` — hand the user the printed URL | Pasting walls of JSON at the user |
 | User wants guided maintenance in the terminal | `em-manage` (interactive menu) | Dictating flag-by-flag commands to a human |
 | Make a lesson surface on a phrase / tool / activity (or rebuild that index) | `em-store --category lesson --trigger ...` then `em-trigger-index` | Hoping search recall happens to resurface the lesson |
@@ -1139,6 +1140,152 @@ promotes under its new hash with a `Supersedes-promotion:` back-reference.
 Malformed existing promoted episodes (bad hash tag, missing `## Sources`)
 are reported in `warnings`, never fatal. Exit 1 only when an `--apply` write
 failed; usage errors exit 2.
+
+### em-topic-tracks
+
+On-demand learning-strategy capability (CAPABILITIES.md WEAK tier): scans
+the global store plus every registered source store for clusters of related
+primary episodes (>=3 members by default) and, on explicit per-candidate
+confirmation, derives ONE global lesson episode per cluster via `em-store`.
+Dry-run is the DEFAULT; nothing is written until you pass `--apply` together
+with the 64-hex fingerprints from the preview.
+
+- WHEN TO USE: you have hand-curated the relevant primary episodes into a
+  cluster (e.g., three related `lesson`/`decision`/`research` episodes across
+  registered projects) and want a typed-provenance global lesson so every
+  future session surfaces it through ordinary search.
+- WHEN NOT TO USE: a near-duplicate cluster inside ONE store (`em-consolidate`),
+  a recurring lesson across projects that needs `em-promote` instead, fewer
+  than three configured source episodes (the build step rejects sub-threshold
+  clusters), or any cluster whose members have not yet been captured —
+  `em-topic-tracks` derives from existing episodes, it does not invent them.
+
+```
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs [--max-episodes <n>] [--apply] [--confirm <64-hex>]...
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs --help
+```
+
+The CLI is a thin wrapper over `scripts/topic-tracks/engine.mjs`; the engine
+owns behavior and `em-store` owns every write. The CLI itself never touches
+an episode, index, tag, or lock file.
+
+**Preview → confirm → apply workflow.** A dry-run prints one JSON object:
+`{status:"ok", dry_run:true, config, candidates, skipped, warnings,
+missing_sources}`. Each `candidates[]` entry carries a stable 64-hex
+`fingerprint`, `common_tags`, a deterministic `summary` and `body`,
+`promotion_sources` (typed `{store_id, episode_id, content_sha256}` refs to
+every member — these are the typed provenance round-tripped through
+`em-store --promotion-sources-json`), and the `members[]` themselves.
+`skipped[]` lists fingerprints already derived on a prior run as
+`{fingerprint, reason:"already-derived", existing_episode_id}` — re-runs are
+idempotent and will not duplicate an existing global lesson.
+
+To write the lessons you want, repeat `--confirm <fingerprint>` for each
+preview candidate you approve, then add `--apply`:
+
+```
+# Preview only (default mode; no filesystem changes).
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs
+
+# Confirm and apply a chosen subset; --confirm is repeatable.
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs \
+  --apply \
+  --confirm <fingerprint-A> \
+  --confirm <fingerprint-B>
+```
+
+Confirmed `--apply` writes ONE `category:lesson` episode per fingerprint
+through `em-store` — never by hand — into the global store with typed
+`promotion_sources`, and exits 0 on success. The apply result mirrors the
+dry-run shape: `{status:"ok", dry_run:false, written, skipped, unconfirmed,
+warnings, missing_sources}`. `written[]` carries `{fingerprint, episode_id,
+project}` for each new global lesson; `skipped[]` again surfaces
+`already-derived` rows; `unconfirmed[]` lists preview fingerprints that
+were not selected and therefore were not written.
+
+**Bounds and warnings.** The committed config sets `warn_episodes:1000`
+(emit a `warning-threshold-exceeded` warning when the total eligible
+input members after eligibility filtering and replica collapse exceeds
+1000, before clustering) and `max_episodes:2000` (hard cap; any run where
+the total eligible input members after eligibility filtering and replica
+collapse exceeds 2000, before pair construction, exits 2 with
+`topic-tracks-max-episodes`). `--max-episodes <n>` may only TIGHTEN the
+committed cap (values <=2000); any value above the committed cap is
+rejected with `invalid-max-episodes`, exit 2. CLI args use exact pairwise
+parsing: unknown flags, `--flag=value` spellings, positional arguments,
+and missing values all exit 2 with `unknown-flag` or the appropriate usage
+error.
+
+**`--auto` is REJECTED.** RFC-001 Phase 4's `em-consolidate --auto` /
+`--apply-without-confirm` proposal was withdrawn in favor of per-candidate
+confirmation; passing `--auto` exits 2 with `auto-write-withdrawn`. There
+is no flag that writes without per-fingerprint `--confirm <fingerprint>`.
+
+**Global-only side effect; sources are immutable.** The confirmed write
+target is the global store (`~/.episodic-memory/`); source stores — both
+the global source rows AND every registered source-store episode used as
+a member — remain byte-identical. The apply path holds a store write lock
+on the global store AND every represented source store, and re-validates
+source content hashes under both locks before any write; a mutated source
+during that window is reported as `stale-fingerprint` and the run exits 1
+without touching the global store. There is no flag or mode that mutates a
+source episode: source immutability is enforced by the engine, not by a
+usage rule.
+
+**Output shapes (excerpts).** Dry-run success:
+
+```json
+{
+  "status": "ok", "dry_run": true,
+  "config": { "tag_jaccard_min": 0.3, "summary_jaccard_min": 0.2,
+              "min_cluster": 3, "warn_episodes": 1000, "max_episodes": 2000,
+              "common_tag_support": 0.5, "source_categories": ["decision","lesson","research"] },
+  "candidates": [
+    { "fingerprint": "<64-hex>",
+      "common_tags": ["..."],
+      "summary": "...",
+      "body": "...",
+      "promotion_sources": [
+        { "store_id": "<16-hex-or-global>",
+          "episode_id": "<id>", "content_sha256": "<64-hex>" }
+      ],
+      "members": [
+        { "store_id": "<16-hex-or-global>",
+          "episode_id": "<id>", "project": "<name>",
+          "category": "decision|lesson|research",
+          "date": "YYYY-MM-DD", "summary": "..." }
+      ] }
+  ],
+  "skipped": [
+    { "fingerprint": "<64-hex>",
+      "reason": "already-derived",
+      "existing_episode_id": "<id>" }
+  ],
+  "warnings": [],
+  "missing_sources": []
+}
+```
+
+Apply success mirrors the dry-run shape with `dry_run:false`, `written[]`,
+`skipped[]` (again `already-derived`), and `unconfirmed[]` (preview
+fingerprints you did not pass to `--confirm`). Every dry-run / apply /
+error object validates against `schemas/runtime/topic-tracks-io.schema.json`;
+any error is one of the closed set
+`auto-write-withdrawn | invalid-max-episodes | confirm-required |
+confirm-malformed | confirm-duplicate | confirm-unknown | unknown-flag |
+topic-tracks-config-unloadable | topic-tracks-config-invalid |
+topic-tracks-config-symlink | topic-tracks-max-episodes |
+stale-fingerprint | store-write-lock-timeout | store-write-failed`.
+
+**No new ranking layer.** The derived global lesson is an ordinary
+`category:lesson` episode — it is surfaced through the same `em-search`,
+`em-recall`, and `--tag` paths as every other lesson, and there is
+deliberately no new ranking layer for derived lessons (no special tag,
+no special index, no boost). The only signal that an episode was derived
+by `em-topic-tracks` is the typed `promotion_sources` payload; discovery
+is by tag/query, not by source. `em-rebuild-index` preserves
+`promotion_sources` across rebuilds so derived lessons keep their typed
+provenance after index maintenance.
 
 ### em-console
 

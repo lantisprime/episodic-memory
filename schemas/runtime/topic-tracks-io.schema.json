@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/runtime/topic-tracks-io.schema.json",
+  "title": "Topic-tracks runtime IO schema (NAPMEM-C REQ-12)",
+  "description": "Closed oneOf schema covering help-independent dry-run, successful apply, and structured error outputs of scripts/em-topic-tracks.mjs. Promotion-source field shapes mirror schemas/runtime/learning-io.schema.json so typed provenance round-trips through em-store --promotion-sources-json unchanged. Closed at every level (additionalProperties:false) so unknown extra keys surface as schema violations instead of silently passing. The dryRun.config uses the same modeled fraction01 shape as schemas/topic-tracks-config.schema.json (allOf with minimum 0, not const 0, not minimum 1.0000000000000002) for the three REQ-2 fraction fields; cross-field ordering and source-category string uniqueness remain runtime-validated by loadTopicTracksConfig, not enforced by this schema.",
+  "oneOf": [
+    { "$ref": "#/$defs/dryRun" },
+    { "$ref": "#/$defs/apply" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "fraction01": {
+      "type": "number",
+      "allOf": [
+        { "minimum": 0 },
+        { "not": { "const": 0 } },
+        { "not": { "minimum": 1.0000000000000002 } }
+      ]
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "episode_id", "content_sha256"],
+      "properties": {
+        "store_id": { "type": "string", "pattern": "^([0-9a-f]{16}|global)$" },
+        "episode_id": { "type": "string", "minLength": 1 },
+        "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "missingSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "episode_id"],
+      "properties": {
+        "store_id": { "type": "string", "pattern": "^([0-9a-f]{16}|global)$" },
+        "episode_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "episode_id", "project", "category", "date", "summary"],
+      "properties": {
+        "store_id": { "type": "string", "pattern": "^([0-9a-f]{16}|global)$" },
+        "episode_id": { "type": "string", "minLength": 1 },
+        "project": { "type": "string", "minLength": 1 },
+        "category": { "type": "string", "minLength": 1 },
+        "date": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "common_tags", "summary", "body", "promotion_sources", "members"],
+      "properties": {
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "common_tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "body": { "type": "string", "minLength": 1 },
+        "promotion_sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourceRef" }
+        },
+        "members": {
+          "type": "array",
+          "minItems": 3,
+          "items": { "$ref": "#/$defs/member" }
+        }
+      }
+    },
+    "skippedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "reason"],
+      "properties": {
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "reason": { "type": "string", "enum": ["already-derived"] },
+        "existing_episode_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "dryRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "dry_run", "config", "candidates", "skipped", "warnings", "missing_sources"],
+      "properties": {
+        "status": { "const": "ok" },
+        "dry_run": { "const": true },
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tag_jaccard_min", "summary_jaccard_min", "min_cluster", "warn_episodes", "max_episodes", "common_tag_support", "source_categories"],
+          "properties": {
+            "tag_jaccard_min": { "$ref": "#/$defs/fraction01" },
+            "summary_jaccard_min": { "$ref": "#/$defs/fraction01" },
+            "min_cluster": { "type": "integer", "minimum": 3 },
+            "warn_episodes": { "type": "integer", "minimum": 3 },
+            "max_episodes": { "type": "integer", "minimum": 3 },
+            "common_tag_support": { "$ref": "#/$defs/fraction01" },
+            "source_categories": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/candidate" }
+        },
+        "skipped": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/skippedCandidate" }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["problem"],
+            "properties": {
+              "problem": { "type": "string", "minLength": 1 },
+              "store_id": { "type": "string" },
+              "episode_id": { "type": "string" },
+              "count": { "type": "integer" },
+              "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "missing_sources": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/missingSource" }
+        }
+      }
+    },
+    "apply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "dry_run", "written", "skipped", "unconfirmed", "warnings", "missing_sources"],
+      "properties": {
+        "status": { "const": "ok" },
+        "dry_run": { "const": false },
+        "written": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fingerprint", "episode_id"],
+            "properties": {
+              "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "episode_id": { "type": "string", "minLength": 1 },
+              "project": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "skipped": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/skippedCandidate" }
+        },
+        "unconfirmed": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["problem"],
+            "properties": {
+              "problem": { "type": "string", "minLength": 1 },
+              "store_id": { "type": "string" },
+              "episode_id": { "type": "string" },
+              "count": { "type": "integer" },
+              "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "missing_sources": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/missingSource" }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "error"],
+      "properties": {
+        "status": { "const": "error" },
+        "error": {
+          "type": "string",
+          "enum": [
+            "auto-write-withdrawn",
+            "invalid-max-episodes",
+            "confirm-required",
+            "confirm-malformed",
+            "confirm-duplicate",
+            "confirm-unknown",
+            "unknown-flag",
+            "topic-tracks-config-unloadable",
+            "topic-tracks-config-invalid",
+            "topic-tracks-config-symlink",
+            "topic-tracks-max-episodes",
+            "stale-fingerprint",
+            "store-write-lock-timeout",
+            "store-write-failed"
+          ]
+        },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "detail": { "type": "string" }
+      }
+    }
+  }
+}

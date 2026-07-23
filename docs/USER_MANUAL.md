@@ -284,7 +284,7 @@ AI:   Here are the 5 most recent memories for this project:
 
 ### Routing your question
 
-Before searching, identify what kind of answer you need. For profile-class questions about standing rules and playbooks, rely on what loaded at session start or use `em-search.mjs --tag playbook --scope global --limit 1 --full`. For event-class questions about past decisions or causes, use `em-search.mjs --query "<topic>"`; for evolution-class questions about what is current, use `em-search.mjs --history <episode-id>`. Transcript-level and topic-track routes are not shipped, and routing never re-ranks results (RFC-001 score-merge contract). Stop once an episode id grounds the answer, or after two empty queries (broaden scope once first); make at most 3 recall calls per question, and remember that session-start advisory bounds (RFC-009 R3 max_matches/max_tokens) never flex.
+Before searching, identify what kind of answer you need. For profile-class questions about standing rules and playbooks, rely on what loaded at session start or use `em-search.mjs --tag playbook --scope global --limit 1 --full`. For event-class questions about past decisions or causes, use `em-search.mjs --query "<topic>"`; for evolution-class questions about what is current, use `em-search.mjs --history <episode-id>`. Transcript-level routes are not shipped (use the per-episode query / history path above); topic-track routes ship as the on-demand `em-topic-tracks` workflow in Scenario 8d.5 below. Routing never re-ranks results (RFC-001 score-merge contract), and derived lessons are surfaced by the same ordinary search and tag paths as every other lesson — there is no new ranking layer. Stop once an episode id grounds the answer, or after two empty queries (broaden scope once first); make at most 3 recall calls per question, and remember that session-start advisory bounds (RFC-009 R3 max_matches/max_tokens) never flex.
 
 ---
 
@@ -475,6 +475,65 @@ review, not gospel.
 **When you don't want this:** with a single registered project there is nothing to correlate —
 the commands say so and exit cleanly. Everything here is opt-in and manual; nothing scans your
 projects in the background.
+
+## Scenario 8d.5: Deriving a Topic Track from Related Episodes (On-Demand)
+
+**What happens:** You've captured the primary episodes (decisions, lessons, research) that
+together describe a topic, and you want a single global lesson that summarizes the cluster
+and points back to its sources — so every future session in every project recalls the
+takeaway through ordinary search without re-reading every source row. `em-topic-tracks`
+(CAPABILITIES.md WEAK tier, on-demand) is the confirmation-gated workflow for that.
+
+```bash
+# Preview clusters of related primary episodes (dry-run by default; no filesystem changes).
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs
+
+# Confirm and apply a chosen subset; --confirm is repeatable, one per fingerprint.
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs \
+  --apply \
+  --confirm <fingerprint-A> \
+  --confirm <fingerprint-B>
+```
+
+A dry-run prints one JSON object with a stable 64-hex `fingerprint`, typed
+`promotion_sources` (`{store_id, episode_id, content_sha256}` for every member), and the
+`members[]` themselves for each `candidates[]` entry. `skipped[]` lists fingerprints already
+derived on a prior run with `reason:"already-derived"` and the `existing_episode_id` of the
+global lesson — re-runs are idempotent and never duplicate. Confirmed `--apply` writes ONE
+global `category:lesson` episode per fingerprint through `em-store` (never by hand), and
+only into the global store. The `--auto` flag is REJECTED with `auto-write-withdrawn` —
+there is no write-without-confirmation path; per-fingerprint `--confirm <fingerprint>` is
+required for every candidate you want written.
+
+**Source stores are untouched.** The apply path holds a store write lock on the global store
+AND every represented source store, and re-validates source content hashes under both locks
+before any write. Source immutability is enforced by the engine — your project stores and
+every source episode used as a cluster member remain byte-identical whether or not you
+confirm. A mutated source during that window surfaces as `stale-fingerprint` and the run
+exits 1 without touching the global store.
+
+**Bounds.** The committed config sets a soft warning threshold at 1000 and a hard
+`--max-episodes` cap at 2000; `warn_episodes` and `max_episodes` count the total eligible
+input members after eligibility filtering and replica collapse, before clustering. The
+warning (`warning-threshold-exceeded`) is emitted above 1000, and the hard cap refuses
+runs above 2000 before pair construction with `topic-tracks-max-episodes` (exit 2).
+`--max-episodes <n>` may only TIGHTEN the committed cap — values above the committed cap
+are rejected with `invalid-max-episodes`, exit 2.
+
+**Discovery by ordinary search.** The derived global lesson is an ordinary
+`category:lesson` episode with the same tags as its cluster's `common_tags`. There is no
+new ranking layer for derived lessons — no special tag, no special index, no boost — and
+that is deliberate. You surface derived lessons through the same `em-search`,
+`em-recall`, and `--tag playbook|...` paths as every other lesson: by tag and by query.
+`em-rebuild-index` preserves `promotion_sources` across rebuilds so derived lessons keep
+their typed provenance after index maintenance.
+
+**When you don't want this:** `em-topic-tracks` derives a global lesson from episodes that
+already exist — if you haven't captured the primary episodes yet, store them first. For
+near-duplicates inside ONE store use `em-consolidate`; for a recurring lesson across two
+or more projects that hasn't been hand-clustered, use `em-promote`. Transcript-level routes
+remain unshipped; topic-track routes do not — but the workflow is confirmation-gated, so
+nothing happens unless you run `--apply --confirm <fingerprint>` yourself.
 
 ---
 

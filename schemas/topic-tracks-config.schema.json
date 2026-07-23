@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/topic-tracks-config.schema.json",
+  "title": "Topic-tracks config schema (NAPMEM-C REQ-2)",
+  "description": "Closed schema for scripts/topic-tracks/config.json. The schema alone enforces: a (0, 1] number shape (fraction01) for tag_jaccard_min, summary_jaccard_min, and common_tag_support, expressed via allOf with minimum 0, not const 0, and not minimum 1.0000000000000002; and minimum 3 for min_cluster, warn_episodes, and max_episodes. Cross-field ordering (warn_episodes >= min_cluster, max_episodes >= warn_episodes) and source-category string uniqueness are validated by loadTopicTracksConfig at runtime, not by this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "tag_jaccard_min",
+    "summary_jaccard_min",
+    "min_cluster",
+    "warn_episodes",
+    "max_episodes",
+    "common_tag_support",
+    "source_categories"
+  ],
+  "properties": {
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "tag_jaccard_min": { "$ref": "#/$defs/fraction01" },
+    "summary_jaccard_min": { "$ref": "#/$defs/fraction01" },
+    "min_cluster": { "type": "integer", "minimum": 3 },
+    "warn_episodes": { "type": "integer", "minimum": 3 },
+    "max_episodes": { "type": "integer", "minimum": 3 },
+    "common_tag_support": { "$ref": "#/$defs/fraction01" },
+    "source_categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "fraction01": {
+      "type": "number",
+      "allOf": [
+        { "minimum": 0 },
+        { "not": { "const": 0 } },
+        { "not": { "minimum": 1.0000000000000002 } }
+      ]
+    }
+  }
+}

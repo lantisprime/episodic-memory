@@ -386,3 +386,64 @@ Four new open questions (OQ-4 through OQ-7) raised and resolved in the same revi
 > Populate only if status changes to `superseded`.
 
 Superseded by: `RFC-NNN-<new-slug>`
+
+## 2026-07-23 implementation resolution (NAPMEM-C, RFC-012)
+
+> **The historical Phase 4 acceptance boxes above — including the `em-consolidate --auto`
+> rows (≤3 / >3 clusters / `--dry-run`) and the `lesson files include source_episodes` /
+> `rebuild preserves source_episodes` rows — are SUPERSEDED, not satisfied.**
+>
+> Phase 4 ships here under the new `em-topic-tracks` command and the typed
+> `promotion_sources` provenance from RFC-012. The historical `em-consolidate --auto`
+> session-end proposal was withdrawn in RFC-012 B-2. The legacy `source_episodes`
+> in-body frontmatter array is replaced by typed `promotion_sources`;
+> `em-rebuild-index.mjs` already preserves `promotion_sources` on rebuild.
+
+**Shipped evidence — `em-topic-tracks` (RFC-001 Phase 4, NAPMEM-C, RFC-012 R2a/R2d):**
+
+- **Deterministic dry-run** is the default; dry-run performs no directory, episode,
+  index, tags, config, registry, or lock-file write.
+- **`--auto` is rejected** with exit 2 (`auto-write-withdrawn`); no autonomous,
+  session-end, hook, or background invocation is registered.
+- **`--apply` requires per-candidate `--confirm <64-hex>`** values; unknown, stale,
+  duplicate, or malformed confirmations fail closed.
+- **Each confirmed fresh candidate writes one global lesson** through the real
+  `em-store.mjs --promotion-sources-json` path (category `lesson`, project
+  lexical-winner among the most frequent real source projects, tags `topic-track`
+  plus candidate common tags).
+- **Typed `promotion_sources`** provenance (`{store_id, episode_id, content_sha256}`),
+  content-bound to source bytes, sorted, and hashed into the candidate fingerprint.
+- **Source preservation keeps sources untouched:** source episode files, source `index.jsonl`, and source
+  `tags.json` are byte-identical after apply; replica collapse uses
+  `{episode_id, content_sha256}`, not store-derived identity.
+- **Hard `--max-episodes N` cap** is committed (`max_episodes: 2000`); CLI may only
+  tighten the committed cap; refusal exits 2 before pair construction; O(n²) is
+  bounded.
+- **`em-rebuild-index.mjs` already preserves `promotion_sources`** on rebuild
+  (this is the shipped behavior, not a Phase 4 proposal).
+- Cluster input: **any three or more related primary source episodes** from the global
+  store plus registered project stores may qualify (single-store topics included);
+  derived lessons are searchable by ordinary lesson search / ranking (no new ranking
+  layer is introduced).
+- Exact source-set idempotency: identical canonical `promotion_sources` already present
+  on an active global `topic-track` lesson is reported as `already-derived` and is not
+  rewritten.
+
+**Phase 4 is shipped only under this resolution.** All shipped evidence is exercised by
+`tests/test-topic-tracks.mjs` and the isolated-HOME `tests/test-install-topic-tracks.mjs`
+gauntlets; the gauntlets use `--break-stale-revalidation`, `--break-source-immutability`,
+and `--break-hard-cap` argv controls to falsify their corresponding assertions. Real
+installed deployment is proven via `install.mjs` against an isolated `HOME`.
+
+**Vocabulary migration recorded here:**
+
+- `source_episodes` (in-body frontmatter array) → typed `promotion_sources`
+  (`{store_id, episode_id, content_sha256}`), content-bound, sortable, hashed for the
+  topic-track fingerprint.
+- `em-consolidate --auto` (session-end, autonomous writes) →
+  `em-topic-tracks --apply --confirm <fingerprint>` (on-demand, explicit per-candidate
+  confirmation).
+
+**Deferred under this resolution (no silent claim):** growing-topic revision chaining,
+topic-track apply run records, and an external Principle 2 stopword vocabulary audit
+are tracked separately (NAPMEM-C plan §17); none are required for Phase 4 to be shipped.

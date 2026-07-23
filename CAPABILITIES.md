@@ -36,7 +36,7 @@ All four are ways of **using episodes**. None of them enforce workflows.
 |---|---|---|---|---|---|
 | **Memory-store strategy** | Persists episodes and builds derived indexes from them (e.g. knowledge graph) | episodes (write) + derived indexes | `em-store` | `store-strategy` | append-only log + lexical index |
 | **Recall strategy** | Retrieves + ranks episodes for use | episodes (read) | `em-recall` | `recall-strategy` | lexical tag-based (zero-dep) |
-| **Learning strategy** | Derives new knowledge from episodes + derived indexes, writes it back as global episodes | indexes (read) → episodes (write) | `em-store` (write-back) | `learning` | `em-promote` (EXPERIMENTAL, decision 2026-10-08); otherwise none (opt-in) |
+| **Learning strategy** | Derives new knowledge from episodes + derived indexes, writes it back as global episodes | indexes (read) → episodes (write) | `em-store` (write-back) | `learning` | `em-promote` (EXPERIMENTAL, decision 2026-10-08); `em-topic-tracks` (WEAK, on-demand, decision 2026-07-23); otherwise none (opt-in) |
 | **Curation strategy** | Maintains, reorganizes, and audits the corpus without deriving new knowledge (archive, fold, relocate, verify) | episodes + derived indexes (read/move/archive) | `em-prune`, `em-consolidate`, `em-doctor` | `curation` | manual opt-in commands |
 
 ### 1. Memory-store strategy
@@ -65,7 +65,22 @@ persists derived knowledge via `em-store`. Opt-in, substrate-side, enforcement-f
 First shipped member: `em-promote` (EXPERIMENTAL tier, promote-or-remove decision
 2026-10-08) — detects lessons recurring across ≥2 registered project stores and, on
 explicit `--apply`, writes one derived global lesson episode per recurrence (sources
-untouched; provenance carried in-body pending RFC-009 P1b typed linkage).
+untouched; shipped typed `promotion_sources` provenance and confirm-gated writes).
+
+**Shipped learning members:**
+
+- **`em-topic-tracks`** (WEAK tier, non-experimental, decision date 2026-07-23,
+  on-demand activation) — deterministically groups any three or more related primary
+  source episodes from the global store plus registered project stores into per-topic
+  lesson candidates; dry-run previews one global lesson per topic; `--apply` writes only
+  explicitly confirmed candidates as global category `lesson` episodes through
+  `em-store` with typed `promotion_sources` provenance; `--auto` is rejected; source
+  episodes remain byte-identical and active; ordinary search and ranking are unchanged.
+
+- **`em-promote`** (EXPERIMENTAL tier, promote-or-remove decision 2026-10-08) —
+  detects lessons recurring across ≥2 registered project stores and, on explicit
+  `--apply`, writes one derived global lesson episode per recurrence with typed
+  `promotion_sources` provenance and confirm-gated writes (sources untouched).
 
 ### 4. Curation strategy
 How the corpus stays healthy over time: pruning, backup and restore, relocation between

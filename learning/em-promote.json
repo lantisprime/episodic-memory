@@ -9,6 +9,6 @@
   "experimental": true,
   "decision_date": "2026-10-08",
   "activation": { "mode": "on-demand" },
-  "side_effects": { "writes": ["global-episodes"], "confirm_gated": false },
-  "summary": "Cross-store recurring-lesson promotion (RFC-012 R2). EXPERIMENTAL under the charter 2026-10-08 promote-or-remove rule: dry-run proposes derived global lessons from typed promotion_sources provenance; --apply writes one global episode per fresh candidate via em-store (per-candidate fingerprint confirm ships in P2-S4, REQ-16)."
+  "side_effects": { "writes": ["global-episodes"], "confirm_gated": true },
+  "summary": "Cross-store recurring-lesson promotion (RFC-012 R2). EXPERIMENTAL under the charter 2026-10-08 promote-or-remove rule: dry-run proposes derived global lessons from typed promotion_sources provenance; --apply writes one global episode per fresh candidate via em-store (per-candidate fingerprint confirmation and under-lock revalidation shipped in RFC-012 P2-S4)."
 }
