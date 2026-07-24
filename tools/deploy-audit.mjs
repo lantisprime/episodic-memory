@@ -41,7 +41,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { mkMock, runInstall } from '../tests/lib/activation-scoping-harness.mjs'
-import { repoCompletenessFindings } from '../scripts/lib/install-manifest.mjs'
+import { repoCompletenessFindings, subtreeOrphanFindings } from '../scripts/lib/install-manifest.mjs'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -102,7 +102,10 @@ if (r.status !== 0) {
   process.exit(2)
 }
 
-const findings = { missing: [], differ: [], cosmetic: [], extra: [] }
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const subtreePrunableSet = new Set(subtreeOrphanFindings(REPO_ROOT, path.join(REAL, '.episodic-memory', 'scripts')).map(p => p.replace(/^scripts\//, '.episodic-memory/scripts/')))
+
+const findings = { missing: [], differ: [], cosmetic: [], extra: [], prunable: [] }
 for (const d of DIRS) {
   const mockDir = path.join(M.home, d)
   const realDir = path.join(REAL, d)
@@ -120,11 +123,9 @@ for (const d of DIRS) {
   }
   for (const f of walk(realDir)) {
     const key = `${d}/${f}`
-    if (!mockSet.has(f) && !IGNORE_EXTRA.has(key)) findings.extra.push(key)
+    if (!mockSet.has(f) && !IGNORE_EXTRA.has(key)) { if (subtreePrunableSet.has(key)) findings.prunable.push(key); else findings.extra.push(key) }
   }
 }
-
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 findings.undeployed = repoCompletenessFindings(REPO_ROOT, path.join(M.home, '.episodic-memory', 'scripts'))
 const drift = findings.missing.length + findings.differ.length + findings.extra.length + findings.undeployed.length
 if (JSON_OUT) {
@@ -133,6 +134,10 @@ if (JSON_OUT) {
   for (const k of findings.missing) console.log(`  MISSING  ${k}  (an update never deployed)`)
   for (const k of findings.differ) console.log(`  DIFFER   ${k}  (real global is stale)`)
   for (const k of findings.extra) console.log(`  EXTRA    ${k}  (orphan — TRACE consumers before pruning)`)
+  // prunable is advisory-only — a known-safe refinement of EXTRA for files that
+  // are subtree orphans (remediation: rerun install with --prune-subtree-orphans);
+  // it is deliberately NOT included in the drift sum so it never flips clean → DRIFT.
+  for (const k of findings.prunable) console.log(`  PRUNABLE    ${k}  (subtree orphan — safe: rerun install with --prune-subtree-orphans)`)
   for (const k of findings.undeployed) console.log(`  UNDEPLOYED  ${k}  (repo file a clean install does not produce — installer gap)`)
   for (const k of findings.cosmetic) console.log(`  (info)   ${k}  cosmetic DIFFER (install_timestamp only; content current)`)
   console.log(`\nMISSING=${findings.missing.length}  DIFFER=${findings.differ.length}  EXTRA=${findings.extra.length}  UNDEPLOYED=${findings.undeployed.length}` +
