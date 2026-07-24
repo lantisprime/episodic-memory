@@ -28,7 +28,7 @@ import {
   isEnforcementEntryScript, isSubstrateScript, enforcementEntryScripts, enforcementBundleLibs,
   globalScriptLibs, relocatedOnlyLibs, bp1EntryScripts, bp1ClosureLibs,
   ACTIVATION_HOOK_SPECS, activationRegistrations, activationHookFileBasenames,
-  activationSupportFiles, classifyScriptSubtree,
+  activationSupportFiles, classifyScriptSubtree, subtreeOrphanFindings,
 } from './scripts/lib/install-manifest.mjs'
 import { resolveRepoRoot } from './scripts/lib/local-dir.mjs'
 import {
@@ -83,6 +83,7 @@ const uninstallActivation = argv.includes('--uninstall-activation')
 // ours + registered), not merely that the runner file exists on disk.
 let lastActivationInstallReport = null
 const installSecondOpinion = argv.includes('--install-second-opinion')
+const pruneSubtreeOrphans = argv.includes('--prune-subtree-orphans')
 // Scheduled maintenance routines (em-routines.mjs): sync routines.json to the
 // platform scheduler (launchd/systemd/cron) right after the substrate deploys.
 const installRoutines = argv.includes('--install-routines')
@@ -188,7 +189,7 @@ if (argv.includes('--wizard')) {
 
 if (!tool) {
   console.log(`Usage: node install.mjs --wizard   (interactive guided setup — recommended)
-       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-activation] [--uninstall-activation] [--install-hooks-force] [--install-second-opinion] [--bootstrap-last-prompt]
+       node install.mjs --tool <claude-code|cursor|codex|opencode|pi-agent|windsurf|all> [--project <path>] [--install-routines] [--install-hooks] [--install-enforcement] [--uninstall-enforcement [--purge-config]] [--install-activation] [--uninstall-activation] [--install-hooks-force] [--install-second-opinion] [--prune-subtree-orphans] [--bootstrap-last-prompt]
        node install.mjs --update-consumers [--dry-run]   (refresh registered consuming projects)
 
 Tools:
@@ -266,6 +267,12 @@ Activation flags (claude-code and codex / RFC-009 — advisory, PER-PROJECT, nev
                           checksum → kept with a stderr diff, PRINCIPLES P10).
                           Never touches ~/.claude or ~/.episodic-memory.
 
+  --prune-subtree-orphans Opt-in: after deploying scripts/<subtree>/ data,
+                          delete files under ~/.episodic-memory/scripts/<subtree>/
+                          that no longer exist in the repo subtree (orphans from
+                          a removed file). Report-only detection lives in
+                          tools/deploy-audit.mjs; this flag is the deliberate
+                          deletion. Default install deletes nothing.
 Second-opinion harness:
   --install-second-opinion Write install snapshot at
                           ~/.claude/hooks/second-opinion-providers.json
@@ -446,6 +453,16 @@ function copyDirRecursive(src, dst) {
 }
 
 console.log(`Installed ${scriptFiles.length} scripts to ${SCRIPTS_DIR}`)
+if (pruneSubtreeOrphans) {
+  const orphans = subtreeOrphanFindings(REPO_DIR, SCRIPTS_DIR)
+  for (const rel of orphans) {
+    const abs = path.join(SCRIPTS_DIR, rel.slice('scripts/'.length))
+    assertContained(abs, SCRIPTS_DIR)
+    fs.rmSync(abs, { force: true })
+    console.log(`Pruned orphan ${rel}`)
+  }
+  console.log(orphans.length ? `Pruned ${orphans.length} subtree orphan(s)` : 'No subtree orphans to prune')
+}
 
 // ---------------------------------------------------------------------------
 // Unified CLI shim: ~/.episodic-memory/bin/em → scripts/em.mjs, so a single
