@@ -290,6 +290,62 @@ test('testSubtreeOrphanSkipsSymlink: symlink in installed subtree → not report
   }
 })
 
+test('testPruneFlagRemovesOrphan: mock install; plant orphan; re-run with --prune-subtree-orphans → orphan gone, clerk.md survives', () => {
+  const { home, project, callerCwd } = mkMock('prune-removes')
+  const r1 = runInstall({ home, project, callerCwd })
+  assert.strictEqual(r1.status, 0, `baseline install must exit 0; got ${r1.status}; stderr=${r1.stderr}`)
+
+  const orphan = path.join(home, '.episodic-memory', 'scripts', 'em-consolidate', 'ORPHAN_539.md')
+  fs.writeFileSync(orphan, 'ORPHAN_539')
+  assert.ok(fs.existsSync(orphan), `precondition: orphan planted at ${orphan}`)
+
+  const r2 = runInstall({ home, project, callerCwd, flags: ['--prune-subtree-orphans'] })
+  assert.strictEqual(r2.status, 0, `prune install must exit 0; got ${r2.status}; stderr=${r2.stderr}`)
+  assert.ok(!fs.existsSync(orphan), `orphan must be gone after --prune-subtree-orphans; still at ${orphan}`)
+
+  const clerkDeployed = path.join(home, '.episodic-memory', 'scripts', 'em-consolidate', 'prompts', 'clerk.md')
+  assert.ok(fs.existsSync(clerkDeployed), `repo file clerk.md must survive the prune; missing at ${clerkDeployed}`)
+})
+
+test('testPruneFlagAbsentKeepsOrphan: mock install; plant orphan; re-run WITHOUT flag → orphan retained (default unchanged)', () => {
+  const { home, project, callerCwd } = mkMock('prune-keeps')
+  const r1 = runInstall({ home, project, callerCwd })
+  assert.strictEqual(r1.status, 0, `baseline install must exit 0; got ${r1.status}; stderr=${r1.stderr}`)
+
+  const orphan = path.join(home, '.episodic-memory', 'scripts', 'em-consolidate', 'ORPHAN_539.md')
+  fs.writeFileSync(orphan, 'ORPHAN_539')
+  assert.ok(fs.existsSync(orphan), `precondition: orphan planted at ${orphan}`)
+
+  const r2 = runInstall({ home, project, callerCwd })
+  assert.strictEqual(r2.status, 0, `default install (no flag) must exit 0; got ${r2.status}; stderr=${r2.stderr}`)
+  assert.ok(fs.existsSync(orphan), `orphan must be retained without --prune-subtree-orphans; missing at ${orphan}`)
+})
+
+test('testPruneContainmentGuard: installed subtree symlinked to outside dir; --prune-subtree-orphans → non-zero exit, outside file survives', () => {
+  const { home, project, callerCwd } = mkMock('prune-guard')
+  const r1 = runInstall({ home, project, callerCwd })
+  assert.strictEqual(r1.status, 0, `baseline install must exit 0; got ${r1.status}; stderr=${r1.stderr}`)
+
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-outside-'))
+  const keepFile = path.join(outsideDir, 'keep.txt')
+  fs.writeFileSync(keepFile, 'KEEP_539')
+  assert.ok(fs.existsSync(keepFile), `precondition: outside file planted at ${keepFile}`)
+
+  const emConsol = path.join(home, '.episodic-memory', 'scripts', 'em-consolidate')
+  fs.rmSync(emConsol, { recursive: true, force: true })
+  fs.symlinkSync(outsideDir, emConsol)
+  assert.ok(fs.existsSync(keepFile), `precondition: outside file still present after symlink swap`)
+
+  try {
+    const r2 = runInstall({ home, project, callerCwd, flags: ['--prune-subtree-orphans'] })
+    assert.notStrictEqual(r2.status, 0,
+      `install must abort non-zero when prune escape is detected; got exit ${r2.status}; combined=${r2.stdout}${r2.stderr}`)
+    assert.ok(fs.existsSync(keepFile), `outside file must survive containment guard abort; missing at ${keepFile}`)
+  } finally {
+    try { fs.rmSync(outsideDir, { recursive: true, force: true }) } catch {}
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
