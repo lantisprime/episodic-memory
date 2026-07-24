@@ -155,7 +155,7 @@ Group 3: CI-shape runs (11)
 | Each suite green | eleven `node tests/<file>.mjs` runs | audit-drift 4, consensus-e2e 7, consensus 18, dispatch 9, gate-runbook 20/20, gate 23, i22 6, install-snapshot 14, preamble 45, providers 24 (orchestrator baseline runs at `9c41012`; GLM round 2 re-ran all ten at HEAD, all exit 0, identical counts), storage 11 (orchestrator post-build rerun) |
 | P12 untouched | `node tests/test-p12-invariant-suite.mjs` | `P12 INVARIANT GATE: PASS` (orchestrator rerun) |
 | Diff surgical | `git diff --stat main` | `3 files changed, 37 insertions(+), 15 deletions(-)` (tests.yml +33, lint -11, storage 4 lines) |
-| CI green | `gh pr checks <PR>` | `<fill at PR time: all six checks>` |
+| CI green | `gh pr checks 575` | run `30074061809` at `43480d9`: all six pass (validate 47s, p12-invariant-gate 34s, gates-classifiers 1m53s, clerk-consolidation 1m42s, recall-activation 2m14s incl. the eleven, substrate 2m2s on rerun). Run 1 surfaced the S3 E2BIG fix (job 89417833020); run 2's substrate red was a pre-existing `test-em-stats-semantic.mjs` rerank flake, 13/13 locally and green on rerun, filed as an issue at step 9 |
 
 ## §16 Risk Analysis
 
