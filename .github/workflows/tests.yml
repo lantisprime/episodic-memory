@@ -194,6 +194,39 @@ jobs:
       - name: Run reply-sanity harness E2E (#538 — bootstrap-shaped reply rejected, nothing persisted)
         run: node tests/test-so-reply-sanity-e2e.mjs
 
+      - name: Run second-opinion audit-drift suite (#573 wiring sweep — I-23 audit table)
+        run: node tests/test-second-opinion-audit-drift.mjs
+
+      - name: Run second-opinion consensus E2E suite (#573 wiring sweep — stub-driven consensus loop)
+        run: node tests/test-second-opinion-consensus-e2e.mjs
+
+      - name: Run second-opinion consensus unit suite (#573 wiring sweep — parseVerdict + stop conditions)
+        run: node tests/test-second-opinion-consensus.mjs
+
+      - name: Run second-opinion dispatch suite (#573 wiring sweep — stub dispatch + #221 fail-closed axes)
+        run: node tests/test-second-opinion-dispatch.mjs
+
+      - name: Run second-opinion gate-runbook suite (#573 wiring sweep — runbook injection branch)
+        run: node tests/test-second-opinion-gate-runbook.mjs
+
+      - name: Run second-opinion gate suite (#573 wiring sweep — snapshot fail-closed + Bash/Agent branches)
+        run: node tests/test-second-opinion-gate.mjs
+
+      - name: Run second-opinion I-22 algorithm-parity suite (#573 wiring sweep — canonical-root parity)
+        run: node tests/test-second-opinion-i22-algorithm-parity.mjs
+
+      - name: Run second-opinion install-snapshot suite (#573 wiring sweep — I-27a/I-27b freshness + tamper)
+        run: node tests/test-second-opinion-install-snapshot.mjs
+
+      - name: Run second-opinion preamble suite (#573 wiring sweep — composer + registry validator)
+        run: node tests/test-second-opinion-preamble.mjs
+
+      - name: Run second-opinion providers suite (#573 wiring sweep — provider module contract)
+        run: node tests/test-second-opinion-providers.mjs
+
+      - name: Run second-opinion storage suite (#573 wiring sweep — storage + preamble_source, fixes #573)
+        run: node tests/test-second-opinion-storage.mjs
+
       - name: Run scripts-subtree deploy + completeness suite (#531 — fail-closed classification, UNDEPLOYED audit)
         run: node tests/test-install-scripts-subtrees.mjs
 
