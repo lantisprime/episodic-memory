@@ -280,10 +280,10 @@ test('preamble_source: "default" for codex with no override/flag', () => {
     '--summary', 'codex default preamble',
   ])
   assert.strictEqual(result.preamble_source, 'default')
-  // codex default = review ladder + env-prefix discipline (per committed
-  // preambles/index.json). This assertion was stale (review-ladder only) and
-  // failing pre-existing; corrected to match the source-of-truth registry.
-  assert.deepStrictEqual(result.fragment_ids, ['review-ladder-v9.4', 'env-prefix-discipline-v1'])
+  // codex default = review ladder + env-prefix discipline + adversarial depth
+  // (per committed preambles/index.json). Kept in sync with the source-of-truth
+  // registry; previous two-fragment drift was issue #573.
+  assert.deepStrictEqual(result.fragment_ids, ['review-ladder-v9.4', 'env-prefix-discipline-v1', 'adversarial-depth-v1'])
 })
 
 test('preamble_source: "repo-override" when override file present', () => {
