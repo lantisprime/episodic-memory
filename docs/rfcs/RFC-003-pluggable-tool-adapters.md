@@ -431,7 +431,7 @@ This phase **subsumes the runtime portion of RFC-002 Phase 3b**. Issue [#59](htt
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| (no RFC-003-named implementation PR) | — | — | Accepted in docs (#74 `5526b85` draft, #83 `20e5b2c` accepted). The adapter/registry surface realizing this design shipped under RFC-008: registry+manifest #374 `0e27ad2`; per-harness enforcement adapters #424 `f5dbaef` / #431 `3b91f9b` / #437 `5da4418`. Decision-in-core stance superseded per RFC-008 Related-RFCs note. |
 
 ---
 

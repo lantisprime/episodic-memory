@@ -488,7 +488,14 @@ Each phase's merge is gated by the R-groups below plus its phase-specific gates;
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
 | P0 (P0-S1..S3, PR #454) | `scripts/em-pattern-health.mjs` (`--hermetic`, R5a), `scripts/em-prune.mjs` (R6 protection set), docs guide + README + CI wiring | `tests/test-pattern-health-hermetic.mjs` (8), `tests/test-prune-protection.mjs` (17) | R6 blend half lands with R2 in P1; R5b CI gate is P3 |
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| P1a — PR #460 (`f6936ca`) | see PR | see PR | R10 taxonomy; categories.json single vocab source |
+| P1b — PR #489 (`0f0bdba`) | see PR | see PR | activation schema + trigger index + R9a + T6 + contract mirror |
+| P2 — PR #493 (`fb9fd79`) | see PR | see PR | advisory activation adapter (R3 event plane + R4 SessionStart) |
+| P3 — PR #520 (`766ed3c`) | see PR | see PR | R7 lesson injection + R5b pattern-health CI + #512/#515 |
+| P4 PR-A — PR #523 (`c2abbe8`) | see PR | see PR | R6 telemetry writer + R9b clerk report mode (S1-S3) |
+| P4 S4 — PR #525 (`ea69b95`) | see PR | see PR | R9b clerk apply + clerkWrite + lock lib (REQ-6..13) |
+| P4 S5-S7 — PR #528 (`45125b5`) | see PR | see PR | R6 conversion + R9c enrichment + R9d clerk prompt |
+| _P5 pending (R8 assisted migration, unplanned)_ | _pending_ | _pending_ | _pending_ |
 
 ---
 

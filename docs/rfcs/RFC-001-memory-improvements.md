@@ -316,6 +316,7 @@ graph TD
 | Phase 1: Tag Normalization + Inverted Index | `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs` | 16 E2E scenarios passed | Shipped in PR #6, commit `0e45e4d`. Bugs: #2 (P1), #3 (P2), #4 (P3), #5 (P1) — all fixed. |
 | Phase 2: Relevance Decay + Access Tracking | `em-search.mjs`, `em-rebuild-index.mjs`, `em-prune.mjs` (new) | 24 Phase 2 tests + 15 existing = 39 passed | Shipped in PR #13. Scoring default-on, access tracking, pruning, performance health checks. BPs decoupled from user-preferences, bp-007 merged into bp-006, bp-011 added. |
 | Phase 3: Proactive Recall | `em-recall.mjs` (new) | 20 Phase 3 tests + 31 existing = 51 passed | Multi-pass retrieval (project, tag, recent cross-project). Context inference from package.json, git remote, git branch, cwd. Drift detection for inlined functions. 2nd opinion review applied (8 findings). |
+| Topic tracks (NAPMEM-C) | PR #567 (`d5b5484`) | `tests/test-topic-tracks.mjs` (25 files, +4157) | Derived topic tracks with provenance; NapMem assessment entry into Phase 4 territory. Phase 4 synthesis clerk + embedding arc remain open. |
 
 ---
 

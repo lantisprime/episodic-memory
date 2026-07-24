@@ -194,6 +194,10 @@ graph TD
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
 | P1 (R3a): PR #544, `d42573c` | `scripts/lib/activation-log.mjs` (computeCadence + CADENCE_FIELDS), `scripts/em-trigger-index.mjs` (v4 + per-store stamp + merged thread), both activation hooks' `mergeSessionStart`, `scripts/lib/activation-match.mjs` + codex vendored copy (renderer line), `scripts/em-consolidate.mjs` (REQ-23 lesson-only N gauge), `schemas/trigger-index.schema.json` v4, contract mirror + validator pin, both plugin manifests (checksum pins), docs, CI wiring | `tests/test-trigger-index-cadence.mjs` (24 tests/54 asserts) + full A.8 sweep green | GLM build r1 ACCEPT 0 blockers (`.review-store/rfc-012-p1/glm-build-r1.md`); plan `docs/plans/rfc-012-p1.md` §19.3 records build deltas D1-D5 |
+| P2-S1 — PR #547 (`d2105aa`) | see PR | see PR | store-identity chain (REQ-1..6, REQ-18) |
+| P2 typed provenance — PR #550 (`0193607`) | see PR | see PR | em-promote + promotion-sources lib (subject untagged; RFC-012 files verified) |
+| P2-S3 — PR #552 (`1c2e31d`) | see PR | see PR | learning registry slot + conformance gauntlet (REQ-13/14) |
+| P2-S4 — PR #559 (`81f3cce`) | see PR | see PR | promotion apply |
 
 ---
 
