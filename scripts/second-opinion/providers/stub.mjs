@@ -64,6 +64,19 @@ export function dispatch({ prompt, projectRoot, timeout }) {
     }
   }
 
+  // SO_STUB_RAW_BODY (#538): return an arbitrary body verbatim with ok:true so
+  // tests can drive the reply-sanity gate with a bootstrap-shaped reply. When
+  // unset, the deterministic template path below is unchanged.
+  if (process.env.SO_STUB_RAW_BODY !== undefined) {
+    return {
+      ok: true,
+      exitCode: 0,
+      stdout: process.env.SO_STUB_RAW_BODY,
+      stderr: '',
+      timedOut: false,
+    }
+  }
+
   const idMatch = prompt.match(/(\d{8}-\d{6}-[a-z0-9-]+-[0-9a-f]{4})/)
   const requestId = idMatch ? idMatch[1] : 'unknown-request'
 

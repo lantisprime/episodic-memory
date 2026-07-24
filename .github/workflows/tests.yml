@@ -188,6 +188,12 @@ jobs:
       - name: Run second-opinion gate per-project install E2E (RFC-008 P4d — gate + libs + runbooks per-project; snapshot global)
         run: node tests/test-install-second-opinion-e2e.mjs
 
+      - name: Run reply-sanity predicate suite (#538 — pre-persistence gate on provider replies)
+        run: node tests/test-second-opinion-reply-sanity.mjs
+
+      - name: Run reply-sanity harness E2E (#538 — bootstrap-shaped reply rejected, nothing persisted)
+        run: node tests/test-so-reply-sanity-e2e.mjs
+
       - name: Run scripts-subtree deploy + completeness suite (#531 — fail-closed classification, UNDEPLOYED audit)
         run: node tests/test-install-scripts-subtrees.mjs
 
