@@ -24,7 +24,7 @@ import os from 'node:os'
 import assert from 'node:assert'
 import { mkMock, runInstall, REPO_ROOT } from './lib/activation-scoping-harness.mjs'
 import {
-  classifyScriptSubtree, repoCompletenessFindings,
+  classifyScriptSubtree, repoCompletenessFindings, subtreeOrphanFindings,
   GLOBAL_SCRIPT_SUBTREES,
 } from '../scripts/lib/install-manifest.mjs'
 
@@ -224,6 +224,69 @@ test('testCompletenessSkipsSymlinks: synthetic fixture with real symlink → fin
   } finally {
     try { fs.rmSync(fixture, { recursive: true, force: true }) } catch {}
     try { fs.rmSync(installedDir, { recursive: true, force: true }) } catch {}
+  }
+})
+
+test('testSubtreeOrphanGreen: convergent install → subtreeOrphanFindings === []', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-green-repo-'))
+  const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-green-inst-'))
+  try {
+    const repoSub = path.join(repo, 'scripts', 'em-consolidate')
+    fs.mkdirSync(repoSub, { recursive: true })
+    fs.writeFileSync(path.join(repoSub, 'a.md'), 'SENTINEL_539g')
+
+    const installedSub = path.join(installed, 'em-consolidate')
+    fs.mkdirSync(installedSub, { recursive: true })
+    fs.copyFileSync(path.join(repoSub, 'a.md'), path.join(installedSub, 'a.md'))
+
+    assert.deepStrictEqual(subtreeOrphanFindings(repo, installed), [],
+      `convergent install must report no orphans; got ${JSON.stringify(subtreeOrphanFindings(repo, installed))}`)
+  } finally {
+    try { fs.rmSync(repo, { recursive: true, force: true }) } catch {}
+    try { fs.rmSync(installed, { recursive: true, force: true }) } catch {}
+  }
+})
+
+test('testSubtreeOrphanDetected: plant extra file in installed subtree → finding includes its scripts/<s>/<rel>', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-detected-repo-'))
+  const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-detected-inst-'))
+  try {
+    const repoSub = path.join(repo, 'scripts', 'em-consolidate')
+    fs.mkdirSync(repoSub, { recursive: true })
+    fs.writeFileSync(path.join(repoSub, 'a.md'), 'SENTINEL_539d')
+
+    const installedSub = path.join(installed, 'em-consolidate')
+    fs.mkdirSync(installedSub, { recursive: true })
+    fs.copyFileSync(path.join(repoSub, 'a.md'), path.join(installedSub, 'a.md'))
+    fs.writeFileSync(path.join(installedSub, 'gone.md'), 'ORPHAN_539')
+
+    const findings = subtreeOrphanFindings(repo, installed)
+    assert.ok(findings.includes('scripts/em-consolidate/gone.md'),
+      `findings must include the planted orphan path; got ${JSON.stringify(findings)}`)
+  } finally {
+    try { fs.rmSync(repo, { recursive: true, force: true }) } catch {}
+    try { fs.rmSync(installed, { recursive: true, force: true }) } catch {}
+  }
+})
+
+test('testSubtreeOrphanSkipsSymlink: symlink in installed subtree → not reported', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-symlink-repo-'))
+  const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-symlink-inst-'))
+  try {
+    const repoSub = path.join(repo, 'scripts', 'em-consolidate')
+    fs.mkdirSync(repoSub, { recursive: true })
+    fs.writeFileSync(path.join(repoSub, 'a.md'), 'SENTINEL_539s')
+
+    const installedSub = path.join(installed, 'em-consolidate')
+    fs.mkdirSync(installedSub, { recursive: true })
+    fs.copyFileSync(path.join(repoSub, 'a.md'), path.join(installedSub, 'a.md'))
+    fs.symlinkSync('a.md', path.join(installedSub, 'link.md'))
+
+    assert.deepStrictEqual(subtreeOrphanFindings(repo, installed), [],
+      `symlink must not be reported as an orphan; got ${JSON.stringify(subtreeOrphanFindings(repo, installed))}`)
+  } finally {
+    try { fs.rmSync(repo, { recursive: true, force: true }) } catch {}
+    try { fs.rmSync(installed, { recursive: true, force: true }) } catch {}
   }
 })
 

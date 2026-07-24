@@ -603,3 +603,20 @@ export function repoCompletenessFindings(repoDir, installedScriptsDir) {
   }
   return findings
 }
+
+/**
+ * Inverse of repoCompletenessFindings: regular files present under
+ * installedScriptsDir/<subtree> (for each GLOBAL_SCRIPT_SUBTREES member) but
+ * absent from repoDir/scripts/<subtree>. Sorted 'scripts/<subtree>/<rel>'.
+ * Never throws on missing dirs (walkRegularFiles guards existsSync).
+ */
+export function subtreeOrphanFindings(repoDir, installedScriptsDir) {
+  const findings = []
+  for (const s of GLOBAL_SCRIPT_SUBTREES) {
+    const repoSet = new Set(walkRegularFiles(path.join(repoDir, 'scripts', s)))
+    for (const rel of walkRegularFiles(path.join(installedScriptsDir, s))) {
+      if (!repoSet.has(rel)) findings.push(`scripts/${s}/${rel}`)
+    }
+  }
+  return findings.sort()
+}
