@@ -188,6 +188,7 @@ Verdicts recorded here with three-state ACCEPT/HOLD-n/REJECT.
 | 1 | GLM-5.2 (neuralwatt) | plan doc | 1 P2 + 2 P3 | HOLD-1 | `scratchpad/glm-plan-review-r1.md` (runtime-probed: real parseWorkflow sim counted the eleven; fresh-HOME sim all-green) |
 | 1b | GLM-5.2 (neuralwatt) | fold confirmation | 0 (1 P3 doc-hygiene residual, swept) | ACCEPT | `scratchpad/glm-plan-review-r1.md` ROUND-1B |
 | 2 | GLM-5.2 (neuralwatt) | frozen diff (`70de5f2` + `c030829` + `5642609`) | 0 P1 / 0 P2 / 3 P3 (cosmetic, folded) | ACCEPT | `scratchpad/glm-diff-review-r2.md` (byte-exact per-commit audit R4-R6; lint/storage/p12 reruns R8-R11; YAML damage hunt R15-R21; fresh-runner sim R22) |
+| 2b | GLM-5.2 (neuralwatt) | 573-S3 increment (`4e614f1`) | 0 | ACCEPT | `scratchpad/glm-diff-review-r2.md` ROUND-2B (byte-exact vs step 3.1; storage 11/11 rerun; PR #575 CI rerun named as the E2BIG negative-control environment) |
 
 ### 19.1 Resolved blockers (round 1)
 
@@ -258,6 +259,32 @@ Verdicts recorded here with three-state ACCEPT/HOLD-n/REJECT.
 | 2.2 | — | — | **Negative control (red-then-green):** run the lint while the eleven are wired AND still baselined. | `node tests/test-ci-suite-registration.mjs` → exit 1, failure text contains `now wired — remove from KNOWN_UNWIRED: test-second-opinion-audit-drift.mjs` |
 | 2.3 | `tests/test-ci-suite-registration.mjs` | **EDIT** | ANCHOR (11 lines, verbatim — the contiguous block):<br>`  'test-second-opinion-audit-drift.mjs',`<br>`  'test-second-opinion-consensus-e2e.mjs',`<br>`  'test-second-opinion-consensus.mjs',`<br>`  'test-second-opinion-dispatch.mjs',`<br>`  'test-second-opinion-gate-runbook.mjs',`<br>`  'test-second-opinion-gate.mjs',`<br>`  'test-second-opinion-i22-algorithm-parity.mjs',`<br>`  'test-second-opinion-install-snapshot.mjs',`<br>`  'test-second-opinion-preamble.mjs',`<br>`  'test-second-opinion-providers.mjs',`<br>`  'test-second-opinion-storage.mjs',`<br>REPLACE with: nothing (delete the 11 lines; the neighbors `  'test-script-identity-key.mjs',` above and `  'test-seed-patterns.mjs',` below stay untouched) | `node tests/test-ci-suite-registration.mjs` → exit 0, stdout contains `baseline: 71` and `test-ci-suite-registration: PASS` |
 | 2.4 | — | — | Full CI-shape sweep: run each of the eleven suites once from the worktree root. | eleven commands `node tests/test-second-opinion-<name>.mjs`, each exit 0; pass counts: audit-drift 4, consensus-e2e 7, consensus 18, dispatch 9, gate-runbook 20, gate 23, i22 6, install-snapshot 14, preamble 45, providers 24, storage 11 |
+
+### 573-S3 — CI-surfaced amendment: I-28 giant body exceeds Linux MAX_ARG_STRLEN (added post-round-2, PR #575 CI run 1)
+
+**Provenance:** the first CI run of PR #575 failed ONLY at the storage suite's I-28 test:
+`TypeError: Cannot read properties of null (reading 'toString')` at `runHarness`
+(`tests/test-second-opinion-storage.mjs:75`), job 89417833020. Root cause: the test passes a
+150000-char `--body` value as a single argv string; Linux `MAX_ARG_STRLEN` caps one argv
+string at 131072 bytes, so `spawnSync` fails E2BIG and `result.stdout` is null. macOS has no
+128KiB per-arg cap, which is why every local and fake-HOME probe passed. This is a second
+#573-class latent instance in the same suite, surfaced by the wiring exactly as intended.
+Same-class sweep: `grep -rn "repeat(" tests/test-second-opinion-*.mjs` shows the only other
+giant literal is `test-second-opinion-gate.mjs:338` (250000 chars), which travels to the hook
+via stdin JSON, not argv, and its suite passed on the same CI run. Fix set = storage only.
+Fix: pass the giant body via `--body-file` (supported at `scripts/second-opinion.mjs:132`),
+which preserves the exact overflow behavior under test and is argv-limit-immune on every OS.
+
+**Files this slice may touch:** `tests/test-second-opinion-storage.mjs`.
+
+| Step | File | Kind | Exact action | Verify |
+|---|---|---|---|---|
+| 3.1 | `tests/test-second-opinion-storage.mjs` | **EDIT** | ANCHOR (5 lines, verbatim):<br>`  // Provider 'stub' has prompt_max_chars: 100000; default preamble is small.`<br>`  // Build a body that pushes total over the limit.`<br>`  const giantBody = 'x'.repeat(150000)`<br>(blank line)<br>`  const result = runHarness([`<br>REPLACE with:<br>`  // Provider 'stub' has prompt_max_chars: 100000; default preamble is small.`<br>`  // Build a body that pushes total over the limit. Passed via --body-file:`<br>`  // a 150000-char argv value exceeds Linux MAX_ARG_STRLEN (131072), so a`<br>`  // --body spawn dies E2BIG on ubuntu CI before the harness runs (#573 sweep).`<br>`  const giantBody = 'x'.repeat(150000)`<br>`  const giantBodyFile = path.join(tmp, 'giant-body.txt')`<br>`  fs.writeFileSync(giantBodyFile, giantBody, 'utf8')`<br>(blank line)<br>`  const result = runHarness([`<br>THEN in the same argv list 5 lines below, ANCHOR: `    '--body', giantBody,` → REPLACE: `    '--body-file', giantBodyFile,` | `node tests/test-second-opinion-storage.mjs` → `11 passed, 0 failed`, exit 0 |
+| 3.2 | — | — | Re-run the full DoD gate locally. | `node tests/test-ci-suite-registration.mjs` → `baseline: 71` PASS |
+
+The final proof for 3.x is the PR's CI rerun going green; E2BIG is not reproducible on a
+Darwin dev box (per-arg limit differs), so the runner itself is the negative-control
+environment. Ledger row added to §15 at rerun time.
 
 ## A.8 Definition of done (mechanical)
 

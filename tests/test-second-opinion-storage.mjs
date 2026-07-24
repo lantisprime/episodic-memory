@@ -239,15 +239,19 @@ console.log('\n## I-28 prompt-overflow rejected before dispatch')
 test('composed prompt > prompt_max_chars → exit prompt-overflow, no write', () => {
   const tmp = makeTmpProject()
   // Provider 'stub' has prompt_max_chars: 100000; default preamble is small.
-  // Build a body that pushes total over the limit.
+  // Build a body that pushes total over the limit. Passed via --body-file:
+  // a 150000-char argv value exceeds Linux MAX_ARG_STRLEN (131072), so a
+  // --body spawn dies E2BIG on ubuntu CI before the harness runs (#573 sweep).
   const giantBody = 'x'.repeat(150000)
+  const giantBodyFile = path.join(tmp, 'giant-body.txt')
+  fs.writeFileSync(giantBodyFile, giantBody, 'utf8')
 
   const result = runHarness([
     'request',
     '--provider', 'stub',
     '--project', tmp,
     '--storage', 'files',
-    '--body', giantBody,
+    '--body-file', giantBodyFile,
     '--summary', 'overflow test',
   ], { expectError: true })
 
