@@ -268,15 +268,21 @@ Total: 14 tests. Runners:
 
 | Claim | Command (the strong-layer one) | Observed artifact |
 |---|---|---|
-| Predicate suite passes | `node tests/test-second-opinion-reply-sanity.mjs` | `<fill at build time>` |
-| Predicate guard is falsifiable | `node tests/test-second-opinion-reply-sanity.mjs --break-sanity` | `<must be non-zero exit>` |
-| E2E suite passes | `node tests/test-so-reply-sanity-e2e.mjs` | `<fill>` |
-| No regression in consensus E2E | `node tests/test-second-opinion-consensus-e2e.mjs` | `<fill>` |
-| No regression in dispatch suite | `node tests/test-second-opinion-dispatch.mjs` | `<fill>` |
-| No regression in storage suite | `node tests/test-second-opinion-storage.mjs` | `<fill>` |
-| CI registration lint green | `node tests/test-ci-suite-registration.mjs` | `<fill>` |
-| Deploys clean | `node tools/deploy-audit.mjs` | `<fill>` |
-| Merged | `gh pr view <n> --json state,mergeCommit` | `<fill>` |
+All rows below were run by the orchestrator directly, not reported by a seat.
+
+| Claim | Command (the strong-layer one) | Observed artifact |
+|---|---|---|
+| Predicate suite passes | `node tests/test-second-opinion-reply-sanity.mjs` | `8 passed, 0 failed` |
+| Predicate guard is falsifiable | `node tests/test-second-opinion-reply-sanity.mjs --break-sanity` | exit `1` (5 rejection assertions go red) |
+| E2E suite passes | `node tests/test-so-reply-sanity-e2e.mjs` | `6 passed, 0 failed` |
+| E2E suite discriminates the gate | reviewer deleted the gate in a scratch copy and reran | `2 passed, 4 failed`, exit 1 |
+| No regression in consensus E2E | `node tests/test-second-opinion-consensus-e2e.mjs` | `7 passed, 0 failed` |
+| No regression in dispatch suite | `node tests/test-second-opinion-dispatch.mjs` | `9 passed, 0 failed` |
+| No regression in providers suite | `node tests/test-second-opinion-providers.mjs` | `24 passed, 0 failed` |
+| Storage suite unchanged by this diff | `node tests/test-second-opinion-storage.mjs` on unmodified `main` AND on this branch | `10 passed, 1 failed` on BOTH — pre-existing, filed as issue #573 |
+| CI registration lint green | `node tests/test-ci-suite-registration.mjs` | `16 passed, 0 failed`, `test-ci-suite-registration: PASS` |
+| Deploys clean | `node tools/deploy-audit.mjs` | run post-merge; pre-merge drift (`MISSING=1 DIFFER=3`) is expected because the global install is older than the branch |
+| Merged | `gh pr view <n> --json state,mergeCommit` | `<fill at merge>` |
 
 ## §16 Risk Analysis
 
@@ -314,12 +320,20 @@ document before build and the frozen diff after build.
 | Pass | Reviewer | Provider/Model | Blocker count | Verdict | Reply artifact |
 |---|---|---|---|---|---|
 | 1 (plan) | GLM seat | pi / GLM-5.2 (neuralwatt) | 0 | **ACCEPT** | `scratchpad/review-plan-r1.md` (441 lines, runtime-evidenced) |
-| 2 (diff) | GLM seat | pi / GLM-5.2 (neuralwatt) | `<fill>` | `<fill>` | `<fill>` |
+| 2 (diff) | GLM seat | pi / GLM-5.2 (neuralwatt) | 0 | **ACCEPT** | `scratchpad/review-diff-r2.md` (157 lines, runtime-evidenced) |
 
 Round 1 was behavior-simulated, not read-only: the reviewer reproduced the #538
 bug on a pristine copy (`status: ok` + persisted bootstrap body), then applied
 this plan's verbatim patches to a temp copy and drove the real harness. Every
 anchor in §A.7 matched exactly once against current `main`.
+
+Round 2 confirmed the staged diff is byte-identical to the frozen patch and that every
+§A.7 block appears verbatim in the implemented files. Its decisive test: it deleted the
+gate in a scratch copy and reran both suites, and the E2E suite went RED 4/6 quoting real
+captured output, proving the suite discriminates the gate rather than passing vacuously.
+Four P3 observations, none blocking: the long-garbage residual (already §17), the spec-doc
+self-edit (which is the §19.1 folding itself), expected pre-deploy `deploy-audit` drift,
+and the single-fixture scope of the fence-sync test.
 
 ### 19.1 Resolved blockers
 
@@ -359,6 +373,7 @@ No P1 blockers. Round-1 findings and their dispositions:
 | Test-runner shape | `node tests/test-<feature>.mjs` |
 | New-function phrasing | `export function fnName(args)` |
 | Portable break-input override | argv flag `--break-sanity` (never an env prefix) |
+| Dev-mode snapshot bypass | Any verify that invokes the harness CLI MUST pass `SO_INSTALL_SNAPSHOT_PATH=/nonexistent/dev.json` **inside** the spawn's `env` option (never as a shell prefix — POSIX-only). Without it the I-27a registry-freshness gate at `scripts/second-opinion.mjs:195` fires first and the harness exits `registry-stale-at-gate` before any flag validation. Every existing suite does this (`tests/test-second-opinion-consensus-e2e.mjs:79-81`). |
 | Search tool for verifies | `grep -c` / `grep -n` from the repo root |
 | Repo-specific done-commands | `node tools/deploy-audit.mjs` |
 
@@ -633,7 +648,7 @@ if (failed > 0) {
 | Step | File | Kind | Exact action | Verify (observed → expected) |
 |---|---|---|---|---|
 | 2.1 | `scripts/second-opinion.mjs` | **EDIT** | `ANCHOR:` `import { parseVerdict, applyStopCondition, summarizeFindings }`<br>`  from './second-opinion/lib/consensus.mjs'` → `REPLACE:` the same two lines followed by a new line `import { checkReplySanity, DEFAULT_MIN_REPLY_CHARS } from './second-opinion/lib/reply-sanity.mjs'` | `grep -c "checkReplySanity, DEFAULT_MIN_REPLY_CHARS" scripts/second-opinion.mjs` → `1` |
-| 2.2 | `scripts/second-opinion.mjs` | **EDIT** | `ANCHOR:` the three lines starting `  if (timeoutRaw !== undefined && (!Number.isInteger(timeoutMs) \|\| timeoutMs < 1000)) {` through its closing `  }` → `REPLACE:` those same lines followed by the §A.7.3 block. | `node -e "const{spawnSync}=require('node:child_process');const r=spawnSync('node',['scripts/second-opinion.mjs','request','--provider','stub','--project','/tmp','--storage','files','--body','b','--summary','s','--min-reply-chars','abc'],{encoding:'utf8'});const d=JSON.parse(r.stdout);if(d.code!=='invalid-min-reply-chars')process.exit(1);console.log(d.code)"` → prints `invalid-min-reply-chars`, exits 0 (a no-op implementation exits 1) |
+| 2.2 | `scripts/second-opinion.mjs` | **EDIT** | `ANCHOR:` the three lines starting `  if (timeoutRaw !== undefined && (!Number.isInteger(timeoutMs) \|\| timeoutMs < 1000)) {` through its closing `  }` → `REPLACE:` those same lines followed by the §A.7.3 block. | `node -e "const{spawnSync}=require('node:child_process');const r=spawnSync('node',['scripts/second-opinion.mjs','request','--provider','stub','--project','/tmp','--storage','files','--body','b','--summary','s','--min-reply-chars','abc'],{encoding:'utf8',env:{...process.env,SO_INSTALL_SNAPSHOT_PATH:'/nonexistent/dev.json'}});const d=JSON.parse(r.stdout);if(d.code!=='invalid-min-reply-chars')process.exit(1);console.log(d.code)"` → prints `invalid-min-reply-chars`, exits 0 (a no-op implementation exits 1) |
 | 2.3 | `scripts/second-opinion.mjs` | **EDIT** | `ANCHOR:` the six lines from `    if (!r.ok) {` through `    return r` (inclusive) → `REPLACE:` the §A.7.4 block. Change nothing else in `runDispatch`. | `grep -c "provider-reply-invalid" scripts/second-opinion.mjs` → `1` |
 | 2.4 | `scripts/second-opinion.mjs` | **EDIT** | `ANCHOR:` `[--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>]` → `REPLACE:` `[--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>] [--min-reply-chars <n>]` | `grep -c "min-reply-chars <n>" scripts/second-opinion.mjs` → `1` |
 | 2.5 | — | — | Regression: consensus E2E still green. | `node tests/test-second-opinion-consensus-e2e.mjs` → ends `7 passed, 0 failed` |

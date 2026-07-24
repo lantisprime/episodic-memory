@@ -36,6 +36,7 @@ import { computeSourceHash } from './second-opinion/lib/source-hash.mjs'
 import { readSnapshot, snapshotPath } from './second-opinion/lib/install-snapshot.mjs'
 import { parseVerdict, applyStopCondition, summarizeFindings }
   from './second-opinion/lib/consensus.mjs'
+import { checkReplySanity, DEFAULT_MIN_REPLY_CHARS } from './second-opinion/lib/reply-sanity.mjs'
 import { spawnSync } from 'node:child_process'
 
 // harnessRoot frozen at module load.
@@ -49,7 +50,7 @@ const PROVIDERS_REGISTRY = path.join(HARNESS_ROOT, 'scripts', 'second-opinion', 
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'second-opinion.mjs', usage: 'node second-opinion.mjs <request|list-replies|rebuild-index> [options]. request: --provider <p> --project <path> --storage <files|episodic> --body <text> --summary <text> [--dispatch] [--timeout <ms>] [--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'second-opinion.mjs', usage: 'node second-opinion.mjs <request|list-replies|rebuild-index> [options]. request: --provider <p> --project <path> --storage <files|episodic> --body <text> --summary <text> [--dispatch] [--timeout <ms>] [--consensus --max-rounds <n> --rebuttal-cb <script>] [--preamble <id>] [--min-reply-chars <n>]' }))
   process.exit(0)
 }
 
@@ -220,6 +221,14 @@ async function cmdRequest() {
   const timeoutMs = timeoutRaw === undefined ? undefined : parseInt(timeoutRaw, 10)
   if (timeoutRaw !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1000)) {
     emitErr('invalid-timeout', `--timeout must be an integer number of milliseconds >= 1000, got "${timeoutRaw}"`)
+  }
+  const minReplyRaw = flag('--min-reply-chars')
+  const minReplyChars = minReplyRaw === undefined
+    ? DEFAULT_MIN_REPLY_CHARS
+    : parseInt(minReplyRaw, 10)
+  if (minReplyRaw !== undefined && (!Number.isInteger(minReplyChars) || minReplyChars < 0)) {
+    emitErr('invalid-min-reply-chars',
+      `--min-reply-chars must be a non-negative integer, got "${minReplyRaw}"`)
   }
 
   // Compose preamble (3-tier resolution).
@@ -399,6 +408,28 @@ async function cmdRequest() {
       emitErr('provider-dispatch-nonzero',
         `Provider ${provider} exited non-zero (${r.exitCode})`,
         { provider, dispatchResult: r })
+    }
+    // #538: a provider can exit 0 while emitting its own interactive bootstrap
+    // prompt. Exit status alone is not evidence of a review, so gate the body
+    // before it reaches storage — otherwise the garbage persists as status ok
+    // and a --consensus run counts it as a completed round.
+    const sanity = checkReplySanity(r.stdout, { minChars: minReplyChars })
+    if (!sanity.ok) {
+      let invalidForensicsPath = null
+      if (requestId) {
+        try {
+          const fdir = path.join(projectRoot, '.review-store', 'forensics')
+          fs.mkdirSync(fdir, { recursive: true })
+          invalidForensicsPath = path.join(fdir, `${requestId}.round${roundN}.invalid-reply.txt`)
+          fs.writeFileSync(invalidForensicsPath, typeof r.stdout === 'string' ? r.stdout : '', 'utf8')
+        } catch { invalidForensicsPath = null }
+      }
+      emitErr('provider-reply-invalid',
+        `Provider ${provider} returned an unusable reply (${sanity.reason}): ${sanity.detail}`,
+        {
+          provider, round: roundN, reason: sanity.reason,
+          detail: sanity.detail, forensics: invalidForensicsPath,
+        })
     }
     return r
   }
