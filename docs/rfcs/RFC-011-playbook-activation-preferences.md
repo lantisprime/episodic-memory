@@ -186,6 +186,18 @@ Single implementation phase (P1), one PR, slice ladder in the phase plan documen
 | T11 | target-store binding | the preference-file read binds to the `--project` store under `caller_cwd != target` (extends the RFC-009 R2 binding fixture to the new per-project input) |
 | T12 | schema-version migration | a cached v2 `trigger-index.json` is treated as stale and rebuilt to v3; `test-trigger-index-schema.mjs` negatives updated (v2 rejected like v1) |
 
+---
+
+## Implementation
+
+> Populate during build stage — mark each item immediately after it ships. Do not batch at the end.
+
+| PR/Commit | Files changed | Tests | Notes |
+|---|---|---|---|
+| P1 (S1-S5) — PR #511 (`d5f6efc`) | see PR | panel ledger in ## Second opinion rows 7-11 | preference schema, derived index v3, --read surface, retention protection, docs+CI; status flip authored as `b192808` on the feature branch, landed on main in the #511 squash. P2 (body excerpts) intentionally unscheduled pending R6 evidence. |
+
+---
+
 ## Related RFCs
 
 - **RFC-009 (accepted)** — supplies every mechanism this RFC composes: R1 trigger grammar, R2 derived index + freshness + build report, R3 matcher + rendering + bounds + suppression, R4 session-start surface + strict read boundary, R6 telemetry (pending P4), R10 taxonomy. This RFC adds a declared-preference surface beside R4's earned band, one boundary CLARIFICATION (fingerprint stats, R2.5), and changes none of RFC-009's contracts. One latent RFC-009 defect (untracked `--history` in the R3 rendering) is discharged via a filed issue + R7, not a text amendment.

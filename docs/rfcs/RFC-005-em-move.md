@@ -263,7 +263,7 @@ Add `project-mismatch` tag to 9 episodes in Group 6 (operating-rules cluster fro
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| em-move v1 | PR #466 (`556bf85`) | bundled wave PR, 28 files +2176 | Introduced `scripts/em-move.mjs` (verified `--follow --diff-filter=A`). Hardened by #470 (`fc37d17`, partial-move null-proto fix); suite CI-wired by #472 (`ef0d771`). |
 
 ---
 

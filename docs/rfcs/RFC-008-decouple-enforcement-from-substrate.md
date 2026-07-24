@@ -1344,7 +1344,32 @@ graph TD
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
 | **P0** — PR #367 (`bf58e8f`) | 20 P0 files (17 schemas + 3 data) + test-only `tests/lib/mini-jsonschema.mjs` + `tests/lib/version-hash.mjs` (both later promoted to `scripts/lib/` in P1b/P2a, with re-export shims left at the `tests/lib/` paths) + `tests/test-p0-schemas.mjs` + `tests/fixtures/plugins/*` (≥16 golden + `_corpus-index.json`) + `tests/fixtures/harness-events/claude-code/*` | `node tests/test-p0-schemas.mjs` → 89/0; `em-rfc-validate` consistent | Locked schema + data layer (R3, R4; F11–F51). NO shipped `.mjs` validators (T17). Validity gate = self-asserting keyword-grammar linter (closes R0b-R3 fail-open class). Plan reviewed 3 rounds; impl review ACCEPT-with-FU (4 FUs fixed inline). Post-merge FU: P2 shared negative corpus → issue #368. |
-| _P1+ pending_ | _pending_ | _pending_ | _pending_ |
+| **P1a** — PR #373 (`e4f89a5`) | see PR | see PR | git mv hooks/→plugins/claude-code/hooks/ |
+| **P1b** — PR #374 (`0e27ad2`) | see PR | see PR | plugin registry+manifest+validator |
+| **P1c** — PR #376 (`a1bf7e7`) | see PR | see PR | conformance gauntlet+field_bindings |
+| **Follow** — PR #378 (`8f1e880`) | see PR | see PR | runbook relocation |
+| **P2a** — PR #381 (`176d6c2`) | see PR | see PR | validate-schemas+negative corpus |
+| **P2b** — PR #384 (`45aceba`) | see PR | see PR | bp contracts+validate-bp-contract |
+| **P2c** — PR #388 (`b425099`) | see PR | see PR | doc sweep |
+| **P3a** — PR #389 (`fe2b61c`) | see PR | see PR | marker-state lib |
+| **P3b-1** — PR #391 (`e077f55`) | see PR | see PR | stop decision relocation |
+| **P3c** — PR #392 (`15ad76b`) | see PR | see PR | classifier taxonomy sourcing |
+| **P3b-2** — PR #393 (`f880b52`) | see PR | see PR | effective-tier layer |
+| **P3d** — PR #395 (`c6ac710`) | see PR | see PR | em-recall purification |
+| **P4a** — PR #397 (`87c9ceb`) | see PR | see PR | per-project config in gates |
+| **P4c** — PR #398 (`f117709`) | see PR | see PR | active:false kill switch |
+| **P4d S1** — PR #400 (`99f4eaa`) | see PR | see PR | E2E harness |
+| **S2** — PR #401 (`0f4edad`) | see PR | see PR | --install-enforcement |
+| **S4** — PR #402 (`ad14ae5`) | see PR | see PR | config seeding |
+| **ESC** — PR #409 (`ebc5df4`) | see PR | see PR | repo-source-only gating |
+| **S5** — PR #416 (`a40d907`) | see PR | see PR | uninstall |
+| **S6** — PR #417 (`a256b13`) | see PR | see PR | seed-identity guard |
+| **S7** — PR #418 (`b7db28d`) | see PR | see PR | phase index docs |
+| **S8** — PR #419 (`c8651f4`) | see PR | see PR | P12 CI gate |
+| **P5** — PR #424 (`f5dbaef`) + #425 (`a7f66c9`) | see PR | see PR | OpenCode plugin |
+| **P6** — PR #431 (`3b91f9b`) | see PR | see PR | Codex plugin |
+| **P7** — PR #437 (`5da4418`) | see PR | see PR | Pi Agent plugin |
+| _P8 pending (Cursor/Windsurf, not started)_ | _pending_ | _pending_ | P9 carved out to RFC-001/007 lineage; plan-gate.sh:108-115 reorder still open |
 
 ---
 
