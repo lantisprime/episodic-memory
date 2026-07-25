@@ -22,6 +22,7 @@ RFCs document proposed changes to the episodic-memory system. Every non-trivial 
 | RFC-012 | Promotion Arc: Evidence-Fed Knowledge Promotion, Advisory Cadence, and Stagnation Signals | accepted | Charlton Ho |
 | RFC-013 | Episode Sync: Cross-Host Replication of Project and Global Episode Stores | draft | Charlton Ho |
 | RFC-014 | em-serve — Episode Server: Rendezvous Sync, Live Episode Feed, and Remote Recall over the CLI Contract | draft | Charlton Ho |
+| RFC-015 | Playbook Registration: Store-Time Detection, Registration Audit, and Scope Rules | draft | Charlton Ho |
 
 ---
 
