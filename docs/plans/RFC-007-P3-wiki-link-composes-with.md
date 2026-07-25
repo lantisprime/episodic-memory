@@ -257,7 +257,7 @@ empty strings. Never null.
 | EC2 | `[[Name]]` vs `[[name]]` in two files | both slugify to `name`, one deduped edge | `t_case_folded_targets_dedupe` |
 | EC3 | Slug collision already exits 2 at `:152-155` before any body scan | Phase 3 never runs on a colliding corpus | `t_collision_still_exits_2_before_extraction` |
 | EC4 | `## Composes with` present, section empty | 0 edges AND 0 dangling (REQ-6) | `t_composes_empty_section_no_dangling` |
-| EC5 | Unclosed fence — ` ``` ` opened and never closed | remainder of file treated as fenced, no edges (matches `cites` regex behavior) | `t_unclosed_fence_swallows_remainder` |
+| EC5 | Unclosed fence — ` ``` ` opened and never closed | **remainder is NOT treated as fenced**; a wiki-link after it IS extracted. `stripFenced` is non-greedy and requires a closing fence, which is exactly what shipped `cites` does at `em-graph.mjs:207`. Parity with `cites` is the requirement (REQ-4), so this is the correct behavior, not a gap | `t_unclosed_fence_does_not_swallow_remainder` |
 | EC6 | `## Composes with` followed immediately by `## Other` | section is empty, next heading terminates it | `t_composes_terminated_by_next_heading` |
 | EC7 | Live corpus run — 68 files carry `[[…]]`, 21 carry the heading | real run completes, emits both edges and dangling entries | `manual:` §15 row |
 
@@ -274,7 +274,7 @@ Group 1: wiki-link shape matrix (15)
 Group 2: exclusion (3)
   t_wikilink_fence_exclusion
   t_wikilink_inline_backtick_exclusion
-  t_unclosed_fence_swallows_remainder
+  t_unclosed_fence_does_not_swallow_remainder   (EC5, corrected: parity with cites)
 
 Group 3: composes-with (8)
   t_composes_toplevel_only
