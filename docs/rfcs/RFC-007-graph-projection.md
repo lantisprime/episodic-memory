@@ -2,10 +2,11 @@
 rfc_id: RFC-007
 slug: graph-projection
 title: Graph Projection — first-class traversal over latent episode/rule edges
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-05-17
-last_modified: 2026-05-17
+last_modified: 2026-07-25
+adversarial_review: 2026-07-25 (second opinion on the revision diff; see Second opinion section)
 supersedes: ~
 superseded_by: ~
 ---
@@ -14,7 +15,7 @@ superseded_by: ~
 
 ## AI context
 
-> (1) Build an in-memory graph projection over the existing episode + rule-file corpus, persisted as a JSON sidecar to the index, exposing typed-edge traversal queries through `em-search`. (2) Solves the problem that graph-shaped edges (`supersedes`, `tags`, `[[name]]` links, "composes with") already exist in the data but are handled ad-hoc — linear walks in code, narrative-only in markdown, or not at all — so cluster, lineage, and link-rot queries require manual joins or grep. (3) Key trade-off: this is a **projection over file storage, not a graph DB** — Principle 1 ("memory is the substrate, avoid sidecar databases") rules out Neo4j/SQLite/Memgraph; rebuild-time freshness is acceptable because the corpus is small (low thousands of episodes) and the existing `em-rebuild-index.mjs` already walks every file.
+> (1) Build a typed-edge graph projection over the existing episode corpus, exposing `--from` / `--orphans` / `--hubs` traversal queries from a standalone `scripts/em-graph.mjs`. (2) Solves the problem that graph-shaped edges (`supersedes`, `tags`, evidence links, body citations, consolidation membership) already exist in the data but are handled ad-hoc — linear walks in code, narrative-only in markdown, or not at all — so cluster, lineage, and link-rot queries require manual joins or grep. (3) v1 shipped as `scripts/em-graph.mjs`: a per-query projection with no persisted artifact (built fresh on every call from index rows plus one body pass when `cites` is selected). The persisted derived index is a deferred phase (see Storage section, Phase 6 of the Implementation plan). Key trade-off: this is a **projection over file storage, not a graph DB** — Principle 1 ("memory is the substrate, avoid sidecar databases") rules out Neo4j/SQLite/Memgraph; rebuild-time freshness is acceptable because the corpus is small (low thousands of episodes) and the existing `em-rebuild-index.mjs` already walks every file.
 
 ---
 
@@ -44,42 +45,76 @@ Build a **typed-edge graph projection** computed at `em-rebuild-index.mjs` time,
 
 ### Node types
 
-| Node type | Source | Identifier |
-|---|---|---|
-| `episode` | All episode files in local + global stores | Episode `id` |
-| `rule` | `~/.claude/projects/.../memory/feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md` | Filename (slug from frontmatter `name`) |
-| `rfc` | `docs/rfcs/RFC-*.md` | `rfc_id` from frontmatter |
+| Node type | Status |
+|---|---|
+| `episode` | SHIPPED (`em-graph.mjs:194`) |
+| `tag` (pseudo-node `tag:<name>`) | SHIPPED (`em-graph.mjs:190`), opt-in via `--edges tags` |
+| `rule` | UNBUILT — next phase |
+| `rfc` | UNBUILT — next phase |
+
+**Node type details (preserved for the unbuilt phase and the shipped ones).**
+
+`episode` — all episode files in local + global stores; identifier = episode `id`.
+
+`tag` — pseudo-node of the form `tag:<name>`; emitted only when `--edges tags` is requested (tag fan-out is the noisiest edge and is excluded from `DEFAULT_EDGES`).
+
+`rule` — source would be `~/.claude/projects/.../memory/feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`; identifier = filename (slug from frontmatter `name`). Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
+
+`rfc` — source would be `docs/rfcs/RFC-*.md`; identifier = `rfc_id` from frontmatter. Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
 
 ### Edge types
 
-| Edge | Source | Direction | Notes |
-|---|---|---|---|
-| `supersedes` | Episode `supersedes` field | `new → old` | Existing field; just indexed |
-| `tag` | Episode `tags[]` | `episode → tag` (tags are pseudo-nodes) | Enables co-occurrence queries |
-| `wiki-link` | `[[name]]` matches in rule bodies | `source → target` | Resolved against rule slug index via `slugify()`; dangling links recorded as `wiki-link-dangling`; fenced code blocks + inline backticks skipped |
-| `composes-with` | Top-level bullets under `## Composes with` heading in rule files | `source → target` | Markdown-list-item parsing; same `slugify()` resolution as wiki-link; nested bullets ignored |
-| `trigger-phrase` | Machine-readable trigger block in `MEMORY.md` (added in PR-5) | `phrase → rule` | JSON-block parser; falls back to no-edges + stderr warning if block missing |
-| `cites-episode` | Episode-id pattern (`\d{8}-\d{6}-[a-z0-9-]+-[a-f0-9]{4}`) in rule + episode bodies | `source → episode` | Lineage across categories; fenced code blocks + inline backticks skipped; self-reference filtered |
-| `cites-pr` | `pr-\d+` tag (primary). `#NNN` body mention contributes ONLY when episode is also tagged `pr-NNN`. | `episode → pr` (pseudo-node) | Body-only mention without tag yields no edge — prevents meta-commentary false positives |
+| Edge | Status |
+|---|---|
+| `supersedes` | SHIPPED (`em-graph.mjs:171-172`) |
+| `consolidates` | SHIPPED (`em-graph.mjs:174-176`) |
+| `evidence` | SHIPPED (`em-graph.mjs:177-180`) |
+| `cites` | SHIPPED (`em-graph.mjs:181-183`, `bodyCitations` at `:156-167`) |
+| `tags` | SHIPPED (`em-graph.mjs:184-186`), opt-in |
+| `wiki-link` | UNBUILT — Phase 3 |
+| `composes-with` | UNBUILT — Phase 3 |
+| `trigger-phrase` | UNBUILT — Phase 5 |
+| `cites-pr` | UNBUILT — Phase 5 |
+
+**Naming correction.** This RFC originally called the body-citation edge `cites-episode`. The shipped name is bare `cites`. The RFC adopts the shipped name throughout. `consolidates` and `evidence` were added during implementation and are recorded here for the first time; the pre-implementation RFC did not name them.
+
+**Default edge set.** The shipped default is `supersedes, consolidates, evidence, cites`. `tags` must be requested explicitly (it is not in `DEFAULT_EDGES`, `em-graph.mjs:82`).
+
+**Shipped edge details.**
+
+- `supersedes` — episode `supersedes` field (and its `superseded_by` mirror), `new → old`. Emitted from `em-graph.mjs:171-172`.
+- `consolidates` — digest → member; source is `episode.consolidates[]` index field, direction `digest → member`. Emitted from `em-graph.mjs:174-176`.
+- `evidence` — lesson ↔ violation, sourced from `episode.evidence[]` and `episode.lessons[]` index fields. Emitted from `em-graph.mjs:177-180`.
+- `cites` — episode → episode whose id appears in its BODY; fenced code blocks and inline backticks are skipped, self-references filtered. The regex is `\d{8}-\d{6}-[a-z0-9-]+-[a-f0-9]{4}` over the body (frontmatter ids are already first-class edges via `supersedes` / `consolidates` and are not rescanned). Emitted from `em-graph.mjs:181-183` via `bodyCitations` at `:156-167`.
+- `tags` — episode → `tag:<name>` pseudo-node; the tag name is lowercased and trimmed. Opt-in via `--edges tags`; excluded from `DEFAULT_EDGES`. Emitted from `em-graph.mjs:184-186`.
+
+**Unbuilt edge details (preserved verbatim from the original RFC).**
+
+- `wiki-link` — `[[name]]` matches in rule bodies; `source → target`; resolved against rule slug index via `slugify()`; dangling links recorded as `wiki-link-dangling`; fenced code blocks + inline backticks skipped.
+- `composes-with` — top-level bullets under `## Composes with` heading in rule files; `source → target`; markdown-list-item parsing; same `slugify()` resolution as wiki-link; nested bullets ignored.
+- `trigger-phrase` — machine-readable trigger block in `MEMORY.md` (added in PR-5); `phrase → rule`; JSON-block parser; falls back to no-edges + stderr warning if block missing.
+- `cites-pr` — `pr-\d+` tag (primary). `#NNN` body mention contributes ONLY when episode is also tagged `pr-NNN`. `episode → pr` (pseudo-node); body-only mention without tag yields no edge — prevents meta-commentary false positives.
 
 ### Scope-root resolution (axis 9 binding)
 
-`scopeRoot` is resolved identically to the existing logic in `scripts/em-rebuild-index.mjs` — never via `process.cwd()` in projection or query code paths:
+v1 has no persisted artifact, so the binding axis is **which stores are read**, not where a sidecar is written. Scope resolution is fixed:
 
 ```
 scopeRoot(scope, project) =
-  scope == 'local'  → resolveProject(project) + '/.episodic-memory'
-  scope == 'global' → os.homedir() + '/.episodic-memory'
-  scope == 'all'    → BOTH (build each separately; never merged on disk)
+  scope == 'local'  → resolveLocalDir()  (from scripts/lib/local-dir.mjs)
+  scope == 'global' → path.join(os.homedir(), '.episodic-memory')
+  scope == 'all'    → BOTH (read each separately; never merged on disk)
 ```
 
-All file I/O — projection writes, query reads — uses `path.join(scopeRoot, 'graph.json')`. Subprocess invocations forward `cwd: scopeRoot`, not the caller's cwd.
+Concretely in the shipped code: `GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')` (`em-graph.mjs:42`); `LOCAL_DIR = resolveLocalDir()` (`em-graph.mjs:39,43`); `--scope` flag default `all` (`em-graph.mjs:76`, validated `:94-98`). Index rows load via `loadIndex` from `./lib/relevance.mjs` (`em-graph.mjs:40`). The `--scope all` path reads both stores and de-duplicates by id (local shadows global on collision, matching the readers); nothing is ever written to disk.
 
-**Required PR-1 fixture (axis 9):** `caller_cwd != target_project_root` — invoke `em-rebuild-index --scope local --project /tmp/target` from `/tmp/elsewhere`; assert `fs.existsSync('/tmp/target/.episodic-memory/graph.json') === true` AND `fs.existsSync('/tmp/elsewhere/.episodic-memory/graph.json') === false`. Same shape per new `em-search` query flag (PR-3) asserting the right `graph.json` is read.
+**Axis-9 fixtures for a WRITER path.** Because v1 does not write, the caller-cwd-elsewhere fixtures, the `--scope all` union-write fixture, and the shared `assertGraphFileLocation({ scope, project, callerCwd, expectPresent, expectAbsent })` helper described in earlier drafts of this RFC have nothing to assert against in v1. They are preserved verbatim below and move to Phase 6 (DEFERRED) where the persisted index returns — the moment a file is written, those fixtures and the helper become required, and the helper internals stay stable as new surfaces extend `expectPresent` / `expectAbsent` at the call site.
 
-**Required PR-1 fixture (axis 9, `--scope all` variant):** invoke `em-rebuild-index --scope all --project /tmp/target` from `/tmp/elsewhere`; assert BOTH `/tmp/target/.episodic-memory/graph.json` AND `<HOME>/.episodic-memory/graph.json` exist after the run, AND `/tmp/elsewhere/.episodic-memory/graph.json` does NOT exist. The union-write path must satisfy axis-9 binding at every disk location it writes.
-
-**Shared assertion helper (required).** Signature: `assertGraphFileLocation({ scope, project, callerCwd, expectPresent: string[], expectAbsent: string[] })`. Both arrays asserted in a single call against `fs.existsSync`. New `--scope` values (or new CLI surfaces) extend `expectPresent` / `expectAbsent` at the call site; helper internals stay stable. This prevents axis-9-class bypass recurring as new surfaces are added (stop-rule from round-2 audit).
+> **[DEFERRED to Phase 6]** **Required PR-1 fixture (axis 9):** `caller_cwd != target_project_root` — invoke `em-rebuild-index --scope local --project /tmp/target` from `/tmp/elsewhere`; assert `fs.existsSync('/tmp/target/.episodic-memory/graph.json') === true` AND `fs.existsSync('/tmp/elsewhere/.episodic-memory/graph.json') === false`. Same shape per new `em-search` query flag (PR-3) asserting the right `graph.json` is read.
+>
+> **[DEFERRED to Phase 6]** **Required PR-1 fixture (axis 9, `--scope all` variant):** invoke `em-rebuild-index --scope all --project /tmp/target` from `/tmp/elsewhere`; assert BOTH `/tmp/target/.episodic-memory/graph.json` AND `<HOME>/.episodic-memory/graph.json` exist after the run, AND `/tmp/elsewhere/.episodic-memory/graph.json` does NOT exist. The union-write path must satisfy axis-9 binding at every disk location it writes.
+>
+> **[DEFERRED to Phase 6]** **Shared assertion helper (required).** Signature: `assertGraphFileLocation({ scope, project, callerCwd, expectPresent: string[], expectAbsent: string[] })`. Both arrays asserted in a single call against `fs.existsSync`. New `--scope` values (or new CLI surfaces) extend `expectPresent` / `expectAbsent` at the call site; helper internals stay stable. This prevents axis-9-class bypass recurring as new surfaces are added (stop-rule from round-2 audit).
 
 ### slugify() — single source of truth
 
@@ -101,52 +136,82 @@ Rule-file slugs derive from frontmatter `name:`. Filename-derived slugs are NOT 
 
 | Concern | Rule |
 |---|---|
-| Code-block exclusion | `wiki-link` and `cites-episode` extractors MUST skip text inside fenced code blocks (` ``` ` and `~~~ `) and inline backticks. Fixture coverage in PR-1 + PR-2. |
+| Code-block exclusion | `wiki-link` and `cites` extractors MUST skip text inside fenced code blocks (` ``` ` and `~~~ `) and inline backticks. Fixture coverage in PR-1 + PR-2. |
 | `[[ ]]` shape variants | PR-2 ships a 15+ case fixture covering: `[[name]]`, `[[name\|alias]]`, `[[ name ]]`, `[[name.md]]` (extension stripped before slugify), `[[name#anchor]]` (anchor stripped), `[[name#anchor\|alias]]` (BOTH anchor AND alias — anchor stripped, alias dropped, target = slugify(`name`)), `[[Name]]` (case-folded), `[link](path.md)` (NOT a wiki-link), `[[]]` (empty — ignored), nested `[[[[x]]]]` (outermost only). Regex: `\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]` (capture 1 = name; anchor and alias are non-capturing optional groups, anchor-then-alias order). Each row asserts `(resolved, dangling, ignored)` classification. |
 | `composes-with` parser | Bullets under `## Composes with` until next `## ` heading or EOF. Top-level only — nested bullets ignored. Markdown-link form `- [text](path.md)` resolved by file basename. Empty section yields zero edges and zero dangling entries. |
 | Empty-shape handling | `tags: []` → 0 edges (not an error). `supersedes: ~` → 0 edges (never an edge to literal `"~"`). Empty `## Composes with` → 0 edges + 0 dangling. PR-1 fixtures cover each. |
 | Cluster membership (`cites-pr`) | Tag-primacy: an episode belongs to PR-cluster `pr-NNN` iff it carries the `pr-NNN` tag. Body-only `#NNN` mention without tag does NOT create the edge. |
-| Self-reference | An episode body that contains its own id MUST NOT create a `cites-episode` self-loop. |
+| Self-reference | An episode body that contains its own id MUST NOT create a `cites` self-loop. |
 
 ### Concurrency semantics
 
-Snapshot-at-start, last-writer-wins. Rebuild captures the episode-file set at pass start (single `readdir` per scope), then walks; episodes written mid-pass are deferred to the next rebuild. Concurrent rebuilds write to distinct temps (`graph.json.tmp.<pid>.<random>`) and atomic-rename to `graph.json`; second writer wins. Readers see a complete file via atomic rename — no advisory lock in v1. Failure mode is "slightly stale snapshot," not corruption. Documented + fixture in PR-1.
+v1 has no writer. Each invocation of `scripts/em-graph.mjs` is an independent read: it loads index rows for the selected scope(s), walks the projection in-memory, and returns JSON to stdout. There is no shared mutable artifact on disk and therefore no write-concurrency surface. The original snapshot-at-start / last-writer-wins / ENOENT semantics all describe writers of a shared file and move to Phase 6 (DEFERRED) as requirements that return when the index is persisted.
 
-**ENOENT during pass = skip, don't fail.** If a file from the snapshot `readdir` is deleted before its `readFile` (e.g., concurrent `em-prune`), swallow the ENOENT and continue. The episode is simply absent from this projection; the next rebuild's `readdir` won't see it. Any non-ENOENT error during per-file read aborts the pass (and leaves the prior `graph.json` intact via temp+rename).
+> **[DEFERRED to Phase 6]** **Snapshot-at-start, last-writer-wins.** Rebuild captures the episode-file set at pass start (single `readdir` per scope), then walks; episodes written mid-pass are deferred to the next rebuild. Concurrent rebuilds write to distinct temps (`graph.json.tmp.<pid>.<random>`) and atomic-rename to `graph.json`; second writer wins. Readers see a complete file via atomic rename — no advisory lock in v1. Failure mode is "slightly stale snapshot," not corruption. Documented + fixture in PR-1.
+>
+> **[DEFERRED to Phase 6]** **ENOENT during pass = skip, don't fail.** If a file from the snapshot `readdir` is deleted before its `readFile` (e.g., concurrent `em-prune`), swallow the ENOENT and continue. The episode is simply absent from this projection; the next rebuild's `readdir` won't see it. Any non-ENOENT error during per-file read aborts the pass (and leaves the prior `graph.json` intact via temp+rename).
 
 ### Stale detection
 
-At read time, `em-search` compares `graph.json.rebuilt_at` against the newest episode mtime under `scope_root`. If `newest_mtime > rebuilt_at`, emit stderr warning + set `source: "stale-projection"` in the response envelope. Threshold is "any new episode since rebuild" in v1 (configurable later). Consumers branch on `source` to decide whether to fall back to linear scan.
+v1 rebuilds the projection on every call, so the projection is **always current** and has no staleness surface. The `rebuilt_at` comparison and the mtime caveat below describe a property of a persisted artifact and move to Phase 6 (DEFERRED); they return when the index is persisted.
 
-**mtime caveat:** `git checkout` of an older branch, file restores, and `chmod` touch mtime without semantic change. v1 accepts the false-positive rate (stderr warnings, not hard failures); a content-hash alternative (per-file SHA, stored in graph.json) is reserved for a future RFC if the noise proves painful. Documented limitation, not a v1 blocker.
+> **[DEFERRED to Phase 6]** At read time, `em-search` compares `graph.json.rebuilt_at` against the newest episode mtime under `scope_root`. If `newest_mtime > rebuilt_at`, emit stderr warning + set `source: "stale-projection"` in the response envelope. Threshold is "any new episode since rebuild" in v1 (configurable later). Consumers branch on `source` to decide whether to fall back to linear scan.
+>
+> **[DEFERRED to Phase 6]** **mtime caveat:** `git checkout` of an older branch, file restores, and `chmod` touch mtime without semantic change. v1 accepts the false-positive rate (stderr warnings, not hard failures); a content-hash alternative (per-file SHA, stored in graph.json) is reserved for a future RFC if the noise proves painful. Documented limitation, not a v1 blocker.
 
 ### Query response envelope
 
-All graph-query flags emit:
+The shipped code emits **three distinct response shapes** depending on the mode. `envelope_version` was specified in earlier drafts of this RFC and was **never implemented**; `grep -rn "envelope_version" scripts/` is empty. The `envelope_version` block and its version policy below are recorded here as unbuilt scope, not as a current contract.
+
+**Traversal — `--from <id>`** (`em-graph.mjs:276-285`):
 
 ```json
-{
-  "envelope_version": "1.0.0",
-  "source": "projection" | "fallback-linear" | "fallback-disabled" | "stale-projection",
-  "rebuilt_at": "<iso>" | null,
-  "scope": "local" | "global" | "all",
-  "result_count": <int>,
-  "truncated": false,
-  "results": [ ... ]
-}
+{"status":"ok","root":"<id>","depth":2,"edge_types":["supersedes","consolidates","evidence","cites"],"count":21,"nodes":[...],"edges":[...],"truncated":true}
 ```
 
-Distinguishes "no edges" from "no projection." `fallback-linear` = `graph.json` missing, computed at query time. `fallback-disabled` = explicit `--no-graph` flag set by the caller. `stale-projection` = staleness check tripped. `envelope_version` is bumped whenever the schema changes; consumers MUST branch on it before reading `source`.
+`truncated: true` is emitted only when the `--limit` cap is hit; the field is absent otherwise. `edge_types` carries the resolved edge set (default or as selected). `nodes` are sorted by `(distance asc, id asc)`; each carries `distance`, `type` (`episode` or `tag`), `summary`/`category`/`project`/`status`/`date`/`source` from the index row, and `pinned: true` when applicable. `edges` is a post-BFS sweep over the visited set, emitted once per `(from, to, type)` triple.
 
-**Version policy.** Major bumps on field removal, field-semantic change, or envelope-shape change. Minor bumps on new fields or new `source` values (additive only). Patch bumps on documentation-only changes. Consumers MUST reject envelopes whose major version exceeds their compiled-in expectation.
+**Orphans — `--orphans`** (`em-graph.mjs:221`):
+
+```json
+{"status":"ok","mode":"orphans","count":N,"nodes":[...]}
+```
+
+`nodes` carries episodes (tag pseudo-nodes never appear here — `--orphans` counts degree over non-tag edges) with zero non-tag edges. This is the shipped analogue of the deferred-phase `nodes_with_no_edges[]` field, under a different name and shape.
+
+**Hubs — `--hubs [--top N]`** (`em-graph.mjs:226`):
+
+```json
+{"status":"ok","mode":"hubs","count":N,"nodes":[...]}
+```
+
+`nodes` carries ranked, degree-positive episodes; each node carries `degree` (count of non-tag edges incident to it). Ordering is `(degree desc, id asc)`, then sliced to `--top` (default 10).
+
+> **[UNBUILT — recorded here for completeness, not as a current contract]** The pre-implementation RFC specified an `envelope_version`-keyed envelope with `source`, `rebuilt_at`, `scope`, `result_count`, `truncated`, and `results` fields, distinguishing `projection` / `fallback-linear` / `fallback-disabled` / `stale-projection`. None of that machinery exists in v1 — there is no persisted index to be stale, no linear-fallback path, and no `envelope_version` field anywhere in the codebase. The `envelope_version` block, the `source` enum, and the major/minor/patch version policy that go with it are preserved below and return when (and only when) the persisted index lands in Phase 6.
+>
+> **[DEFERRED to Phase 6]** `envelope_version` is bumped whenever the schema changes; consumers MUST branch on it before reading `source`. Major bumps on field removal, field-semantic change, or envelope-shape change. Minor bumps on new fields or new `source` values (additive only). Patch bumps on documentation-only changes. Consumers MUST reject envelopes whose major version exceeds their compiled-in expectation.
 
 ### Depth bounds + cycle handling
 
-`--depth` flag: default = 2, max = 10, negative values rejected with exit code 2. Traversal uses a visited-set keyed by node id; tag-edge cycles (episode → shared tag → other episode → shared tag) are common and would loop without it. PR-3 self-test covers `--depth 0`, `--depth -1`, `--depth 999`, empty corpus, single-node corpus, `--cluster <empty-tag>`, `--inbound <nonexistent>`.
+`--depth` flag: default = **2**, **min = 0** (`em-graph.mjs:73` via `intFlag('--depth', 2, 0)`). The pre-implementation text described a `max = 10` cap and rejection of negatives; the shipped `intFlag` helper enforces **integer ≥ min** via regex match (`:60-67`) and rejects non-integer or below-minimum inputs with exit code 2 (`:65-67`). The pre-implementation text's `--depth 999` boundary was therefore replaced with the upper bound being implicit (the BFS simply does not expand at `dist >= depth`).
 
-**Result-set cap.** `--limit N` (default 1000) bounds the result-set size. High-fanout tag nodes (5000+ episodes sharing a popular tag) would otherwise emit MB-scale JSON envelopes. When the cap fires, the envelope sets `truncated: true` and `result_count` reflects total available (not just returned). Callers needing complete results raise `--limit` explicitly. Negative `--limit` rejected with exit code 2.
+`--limit N` (default **50**, min **1**, `em-graph.mjs:74`). The pre-implementation text specified default 1000; the shipped default is 50. When the cap fires, the response sets `truncated: true` and `count` reflects the number of nodes actually returned (not the total available). Negative or non-integer `--limit` rejected with exit code 2.
+
+**Cycle handling.** Traversal uses a visited-set keyed by node id; tag-edge cycles (episode → shared tag → other episode → shared tag) are common and would loop without it. The shipped traversal is **undirected** breadth-first from `--from` (`em-graph.mjs:27-33` comment); edges keep their true direction in the output but are walkable in either direction. Closest-first ordering is enforced by BFS distance, ties broken by id ascending. Edge emission is a post-BFS sweep over the visited set so boundary-to-boundary edges are not silently dropped (`em-graph.mjs:262-270`).
+
+**Self-test coverage.** `tests/test-em-graph.mjs` (10 cases, CI-wired at `.github/workflows/tests.yml:401-402`) covers `--depth 0`, `--depth -1` (rejected with exit 2), `--limit` validation, empty corpus, single-node corpus, the `cites` code/backtick exclusion rule, the tag opt-in flag, and the default-vs-requested edge set.
 
 ### Storage
+
+#### Part 1 — v1 as shipped
+
+**No persisted artifact.** The projection is built fresh on every call from index rows plus one body pass when `cites` is selected (`em-graph.mjs:29-33` design comment, runtime-verified). There is no `graph.json`, no atomic write, no temp+rename, no schema version. `grep -n "writeFile\|graph.json\|rename\|mkdir" scripts/em-graph.mjs` returns zero hits; `grep -rn "graph.json" scripts/ tests/` returns zero hits (the only occurrences repo-wide are inside this RFC itself). The shipped `--orphans` mode is the v1 analogue of the deferred-phase `nodes_with_no_edges[]` array, under a different name and shape (see Query response envelope).
+
+**Comment-citation correction.** `scripts/em-graph.mjs:29-31` currently justifies the per-query design with "Projection over file storage, not a graph DB (Principle 1): built fresh per query from index rows + one body pass when `cites` is selected — always current, no sidecar to drift." The citation over-reads `PRINCIPLES.md:13`: Principle 1 bars a **second store** ("No feature may introduce a second store (queue, socket, sidecar database)"). A rebuildable **derived index** is not a store. The repo already ships four rebuildable derived indexes — `index.jsonl`, `tags.json`, `category-index.json`, `trigger-index.json` — and `CAPABILITIES.md:43-46` explicitly sanctions a future derived **knowledge-graph index** as a legitimate family-1 memory-store concern ("A store strategy may, in future, maintain a derived knowledge-graph index or another derived index that makes recall richer"). `CAPABILITIES.md:48-52` places RFC-007 graph traversal in family 2 (recall strategy), which is exactly where the shipped per-query design sits. The honest v1 rationale is therefore the **freshness-versus-rebuild-cost** trade: a per-query projection is always current with zero staleness surface, at the cost of rebuilding on every call. The deferred persisted index below is **admissible** under Principle 1 and `CAPABILITIES.md` family 1; it is deferred because v1 did not need it, not because it is forbidden. The code comment is to be corrected in a later phase; this slice deliberately does not edit `scripts/em-graph.mjs`.
+
+#### Part 2 — DEFERRED: persisted derived graph index
+
+When rebuild cost per query becomes the binding constraint, the following design is the persisted index that returns. Every element below is preserved verbatim from the original RFC; nothing is dropped.
 
 - File: `path.join(scopeRoot, 'graph.json')` — one per scope, never merged on disk.
 - Shape:
@@ -159,7 +224,7 @@ Distinguishes "no edges" from "no projection." `fallback-linear` = `graph.json` 
     "edge_count": 3891,
     "nodes": { "<id>": { "type": "episode|rule|rfc|tag|pr", "metadata": {...} } },
     "edges": [ { "from": "<id>", "to": "<id>", "type": "<edge_type>", "metadata": {...} } ],
-    "dangling": [ { "source": "<id>", "ref": "<unresolved-slug>", "kind": "wiki-link|composes-with|trigger-phrase|cites-episode" } ],
+    "dangling": [ { "source": "<id>", "ref": "<unresolved-slug>", "kind": "wiki-link|composes-with|trigger-phrase|cites" } ],
     "nodes_with_no_edges": [ "<id>", ... ]
   }
   ```
@@ -168,7 +233,17 @@ Distinguishes "no edges" from "no projection." `fallback-linear` = `graph.json` 
 - **Orphan allowlist.** A rule file may declare `entry_point: true` in frontmatter to suppress its presence in `nodes_with_no_edges[]` — canonical roots (`MEMORY.md`, top-level index files) are entry points by design, not orphans. The allowlist is the rule files' own frontmatter; no separate config file.
 - **Entry-point auditability.** `--graph-health` emits `entry_points[]` as a separate array from `nodes_with_no_edges[]`. Rule files declaring `entry_point: true` appear in the former, not the latter, so reviewers can audit suppression decisions explicitly (self-attested metadata still needs a visible audit surface — see `#221` snapshot validator gap, same class).
 
+**Deferral rationale.**
+
+- The persisted index is a **rebuildable derived index**, admissible under `PRINCIPLES.md:13` (which bars a second store, not a derived index) and explicitly sanctioned by `CAPABILITIES.md:43-46` as a family-1 memory-store concern. It is **not** a second store.
+- v1 chose the per-query projection on a **freshness-versus-rebuild-cost** trade: always current, zero staleness surface, at the cost of rebuilding on every call. That is the honest reason, and it is the reason the deferred phase exists rather than being cancelled.
+- A persisted index becomes worth building when **rebuild cost per query becomes the binding constraint**. Name that as the trigger condition.
+- `scripts/em-graph.mjs:29-31` cites Principle 1 for the per-query choice; the citation over-reads the principle (see Part 1). The correction is recorded here so the code comment can be fixed in a later phase; this slice does not edit it.
+- The shipped `--orphans` mode is v1's analogue of `nodes_with_no_edges[]`, under a different name and shape.
+
 ### Rule-node frontmatter convention
+
+**Status: UNBUILT — next phase.** `entry_point` is not read by any shipped code (`grep entry_point scripts/` is empty). It belongs with the `rule` node type phase (Phase 2) where rule nodes themselves are first projected. The design is preserved verbatim so RFC-007-B can file it.
 
 Rule nodes (`feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`) may carry these optional frontmatter keys recognized by the projection (in addition to the existing `name`, `description`, `type` keys):
 
@@ -180,43 +255,57 @@ This is a query-time convention (consumed by `--graph-health`), not an edge-extr
 
 ### Query surface
 
-New `em-search` flags, all read-only, all output JSON:
+The pre-implementation RFC specified new flags on `em-search`. What shipped is a **standalone** script `scripts/em-graph.mjs` with its own CLI. The full shipped surface (runtime-verified via `node scripts/em-graph.mjs --help`):
 
-```bash
-# Show all nodes connected to <id> up to depth N, optionally filtered by edge type.
-em-search --related <id> --depth 2 [--edge-types tag,wiki-link]
-
-# Show inbound references (who links to <id>?). Useful for hub detection.
-em-search --inbound <id>
-
-# Show the cluster around a tag or PR number.
-em-search --cluster pr-291
-em-search --cluster tag:bp1-auto-pilot
-
-# Report dangling links and orphan nodes.
-em-search --graph-health
-
-# Co-occurrence: which tags appear together with <tag>?
-em-search --tag-cooccur bp1-auto-pilot --top 10
 ```
+node em-graph.mjs (--from <id> [--depth <n>] [--edges supersedes,consolidates,evidence,cites,tags|all] [--limit <n>] | --orphans | --hubs [--top <n>]) [--scope local|global|all] [--include-superseded]
+```
+
+Flags (all read-only, all output JSON):
+
+| Flag | Default | Min | Purpose |
+|---|---|---|---|
+| `--from <id>` | required (one of three modes) | — | Traversal root |
+| `--depth <n>` | 2 (`em-graph.mjs:73`) | 0 | BFS depth from root |
+| `--limit <n>` | 50 (`em-graph.mjs:74`) | 1 | Node cap; `truncated: true` when hit |
+| `--top <n>` | 10 (`em-graph.mjs:75`) | 1 | Hub ranking cap |
+| `--scope <scope>` | `all` (`em-graph.mjs:76`); validated `:94-98` | — | `local` / `global` / `all` |
+| `--orphans` | (mode) | — | Episodes with zero non-tag edges |
+| `--hubs` | (mode) | — | Highest-degree episodes; each node carries `degree` |
+| `--include-superseded` | off | — | Include `status: superseded` rows in orphans/hubs reporting |
+| `--edges <list>` | `supersedes,consolidates,evidence,cites` (`em-graph.mjs:82`) | — | Comma list of edge types, or `all` |
+
+**Mode-exclusivity rule.** Exactly one of `--from <id>` / `--orphans` / `--hubs` is required (`em-graph.mjs:99-102`); other configurations exit 2 with an explanatory error.
+
+> **[UNBUILT]** **Folding into `em-search`.** The pre-implementation RFC's `--related` / `--inbound` / `--cluster` / `--graph-health` / `--tag-cooccur` flags on `em-search` were not implemented. The standalone `scripts/em-graph.mjs` is the v1 surface; folding its modes back into `em-search` is unbuilt scope, not a deletion.
 
 ### Rebuild integration
 
-- `em-rebuild-index.mjs` invokes the projection pass after writing the existing index, forwarding the same `--scope` flag.
-- Projection is **derivative**, not authoritative — if `graph.json` is missing or stale, queries fall back to linear scan with `source: "fallback-linear"` (or `"stale-projection"`) in the response envelope + stderr warning. Substrate (episode files) remains source of truth (Principle 1). The grep-based pathway used today by RFC-004's BP-1 auto-pilot survives indefinitely as the fallback.
-- Rebuild cost: O(N) for node extraction; O(E) for edge resolution where E ≤ N × avg-links-per-file. Target: < 500ms for current corpus (~2k episodes + ~80 rule files). PR-1 self-test measures + asserts the budget.
+No integration with `em-rebuild-index.mjs` exists or is needed in v1, because nothing is persisted. The shipped `scripts/em-graph.mjs` is a standalone read-side CLI; it does not participate in the rebuild pipeline. Projection **is** still derivative, not authoritative — the substrate (episode files) remains source of truth (Principle 1). The grep-based pathway used today by RFC-004's BP-1 auto-pilot survives indefinitely as the fallback.
+
+**Rebuild cost.** O(N) for node extraction; O(E) for edge resolution where E ≤ N × avg-links-per-file. v1's per-query projection rebuilds on every call, so the budget assertion moves with the persisted index to Phase 6; for the per-query case the budget is bounded by the same numbers (target < 500ms for current corpus, ~2k episodes) and is exercised by the `tests/test-em-graph.mjs` suite.
+
+**Naming correction.** The pre-implementation RFC referenced a contract-mirror validator `scripts/rfc-graph-contract-validate.mjs` and a projection script `scripts/graph-projection.mjs`. The shipped script is `scripts/em-graph.mjs`; the contract-mirror validator was never created (`ls scripts/ | grep graph` returns only `em-graph.mjs`). The validator is unbuilt scope (Phase 4) and is named explicitly below.
 
 ### Scope
 
-- **In scope:**
-  - Node + edge extraction at `em-rebuild-index.mjs` time, per scope (`local`, `global`, `all`)
-  - JSON-sidecar persistence per scope (never merged on disk; cross-scope reachable via read-time union with `--scope all`)
-  - `scopeRoot` binding spec + caller-cwd-elsewhere fixture (axis 9)
-  - `slugify()` as single source of truth for wiki/composes resolution
-  - New `em-search` query flags (`--related`, `--inbound`, `--cluster`, `--graph-health`, `--tag-cooccur`) — all emit the response envelope
-  - Dangling-link, orphan (`nodes_with_no_edges`), and stale-projection reporting
-  - CI validator for graph-health regression (always-tier rule files: zero dangling links → hard fail; lazy-tier: warn — exact threshold per OQ-2)
-  - Contract-mirror validator: `scripts/rfc-graph-contract-validate.mjs` diffs the RFC's machine-readable edge contract against `scripts/graph-projection.mjs` constants (per rule 14)
+- **In scope (v1, shipped):**
+  - Typed-edge graph projection built fresh per query from index rows plus one body pass when `cites` is selected (`scripts/em-graph.mjs`)
+  - Two node types: `episode` and `tag` (pseudo-node `tag:<name>`)
+  - Five edge types: `supersedes`, `consolidates`, `evidence`, `cites`, `tags` (the last opt-in via `--edges tags`)
+  - Three query modes: `--from <id> [--depth N] [--limit N] [--edges <list>]`, `--orphans`, `--hubs [--top N]`
+  - Scope selection: `--scope local|global|all` (default `all`); `local` and `all` read `resolveLocalDir()`, `global` and `all` read `~/.episodic-memory`
+  - `tests/test-em-graph.mjs`, 10 cases; CI-wired at `.github/workflows/tests.yml:401-402`
+  - Documentation: `docs/EM_SCRIPTS_GUIDE.md:732-750` describes the shipped behavior
+
+- **Unbuilt (recorded explicitly so it is enumerable, not deleted):**
+  - `rule` + `rfc` node projection (the feedback corpus and the RFC set traversable) — Phase 2
+  - `wiki-link` + `composes-with` edges with `slugify()` resolution and dangling tracking — Phase 3
+  - `entry_point` frontmatter convention + `nodes_with_no_edges[]` + `entry_points[]` audit array — Phase 4
+  - Graph-health audit surface (`--graph-health`, CI validator, contract-mirror validator `scripts/rfc-graph-contract-validate.mjs` — never created) — Phase 4
+  - `cites-pr` edge; MEMORY.md machine-readable trigger block plus the `trigger-phrase` parser — Phase 5
+  - Persisted derived `graph.json` index, `envelope_version` envelope, `source` fallback enum, stale-detection, dangling-link and orphan reporting, the `assertGraphFileLocation` axis-9 helper and its fixtures — Phase 6 (DEFERRED)
+  - Folding the shipped modes back into `em-search` as `--related` / `--inbound` / `--cluster` / `--graph-health` / `--tag-cooccur` — unbuilt
 
 - **Out of scope:**
   - External graph DB (Neo4j, Memgraph, SQLite-with-graph) — violates Principle 1
@@ -232,14 +321,14 @@ em-search --tag-cooccur bp1-auto-pilot --top 10
 
 ## Invariants
 
-| # | Invariant | Verifier |
-|---|---|---|
-| I1 | `graph.json.edge_count == graph.json.edges.length` | PR-1 self-test |
-| I2 | Every edge `from`/`to` resolves to a node in `nodes{}` OR appears in `dangling[]` | PR-2 validator |
-| I3 | `supersedes` edges form a DAG (no cycles) | PR-1 self-test |
-| I4 | `rebuilt_at` ≥ mtime of newest episode at pass start | PR-1 self-test |
-| I5 | Per-scope `graph.json` references only nodes whose source files live under that scope's `scope_root` | PR-4 CI validator |
-| I6 | Depth-bounded traversal output AND `--limit`-truncated output are deterministic. Truncation slices the result set sorted by node id ascending, then takes the first N. | PR-3 self-test |
+| # | Invariant | Verifier | Status |
+|---|---|---|---|
+| I1 | `graph.json.edge_count == graph.json.edges.length` | PR-1 self-test | **DEFERRED to Phase 6** — depends on the persisted `graph.json`. The per-query shipped code maintains this trivially (`emittedEdges` is a set; `outEdges` is built from a post-BFS sweep with the duplicate-edge guard at `em-graph.mjs:266-268`, within the sweep loop at `em-graph.mjs:262-270`). |
+| I2 | Every edge `from`/`to` resolves to a node in `nodes{}` OR appears in `dangling[]` | PR-2 validator | **DEFERRED to Phase 6** — `nodes_with_no_edges[]` / `dangling[]` are persisted-index fields. The shipped code guards every episode-to-episode `addEdge` call with `byId.has` at the emission site (`em-graph.mjs:171-185`); `tags` targets are created on the fly and therefore cannot dangle; the post-BFS sweep at `em-graph.mjs:264` drops any edge whose endpoint is not in `visited`. |
+| I3 | `supersedes` edges form a DAG (no cycles) | PR-1 self-test | **DEFERRED to Phase 6.** The shipped code does not assert a DAG invariant; cycle prevention at traversal time is handled by the visited-set in undirected BFS. |
+| I4 | `rebuilt_at` ≥ mtime of newest episode at pass start | PR-1 self-test | **DEFERRED to Phase 6** — `rebuilt_at` is a persisted-index field. The shipped code has no staleness surface (projection rebuilt on every call). |
+| I5 | Per-scope `graph.json` references only nodes whose source files live under that scope's `scope_root` | PR-4 CI validator | **DEFERRED to Phase 6.** The shipped code already honors per-scope containment at the read site (`em-graph.mjs:107-117` loads local/global indices and de-duplicates by id with local shadowing global); the `graph.json`-on-disk form lands with Phase 6. |
+| I6 | Depth-bounded traversal output AND `--limit`-truncated output are deterministic. Truncation slices the result set sorted by node id ascending, then takes the first N. | PR-3 self-test | **Holds in v1 with a correction.** Shipped ordering is `(distance asc, id asc)` for traversal nodes (`em-graph.mjs:273`) and `(degree desc, id asc)` for hubs (`em-graph.mjs:224`); truncation is closest-first BFS, not sort-by-id-first. The PR-3 self-test covers depth-0, depth-boundary, and limit-rejection cases (`tests/test-em-graph.mjs`). |
 
 ---
 
@@ -254,50 +343,72 @@ em-search --tag-cooccur bp1-auto-pilot --top 10
 | Generic property graph in JSON without typed edges | Loses query precision. "Find related" without edge-type filter returns supersedes + tags + citations mixed; user can't ask "only show me lineage edges, not tag co-occurrence." |
 | Build into `em-search` only (no shared projection) | Forces every query to re-derive edges. Doesn't enable graph-health validator. Doesn't catch dangling-link regressions in CI. |
 | Defer until corpus is larger | Link rot is already happening (rules reference renamed feedback files; no detection). Cost to build now is low; cost to fix rotted links retroactively grows with corpus. |
+| Persisted derived `graph.json` index as v1 | **DEFERRED, not rejected.** Admissible under `CAPABILITIES.md:43-46` (family-1 memory-store concern) and not barred by Principle 1 (which bars a second store, not a rebuildable derived index). v1 chose the per-query projection on a **freshness-versus-rebuild-cost** trade — always current, zero staleness surface, at the cost of rebuilding on every call. The persisted index lands in Phase 6 when rebuild cost per query becomes the binding constraint (see Storage, Part 2). |
 
 ---
 
 ## Implementation plan
 
-> Populate this section when the RFC moves to `accepted`. Use phase or PR sub-headings as appropriate.
+> Populated at acceptance (2026-07-25). The shipped-versus-unbuilt split replaces the pre-implementation placeholder.
 
-### Sequencing (preview)
+### Phases
+
+| Phase | Status | Deliverables | Primary files | Tests |
+|---|---|---|---|---|
+| Phase 1 | **SHIPPED** | Per-query typed-edge projection: `episode` + `tag` nodes; `supersedes`, `consolidates`, `evidence`, `cites`, `tags` edges; `--from` / `--orphans` / `--hubs` modes; depth + limit bounds; scope selection. Delivered by PR #468, hardened by PR #472. | `scripts/em-graph.mjs` | `tests/test-em-graph.mjs` (10 cases; CI-wired at `.github/workflows/tests.yml:401-402`) |
+| Phase 2 | **UNBUILT** | `rule` + `rfc` node projection (the feedback corpus and the RFC set become traversable); `entry_point` frontmatter convention. | `scripts/em-graph.mjs`; rule-file / RFC consumers | projection fixtures; entry-point allowlist fixture |
+| Phase 3 | **UNBUILT** | `wiki-link` + `composes-with` edges; `slugify()` resolution; dangling tracking; 15-shape variant fixture. | `scripts/em-graph.mjs` | parser fixtures |
+| Phase 4 | **UNBUILT** | Graph-health audit surface: `dangling[]`, `nodes_with_no_edges[]`, `entry_points[]`, `--graph-health`; CI validator; contract-mirror validator (`scripts/rfc-graph-contract-validate.mjs` — never created). | `scripts/em-graph.mjs`; new `scripts/rfc-graph-contract-validate.mjs`; CI wiring | audit matrix; OQ-2 threshold fixture |
+| Phase 5 | **UNBUILT** | `cites-pr` edge; MEMORY.md machine-readable trigger block plus the `trigger-phrase` parser. | `MEMORY.md`; `scripts/em-graph.mjs` | parser fixtures; cluster-membership rule fixtures |
+| Phase 6 | **DEFERRED** | Persisted derived graph index (all of Storage Part 2): `graph.json` with `$schema_version` / `rebuilt_at` / `scope_root` / `node_count` / `edge_count` / `nodes` / `edges` / `dangling[]` / `nodes_with_no_edges[]`; atomic temp+rename; `entry_point` orphan allowlist; `entry_points[]` audit array; the `assertGraphFileLocation` axis-9 helper and its caller-cwd-elsewhere fixtures; the `envelope_version` envelope and `source` fallback enum. Trigger condition: rebuild cost per query becomes the binding constraint. | `scripts/em-graph.mjs`; `scripts/em-rebuild-index.mjs` | persisted-index fixtures; envelope-version migration |
+
+### Sequencing
 
 ```mermaid
 graph TD
-    PR1[PR-1: graph-projection.mjs + supersedes/tags + scopeRoot binding + caller_cwd fixture + --scope all fixture + empty-shape fixtures + DAG/budget self-tests + shared assertion helper]
-    PR2[PR-2: wiki-link + composes-with parser + 15-shape variant fixture + dangling + orphan report + entry_point allowlist]
-    PR3[PR-3: em-search query flags + response envelope + envelope_version + depth bounds + --limit cap + cycle handling + cluster/cooccur queries]
-    OQ2[OQ-2 resolution: dangling threshold for always-tier vs lazy-tier]
-    PR4[PR-4: CI validator + graph-health gate + contract-mirror validator]
-    MEMBLOCK[PR-5 commit-1: machine-readable trigger block authored in MEMORY.md]
-    PR5[PR-5 commit-2+: trigger-phrase parser + cites-episode + cites-pr edge types]
+    P1[Phase 1 SHIPPED: per-query typed-edge projection]
+    P2[Phase 2 UNBUILT: rule + rfc node types]
+    P3[Phase 3 UNBUILT: wiki-link + composes-with]
+    P4[Phase 4 UNBUILT: graph-health audit + contract-mirror validator]
+    P5[Phase 5 UNBUILT: cites-pr + trigger-phrase]
+    P6[Phase 6 DEFERRED: persisted derived graph.json index]
 
-    PR1 --> PR2
-    PR2 --> PR3
-    PR3 --> PR4
-    OQ2 --> PR4
-    PR2 --> MEMBLOCK
-    MEMBLOCK --> PR5
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    P2 --> P5
+    P4 --> P6
 ```
 
-**PR-5 sequencing note:** PR-5's first commit authors the machine-readable trigger block in `MEMORY.md` (per rule 14); subsequent commits land the parser code. The parser is never merged ahead of the data it parses.
+**Phase 5 sequencing note:** Phase 5's first commit authors the machine-readable trigger block in `MEMORY.md` (per rule 14); subsequent commits land the parser code. The parser is never merged ahead of the data it parses.
 
-**PR-1 test plan (non-negotiable):**
-1. `caller_cwd != target_project_root` fixture for `--scope local` — asserts `graph.json` lands under `--project` target, not caller cwd (axis 9).
-2. `--scope all` fixture — asserts BOTH `<project>/.episodic-memory/graph.json` AND `<HOME>/.episodic-memory/graph.json` exist after the run, AND `<caller_cwd>/.episodic-memory/graph.json` does NOT exist.
-3. Shared assertion helper — all axis-9 fixtures invoke `assertGraphFileLocation({ scope, project, callerCwd, expectPresent, expectAbsent })` (signature defined in "Scope-root resolution"); new flags reuse the helper.
-4. Empty-shape fixtures per edge type — `tags: []`, `supersedes: ~`, `supersedes: ""` (empty string), `supersedes` field absent, empty `## Composes with` section.
-5. ENOENT-during-pass fixture — delete a file from the snapshot mid-rebuild; assert pass completes and that episode is absent from the projection (not a hard failure).
-6. DAG check on `supersedes` edges (I3).
-7. Rebuild-cost budget assertion (< 500ms on representative corpus).
-8. Atomic-write check — partial write does not leave a parseable `graph.json` (temp+rename).
+**Phase 1 test plan (non-negotiable; landed):**
+1. `--depth 0`, `--depth -1` (rejected exit 2), `--limit` validation (negative / non-integer rejected exit 2).
+2. `--orphans` reports only episodes with zero non-tag edges (tag fan-in excluded from degree count).
+3. `--hubs` ranks by `(degree desc, id asc)` and slices to `--top` (default 10).
+4. Default edge set is `supersedes,consolidates,evidence,cites`; `--edges all` plus per-edge-type inclusion both work; unknown edge types rejected exit 2.
+5. `--scope` defaults to `all`; `local` / `global` / `all` validated; `invalid` exits 1.
+6. Mode-exclusivity: exactly one of `--from` / `--orphans` / `--hubs`; other configurations exit 2.
+7. `cites` exclusion: fenced code blocks and inline backticks skipped; self-references filtered; frontmatter ids excluded (they are first-class via `supersedes` / `consolidates`).
+8. `--include-superseded` toggles inclusion in orphans / hubs reporting.
+9. Boundary coverage: empty corpus, single-node corpus, `--from` for an id not in the selected scope (exit 1).
+10. Post-BFS edge sweep: edges between two boundary nodes at distance == depth are reported (`em-graph.mjs:262-270`).
 
-**PR-2 test plan (non-negotiable):**
+**Phase 3 test plan (non-negotiable; lands with Phase 3):**
 1. 15+ case wiki-link shape-variant fixture; each row asserts `(resolved | dangling | ignored)`.
-2. Fenced-code-block + inline-backtick exclusion fixture for both `wiki-link` and `cites-episode`.
+2. Fenced-code-block + inline-backtick exclusion fixture for both `wiki-link` and `cites` (the latter already covered by Phase 1 test 7).
 3. `composes-with` parser: nested bullets ignored; markdown-link form resolved by basename; empty section yields neither edge nor dangling entry.
 4. Dangling-link buckets distinct from `nodes_with_no_edges[]`.
+
+**Phase 6 test plan (non-negotiable; lands with Phase 6):**
+1. `caller_cwd != target_project_root` fixture for `--scope local` — asserts `graph.json` lands under `--project` target, not caller cwd (axis 9).
+2. `--scope all` fixture — asserts BOTH `<project>/.episodic-memory/graph.json` AND `<HOME>/.episodic-memory/graph.json` exist after the run, AND `<caller_cwd>/.episodic-memory/graph.json` does NOT exist.
+3. Shared assertion helper — all axis-9 fixtures invoke `assertGraphFileLocation({ scope, project, callerCwd, expectPresent, expectAbsent })`; new flags reuse the helper.
+4. ENOENT-during-pass fixture — delete a file from the snapshot mid-rebuild; assert pass completes and that episode is absent from the projection (not a hard failure).
+5. DAG check on `supersedes` edges (I3).
+6. Rebuild-cost budget assertion (< 500ms on representative corpus).
+7. Atomic-write check — partial write does not leave a parseable `graph.json` (temp+rename).
+8. Empty-shape fixtures per edge type (already covered by Phase 1 for shipped types; extended to `wiki-link` and `composes-with` once Phase 3 lands).
 
 ---
 
@@ -307,7 +418,8 @@ graph TD
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| _pending_ | _pending_ | _pending_ | _pending_ |
+| Phase 1 core — PR #468 (`28c8873`) | `scripts/em-graph.mjs` (new, 10473 bytes) + `scripts/em.mjs` registration + `docs/EM_SCRIPTS_GUIDE.md` | `tests/test-em-graph.mjs` (new, 114 lines) | PR title "em-graph: typed-edge traversal (RFC-007 core) + session auto-capture plan"; per-query typed-edge projection (`episode` + `tag` nodes; `supersedes`/`consolidates`/`evidence`/`cites`/`tags` edges; `--from`/`--orphans`/`--hubs` modes) |
+| Phase 1 hardening — PR #472 (`ef0d771`) | `scripts/em-graph.mjs`, `tests/test-em-graph.mjs` | suite CI-wired at `.github/workflows/tests.yml:401-402`; 10 cases | raw-NUL fix, depth-boundary fix, strict NaN bounds; wave-6 hardening |
 
 ---
 
@@ -323,10 +435,15 @@ graph TD
 
 > Required before `status: accepted` can be set.
 
-**Reviewer:** `negative-scenario-planner` (plan-time 8-axis attack-class matrix, toolkit v9.4 + axis 9)
+**Reviewer (acceptance, draft → accepted):** `negative-scenario-planner` (plan-time 8-axis attack-class matrix, toolkit v9.4 + axis 9)
 **Date:** 2026-05-17
 **Final decision (round 4):** **ACCEPT** — consensus reached. No required edits remaining; reviewer explicitly states "the loop terminates."
 **AI-slop check:** clean — concrete repros, line-anchored citations, fixed-point convergence demonstrated across 4 rounds.
+
+**Reviewer (acceptance, draft → accepted — revision diff):** pi GLM-5.2 seat (neuralwatt), read-only adversarial review of the frozen revision diff, three rounds
+**Date:** 2026-07-25
+**Final decision (round 3):** **ACCEPT** — one BLOCKER and three lesser findings in round 1, all folded; round 3 was an independent re-audit of all 41 em-graph.mjs line citations (51 distinct range-checks) that found zero remaining wrong citations.
+**Scope of the revision:** RFC text realigned to the shipped code (per-query projection, no persisted artifact, the five shipped edge types with `cites` and the late-added `consolidates` / `evidence` recorded here for the first time, the standalone `scripts/em-graph.mjs` CLI surface, the three shipped response shapes, and the corrected P1 citation in Storage Part 1). The P1 over-read correction (Storage Part 1) is a deliberate wording fix; the deferred-phase rationale (Storage Part 2) is the honest replacement. The contract-mirror "drift is a CI failure" claim is corrected to match today's reality (no validator wired; Phase 4 unbuilt scope).
 
 ### Audit-trail summary
 
@@ -336,6 +453,9 @@ graph TD
 | 2 | ACCEPT WITH MODIFICATION | All 3 BLOCKERs + 5/6 MAJORs RESOLVED; 1 MAJOR (R1: `--scope all` fixture) + 9 MINORs surfaced from round-1 fixes |
 | 3 | ACCEPT WITH MODIFICATION | All R1-R10 RESOLVED; 4 MINORs (N1-N4) surfaced from round-2 fixes (entry_point auditability; truncation determinism; envelope version policy; helper signature) |
 | 4 | **ACCEPT** | All N1-N4 RESOLVED; trajectory analysis confirms fixed point (substantive → documentation-quality findings); 2 optional nits applied for polish |
+| 5 (revision r1) | HOLD-1 | 1 BLOCKER (Implementation ledger cited PR #466 556bf85, which is RFC-005 em-move and never touches scripts/em-graph.mjs; real provenance is PR #468 28c8873) + 2 MINORs (I2 and I6 line citations) + 1 NIT (edge-table phase labels) |
+| 6 (revision r2) | ACCEPT | all four folded; orchestrator escalated the reviewer optional I1 note to in-scope and found the ledger blocker had a second uncorrected site at the Implementation plan Phase 1 row |
+| 7 (revision r3) | **ACCEPT** | independent re-audit of the whole citation class after the builder self-audit; 41 citations and 51 range-checks re-derived from source; 4 wrong citations at RFC lines 196, 200, 395, 561 confirmed fixed; zero additional wrong found |
 
 Detailed round-1 finding table preserved below for historical record.
 
@@ -420,23 +540,27 @@ Detailed round-1 finding table preserved below for historical record.
 
 | # | Question | Owner | Status |
 |---|---|---|---|
-| OQ-1 | Should rule files be first-class nodes in the projection? | Champion | **RESOLVED** — rule files ARE first-class nodes; enables hub + orphan detection (see Storage `nodes_with_no_edges[]`). |
-| OQ-2 | How aggressively should dangling links fail CI? Always-tier hard fail vs lazy-tier warn — exact thresholds. | Champion | open — must close before PR-4 lands (mermaid dependency). |
-| OQ-3 | Should the projection merge local + global scopes on disk, or stay per-scope? | Champion | **RESOLVED** — per-scope on disk; cross-scope reachable via read-time union with `--scope all` (see Scope-root resolution). |
-| OQ-4 | Does `cites-episode` regex extraction risk false positives in code blocks? | Champion | **RESOLVED** — `wiki-link` and `cites-episode` extractors MUST skip fenced code blocks and inline backticks (see Edge extraction rules). |
-| OQ-5 | What is the failure mode when `graph.json` is missing or stale? | Champion | **RESOLVED** — response envelope `source` field distinguishes `projection` / `fallback-linear` / `fallback-disabled` / `stale-projection`. Stale = any new episode since `rebuilt_at` (default threshold). |
+| OQ-1 | Should rule files be first-class nodes in the projection? | Champion | **DEFERRED to Phase 2** — rule files were originally planned as first-class nodes; v1 shipped `episode` + `tag` only. Phase 2 restores rule (and `rfc`) projection. |
+| OQ-2 | How aggressively should dangling links fail CI? Always-tier hard fail vs lazy-tier warn — exact thresholds. | Champion | **DEFERRED to Phase 4** — must close before the graph-health CI validator lands. |
+| OQ-3 | Should the projection merge local + global scopes on disk, or stay per-scope? | Champion | **RESOLVED** — per-scope on disk; cross-scope reachable via read-time union with `--scope all` (see Scope-root resolution). In v1 there is no on-disk index; the resolution applies when Phase 6 lands. |
+| OQ-4 | Does `cites-episode` regex extraction risk false positives in code blocks? | Champion | **RESOLVED in v1 as `cites`** — fenced code blocks and inline backticks are skipped; self-references filtered; frontmatter ids excluded (see Edge types and `em-graph.mjs:156-167`). |
+| OQ-5 | What is the failure mode when `graph.json` is missing or stale? | Champion | **RESOLVED for v1, DEFERRED for Phase 6** — v1 has no `graph.json` so the question is moot today. When Phase 6 lands the response envelope's `source` field will distinguish `projection` / `fallback-linear` / `fallback-disabled` / `stale-projection` (see Query response envelope). |
 | OQ-6 | Should this RFC ship a minimal visualization (Mermaid subgraph export)? | Champion | open — JSON-only is the current Proposal; visualization is a follow-up RFC. |
 
 ---
 
 ## Edge contract (machine-readable)
 
-> Source of truth for `scripts/graph-projection.mjs` constants. Validated by `scripts/rfc-graph-contract-validate.mjs` (PR-4) — drift between this block and the implementation is a CI failure (per rule 14).
+> Source of truth for the shipped script's constants. **The source of truth for v1 is `scripts/em-graph.mjs` (not `scripts/graph-projection.mjs` — that name never existed).** The contract-mirror validator `scripts/rfc-graph-contract-validate.mjs` referenced below was **never created** (`ls scripts/ | grep graph` returns only `em-graph.mjs`); it is Phase 4 unbuilt scope. The block below is currently maintained by hand; drift between this block and `scripts/em-graph.mjs` is **not** a CI failure today — there is no validator to enforce it. The "drift is a CI failure" claim from earlier drafts of this RFC was aspirational and is corrected here.
 
 ```json
 {
   "$schema_version": "1.0.0",
+  "_shipped_in": "scripts/em-graph.mjs",
+  "_shipped_edge_types": ["supersedes", "consolidates", "evidence", "cites", "tags"],
+  "_shipped_default_edges": ["supersedes", "consolidates", "evidence", "cites"],
   "slugify": {
+    "_shipped_use": "not used by the shipped script — tag names are lowercased and trimmed inline (em-graph.mjs:185); slugify() becomes load-bearing in Phase 3 (wiki-link, composes-with)",
     "unicode_normalize": "NFC",
     "trim": true,
     "case": "lower",
@@ -449,28 +573,76 @@ Detailed round-1 finding table preserved below for historical record.
   "edge_types": [
     {
       "type": "supersedes",
+      "status": "SHIPPED",
       "source_node_type": "episode",
       "target_node_type": "episode",
-      "source_field": "episode.supersedes",
+      "source_field": "episode.supersedes (and episode.superseded_by mirror)",
       "parser": "string-id",
       "slug_resolver": null,
-      "skip_when": ["null", "missing", "tilde", "empty-string"],
-      "dangling_bucket": "wiki-link",
-      "idempotent": true
+      "skip_when": ["null", "missing", "tilde", "empty-string", "target-id-not-in-scope"],
+      "dangling_bucket": null,
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:171-172"
     },
     {
-      "type": "tag",
+      "type": "consolidates",
+      "status": "SHIPPED",
+      "source_node_type": "episode",
+      "target_node_type": "episode",
+      "source_field": "episode.consolidates[]",
+      "parser": "array-of-strings",
+      "slug_resolver": null,
+      "skip_when": ["empty-array", "target-id-not-in-scope"],
+      "dangling_bucket": null,
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:174-176",
+      "note": "Added during implementation; recorded here for the first time."
+    },
+    {
+      "type": "evidence",
+      "status": "SHIPPED",
+      "source_node_type": "episode",
+      "target_node_type": "episode",
+      "source_field": "episode.evidence[] (forward direction) + episode.lessons[] (reverse direction; lesson→violation)",
+      "parser": "array-of-strings",
+      "slug_resolver": null,
+      "skip_when": ["empty-array", "target-id-not-in-scope"],
+      "dangling_bucket": null,
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:177-180",
+      "note": "Added during implementation; recorded here for the first time."
+    },
+    {
+      "type": "cites",
+      "status": "SHIPPED",
+      "source_node_type": "episode",
+      "target_node_type": "episode",
+      "source_field": "episode.body (frontmatter excluded; regex over body only)",
+      "parser": "regex:\\d{8}-\\d{6}-[a-z0-9-]+-[a-f0-9]{4}",
+      "slug_resolver": null,
+      "skip_when": ["inside-fenced-code-block", "inside-inline-backticks", "self-reference", "target-id-not-in-scope", "no-body-file"],
+      "dangling_bucket": null,
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:181-183 (parser bodyCitations at :156-167)",
+      "note": "Originally called `cites-episode` in this RFC. The shipped name is bare `cites`; the RFC adopts the shipped name throughout."
+    },
+    {
+      "type": "tags",
+      "status": "SHIPPED (opt-in)",
       "source_node_type": "episode",
       "target_node_type": "tag",
       "source_field": "episode.tags[]",
-      "parser": "array-of-strings",
-      "slug_resolver": "slugify",
+      "parser": "array-of-strings (lowercased + trimmed)",
+      "slug_resolver": "inline-lower-trim",
       "skip_when": ["empty-array"],
       "dangling_bucket": null,
-      "idempotent": true
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:184-186",
+      "note": "Opt-in: not in DEFAULT_EDGES. Emitted only when --edges tags is requested."
     },
     {
       "type": "wiki-link",
+      "status": "UNBUILT (Phase 3)",
       "source_node_type": "rule",
       "target_node_type": "rule",
       "source_field": "rule.body",
@@ -482,6 +654,7 @@ Detailed round-1 finding table preserved below for historical record.
     },
     {
       "type": "composes-with",
+      "status": "UNBUILT (Phase 3)",
       "source_node_type": "rule",
       "target_node_type": "rule",
       "source_field": "rule.body['## Composes with' section, top-level bullets only]",
@@ -493,6 +666,7 @@ Detailed round-1 finding table preserved below for historical record.
     },
     {
       "type": "trigger-phrase",
+      "status": "UNBUILT (Phase 5)",
       "source_node_type": "phrase",
       "target_node_type": "rule",
       "source_field": "MEMORY.md:machine-readable-trigger-block",
@@ -503,18 +677,8 @@ Detailed round-1 finding table preserved below for historical record.
       "idempotent": true
     },
     {
-      "type": "cites-episode",
-      "source_node_type": "episode|rule",
-      "target_node_type": "episode",
-      "source_field": "<source>.body",
-      "parser": "regex:\\d{8}-\\d{6}-[a-z0-9-]+-[a-f0-9]{4}",
-      "slug_resolver": null,
-      "skip_when": ["inside-fenced-code-block", "inside-inline-backticks", "self-reference"],
-      "dangling_bucket": "cites-episode",
-      "idempotent": true
-    },
-    {
       "type": "cites-pr",
+      "status": "UNBUILT (Phase 5)",
       "source_node_type": "episode",
       "target_node_type": "pr",
       "source_field": "episode.tags[matching 'pr-\\d+']",

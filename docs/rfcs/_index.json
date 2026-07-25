@@ -54,7 +54,7 @@
       "id": "RFC-007",
       "slug": "graph-projection",
       "title": "Graph Projection \u2014 first-class traversal over latent episode/rule edges",
-      "status": "draft",
+      "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-007-graph-projection.md"
     },
