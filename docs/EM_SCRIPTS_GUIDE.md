@@ -210,7 +210,7 @@ WRONG lesson via `em-revise` supersession instead (the superseded version drops 
 extends the session-start surface and the on-demand matcher with DECLARED pointers
 to playbook lesson episodes — the voluntary counterpart to the earned critical band
 (see `em-trigger-index` for the derived data and `em-search --read` for the tracked
-bounded read the pointers name). The session-start hook renders one imperative line
+read the pointers name). The session-start hook renders one imperative line
 per `session_start` playbook, AFTER the tier-1 critical band and BEFORE the tier-2
 static blend:
 
@@ -371,7 +371,7 @@ Flags that matter (from the script's own `Usage:` header):
   were archived (`em-prune`, `em-consolidate --fold-superseded`) still appear:
   the walk also reads `archived-index.jsonl`, flags them `"archived": true`,
   and `--full` resolves their bodies from `archived/`.
-- `--read <id>` is the tracked, bounded, single-episode read (RFC-011 R7) the
+- `--read <id>` is the tracked, single-episode read (RFC-011 R7) the
   playbook pointers name. It fetches exactly ONE episode by exact id — no
   chain walk, no search fallthrough (an unknown OR empty id returns
   `{"status":"error"}` exit 1; an empty value never falls through to search).
@@ -380,10 +380,12 @@ Flags that matter (from the script's own `Usage:` header):
   row supplies `access_count`/`last_accessed`/`source`), so hand-authored or
   foreign frontmatter keys survive the read. The read resolves `episodes/`
   then `archived/` (an archived episode returns normally with its `status`
-  field visible). The body is bound to its SERIALIZED form in bytes: it is
-  truncated until `Buffer.byteLength(JSON.stringify(body), 'utf8') <= 49152`
-  with `body_truncated: true` and a stderr note (a truncated body is a prefix
-  of the original; output is always valid JSON). An index row whose body file
+  field visible). The body is returned IN FULL, at any size — the read applies
+  no size bound. (Through 2026-07-25 it truncated the body at 49152 serialized
+  bytes and set `body_truncated: true`. That bound came from a host
+  tool-output limit, but `em-store`/`em-revise` bound nothing at write time, so
+  the store accepted bodies it then refused to return. Fitting output to a host
+  is the host's concern; the substrate returns what it was given.) An index row whose body file
   is absent from BOTH `episodes/` and `archived/` returns `body_missing: true`
   with a stderr note and is NOT tracked (a delivered-nothing read must never
   feed the conversion metric a clean follow). Otherwise the read WRITES access
@@ -405,7 +407,7 @@ included, access tracked; an unknown OR empty id returns the `error` shape and
 exit 1, never a search fallthrough):
 
 ```json
-{"status":"ok","episode":{"id":"ep-read-1","date":"2026-07-08","time":"00:00","project":"t","category":"lesson","status":"active","summary":"tracked bounded read demo","tags":[],"triggers":["x phrase"],"priority":5,"access_count":0,"last_accessed":null,"source":"local","body":"# tracked bounded read demo\n\nthe playbook body text"}}
+{"status":"ok","episode":{"id":"ep-read-1","date":"2026-07-08","time":"00:00","project":"t","category":"lesson","status":"active","summary":"tracked read demo","tags":[],"triggers":["x phrase"],"priority":5,"access_count":0,"last_accessed":null,"source":"local","body":"# tracked read demo\n\nthe playbook body text"}}
 {"status":"error","message":"Episode \"unknown-id\" not found"}
 ```
 
@@ -413,11 +415,9 @@ The read tracks access on the matched row (it bumps the index row's
 `access_count` +1 and stamps `last_accessed`); the values in the emitted
 episode are the PRE-increment row values (`access_count` 0 and `last_accessed`
 `null` on a first read), so the on-disk row reads `1` / a timestamp after the
-read. `--no-track` leaves the row untouched. A body whose
-`JSON.stringify(body)` exceeds 49152 bytes returns `body_truncated: true` (the
-body is truncated to AT MOST the cap — <= 49152 serialized bytes, a prefix of
-the original); a row with no body file in either `episodes/` or `archived/`
-returns `body_missing: true` and is not tracked. Both print a stderr note.
+read. `--no-track` leaves the row untouched. The body is returned in full regardless
+of size; a row with no body file in either `episodes/` or `archived/`
+returns `body_missing: true`, is not tracked, and prints a stderr note.
 
 Common mistakes: guessing `--query` words when you actually want a time or tag
 filter (use `--since` / `--tag` / `--category`); running plain `em-search` in a loop

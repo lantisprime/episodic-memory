@@ -574,17 +574,18 @@ node ~/.episodic-memory/scripts/em-search.mjs --project my-project
 node ~/.episodic-memory/scripts/em-search.mjs --query "JWT" --full
 node ~/.episodic-memory/scripts/em-search.mjs --tag auth --category decision --since 2026-01-01
 node ~/.episodic-memory/scripts/em-search.mjs --history <id> --full
-node ~/.episodic-memory/scripts/em-search.mjs --read <id>            # RFC-011 R7: tracked, bounded, single-episode read the playbook pointers name
+node ~/.episodic-memory/scripts/em-search.mjs --read <id>            # RFC-011 R7: tracked single-episode read the playbook pointers name (full body, no size bound)
 node ~/.episodic-memory/scripts/em-search.mjs --include-superseded
 node ~/.episodic-memory/scripts/em-search.mjs --warn-time-ms <n> --warn-count <n>  # tune performance-warning thresholds
 ```
 
 `--read <id>` (RFC-011 R7) fetches exactly one episode by exact id (resolving
 `episodes/` then `archived/`); an unknown or empty id is an error (never a search
-fallthrough). The body is bound to serialized bytes (≤49152, with `body_truncated`/
-`body_missing`); file frontmatter is merged over the index row, and the read tracks
-`access_count` (unless `--no-track`). This is the tracked bounded read the playbook
-pointers name.
+fallthrough). The body is returned IN FULL at any size — the read applies no size
+bound (a row whose body file is missing from both directories returns
+`body_missing` and is not tracked). File frontmatter is merged over the index row,
+and the read tracks `access_count` (unless `--no-track`). This is the tracked read
+the playbook pointers name.
 
 `--query` uses tiered relevance matching: an exact summary match scores 1.0, a
 contiguous summary substring 0.7, and a **multi-term query** matches when every
@@ -855,7 +856,7 @@ emits no decision/block field — and reads ONLY the purpose-built derived index
 bands; a missing or malformed file fails open (injection proceeds). An optional per-project
 `playbooks.json` (RFC-011) extends the session-start blend and the on-demand matcher with
 declared playbook pointers — one imperative line per playbook (`playbook (playbooks.json):
-READ <id> before proceeding (...)`) pointing at a tracked bounded `em-search --read <id>`,
+READ <id> before proceeding (...)`) pointing at a tracked `em-search --read <id>`,
 never a body; the `playbook (playbooks.json):` provenance prefix keeps declared injection
 visible. Each activation hook appends injected lesson-pointer telemetry to the per-project
 `activation-log.jsonl`; the event-plane log is append-only and capped at 1 MiB. It is the

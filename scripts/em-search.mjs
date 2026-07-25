@@ -98,9 +98,10 @@ results = results.filter(e => {
 
 // ---------------------------------------------------------------------------
 // Read mode (RFC-011 R7 / REQ-14 — amended): fetch exactly ONE episode by exact
-// id. No chain walk; full frontmatter + body; SERIALIZED-BYTE body bound
-// (Buffer.byteLength(JSON.stringify(body),'utf8') <= 49152) with body_truncated +
-// stderr note so stdout is always valid JSON — never a mid-JSON break. Resolves
+// id. No chain walk; full frontmatter + body, returned IN FULL — no size bound
+// (the former 49152 serialized-byte cap was a host DISPLAY limit misplaced into
+// storage, making the round-trip lossy; see the note at the body assignment
+// below). Resolves
 // episodes/ then archived/ (an archived episode returns normally with its
 // status visible). Frontmatter is parsed from the episode FILE and merged OVER
 // the index row (file wins on frontmatter fields; the row supplies access_count,
@@ -234,36 +235,19 @@ if (readId !== undefined) {
   // Body is everything after the second `---`.
   const content = fs.readFileSync(filePath, 'utf8')
   const parts = content.split('---')
-  let body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
+  const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
 
-  // SERIALIZED-BYTE body bound (R7/REQ-14, amended F1): truncate until
-  // Buffer.byteLength(JSON.stringify(body), 'utf8') <= 49152. The bound must be
-  // SERIALIZED BYTES, not UTF-16 code units (.length) and not raw body bytes —
-  // a 45,000-char CJK body passes a `.length <= 49152` cap yet emits ~135,236
-  // UTF-8 bytes of stdout (panel F1 probe), and a quote-heavy body doubles under
-  // JSON escaping. Binary search the largest slice whose serialized UTF-8 byte
-  // length fits; the result is always valid JSON (never a mid-JSON break —
-  // JSON.stringify escapes lone surrogates, and the slice is a code-unit prefix).
-  const MAX_SERIALIZED_BODY = 49152
-  let bodyTruncated = false
-  if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_SERIALIZED_BODY) {
-    bodyTruncated = true
-    let lo = 0, hi = body.length, best = ''
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1
-      const candidate = body.slice(0, mid)
-      if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= MAX_SERIALIZED_BODY) {
-        best = candidate
-        lo = mid + 1
-      } else {
-        hi = mid - 1
-      }
-    }
-    body = best
-    process.stderr.write(`body truncated to serialized-byte bound (<=${MAX_SERIALIZED_BODY}); read episode ${row.id} file directly for the full body\n`)
-  }
+  // The body is returned IN FULL. There is deliberately no size bound here.
+  //
+  // The removed bound (MAX_SERIALIZED_BODY = 49152) originated as a DELIVERY
+  // observation — RFC-011:28 Problem 4, a host tool-output limit seen cutting a
+  // 126,148-byte `--history --full` — but was implemented as a STORAGE bound in
+  // this read path. em-store.mjs and em-revise.mjs impose no body-size bound at
+  // write time, so this made the round-trip lossy: the store accepted a body of
+  // any size and then refused to return it, discarding the remainder with no
+  // route back. Fitting output to a host is presentation, an adjacent layer
+  // (CAPABILITIES.md); the substrate returns what it was given.
   entry.body = body
-  if (bodyTruncated) entry.body_truncated = true
 
   // Access tracking on the matched row (R7), honoring --no-track. Mirrors the
   // search write-back for exactly one row. Archived rows live in
