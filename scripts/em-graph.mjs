@@ -36,8 +36,9 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { resolveLocalDir } from './lib/local-dir.mjs'
+import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 import { loadIndex } from './lib/relevance.mjs'
+import { resolveRuleDir, scanRuleNodes, scanRfcNodes } from './lib/rule-nodes.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -45,7 +46,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-graph.mjs', usage: 'node em-graph.mjs (--from <id> [--depth <n>] [--edges supersedes,consolidates,evidence,cites,tags|all] [--limit <n>] | --orphans | --hubs [--top <n>]) [--scope local|global|all] [--include-superseded] — typed-edge traversal over the episode graph (RFC-007)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-graph.mjs', usage: 'node em-graph.mjs (--from <id> [--depth <n>] [--edges supersedes,consolidates,evidence,cites,tags|all] [--nodes episode,rule,rfc|all] [--limit <n>] | --orphans | --hubs [--top <n>]) [--scope local|global|all] [--include-superseded] — typed-edge traversal over the episode graph (RFC-007)' }))
   process.exit(0)
 }
 
@@ -77,6 +78,19 @@ const scope = flag('--scope') || 'all'
 const orphans = argv.includes('--orphans')
 const hubs = argv.includes('--hubs')
 const includeSuperseded = argv.includes('--include-superseded')
+
+const NODE_TYPES = ['episode', 'rule', 'rfc']
+const DEFAULT_NODES = ['episode']
+const nodesRaw = flag('--nodes')
+const nodeTypes = nodesRaw === 'all' ? NODE_TYPES
+  : nodesRaw ? nodesRaw.split(',').map(s => s.trim()).filter(Boolean)
+  : DEFAULT_NODES
+for (const n of nodeTypes) {
+  if (!NODE_TYPES.includes(n)) {
+    console.log(JSON.stringify({ status: 'error', message: `Unknown node type "${n}". Valid: ${NODE_TYPES.join(', ')} (or "all").` }))
+    process.exit(2)
+  }
+}
 
 const EDGE_TYPES = ['supersedes', 'consolidates', 'evidence', 'cites', 'tags']
 const DEFAULT_EDGES = ['supersedes', 'consolidates', 'evidence', 'cites']
@@ -119,6 +133,28 @@ rows = rows.filter(r => {
 // REPORT — never what they count edges over — so a digest with two
 // superseded members is a hub (degree 2), not an orphan.
 const byId = new Map(rows.map(r => [r.id, r]))
+
+// Opt-in only. With no --nodes flag the rule corpus is never read: no stat, no readdir,
+// and nodeDiag() contributes nothing, so default output stays byte-identical (REQ-8).
+const ruleById = new Map()
+const rfcById = new Map()
+let skippedNodes = 0
+const REPO_ROOT = nodeTypes.includes('rfc') ? resolveRepoRoot() : null
+if (nodeTypes.includes('rule')) {
+  const scanned = scanRuleNodes(resolveRuleDir())
+  if (scanned.collisions.length > 0) {
+    console.log(JSON.stringify({ status: 'error', message: `Rule slug collision: ${[...new Set(scanned.collisions)].join(', ')}. Multiple rule files project the same slug; rename one frontmatter "name" to disambiguate.` }))
+    process.exit(2)
+  }
+  for (const [k, v] of scanned.ruleById) ruleById.set(k, v)
+  skippedNodes += scanned.skipped
+}
+if (nodeTypes.includes('rfc')) {
+  const scanned = scanRfcNodes(path.join(REPO_ROOT, 'docs', 'rfcs'))
+  for (const [k, v] of scanned.rfcById) rfcById.set(k, v)
+  skippedNodes += scanned.skipped
+}
+const nodeDiag = () => (nodesRaw === undefined ? {} : { skipped_nodes: skippedNodes })
 
 // ---------------------------------------------------------------------------
 // Edge projection. adjacency: id -> [{from,to,type}] (edge listed under BOTH
@@ -188,6 +224,14 @@ for (const r of rows) {
 
 function nodeOut(id, dist) {
   if (id.startsWith('tag:')) return { id, type: 'tag', distance: dist }
+  if (ruleById.has(id)) {
+    const n = ruleById.get(id)
+    return { id, type: 'rule', distance: dist, entry_point: n.entry_point, file: n.file }
+  }
+  if (rfcById.has(id)) {
+    const n = rfcById.get(id)
+    return { id, type: 'rfc', distance: dist, entry_point: n.entry_point, file: n.file }
+  }
   const r = byId.get(id)
   return {
     id,
@@ -218,7 +262,12 @@ if (orphans || hubs) {
   const reportable = r => includeSuperseded || r.status !== 'superseded'
   if (orphans) {
     const out = rows.filter(r => reportable(r) && degree.get(r.id) === 0).map(r => nodeOut(r.id, 0))
-    console.log(JSON.stringify({ status: 'ok', mode: 'orphans', count: out.length, nodes: out }))
+    // Phase 2 gives rule/rfc nodes no edges, so every one is degree 0 and is an orphan
+    // by the mode's own definition. Appended only when --nodes opted them in; both maps
+    // are empty otherwise, so the default result set is unchanged (REQ-8).
+    for (const id of ruleById.keys()) out.push(nodeOut(id, 0))
+    for (const id of rfcById.keys()) out.push(nodeOut(id, 0))
+    console.log(JSON.stringify({ status: 'ok', mode: 'orphans', count: out.length, nodes: out, ...nodeDiag() }))
   } else {
     const ranked = [...degree.entries()].filter(([id, d]) => d > 0 && reportable(byId.get(id)))
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, top)
@@ -230,6 +279,22 @@ if (orphans || hubs) {
 
 // --from traversal
 if (!byId.has(from)) {
+  if (ruleById.has(from) || rfcById.has(from)) {
+    // A projected rule/rfc node is a legitimate traversal root. Phase 2 gives it no
+    // edges, so the result is the node itself at depth 0. Once Phase 3 lands, these
+    // ids gain adjacency entries and fall through to the normal BFS below.
+    console.log(JSON.stringify({
+      status: 'ok',
+      root: from,
+      depth,
+      edge_types: edgeTypes,
+      count: 1,
+      nodes: [nodeOut(from, 0)],
+      edges: [],
+      ...nodeDiag(),
+    }))
+    process.exit(0)
+  }
   console.log(JSON.stringify({ status: 'error', message: `Episode "${from}" not found in the selected scope.` }))
   process.exit(1)
 }
@@ -282,4 +347,5 @@ console.log(JSON.stringify({
   nodes,
   edges: outEdges,
   ...(truncated ? { truncated: true } : {}),
+  ...nodeDiag(),
 }))

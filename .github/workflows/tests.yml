@@ -401,6 +401,9 @@ jobs:
       - name: Run em-graph suite (RFC-007 core + wave-6 hardening)
         run: node tests/test-em-graph.mjs
 
+      - name: Run em-graph node-projection suite (RFC-007 Phase 2)
+        run: node tests/test-em-graph-nodes.mjs
+
       - name: Run em-doctor suite
         run: node tests/test-em-doctor.mjs
 

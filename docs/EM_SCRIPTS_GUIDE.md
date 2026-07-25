@@ -749,6 +749,11 @@ queries). Undirected BFS, depth default 2, node limit 50 (closest first,
 `truncated` flagged). Lineage keeps superseded nodes, marked via `status`.
 Output: `{root, nodes:[{id,distance,summary,...}], edges:[{from,to,type}]}`.
 
+`--nodes rule` reads the Claude Code memory corpus at
+`~/.claude/projects/<project-slug>/memory/`. On installs without that directory — any
+non-Claude-Code tool, or a fresh machine — the rule-node set is empty and the command still
+exits 0. Rule-node availability is therefore Claude-Code-scoped, not portable across tools.
+
 ### em-capture
 
 Session auto-capture (wave-6 #2): draft candidate episodes from a session
