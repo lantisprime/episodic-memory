@@ -564,6 +564,129 @@ t('t_proto_key_wiki_target', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Group 3: composes-with (8)
+// ---------------------------------------------------------------------------
+t('t_composes_toplevel_only', () => {
+  resetRuleDir()
+  writeRule('feedback_toplevel_src.md', 'name: sentinel-a1b2c3-toplevel-src',
+    'body\n## Composes with\n- `sentinel-a1b2c3-toplevel-tgt`\n- some other text\n')
+  writeRule('feedback_toplevel_tgt.md', 'name: sentinel-a1b2c3-toplevel-tgt')
+  const r = run(['--from', 'sentinel-a1b2c3-toplevel-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  const edge = (r.json.edges || []).find(e =>
+    e.from === 'sentinel-a1b2c3-toplevel-src' && e.to === 'sentinel-a1b2c3-toplevel-tgt' && e.type === 'composes-with')
+  assert.ok(edge, 'top-level bullet target resolves via composes-with')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries')
+})
+
+t('t_composes_nested_ignored', () => {
+  resetRuleDir()
+  // First bullet is nested (indented), second is top-level. The nested one
+  // must be IGNORED (not parsed as a target), the top-level one must resolve.
+  writeRule('feedback_nested_src.md', 'name: sentinel-a1b2c3-nested-src',
+    'body\n## Composes with\n  - `sentinel-a1b2c3-nested-ignored`\n- `sentinel-a1b2c3-nested-tgt`\n')
+  writeRule('feedback_nested_tgt.md', 'name: sentinel-a1b2c3-nested-tgt')
+  // Note: no target rule for 'nested-ignored' — the assertion is that the
+  // nested bullet was NEVER parsed, so no dangling entry exists for it.
+  const r = run(['--from', 'sentinel-a1b2c3-nested-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  const edges = (r.json.edges || []).filter(e => e.from === 'sentinel-a1b2c3-nested-src' && e.type === 'composes-with')
+  assert.equal(edges.length, 1, 'exactly one composes-with edge (nested bullet ignored, not parsed)')
+  assert.ok(edges.some(e => e.to === 'sentinel-a1b2c3-nested-tgt'), 'top-level bullet is the edge target')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries (nested bullet was ignored, not parsed)')
+})
+
+t('t_composes_markdown_link_basename', () => {
+  resetRuleDir()
+  // Markdown link form: the path in (...) resolves by basename. The target
+  // rule's name-id is different from the basename-derived slug; resolution
+  // must go through the alias index.
+  writeRule('feedback_mdlink_target.md', 'name: sentinel-a1b2c3-mdlink-tgt')
+  writeRule('feedback_mdlink_src.md', 'name: sentinel-a1b2c3-mdlink-src',
+    'body\n## Composes with\n- [link text](feedback_mdlink_target.md)\n')
+  const r = run(['--from', 'sentinel-a1b2c3-mdlink-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  const edge = (r.json.edges || []).find(e =>
+    e.from === 'sentinel-a1b2c3-mdlink-src' && e.to === 'sentinel-a1b2c3-mdlink-tgt' && e.type === 'composes-with')
+  assert.ok(edge, 'markdown link target resolves by basename (feedback_mdlink_target.md -> sentinel-a1b2c3-mdlink-tgt)')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries')
+})
+
+t('t_composes_empty_section_no_dangling', () => {
+  resetRuleDir()
+  // Section heading present but no bullets before EOF: 0 edges AND 0 dangling.
+  writeRule('feedback_empty_src.md', 'name: sentinel-a1b2c3-empty-src',
+    'body\n## Composes with\n')
+  const r = run(['--from', 'sentinel-a1b2c3-empty-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  assert.equal((r.json.edges || []).length, 0, 'empty composes-with section produces 0 edges (REQ-6 false-pass trap)')
+  assert.equal((r.json.dangling || []).length, 0, 'empty composes-with section produces 0 dangling entries (REQ-6 false-pass trap)')
+})
+
+t('t_composes_terminated_by_next_heading', () => {
+  resetRuleDir()
+  // Section followed immediately by another ## heading: the section is
+  // empty (EC6), so no edges and no dangling.
+  writeRule('feedback_term_src.md', 'name: sentinel-a1b2c3-term-src',
+    'body\n## Composes with\n## Other Section\n- `sentinel-a1b2c3-term-tgt`\n')
+  writeRule('feedback_term_tgt.md', 'name: sentinel-a1b2c3-term-tgt')
+  const r = run(['--from', 'sentinel-a1b2c3-term-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  assert.equal((r.json.edges || []).length, 0, 'section terminated by next heading: 0 edges (EC6)')
+  assert.equal((r.json.dangling || []).length, 0, 'section terminated by next heading: 0 dangling entries')
+})
+
+t('t_composes_backticked_target_resolves', () => {
+  resetRuleDir()
+  // REQ-16: composes-with does NOT strip inline backticks. The real-world
+  // form is "- `file.md` — text" and stripping inline code would delete
+  // every target. The backticked token is the target; it resolves.
+  writeRule('feedback_back_src.md', 'name: sentinel-a1b2c3-back-src',
+    'body\n## Composes with\n- `sentinel-a1b2c3-back-tgt` — some text\n')
+  writeRule('feedback_back_tgt.md', 'name: sentinel-a1b2c3-back-tgt')
+  const r = run(['--from', 'sentinel-a1b2c3-back-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  const edge = (r.json.edges || []).find(e =>
+    e.from === 'sentinel-a1b2c3-back-src' && e.to === 'sentinel-a1b2c3-back-tgt' && e.type === 'composes-with')
+  assert.ok(edge, 'backticked target resolves (REQ-16: inline backticks NOT stripped for composes-with)')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries')
+})
+
+t('t_composes_prose_bullet_skipped', () => {
+  resetRuleDir()
+  // A bullet that is neither a markdown link nor backtick-led: SKIP, no target.
+  // Review r1 finding 5: earlier draft slugified the whole prose line and
+  // manufactured a garbage dangling ref. The contract is: no target, no edge,
+  // no dangling.
+  writeRule('feedback_prose_src.md', 'name: sentinel-a1b2c3-prose-src',
+    'body\n## Composes with\n- This is just prose, no link or backticks\n')
+  const r = run(['--from', 'sentinel-a1b2c3-prose-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  assert.equal((r.json.edges || []).length, 0, 'prose bullet produces 0 edges (not slugified as a target)')
+  assert.equal((r.json.dangling || []).length, 0, 'prose bullet produces 0 dangling entries (review r1 finding 5)')
+})
+
+t('t_composes_first_backtick_run_wins', () => {
+  resetRuleDir()
+  // A bullet with TWO backticked spans: only the FIRST is used as the target.
+  // Review r1 finding 6: earlier draft silently kept only the first; that
+  // behavior is kept and made explicit. The second backticked span is
+  // IGNORED, not parsed as a second target.
+  writeRule('feedback_first_src.md', 'name: sentinel-a1b2c3-first-src',
+    'body\n## Composes with\n- `sentinel-a1b2c3-first-tgt` and `sentinel-a1b2c3-second-ignored`\n')
+  writeRule('feedback_first_tgt.md', 'name: sentinel-a1b2c3-first-tgt')
+  // NOTE: no target rule for 'second-ignored'. If the second backtick run
+  // were parsed, it would dangle (no target). The assertion is that the
+  // second run was NEVER parsed, so no dangling entry exists.
+  const r = run(['--from', 'sentinel-a1b2c3-first-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  const edges = (r.json.edges || []).filter(e => e.from === 'sentinel-a1b2c3-first-src' && e.type === 'composes-with')
+  assert.equal(edges.length, 1, 'exactly one composes-with edge (first backtick run wins; review r1 finding 6)')
+  assert.ok(edges.some(e => e.to === 'sentinel-a1b2c3-first-tgt'), 'first backtick run is the edge target')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries (second backtick run ignored, not parsed)')
+})
+
+// ---------------------------------------------------------------------------
 // teardown
 // ---------------------------------------------------------------------------
 fs.rmSync(cwd, { recursive: true, force: true })

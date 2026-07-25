@@ -251,6 +251,41 @@ function targetSlug(raw) {
   return slugify(String(raw).trim().replace(/\.md$/i, ''))
 }
 
+// Section runs from the "## Composes with" heading to the next "## " or EOF.
+// Top-level bullets only: a leading-whitespace bullet is nested and ignored
+// (RFC-007:151). Markdown-link form resolves by basename; the common real form
+// wraps the target in backticks, which is why the caller does NOT strip inline
+// code for this edge type (REQ-16).
+const COMPOSES_HEADING_RE = /^##[ \t]+Composes with[ \t]*$/i
+const MD_LINK_RE = /^\[[^\]]*\]\(([^)]+)\)/
+
+function composesTargets(cleaned) {
+  const out = []
+  let inSection = false
+  for (const line of cleaned.split('\n')) {
+    if (COMPOSES_HEADING_RE.test(line.trim())) { inSection = true; continue }
+    if (!inSection) continue
+    if (/^##[ \t]/.test(line)) break
+    if (/^[ \t]+-[ \t]/.test(line)) continue
+    const bullet = /^-[ \t]+(.*)$/.exec(line)
+    if (!bullet) continue
+    const item = bullet[1].trim()
+    const link = MD_LINK_RE.exec(item)
+    const tick = /^`([^`]+)`/.exec(item)
+    // One bullet names at most one target: a markdown link, or the FIRST
+    // backtick run (a second backticked span on the same bullet is ignored).
+    // A bullet that is neither — plain prose such as
+    // "- Rule 17 (CLAUDE.md global) — bot reviews" — names no target and is
+    // skipped. Slugifying the whole line instead would manufacture a garbage
+    // dangling entry like "rule-17-claude-md-global-bot-reviews".
+    if (!link && !tick) continue
+    const raw = link ? path.basename(link[1], '.md') : tick[1]
+    const slug = targetSlug(raw)
+    if (slug) out.push(slug)
+  }
+  return [...new Set(out)]
+}
+
 function linkTargets(cleaned) {
   const out = []
   for (const m of cleaned.matchAll(WIKI_LINK_RE)) {
@@ -289,6 +324,18 @@ if (edgeTypes.includes('wiki-link')) {
       if (target === slug) continue
       if (target) addEdge(slug, target, 'wiki-link')
       else dangling.push({ source: slug, ref: raw, kind: 'wiki-link' })
+    }
+  }
+}
+
+// Fenced blocks stripped, inline backticks deliberately NOT (REQ-16).
+if (edgeTypes.includes('composes-with')) {
+  for (const [slug, node] of ruleById) {
+    for (const raw of composesTargets(stripFenced(ruleBody(node.file)))) {
+      const target = resolveTarget(raw)
+      if (target === slug) continue
+      if (target) addEdge(slug, target, 'composes-with')
+      else dangling.push({ source: slug, ref: raw, kind: 'composes-with' })
     }
   }
 }
