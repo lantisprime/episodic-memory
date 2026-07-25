@@ -1,7 +1,7 @@
 /**
  * test-em-search-read.mjs — RFC-011 P1-S1 (REQ-14 / T10, amended): em-search --read <id>.
  *
- * Tracked, bounded (SERIALIZED BYTES), single-episode read; file-frontmatter merge;
+ * Tracked single-episode read returning the FULL body; file-frontmatter merge;
  * body_missing handling; empty-id error. Every test asserts captured real output
  * (spawnSync stdout/stderr/exit) against an ISOLATED tmp store + fake HOME; no test
  * touches the operator's real store (spawn with explicit cwd + HOME env, always
@@ -13,25 +13,25 @@
  *  2.  missing:         unknown id → {status:"error"}, exit 1
  *  3.  --no-track:      index.jsonl row unchanged (before/after read)
  *  4.  tracked delta:   access_count +1 and last_accessed set on the read row ONLY
- *  5.  size-bound:      quote-heavy oversized body → body_truncated:true, serialized bytes
- *                       <= 49152, valid JSON, stderr note (F1: would have failed under
- *                       code-unit cap)
+ *  5.  round-trip:      quote-heavy oversized body → returned IN FULL, byte-identical,
+ *                       body_truncated ABSENT, empty stderr, valid JSON (inverted
+ *                       2026-07-25 when the read cap was removed)
  *  6.  archived:        id in archived/ returns normally with its status field visible
  *  7.  deny-check:      --history output byte-identical across two runs (determinism only;
  *                       baseline --history protection lives in test-history-walk.mjs)
  *  8.  red-then-green:  --read <unknown> → error exit 1 (baseline: unknown flag → search, exit 0)
  *  -- fix-round additions (F1/F2/F-codex/F-kimi/F4/F5) --
- *  9.  F1 multibyte:    oversized CJK body → body_truncated:true, stdout UTF-8 bytes <= cap
+ *  9.  F1 multibyte:    oversized CJK body → returned IN FULL, byte-identical, valid JSON
  *  10. F2a dangling:    index row present, body file absent → body_missing:true, status ok,
  *                       exit 0, stderr note, access_count stays 0 (tracking skipped)
  *  11. F2b torn-prune:  file moved to archived/, row still active → body_missing:true,
  *                       access_count stays 0
  *  12. F-codex merge:    custom frontmatter key in the episode FILE survives (file wins over row)
  *  13. F-kimi empty id:  --read '' → {status:"error"} exit 1 (presence, not truthiness)
- *  14. F4 at-cap:       body whose serialized bytes == 49152 → NOT truncated (boundary)
- *  15. F4 over-cap:      body whose serialized bytes == 49153 → truncated, result <= 49152
- *  16. F4 prefix+CJK:   truncated body is a code-unit prefix of the original + nonempty
- *                       (multibyte leg, would have caught F1; covers surrogate-safety)
+ *  14. former-cap size: body whose serialized bytes == 49152 → returned in full
+ *  15. past former cap:  body whose serialized bytes == 49153 → returned in full
+ *  16. multibyte whole: CJK body round-trips byte-identically (multibyte leg, would
+ *                       have caught F1; covers surrogate-safety)
  *  -- fix round 2 — merge-layer authority + LOCKSTEP coercions --
  *  17. F1 round-2 forged: forged operational frontmatter (access_count/last_accessed/
  *                       archived/source) on an active local row does NOT override the
@@ -51,9 +51,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
 const EM_SEARCH = path.join(REPO, 'scripts/em-search.mjs');
 
-// The SERIALIZED-BYTE cap (R7/REQ-14, amended F1): the bound binds UTF-8 bytes of
-// JSON.stringify(body), not UTF-16 code units (.length) and not raw body bytes.
-const MAX_SERIALIZED_BODY = 49152;
+// The read's FORMER serialized-byte cap, removed 2026-07-25. It is no longer a
+// contract bound — nothing in em-search reads it. Cases 14 and 15 keep it only as
+// a fixture SIZE, so they can sit exactly at and one byte past the value that used
+// to change behavior and prove it no longer does.
+const FORMER_CAP = 49152;
 
 let pass = 0, fail = 0;
 function t(name, fn) {
@@ -227,25 +229,32 @@ t('readTrackedBumpsAccessCountOnMatchedRowOnly', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Case 5: size-bound — quote-heavy oversized body → body_truncated:true,
-//          serialized BYTES <= 49152, valid JSON, stderr note
+// Case 5 (INVERTED 2026-07-25): quote-heavy oversized body → returned IN FULL,
+//          valid JSON, no body_truncated, no stderr note. The read path no
+//          longer bounds the body: the former 49152 serialized-byte cap was a
+//          host DISPLAY limit implemented as a storage bound, which made the
+//          round-trip lossy because em-store/em-revise bound nothing at write
+//          time. This is the case the old cap cut hardest (JSON escaping
+//          doubles each quote), so it is the sharpest round-trip leg.
 // ---------------------------------------------------------------------------
-t('readSizeBoundTruncatesSerializedBody', () => {
+t('readQuoteHeavyBodyReturnedInFull', () => {
   const { cwd, home } = mkStore();
   // Quote-heavy body: JSON.stringify doubles each " (→ \\"), so a 60k-quote raw
-  // body serializes to ~120k — well past the 49152 SERIALIZED-BYTE cap.
+  // body serializes to ~120k — formerly truncated to 49152 serialized bytes.
   const big = '"'.repeat(60000);
   writeEpisode(cwd, { id: 'ep-big', summary: 'big', body: big });
+  const expected = `# big\n\n${big}`;
   const r = readOne(cwd, home, 'ep-big');
   assert.equal(r.code, 0, `exit 0; stderr=${r.stderr}`);
   assert.equal(r.json.status, 'ok', `stdout parsed valid JSON; head=${r.stdout.slice(0, 160)}`);
   const ep = r.json.episode;
-  assert.equal(ep.body_truncated, true, 'body_truncated flag set');
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(ep.body), 'utf8') <= MAX_SERIALIZED_BODY,
-    `serialized body <= ${MAX_SERIALIZED_BODY} bytes; got ${Buffer.byteLength(JSON.stringify(ep.body), 'utf8')}`
+  assert.equal(ep.body_truncated, undefined, 'no read truncates; the flag is retired');
+  assert.equal(
+    ep.body.length, expected.length,
+    `full body returned; got ${ep.body.length} chars of ${expected.length}`
   );
-  assert.ok(/truncat/i.test(r.stderr), `stderr carries a truncation note; stderr=${r.stderr}`);
+  assert.equal(ep.body, expected, 'body is byte-identical to what was stored');
+  assert.equal(r.stderr, '', `no truncation note on stderr; stderr=${r.stderr}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -315,28 +324,32 @@ t('readUnknownIdRedThenGreen', () => {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// Case 9 (F1): multibyte CJK oversized body → truncated, stdout UTF-8 bytes <= cap.
-// A 45,000-char CJK body passes a `.length <= 49152` (code-unit) cap yet emits
-// ~135,236 UTF-8 bytes of stdout — the panel F1 probe. The serialized-BYTE cap
-// catches it; a code-unit cap (the pre-fix code) would not.
+// Case 9 (F1, INVERTED 2026-07-25): multibyte CJK oversized body → returned IN
+// FULL, byte-identical, stdout still valid JSON at ~135,236 UTF-8 body bytes.
+// This fixture originally proved the cap measured serialized BYTES rather than
+// UTF-16 code units (a 45,000-char CJK body passes a `.length <= 49152` cap yet
+// emits ~135,236 bytes). With the cap removed it proves the stronger property:
+// a body three times the former bound survives the round trip untouched.
 // ---------------------------------------------------------------------------
-t('readSizeBoundMultibyteCJKSerializedBytes', () => {
+t('readMultibyteCJKBodyReturnedInFull', () => {
   const { cwd, home } = mkStore();
   const big = '字'.repeat(45000); // 45,000 chars, 135,000 UTF-8 bytes
   writeEpisode(cwd, { id: 'ep-cjk', summary: 'cjk', body: big });
+  const expected = `# cjk\n\n${big}`;
   const r = readOne(cwd, home, 'ep-cjk');
   assert.equal(r.code, 0, `exit 0; stderr=${r.stderr}`);
   assert.equal(r.json.status, 'ok');
   const ep = r.json.episode;
-  assert.equal(ep.body_truncated, true, 'CJK oversized body must be truncated');
-  // The CONTRACTUAL bound: serialized UTF-8 BYTES of the body, not code units.
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(ep.body), 'utf8') <= MAX_SERIALIZED_BODY,
-    `serialized body <= ${MAX_SERIALIZED_BODY} BYTES; got ${Buffer.byteLength(JSON.stringify(ep.body), 'utf8')}`
+  assert.equal(ep.body_truncated, undefined, 'no read truncates; the flag is retired');
+  assert.equal(
+    ep.body.length, expected.length,
+    `full CJK body returned; got ${ep.body.length} chars of ${expected.length}`
   );
-  // And the whole stdout is valid JSON (never a mid-JSON break under multibyte).
+  assert.equal(ep.body, expected, 'CJK body is byte-identical to what was stored');
+  // The whole stdout stays valid JSON at 135k+ UTF-8 body bytes (no mid-JSON
+  // break under multibyte now that nothing slices the body).
   assert.ok(r.json, 'whole stdout parses as valid JSON');
-  assert.ok(/truncat/i.test(r.stderr), `stderr carries a truncation note; stderr=${r.stderr}`);
+  assert.equal(r.stderr, '', `no truncation note on stderr; stderr=${r.stderr}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -434,17 +447,16 @@ t('readEmptyIdReturnsErrorExit1', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Case 14 (F4 at-cap): a body whose serialized bytes == 49152 exactly is NOT
-// truncated (boundary leg). For a pure-ASCII body N chars long, JSON.stringify
-// adds 2 bytes (quotes) and no escaping, so N=49150 → 49152 bytes == cap.
+// Case 14: a body sized exactly at the FORMER 49152-byte bound round-trips whole.
+// Retained after the 2026-07-25 cap removal as the at-the-old-boundary leg: it and
+// case 15 (one byte past) bracket the value that used to change behavior, proving
+// nothing changes there any more. For a pure-ASCII body N chars long,
+// JSON.stringify adds 2 bytes (quotes) and no escaping, so N=49150 → 49152 bytes.
 // ---------------------------------------------------------------------------
-t('readSizeBoundAtCapBoundaryUntruncated', () => {
+t('readFormerCapSizedBodyReturnedInFull', () => {
   const { cwd, home } = mkStore();
-  // Body is exactly 49150 'a' chars with NO heading so serialized == 49152 bytes.
-  // Pure-ASCII body of exactly MAX-2 chars: JSON.stringify adds 2 bytes (quotes)
-  // and no escaping, so serialized == MAX bytes == cap. noHeading so the body
-  // field IS exactly the 'a' run (no `# heading` inflation).
-  const n = MAX_SERIALIZED_BODY - 2;
+  // FORMER_CAP is now only a fixture size, not a contract bound.
+  const n = FORMER_CAP - 2;
   const body = 'a'.repeat(n);
   writeEpisodeFile(cwd, { id: 'ep-atcap', summary: 'atcap', body, sub: 'episodes', noHeading: true });
   fs.appendFileSync(indexPath(cwd), JSON.stringify({
@@ -455,22 +467,20 @@ t('readSizeBoundAtCapBoundaryUntruncated', () => {
   const r = readOne(cwd, home, 'ep-atcap', ['--no-track']);
   assert.equal(r.code, 0, `exit 0; stderr=${r.stderr}`);
   const ep = r.json.episode;
-  assert.equal(ep.body_truncated, undefined, 'at-cap (== 49152 bytes) is NOT truncated');
-  assert.equal(
-    Buffer.byteLength(JSON.stringify(ep.body), 'utf8'), MAX_SERIALIZED_BODY,
-    'serialized body == cap exactly'
-  );
-  assert.equal(ep.body.length, n, 'full body returned (no truncation)');
-  assert.equal(r.stderr, '', 'no truncation stderr at the boundary');
+  assert.equal(ep.body_truncated, undefined, 'no read truncates; the flag is retired');
+  assert.equal(ep.body.length, n, `full body returned; got ${ep.body.length} of ${n}`);
+  // Content equality, not just length: a same-length wrong body must fail here.
+  assert.equal(ep.body, body, 'body is byte-identical to what was stored');
+  assert.equal(r.stderr, '', 'no stderr note at the former boundary');
 });
 
 // ---------------------------------------------------------------------------
-// Case 15 (F4 over-cap): a body whose serialized bytes == 49153 (one over) is
-// truncated and the result is <= 49152 bytes. N=49151 → 49153 bytes.
+// Case 15: one byte PAST the former 49152 bound — the leg that used to truncate.
+// It now round-trips whole. Paired with case 14 this brackets the old boundary.
 // ---------------------------------------------------------------------------
-t('readSizeBoundOverCapBoundaryTruncated', () => {
+t('readOverFormerCapBoundaryReturnedInFull', () => {
   const { cwd, home } = mkStore();
-  const n = MAX_SERIALIZED_BODY - 1; // 49151 chars → 49153 serialized bytes
+  const n = FORMER_CAP - 1; // 49151 chars → 49153 serialized bytes
   const body = 'a'.repeat(n);
   writeEpisodeFile(cwd, { id: 'ep-over', summary: 'over', body, sub: 'episodes', noHeading: true });
   fs.appendFileSync(indexPath(cwd), JSON.stringify({
@@ -481,38 +491,35 @@ t('readSizeBoundOverCapBoundaryTruncated', () => {
   const r = readOne(cwd, home, 'ep-over', ['--no-track']);
   assert.equal(r.code, 0, `exit 0; stderr=${r.stderr}`);
   const ep = r.json.episode;
-  assert.equal(ep.body_truncated, true, 'over-cap (49153 bytes) IS truncated');
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(ep.body), 'utf8') <= MAX_SERIALIZED_BODY,
-    `result serialized body <= ${MAX_SERIALIZED_BODY}; got ${Buffer.byteLength(JSON.stringify(ep.body), 'utf8')}`
-  );
-  assert.ok(ep.body.length > 0, 'truncated body is nonempty');
-  assert.equal(ep.body, body.slice(0, ep.body.length), 'truncated body is a prefix of the original');
-  assert.ok(/truncat/i.test(r.stderr), `stderr carries a truncation note; stderr=${r.stderr}`);
+  assert.equal(ep.body_truncated, undefined, 'one byte over the former cap is no longer truncated');
+  assert.equal(ep.body.length, n, `full body returned; got ${ep.body.length} of ${n}`);
+  assert.equal(ep.body, body, 'body is byte-identical to what was stored');
+  assert.equal(r.stderr, '', `no truncation note on stderr; stderr=${r.stderr}`);
 });
 
 // ---------------------------------------------------------------------------
-// Case 16 (F4 prefix + multibyte): an oversized CJK body truncates to a
-// code-unit PREFIX of the original and is nonempty. This is the surrogate-safety
-// leg: JSON.stringify escapes lone surrogates so output stays valid JSON; the
-// slice is a code-unit prefix (a slice can cut a surrogate pair), and JSON
-// escaping is what keeps the output valid (字 is 1 BMP code unit here; the
-// assertion pins prefix-integrity for any multibyte content).
+// Case 16 (INVERTED 2026-07-25): an oversized CJK body round-trips WHOLE, not as
+// a prefix. This was the surrogate-safety leg for the old slicing code, which
+// could cut a surrogate pair and relied on JSON.stringify escaping lone
+// surrogates to stay valid. Nothing slices the body now, so the assertion is
+// upgraded from prefix-integrity to full-content equality plus a serialized-byte
+// equality check — every byte stored is a byte returned.
 // ---------------------------------------------------------------------------
-t('readSizeBoundMultibytePrefixIntegrity', () => {
+t('readMultibyteBodyIntegrityInFull', () => {
   const { cwd, home } = mkStore();
   const big = '字'.repeat(45000);
   writeEpisode(cwd, { id: 'ep-cjkprefix', summary: 'cjkprefix', body: big, noHeading: true });
   const r = readOne(cwd, home, 'ep-cjkprefix', ['--no-track']);
   assert.equal(r.code, 0, `exit 0; stderr=${r.stderr}`);
   const ep = r.json.episode;
-  assert.equal(ep.body_truncated, true, 'CJK body truncated');
-  assert.ok(ep.body.length > 0, 'truncated body is nonempty');
-  // Prefix integrity: the truncated body is the start of the original.
-  assert.equal(ep.body, big.slice(0, ep.body.length), 'truncated body is a prefix of the original CJK body');
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(ep.body), 'utf8') <= MAX_SERIALIZED_BODY,
-    `serialized body <= ${MAX_SERIALIZED_BODY} bytes`
+  assert.equal(ep.body_truncated, undefined, 'no read truncates; the flag is retired');
+  assert.equal(ep.body.length, big.length, `full body returned; got ${ep.body.length} of ${big.length}`);
+  // Integrity across the whole body, not just a prefix of it.
+  assert.equal(ep.body, big, 'CJK body round-trips byte-identically');
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(ep.body), 'utf8'),
+    Buffer.byteLength(JSON.stringify(big), 'utf8'),
+    'serialized body carries every byte that was stored'
   );
 });
 

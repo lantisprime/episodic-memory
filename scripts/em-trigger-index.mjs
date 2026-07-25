@@ -241,7 +241,11 @@ export function effectivePriority(lessonId, rows) {
 // (self-contained), with the schema doc as the CI-linted contract of record.
 
 const PLAYBOOKS_MAX_BYTES = 64 * 1024 // R1 bound: at most 64 KiB of file (over-bound = malformed)
-const PLAYBOOKS_OVERSIZED_FILE_BYTES = 49152 // R2/R7 truncation-coherence: selected playbook FILE size stat proxy
+// R2 size advisory: warn when a SELECTED playbook's FILE grows past this (a stat,
+// never a content read). Was R2/R7 truncation-coherence; R7's read cap was removed
+// 2026-07-25, so this no longer predicts a truncated read — it only tells the
+// operator a declared playbook has grown large. Value unchanged.
+const PLAYBOOKS_OVERSIZED_FILE_BYTES = 49152
 const PLAYBOOKS_FP_ZERO = { playbooks_mtime_ms: 0, playbooks_size: 0, playbooks_sha256: sha256('') }
 
 function zeroExcluded() {
