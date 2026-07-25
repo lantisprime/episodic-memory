@@ -57,7 +57,7 @@ Registration state is computed by reading the current project's `playbooks.json`
 
 `em-store --register-playbook [session_start|on_demand]` (likewise on `em-revise`) upserts the entry into the **current project's** `playbooks.json`, schema-validated against `schemas/playbooks.schema.json` before write, honoring bounds by refusal with a clear error — never by clamping (matching the schema's own posture, `playbooks.schema.json:29-33`). The flag is the consent act: the file remains operator-authored (RFC-011 R1 intact), the flag is simply a first-class way to author it. `--register-playbook` implies `--playbook`. On a full `playbooks` array (32) or a `max_playbooks` already saturated at build, the write still succeeds if schema-valid (the cap is a build/render bound, not a file bound — RFC-011 R1), and the advisory notes the cap.
 
-### R4 — Consolidation closure (RFC-011 R5 intent, evenly enforced)
+### R4 — Consolidation closure (RFC-011 R5 intent, evenly enforced; folds #610)
 
 - **(a) Marker inheritance.** A digest whose members include a marker-bearing episode is itself written with `playbook: true`.
 - **(b) Protection parity.** The legacy digest-apply transaction (`em-consolidate.mjs:1057-1179`) gains the same `resolvePlaybookProtection` consultation the fold paths already have; the clerk-apply call site (`:1863`) passes real resolved playbook ids instead of the hardcoded `[]`, so class-e protection (`protection.mjs:245-267`) fires on every archival path.
@@ -117,7 +117,12 @@ Entirely substrate-CLI-side: every tool that shells the `em-*` scripts gets iden
 
 ## Implementation plan
 
-Single phase. P1: R1 marker + R2 advisories + R3 flag + R4 consolidation closure + R5 doctor checks, with the acceptance fixtures below; docs (CLAUDE.md testing block, script `--help`) in the same PR.
+One phase, two slices:
+
+- **P1-S1** — R1 marker + R2 advisories + R3 flag + R5 doctor checks, with their acceptance fixtures; docs (CLAUDE.md testing block, script `--help`) in the same PR.
+- **P1-S2** — R4 consolidation closure (protection parity on both apply paths, marker inheritance, dangling-registration advisory). This slice **folds GitHub issue #610** (the standalone protection-gap defect report); #610 is closed against this RFC and tracked here, not as an issue.
+
+**Finding-folding rule (operator directive, 2026-07-26):** defects and gaps surfaced by review rounds on this RFC are folded in as new slices (P1-S3, ...) or amendments — no standalone issues are filed for them.
 
 ## Acceptance tests (P1 gate)
 
