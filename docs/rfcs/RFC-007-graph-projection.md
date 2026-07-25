@@ -49,8 +49,8 @@ Build a **typed-edge graph projection** computed at `em-rebuild-index.mjs` time,
 |---|---|
 | `episode` | SHIPPED (`em-graph.mjs:194`) |
 | `tag` (pseudo-node `tag:<name>`) | SHIPPED (`em-graph.mjs:190`), opt-in via `--edges tags` |
-| `rule` | UNBUILT — next phase |
-| `rfc` | UNBUILT — next phase |
+| `rule` | SHIPPED (`em-graph.mjs:227`), opt-in via `--nodes rule` |
+| `rfc` | SHIPPED (`em-graph.mjs:231`), opt-in via `--nodes rfc` |
 
 **Node type details (preserved for the unbuilt phase and the shipped ones).**
 
@@ -59,6 +59,16 @@ Build a **typed-edge graph projection** computed at `em-rebuild-index.mjs` time,
 `tag` — pseudo-node of the form `tag:<name>`; emitted only when `--edges tags` is requested (tag fan-out is the noisiest edge and is excluded from `DEFAULT_EDGES`).
 
 `rule` — source would be `~/.claude/projects/.../memory/feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`; identifier = filename (slug from frontmatter `name`). Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
+
+A rule file with no frontmatter `name:` key has no identifier and is SKIPPED, counted in the
+scan's `skipped` total, never projected under a filename-derived slug (which `:133` forbids).
+As observed on 2026-07-25, eight files in the reference corpus are in this state and every one of
+them is a `MEMORY*` file: `MEMORY.md`, `MEMORY_alwaystier_incidents.md`, `MEMORY_anchors.md`,
+`MEMORY_incidents_2026-07-10.md`, `MEMORY_open_issues.md`, `MEMORY_pr_history.md`,
+`MEMORY_seat_ops.md`, `MEMORY_tooling.md` — eight of the nine files matching the `MEMORY.md` plus
+`MEMORY_*.md` globs, the exception being `MEMORY_workplan_changelog.md`. Note that `:233` names
+`MEMORY.md` among the canonical entry-point roots, so a canonical root is currently
+unprojectable. That tension is tracked on issue #585 with the other `entry_point` contradictions.
 
 `rfc` — source would be `docs/rfcs/RFC-*.md`; identifier = `rfc_id` from frontmatter. Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
 
@@ -243,15 +253,29 @@ When rebuild cost per query becomes the binding constraint, the following design
 
 ### Rule-node frontmatter convention
 
-**Status: UNBUILT — next phase.** `entry_point` is not read by any shipped code (`grep entry_point scripts/` is empty). It belongs with the `rule` node type phase (Phase 2) where rule nodes themselves are first projected. The design is preserved verbatim so RFC-007-B can file it.
+**Status: PARTIAL — key parsed in Phase 2, consumed in Phase 4.** The key is read and carried on
+`rule` nodes by `scripts/lib/rule-nodes.mjs` and surfaced as `entry_point` on projected rule nodes
+(opt-in via `--nodes rule`). Its audit consumption — suppression from `nodes_with_no_edges[]` and
+appearance in `entry_points[]` via `--graph-health` — remains Phase 4 (`:304`, `:361`), and its
+persisted form inside `graph.json` remains Phase 6 (`:363`). This three-way split is the
+reconciliation of the phase assignments that this section, `:304`, and `:363` previously gave
+without narrating; adopted by the Phase 2 PR.
 
 Rule nodes (`feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`) may carry these optional frontmatter keys recognized by the projection (in addition to the existing `name`, `description`, `type` keys):
 
 | Key | Type | Purpose |
 |---|---|---|
-| `entry_point` | boolean | When `true`, suppress this rule from `nodes_with_no_edges[]`; surface it in `entry_points[]` instead. Default: `false`. |
+| `entry_point` | boolean | When `true`, suppress this rule from `nodes_with_no_edges[]`; surface it in `entry_points[]` instead. Default: `false`. The recognized spelling is `true`, case-insensitively (`true`, `True`, `TRUE`); YAML's other truthy spellings (`yes`, `on`, `1`) parse as `false`, so write `true`. |
 
 This is a query-time convention (consumed by `--graph-health`), not an edge-extraction convention — that's why it lives here and not in the machine-readable edge contract block.
+
+**A `name:` that slugifies to the empty string is skipped.** `slugify()` retains ASCII
+alphanumerics only after NFC normalization, so a name composed entirely of non-ASCII characters
+(Greek, Cyrillic, CJK) reduces to `""`. Such a file has no identifier, is skipped, and is counted
+in the scan's `skipped` total on exactly the same footing as a file carrying no `name:` key at all
+(`:133`). Diacritic folding is deliberately NOT performed — `café` slugifies to `caf`, not
+`cafe` — because this RFC specifies no folding table, and inventing one at projection time would
+put the identifier grammar somewhere other than this document.
 
 ### Query surface
 
@@ -356,7 +380,7 @@ No integration with `em-rebuild-index.mjs` exists or is needed in v1, because no
 | Phase | Status | Deliverables | Primary files | Tests |
 |---|---|---|---|---|
 | Phase 1 | **SHIPPED** | Per-query typed-edge projection: `episode` + `tag` nodes; `supersedes`, `consolidates`, `evidence`, `cites`, `tags` edges; `--from` / `--orphans` / `--hubs` modes; depth + limit bounds; scope selection. Delivered by PR #468, hardened by PR #472. | `scripts/em-graph.mjs` | `tests/test-em-graph.mjs` (10 cases; CI-wired at `.github/workflows/tests.yml:401-402`) |
-| Phase 2 | **UNBUILT** | `rule` + `rfc` node projection (the feedback corpus and the RFC set become traversable); `entry_point` frontmatter convention. | `scripts/em-graph.mjs`; rule-file / RFC consumers | projection fixtures; entry-point allowlist fixture |
+| Phase 2 | **SHIPPED** | `rule` + `rfc` node projection (the feedback corpus and the RFC set become traversable); `entry_point` frontmatter convention. PR #XXX (`<pending-merge-sha>`). | `scripts/em-graph.mjs`; rule-file / RFC consumers | projection fixtures; entry-point allowlist fixture |
 | Phase 3 | **UNBUILT** | `wiki-link` + `composes-with` edges; `slugify()` resolution; dangling tracking; 15-shape variant fixture. | `scripts/em-graph.mjs` | parser fixtures |
 | Phase 4 | **UNBUILT** | Graph-health audit surface: `dangling[]`, `nodes_with_no_edges[]`, `entry_points[]`, `--graph-health`; CI validator; contract-mirror validator (`scripts/rfc-graph-contract-validate.mjs` — never created). | `scripts/em-graph.mjs`; new `scripts/rfc-graph-contract-validate.mjs`; CI wiring | audit matrix; OQ-2 threshold fixture |
 | Phase 5 | **UNBUILT** | `cites-pr` edge; MEMORY.md machine-readable trigger block plus the `trigger-phrase` parser. | `MEMORY.md`; `scripts/em-graph.mjs` | parser fixtures; cluster-membership rule fixtures |
@@ -420,6 +444,7 @@ graph TD
 |---|---|---|---|
 | Phase 1 core — PR #468 (`28c8873`) | `scripts/em-graph.mjs` (new, 10473 bytes) + `scripts/em.mjs` registration + `docs/EM_SCRIPTS_GUIDE.md` | `tests/test-em-graph.mjs` (new, 114 lines) | PR title "em-graph: typed-edge traversal (RFC-007 core) + session auto-capture plan"; per-query typed-edge projection (`episode` + `tag` nodes; `supersedes`/`consolidates`/`evidence`/`cites`/`tags` edges; `--from`/`--orphans`/`--hubs` modes) |
 | Phase 1 hardening — PR #472 (`ef0d771`) | `scripts/em-graph.mjs`, `tests/test-em-graph.mjs` | suite CI-wired at `.github/workflows/tests.yml:401-402`; 10 cases | raw-NUL fix, depth-boundary fix, strict NaN bounds; wave-6 hardening |
+| Phase 2 — PR #XXX (`<pending-merge-sha>`) | `scripts/em-graph.mjs` (extend), `scripts/lib/rule-nodes.mjs` (new), `tests/test-em-graph-nodes.mjs` (new, 28 cases), `.github/workflows/tests.yml` (new CI step), `docs/EM_SCRIPTS_GUIDE.md` (honesty caveat) | suite CI-wired at `.github/workflows/tests.yml:403-404`; `tests/test-em-graph.mjs` still 10/10 unchanged | opt-in `--nodes rule,rfc` flag; `slugify` (no truncation, NFC); null-proto frontmatter parser; `scanRuleNodes`/`scanRfcNodes`; `nodeOut` rule/rfc branches; `--orphans` and `--from <rule-id>` emission; no-`name:` skip policy; partial-`entry_point` adoption (key parsed in Phase 2, consumed in Phase 4, persisted in Phase 6) |
 
 ---
 
@@ -540,7 +565,7 @@ Detailed round-1 finding table preserved below for historical record.
 
 | # | Question | Owner | Status |
 |---|---|---|---|
-| OQ-1 | Should rule files be first-class nodes in the projection? | Champion | **DEFERRED to Phase 2** — rule files were originally planned as first-class nodes; v1 shipped `episode` + `tag` only. Phase 2 restores rule (and `rfc`) projection. |
+| OQ-1 | Should rule files be first-class nodes in the projection? | Champion | **RESOLVED** — Phase 2 ships `rule` + `rfc` projection opt-in behind `--nodes rule,rfc`; v1 shipped `episode` + `tag` only. |
 | OQ-2 | How aggressively should dangling links fail CI? Always-tier hard fail vs lazy-tier warn — exact thresholds. | Champion | **DEFERRED to Phase 4** — must close before the graph-health CI validator lands. |
 | OQ-3 | Should the projection merge local + global scopes on disk, or stay per-scope? | Champion | **RESOLVED** — per-scope on disk; cross-scope reachable via read-time union with `--scope all` (see Scope-root resolution). In v1 there is no on-disk index; the resolution applies when Phase 6 lands. |
 | OQ-4 | Does `cites-episode` regex extraction risk false positives in code blocks? | Champion | **RESOLVED in v1 as `cites`** — fenced code blocks and inline backticks are skipped; self-references filtered; frontmatter ids excluded (see Edge types and `em-graph.mjs:156-167`). |
