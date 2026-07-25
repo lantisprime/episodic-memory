@@ -27,8 +27,15 @@
  * Traversal is UNDIRECTED breadth-first from --from (edges keep their true
  * direction in the output), depth default 2, node limit default 50 (closest
  * first; `truncated: true` when hit). Projection over file storage, not a
- * graph DB (Principle 1): built fresh per query from index rows + one body
- * pass when `cites` is selected — always current, no sidecar to drift.
+ * graph DB: an external graph DB (Neo4j, Memgraph) is barred by Principle 1,
+ * which admits no second store. The per-query build is a separate,
+ * freshness-versus-rebuild-cost choice — built fresh from index rows + one
+ * body pass when `cites` is selected, so it is always current with zero
+ * staleness surface, at the cost of rebuilding on every call. A persisted
+ * `graph.json` would be a rebuildable derived index, not a second store:
+ * admissible under Principle 1 and CAPABILITIES.md family 1 (memory-store
+ * strategy), and deferred by RFC-007 to Phase 6 (trigger: rebuild cost per
+ * query becomes the binding constraint), not ruled out.
  *
  * Outputs JSON: { status, root, nodes: [...], edges: [{from,to,type}], truncated? }
  */
