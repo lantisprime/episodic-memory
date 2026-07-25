@@ -49,7 +49,7 @@ hand-authored `<project>/.episodic-memory/playbooks.json` (schema-backed, at mos
 the trigger-index build resolves it to the terminal active revision — and a `mode`:
 `session_start` (surface at every session start) or `on_demand` (surface when the RFC-009
 trigger matcher fires). When the advisory activation adapter is installed, declared playbooks
-render as provenance-prefixed imperative `READ <id>` pointers into the tracked bounded
+render as provenance-prefixed imperative `READ <id>` pointers into the tracked
 `em-search --read <id>` (never bodies), the voluntary counterpart to the earned critical band.
 A missing or malformed file degrades to no playbooks loaded (advisory fail-open);
 `em-prune` / `em-consolidate --fold-superseded` protect referenced chains and fail CLOSED

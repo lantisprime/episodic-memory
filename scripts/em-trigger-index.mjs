@@ -49,7 +49,7 @@ import { computeCadence } from './lib/activation-log.mjs'
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
 // The dir containing em-trigger-index.mjs == the dir containing em-search.mjs. The
-// read_command (RFC-011 R2.4/R7) points here so the hook renders a tracked bounded
+// read_command (RFC-011 R2.4/R7) points here so the hook renders a tracked
 // read without deciding anything; recorded at build time (resolveAsset-consistent —
 // import.meta.url resolves to this script whether run as CLI or imported).
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url))
