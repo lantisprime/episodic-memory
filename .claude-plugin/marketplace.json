@@ -10,7 +10,7 @@
       "author": {
         "name": "Charlton Ho"
       },
-      "source": "./plugins/episodic-memory",
+      "source": ".",
       "category": "productivity"
     }
   ]
