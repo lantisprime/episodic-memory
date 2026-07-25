@@ -263,15 +263,20 @@ unfiltered). Recorded in §18.
 
 ## §18 Done criteria
 
-- [ ] REQ-1..REQ-9 green with observed output pasted into §15
-- [ ] `git status --porcelain` names exactly `scripts/em-graph.mjs` and
-      `docs/rfcs/RFC-007-graph-projection.md` (the pre-existing untracked scratch and the
-      long-standing `.gitignore` modification are NOT staged)
-- [ ] Reviewer verdict ACCEPT (or all findings dispositioned) — §19
-- [ ] PR opened, `gh pr checks` green
+- [x] REQ-1..REQ-9 green with observed output pasted into §15
+- [x] Staged set was exactly `scripts/em-graph.mjs`, `docs/rfcs/RFC-007-graph-projection.md`, and
+      this spec doc (tracked convention, cf. `docs/plans/issue-531-*`, `issue-537-*`, `issue-546-*`).
+      The long-standing `.gitignore` modification and the untracked scratch were NOT staged.
+- [x] Reviewer verdict **ACCEPT**, both nits dispositioned — §19.1
+- [x] PR **#607** opened; `gh pr checks 607` → 8/8 pass (`substrate`, `recall-activation`,
+      `gates-classifiers`, `clerk-consolidation`, `p12-invariant-gate`, 3× `validate`)
+- [x] Rule 17 bot COMMENTED review posted as `lantiscooperdev`, review id `4779379567`; auth
+      switched back to `lantisprime` and verified
+- [ ] **Operator action: approve #607 in the GitHub UI** (the `review-required` gate; the bot's
+      COMMENTED review does not satisfy it)
 - [ ] Post-merge deploy leg: `install.mjs --install-hooks-force` + unfiltered
-      `node tools/deploy-audit.mjs` clean
-- [ ] §17 anchor-drift issue filed, number recorded here
+      `node tools/deploy-audit.mjs` clean (`scripts/em-graph.mjs` is a deployed artifact)
+- [x] §17 anchor-drift issue filed as **#606**, plus a nit comment on it
 
 ## §19 Review consensus
 
@@ -284,7 +289,20 @@ Reviewer must also rule on the two §17 deviations.
 
 | Pass | Reviewer | Provider/Model | Blockers | Verdict | Artifact |
 |---|---|---|---|---|---|
-| 1 | seat | `pi kimi-coding/k3` | _pending_ | _pending_ | _pending_ |
+| 1 | herdr seat `reviewer` (w1:p2) | `pi kimi-coding/k3 • high` | 0 (0 minors, 2 nits) | **ACCEPT** | PR #607 bot review `4779379567` |
+
+### 19.1 Round-1 findings and dispositions
+
+| # | Finding | Class | Disposition | Resolution |
+|---|---|---|---|---|
+| 1 | RFC-007 attributes the SQLite rejection to Principle 1 at `:18`/`:335` but to the zero-deps pin at `:364` | NIT | **DEFER** | pre-existing at `2df117f`, not introduced by this diff; filed as a comment on #606 |
+| 2 | "Issue #587 tracked that code-side fix" is past tense while #587 is still open | NIT | **REJECT** | no change: the RFC is read in its merged state, at which point #587 is closed and the tense is correct |
+
+Both flagged deviations (§17) were ruled **ACCEPT** by the reviewer: document-and-section names
+instead of line anchors, and no Implementation-ledger row.
+
+The reviewer also found a genuine defect in this spec: Verify 1d was unsatisfiable (§15.1). That is
+credited as a spec fix, not a code finding.
 
 Cap: 2 rounds. A third HOLD on the same class means the wording approach is wrong; rewrite the
 passage rather than iterating spellings.
