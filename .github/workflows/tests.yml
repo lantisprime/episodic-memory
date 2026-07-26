@@ -448,6 +448,9 @@ jobs:
       - name: Run promote-apply suite (RFC-012 P2 S4)
         run: node tests/test-promote-apply.mjs
 
+      - name: Run RFC-015 registration suite (P1-S1 marker + advisory + register flag + doctor audit)
+        run: node tests/test-rfc-015-registration.mjs
+
       - name: Run workflow validator suite
         run: node tests/test-workflow-validate.mjs
 

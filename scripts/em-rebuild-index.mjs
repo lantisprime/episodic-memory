@@ -250,6 +250,11 @@ function rebuildDir(dataDir, label) {
       // discriminator; clerk_cutover is the clock-independent orphan stamp. Keep
       // this pair in LOCKSTEP with em-store/em-revise's index fields.
       ...((fm.record_type && !BREAK_REBUILD_WHITELIST) ? { record_type: fm.record_type } : {}),
+      // RFC-015 R1 (P1-S1) lockstep: the playbook marker joins the rebuild
+      // whitelist alongside `pinned` so a rebuild-then-store round-trip
+      // preserves the detection predicate (otherwise index rows would lose
+      // `playbook: true` while episode files keep it — desync by consumer).
+      ...(fm.playbook === true || fm.playbook === 'true' ? { playbook: true } : {}),
       ...(fm.clerk_cutover ? { clerk_cutover: fm.clerk_cutover } : {}),
       // RFC-012 P2 S1 (REQ-1/REQ-5 lockstep, §8.2): identity fields written by
       // scripts/lib/store-identity.mjs round-trip the rebuild.
