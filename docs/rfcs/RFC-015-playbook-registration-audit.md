@@ -24,6 +24,8 @@ Empirical driver: the tiered-orchestration playbook v15 (`20260722-133545-consol
 2. **Consolidation orphans registrations silently.** A digest node is written with `supersedes: null` (`scripts/em-consolidate.mjs:1120`; clerk path `:1503-1517` emits no `supersedes` key), while RFC-011 R2.1 terminal resolution walks supersedes chains only — so consolidating a declared chain strands every registration at an archived-or-stale terminal with no route forward. No warning of any kind is emitted (verified ABSENT). Worse, RFC-011 R5's protection is unevenly enforced: the `--fold-superseded` paths consult `resolvePlaybookProtection` (`em-consolidate.mjs:331-337`, `:392-398`), but the legacy digest-apply transaction (`:1057-1179`) performs no playbook-protection check at all, and the clerk-apply path hardcodes `playbookIds = []` (`:1863`), so class-e playbook protection (`scripts/lib/protection.mjs:245-267`) never fires there.
 3. **No detection predicate exists.** Nothing marks an episode as a playbook — no flag, no frontmatter field, no tag convention (`grep -i playbook scripts/em-store.mjs` = zero matches). Real drift has already occurred: the v5 approach-playbook chain carries the tag `playbook`; the v15 orchestration playbook does not. Any heuristic detector would have missed the exact episode this RFC exists because of.
 4. **Scope confusion around "global playbooks."** Playbook episodes typically live in the global store, but registration is per-project by contract — RFC-011 R1: "no global variant exists," enforced at `scripts/em-trigger-index.mjs:605-614` (non-local builds skip the parse). A hand-authored `~/.episodic-memory/playbooks.json` is therefore silently ignored, and no surface reports which projects (if any) declare a given global playbook episode.
+5. **Registration is necessary but not sufficient — pointer follow-through is invisible.** Registration only gets a pointer rendered; nothing surfaces whether the READ ever happens, and injection stops escalating. Live evidence, 2026-07-26 (the same session that produced this RFC): the a6c2 lesson's `access_count` sat frozen at 73 across seven consecutive injections (activation-log `access_count_at_inject: 73` at 13:34Z, 13:40Z, 13:46Z, 21:38Z, 21:49Z, 21:51Z, 23:29Z on 2026-07-25) — seven deliveries, zero reads; and v15, registered mid-session, was read by the orchestrator only after two operator prompts, because a `session_start`-mode playbook registered mid-session surfaces nowhere until the next session start (RFC-011 R3 renders playbooks at session start only). RFC-011 R6 already tracks the read side (`--read` bumps `access_count`/`last_accessed`); the inject side is logged (RFC-009 R6 telemetry). The conversion join exists in the data and is surfaced to no one.
+6. **Consolidated digests degrade the read they point at.** The v15 digest body contains the identical playbook edition five times — once per consolidated member — because digest assembly concatenates member bodies with no content dedup. The registered pointer works, but every follow-through read pays ~5x the tokens, directly taxing the exact behavior Problems 1-5 are trying to increase.
 
 ## Proposal
 
@@ -80,6 +82,19 @@ No `--fix` wiring in this RFC (the only routed fix target today is `em-rebuild-i
 
 Registration remains per-project-local; the global variant stays rejected (Alternatives). Advisories and `--register-playbook` name exactly one write target: the current project's store. Cross-project visibility ("which projects declare this chain?") is read-only doctor territory via the consumer registry (CAPABILITIES.md cross-store rule) — never a global declaration file.
 
+### R7 — Unread-pointer re-surfacing and conversion visibility (Problem 5)
+
+A registered `session_start` playbook that remains **unread** does not fall silent after one render:
+
+- **(a) Re-surfacing.** The activation adapter re-renders an unread `session_start` playbook pointer on subsequent `UserPromptSubmit` events — bounded to at most one playbook line per prompt event and suppressed the moment the read lands. *Unread* is computed from data the substrate already maintains: the episode's `last_accessed` (bumped by the R7/RFC-011 tracked read) versus the latest `session_start` inject event for that episode id in the activation log. This also closes the mid-session registration gap by construction: a playbook registered mid-session is unread by definition and surfaces on the very next prompt, not at the next session start.
+- **(b) Read-boundary amendment, stated explicitly.** RFC-009 REQ-19 confines event-time reads to the trigger index plus `lesson-suppress.json`; R7a adds the activation log tail (`.episodic-memory/activation-log.jsonl`, already written by this same adapter under RFC-009 R6) as a third sanctioned event-time read. Same store, append-only, stat-then-tail bounded; fail-open — an absent or unparseable log disables re-surfacing, never injection.
+- **(c) Doctor check `playbook-unread`** (joins the R5 table): warns when a declared playbook's inject count since its last read exceeds a threshold (default 3) — the a6c2 signature (seven injects, zero reads) becomes an operator-visible finding instead of a frozen counter nobody joins.
+- **(d) Enforcement stays out.** A gate that blocks work until the READ happens is a behavior-pattern concern (`bp-XXX`, RFC-008 layer) — named here as the recommended companion for operators who want the strong tier, and explicitly not part of this RFC (B-1).
+
+### R8 — Digest body dedup in consolidation (Problem 6)
+
+`em-consolidate` digest assembly dedups member bodies by content before concatenation: byte-identical member bodies collapse to one copy, with the member provenance list (`(id: ..., date)` headers) preserved for every member. Applies to both digest-write paths (legacy `em-consolidate.mjs:1081-1095`, clerk `:1503-1517`). The v15 digest class (five identical editions, ~5x read cost) becomes one edition with five provenance headers. Near-identical bodies (revision chains consolidated together) are out of scope for P1 — only byte-identical dedup, the conservative half that cannot lose content.
+
 ### Data-artifact contracts
 
 | Artifact | Change |
@@ -87,15 +102,17 @@ Registration remains per-project-local; the global variant stays rejected (Alter
 | `schemas/playbooks.schema.json` | UNCHANGED |
 | Episode frontmatter / index row | optional `playbook: boolean` (absent = false) |
 | `em-store` / `em-revise` / `em-consolidate` stdout | optional `playbook_advisory` object (shape in R2/R4c; absent when no marker involved) |
-| `em-doctor` output | four new check ids (R5), existing result shape |
+| `em-doctor` output | five new check ids (R5 four + R7c `playbook-unread`), existing result shape |
+| Activation adapter event-time reads | `+ activation-log.jsonl` tail (R7b — explicit RFC-009 REQ-19 amendment; fail-open) |
+| Digest episode bodies | byte-identical member bodies collapse to one copy + full provenance headers (R8) |
 
 ### Per-tool tier (Principle 5)
 
-Entirely substrate-CLI-side: every tool that shells the `em-*` scripts gets identical behavior — STRONG across claude-code / codex / cursor / windsurf by construction. The activation adapter and its per-tool tiers (RFC-011) are untouched.
+R1-R6, R8: substrate-CLI-side — every tool that shells the `em-*` scripts gets identical behavior, STRONG across claude-code / codex / cursor / windsurf by construction. R7a-b touch the activation adapter's per-prompt surface and therefore inherit RFC-009/RFC-011's adapter tiers: claude-code STRONG; tools without a per-prompt hook surface degrade to session-start-only rendering (no re-surfacing) — honest WEAK, with R7c's doctor check as their fallback visibility.
 
 ### Substrate script coverage (disposition per em-* script)
 
-- **CHANGED:** `em-store.mjs` (R1/R2/R3), `em-revise.mjs` (R1/R2/R3), `em-consolidate.mjs` (R4), `em-doctor.mjs` (R5).
+- **CHANGED:** `em-store.mjs` (R1/R2/R3), `em-revise.mjs` (R1/R2/R3), `em-consolidate.mjs` (R4/R8), `em-doctor.mjs` (R5/R7c). Adapter-side (not em-*): the activation runner + matcher gain the R7a re-surfacing leg.
 - **INTERACTS, UNCHANGED:** `em-trigger-index.mjs` (its `parsePlaybooksConfig` is reused as the single parser; build contract untouched), `lib/protection.mjs` (class list unchanged; R4b only feeds it real inputs), `em-prune.mjs` (protection stays declaration-based — the marker alone protects nothing, see Non-goals), `em-search.mjs` (`--read` untouched).
 - **UNCHANGED:** all remaining `em-*` scripts.
 
@@ -121,8 +138,10 @@ One phase, two slices:
 
 - **P1-S1** — R1 marker + R2 advisories + R3 flag + R5 doctor checks, with their acceptance fixtures; docs (CLAUDE.md testing block, script `--help`) in the same PR.
 - **P1-S2** — R4 consolidation closure (protection parity on both apply paths, marker inheritance, dangling-registration advisory). This slice **folds GitHub issue #610** (the standalone protection-gap defect report); #610 is closed against this RFC and tracked here, not as an issue.
+- **P1-S3** — R7 unread-pointer re-surfacing: adapter re-render leg + REQ-19 read-boundary amendment + `playbook-unread` doctor check (folds the 2026-07-26 follow-through finding: seven injections, zero reads).
+- **P1-S4** — R8 digest body dedup in both `em-consolidate` digest-write paths (folds the 2026-07-26 v15 5x-duplicate-digest finding).
 
-**Finding-folding rule (operator directive, 2026-07-26):** defects and gaps surfaced by review rounds on this RFC are folded in as new slices (P1-S3, ...) or amendments — no standalone issues are filed for them.
+**Finding-folding rule (operator directive, 2026-07-26):** defects and gaps surfaced by review rounds on this RFC are folded in as new slices (P1-S5, ...) or amendments — no standalone issues are filed for them.
 
 ## Acceptance tests (P1 gate)
 
@@ -137,6 +156,9 @@ One phase, two slices:
 | T7 | doctor: marker-bearing undeclared terminal / declared-but-excluded entry / consolidated-away terminal / global `playbooks.json` present | each of the four checks fires warn with the right id; all four silent on a clean fixture (both polarities) |
 | T8 | no-flag negative sweep | grep-level + runtime assertion that no code path writes `playbooks.json` absent `--register-playbook` |
 | T9 | non-local scope | `--register-playbook` with `--scope global` store target is refused (B-3); advisory on a global-store write still names only the current project's local store |
+| T10 | unread re-surfacing | after a session_start inject with no subsequent read, the next prompt event re-renders the pointer (at most one playbook line per event); a tracked `--read` suppresses re-surfacing on the following event; registering a playbook mid-session surfaces it on the next prompt without a session restart |
+| T11 | R7 fail-open | absent activation log / unparseable log / log naming an unknown episode → re-surfacing silently disabled, normal injection unaffected, exit 0, no decision field (RFC-009 advisory invariant preserved on every leg) |
+| T12 | digest dedup | consolidating five byte-identical member bodies yields one body copy + five provenance headers (both digest paths); non-identical bodies remain fully concatenated; digest read round-trips byte-exact for the surviving content |
 
 ## Implementation
 
