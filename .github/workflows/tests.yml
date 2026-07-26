@@ -404,6 +404,9 @@ jobs:
       - name: Run em-graph node-projection suite (RFC-007 Phase 2)
         run: node tests/test-em-graph-nodes.mjs
 
+      - name: Run em-graph link-edge suite (RFC-007 Phase 3)
+        run: node tests/test-em-graph-links.mjs
+
       - name: Run em-doctor suite
         run: node tests/test-em-doctor.mjs
 

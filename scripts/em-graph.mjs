@@ -45,7 +45,7 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 import { loadIndex } from './lib/relevance.mjs'
-import { resolveRuleDir, scanRuleNodes, scanRfcNodes } from './lib/rule-nodes.mjs'
+import { resolveRuleDir, scanRuleNodes, scanRfcNodes, slugify } from './lib/rule-nodes.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -99,7 +99,7 @@ for (const n of nodeTypes) {
   }
 }
 
-const EDGE_TYPES = ['supersedes', 'consolidates', 'evidence', 'cites', 'tags']
+const EDGE_TYPES = ['supersedes', 'consolidates', 'evidence', 'cites', 'tags', 'wiki-link', 'composes-with']
 const DEFAULT_EDGES = ['supersedes', 'consolidates', 'evidence', 'cites']
 const edgesRaw = flag('--edges')
 const edgeTypes = edgesRaw === 'all' ? EDGE_TYPES
@@ -162,6 +162,7 @@ if (nodeTypes.includes('rfc')) {
   skippedNodes += scanned.skipped
 }
 const nodeDiag = () => (nodesRaw === undefined ? {} : { skipped_nodes: skippedNodes })
+const danglingOut = () => (edgeTypes.some(e => RULE_EDGE_TYPES.includes(e)) ? { dangling } : {})
 
 // ---------------------------------------------------------------------------
 // Edge projection. adjacency: id -> [{from,to,type}] (edge listed under BOTH
@@ -209,6 +210,91 @@ function bodyCitations(row, dataDir) {
   } catch { return [] }
 }
 
+// --- Phase 3: rule-body edge extraction (RFC-007 wiki-link + composes-with) ---
+// Fenced blocks are stripped for both edge types. Inline backticks are stripped
+// for wiki-link ONLY (RFC-007:149 scopes that rule to wiki-link and cites): real
+// "## Composes with" bullets write their target inside backticks, so stripping
+// inline code there would delete every target and silently emit zero edges.
+const WIKI_LINK_RE = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g
+const RULE_EDGE_TYPES = ['wiki-link', 'composes-with']
+const dangling = []
+
+const stripFenced = s => s.replace(/```[\s\S]*?```/g, '').replace(/~~~[\s\S]*?~~~/g, '')
+const stripInline = s => s.replace(/`[^`\n]*`/g, '')
+
+function ruleBody(file) {
+  try {
+    const content = fs.readFileSync(file, 'utf8')
+    const parts = content.split('---')
+    return parts.length >= 3 ? parts.slice(2).join('---') : content
+  } catch { return '' }
+}
+
+// Secondary index for TARGET resolution only. Node ids stay frontmatter-name
+// derived (RFC-007:142 is untouched); authors nonetheless link by filename, so a
+// slugified basename maps back to the owning node id. An ambiguous basename (two
+// files slugifying alike) is dropped rather than guessed — the link dangles.
+const ruleAlias = new Map()
+for (const [slug, node] of ruleById) {
+  const base = slugify(path.basename(node.file, '.md'))
+  if (!base || ruleById.has(base)) continue
+  if (ruleAlias.has(base)) ruleAlias.set(base, null)
+  else ruleAlias.set(base, slug)
+}
+
+function resolveTarget(slug) {
+  if (ruleById.has(slug)) return slug
+  return ruleAlias.get(slug) || null
+}
+
+function targetSlug(raw) {
+  return slugify(String(raw).trim().replace(/\.md$/i, ''))
+}
+
+// Section runs from the "## Composes with" heading to the next "## " or EOF.
+// Top-level bullets only: a leading-whitespace bullet is nested and ignored
+// (RFC-007:151). Markdown-link form resolves by basename; the common real form
+// wraps the target in backticks, which is why the caller does NOT strip inline
+// code for this edge type (REQ-16).
+const COMPOSES_HEADING_RE = /^##[ \t]+Composes with[ \t]*$/i
+const MD_LINK_RE = /^\[[^\]]*\]\(([^)]+)\)/
+
+function composesTargets(cleaned) {
+  const out = []
+  let inSection = false
+  for (const line of cleaned.split(/\r?\n/)) {
+    if (COMPOSES_HEADING_RE.test(line.trim())) { inSection = true; continue }
+    if (!inSection) continue
+    if (/^##[ \t]/.test(line.trim())) break
+    if (/^[ \t]+-[ \t]/.test(line)) continue
+    const bullet = /^-[ \t]+(.*)$/.exec(line)
+    if (!bullet) continue
+    const item = bullet[1].trim()
+    const link = MD_LINK_RE.exec(item)
+    const tick = /^`([^`]+)`/.exec(item)
+    // One bullet names at most one target: a markdown link, or the FIRST
+    // backtick run (a second backticked span on the same bullet is ignored).
+    // A bullet that is neither — plain prose such as
+    // "- Rule 17 (CLAUDE.md global) — bot reviews" — names no target and is
+    // skipped. Slugifying the whole line instead would manufacture a garbage
+    // dangling entry like "rule-17-claude-md-global-bot-reviews".
+    if (!link && !tick) continue
+    const raw = link ? path.basename(link[1].replace(/#.*$/, ""), '.md') : tick[1]
+    const slug = targetSlug(raw)
+    if (slug) out.push(slug)
+  }
+  return [...new Set(out)]
+}
+
+function linkTargets(cleaned) {
+  const out = []
+  for (const m of cleaned.matchAll(WIKI_LINK_RE)) {
+    const slug = targetSlug(m[1])
+    if (slug) out.push(slug)
+  }
+  return [...new Set(out)]
+}
+
 for (const r of rows) {
   if (edgeTypes.includes('supersedes')) {
     if (typeof r.supersedes === 'string' && byId.has(r.supersedes)) addEdge(r.id, r.supersedes, 'supersedes')
@@ -226,6 +312,31 @@ for (const r of rows) {
   }
   if (edgeTypes.includes('tags')) {
     for (const tag of strings(r.tags)) addEdge(r.id, `tag:${tag.toLowerCase().trim()}`, 'tags')
+  }
+}
+
+// Rule-to-rule edges. Rule bodies are read ONLY when a rule-edge type was
+// requested, so a default invocation still performs zero rule I/O (REQ-8).
+if (edgeTypes.includes('wiki-link')) {
+  for (const [slug, node] of ruleById) {
+    for (const raw of linkTargets(stripInline(stripFenced(ruleBody(node.file))))) {
+      const target = resolveTarget(raw)
+      if (target === slug) continue
+      if (target) addEdge(slug, target, 'wiki-link')
+      else dangling.push({ source: slug, ref: raw, kind: 'wiki-link' })
+    }
+  }
+}
+
+// Fenced blocks stripped, inline backticks deliberately NOT (REQ-16).
+if (edgeTypes.includes('composes-with')) {
+  for (const [slug, node] of ruleById) {
+    for (const raw of composesTargets(stripFenced(ruleBody(node.file)))) {
+      const target = resolveTarget(raw)
+      if (target === slug) continue
+      if (target) addEdge(slug, target, 'composes-with')
+      else dangling.push({ source: slug, ref: raw, kind: 'composes-with' })
+    }
   }
 }
 
@@ -260,21 +371,23 @@ function nodeOut(id, dist) {
 if (orphans || hubs) {
   // Degree over non-tag edges (tag fan-in would make everything a hub).
   const degree = new Map(rows.map(r => [r.id, 0]))
+  for (const id of ruleById.keys()) degree.set(id, 0)
   for (const key of edgeKeys) {
     const [a, b, type] = key.split(EDGE_KEY_SEP)
     if (type === 'tags') continue
     if (degree.has(a)) degree.set(a, degree.get(a) + 1)
     if (degree.has(b)) degree.set(b, degree.get(b) + 1)
   }
-  const reportable = r => includeSuperseded || r.status !== 'superseded'
+  const reportable = r => includeSuperseded || r?.status !== 'superseded'
   if (orphans) {
     const out = rows.filter(r => reportable(r) && degree.get(r.id) === 0).map(r => nodeOut(r.id, 0))
-    // Phase 2 gives rule/rfc nodes no edges, so every one is degree 0 and is an orphan
-    // by the mode's own definition. Appended only when --nodes opted them in; both maps
-    // are empty otherwise, so the default result set is unchanged (REQ-8).
-    for (const id of ruleById.keys()) out.push(nodeOut(id, 0))
+    // Phase 3 gives rule nodes real edges, so a rule is an orphan only at degree 0.
+    // rfc nodes still have no edge type of their own, so every one stays degree 0 by
+    // definition. Appended only when --nodes opted them in; both maps are empty
+    // otherwise, so the default result set is unchanged (REQ-8).
+    for (const id of ruleById.keys()) if ((degree.get(id) || 0) === 0) out.push(nodeOut(id, 0))
     for (const id of rfcById.keys()) out.push(nodeOut(id, 0))
-    console.log(JSON.stringify({ status: 'ok', mode: 'orphans', count: out.length, nodes: out, ...nodeDiag() }))
+    console.log(JSON.stringify({ status: 'ok', mode: 'orphans', count: out.length, nodes: out, ...nodeDiag(), ...danglingOut() }))
   } else {
     const ranked = [...degree.entries()].filter(([id, d]) => d > 0 && reportable(byId.get(id)))
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, top)
@@ -287,23 +400,27 @@ if (orphans || hubs) {
 // --from traversal
 if (!byId.has(from)) {
   if (ruleById.has(from) || rfcById.has(from)) {
-    // A projected rule/rfc node is a legitimate traversal root. Phase 2 gives it no
-    // edges, so the result is the node itself at depth 0. Once Phase 3 lands, these
-    // ids gain adjacency entries and fall through to the normal BFS below.
-    console.log(JSON.stringify({
-      status: 'ok',
-      root: from,
-      depth,
-      edge_types: edgeTypes,
-      count: 1,
-      nodes: [nodeOut(from, 0)],
-      edges: [],
-      ...nodeDiag(),
-    }))
-    process.exit(0)
+    // A projected rule/rfc node is a legitimate traversal root. With no adjacency
+    // (no rule-edge type requested, or a genuinely unlinked node) the result is the
+    // node itself at depth 0. With adjacency it falls through to the BFS below.
+    if (!adjacency.has(from)) {
+      console.log(JSON.stringify({
+        status: 'ok',
+        root: from,
+        depth,
+        edge_types: edgeTypes,
+        count: 1,
+        nodes: [nodeOut(from, 0)],
+        edges: [],
+        ...nodeDiag(),
+        ...danglingOut(),
+      }))
+      process.exit(0)
+    }
+  } else {
+    console.log(JSON.stringify({ status: 'error', message: `Episode "${from}" not found in the selected scope.` }))
+    process.exit(1)
   }
-  console.log(JSON.stringify({ status: 'error', message: `Episode "${from}" not found in the selected scope.` }))
-  process.exit(1)
 }
 
 const visited = new Map([[from, 0]])
@@ -355,4 +472,5 @@ console.log(JSON.stringify({
   edges: outEdges,
   ...(truncated ? { truncated: true } : {}),
   ...nodeDiag(),
+  ...danglingOut(),
 }))
