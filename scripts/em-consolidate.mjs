@@ -244,6 +244,28 @@ const minCluster = Math.max(2, parseInt(flag('--min-cluster') || '2', 10))
 const categoryFilter = flag('--category')
 const projectFilter = flag('--project')
 const includePinned = argv.includes('--include-pinned')
+// On main, the legacy dry-run/apply paths had NO protection gating for pinned rows
+// at all — admission was governed solely by the `(includePinned || r.pinned !== true)`
+// row filter applied once, before clustering. This slice added
+// resolveProtectionOrAbort to those paths, so class-0 `pinned` protection now
+// re-skips rows the filter already admitted. That breaks two cases that folded on
+// main: (a) --include-pinned rows (protectedIds turns the flag into a no-op), and
+// (b) the apply path's in-lock fresh re-read (S3c) racing a row that goes from
+// unpinned to pinned AFTER the pre-lock filter ran — main applied it anyway (the
+// filter never re-runs post-lock) and the digest inherited the fresh pin.
+// Unconditionally stripping the `pinned` reason from protectedIds restores both: it
+// is a no-op in the ordinary default-scope case, because the row filter already
+// excludes pinned rows from `clusters` before this ever runs. Only the `pinned`
+// reason is stripped, only from protectedIds maps consumed by the legacy
+// dry-run/apply gating this slice added (:928, :1227) — every other protection
+// class (e.g. playbook-referenced) and every other caller (clerk, fold) are
+// untouched.
+function liftPinnedGate(protectedIds) {
+  for (const [id, v] of protectedIds) {
+    if (v.reason === 'pinned') protectedIds.delete(id)
+  }
+  return protectedIds
+}
 const apply = argv.includes('--apply')
 const confirm = argv.includes('--confirm')
 const foldSuperseded = argv.includes('--fold-superseded')
@@ -925,7 +947,7 @@ if (!apply) {
     abortOnLocalPlaybooks: true,
   })
   if (dryRunProt.abort) emitProtectionAbort(dryRunProt.abort, 'consolidate-dry-run')
-  const dryRunSkips = partitionProtectionSkips(clusters.map(m => m.map(x => x.id)), dryRunProt.protectedIds)
+  const dryRunSkips = partitionProtectionSkips(clusters.map(m => m.map(x => x.id)), liftPinnedGate(dryRunProt.protectedIds))
   const dryRunAdvisory = buildConsolidationAdvisory({
     localDataDir: LOCAL_DIR,
     playbookIds: dryRunProt.playbookIds,
@@ -1182,7 +1204,7 @@ try {
     _csLockHandles = null
     emitProtectionAbort(applyProt.abort, 'consolidate-apply')
   }
-  const protectedIds = applyProt.protectedIds
+  const protectedIds = liftPinnedGate(applyProt.protectedIds)
   const applyPlaybookIds = applyProt.playbookIds
 
   // Re-read index rows under the lock, then read episode files only for
