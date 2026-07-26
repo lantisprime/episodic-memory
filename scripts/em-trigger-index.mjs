@@ -362,7 +362,10 @@ export function validatePlaybooksShape(doc) {
  * continues (or both), LOCAL wins (the RFC-009 merge convention; round-3 planner
  * V4). LOCAL is iterated first so ties resolve to the local row by insertion order.
  */
-function mergeIndexRowsForChain(localRows, globalRows) {
+// RFC-015 R2/F7 (review r2 NF1): exported so em-doctor's per-store audit
+// reuses the SAME chain-merge helper the build uses (a second merge would
+// drift exactly the way second parsers do). Behavior unchanged.
+export function mergeIndexRowsForChain(localRows, globalRows) {
   const byId = new Map()
   const consider = (row) => {
     if (!row || typeof row.id !== 'string') return

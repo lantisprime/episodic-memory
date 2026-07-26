@@ -60,7 +60,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { findContradictionCandidates, SUMMARY_JACCARD_MIN } from './lib/contradiction.mjs'
 import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
-import { parsePlaybooksConfig, terminalOf, buildChainMaps } from './em-trigger-index.mjs'
+import { parsePlaybooksConfig, terminalOf, buildChainMaps, mergeIndexRowsForChain } from './em-trigger-index.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -610,14 +610,16 @@ function checkStoreWithDir(dataDir, scopeName) {
 // global-store section is zero-state by design and would silently miss
 // declarations that resolve through a local cross-store chain).
 //
-// F2 (review r1): the row source is the UNION of local + global index rows
-// (matching buildPlaybookSection's cross-store resolution), so a declaration
-// whose id resolves through a global terminal is recognized.
-function declaredTerminalMap(entries, declarationDataDir) {
+// NF2 (review r2): the `declarationDataDir` parameter was dead (declared
+// entries' chain RESOLUTION uses the merge + chain maps passed in by the
+// caller; the param was only used to look up the scanned store's index,
+// which the resolution already covers via the merged rows). Dropped.
+// NF1 (review r2): the row source is the chain maps passed in by the
+// caller (built from the imported mergeIndexRowsForChain in the caller),
+// so a second helper re-implementation cannot drift.
+function declaredTerminalMap(entries, byId, successorOf) {
   const out = new Map()
   if (!Array.isArray(entries)) return out
-  const rows = mergedIndexRowsForResolution()
-  const { byId, successorOf } = buildChainMaps(rows)
   for (const entry of entries) {
     if (!entry || typeof entry.id !== 'string') continue
     const t = terminalOf(entry.id, byId, successorOf)
@@ -626,43 +628,29 @@ function declaredTerminalMap(entries, declarationDataDir) {
   return out
 }
 
-// F2 (review r1): cross-store resolution. Re-implements the R2.1 precedence
-// rule (continuing > stale; local > global on tie) the build uses for its
-// merged index. Returns the row union as a flat array.
-function mergedIndexRowsForResolution() {
-  const byId = new Map()
-  const consider = (row) => {
-    if (!row || typeof row.id !== 'string') return
-    const ex = byId.get(row.id)
-    if (!ex) { byId.set(row.id, row); return }
-    const exCont = !!ex.superseded_by
-    const curCont = !!row.superseded_by
-    if (curCont && !exCont) byId.set(row.id, row) // continuing outranks a stale terminal snapshot
-  }
-  for (const r of loadIndex(LOCAL_DIR, 'local')) consider(r)
-  for (const r of loadIndex(GLOBAL_DIR, 'global')) consider(r)
-  return [...byId.values()]
-}
-
 // Build a Set<declared-terminal-id> across ALL declaration sources for the
 // current scope. F2 (review r1): under DEFAULT scope the declaration source
 // is the CWD-LOCAL project's playbooks.json (LOCAL_DIR) — NOT the scanned
 // store's dataDir. Registration is per-project (B-3), so the audit surface
 // is the cwd-local declaration regardless of which store the per-store scan
 // targets. Under --all-projects, union every registered store's playbooks.json.
-function collectDeclarationTerminalSet() {
+//
+// NF4 (review r2 minimal form): the chain maps are built ONCE by the caller
+// and threaded in — no module-scope memoization, one merge + one chain-map
+// construction per checkPlaybookRegistration call.
+function collectDeclarationTerminalSet(byId, successorOf) {
   const set = new Set()
   // (a) cwd project declaration file (RFC-015 R5 default scope)
   const cwdPb = parsePlaybooksConfig(LOCAL_DIR)
   if (cwdPb.ok && cwdPb.config) {
-    for (const id of declaredTerminalMap(cwdPb.config.playbooks, LOCAL_DIR).keys()) set.add(id)
+    for (const id of declaredTerminalMap(cwdPb.config.playbooks, byId, successorOf).keys()) set.add(id)
   }
   // (b) --all-projects: union of every registered project's declarations
   if (allProjects) {
     for (const st of registeredStores) {
       const pb = parsePlaybooksConfig(st.data_dir)
       if (!pb.ok || !pb.config) continue
-      for (const id of declaredTerminalMap(pb.config.playbooks, st.data_dir).keys()) set.add(id)
+      for (const id of declaredTerminalMap(pb.config.playbooks, byId, successorOf).keys()) set.add(id)
     }
   }
   return set
@@ -673,18 +661,26 @@ function checkPlaybookRegistration(dataDir, scopeName) {
   // source is the CWD-LOCAL project's playbooks.json (LOCAL_DIR), NOT the
   // scanned store's dataDir. Registration is per-project (B-3). Under
   // --all-projects the union includes every registered store's declarations.
-  const declSet = collectDeclarationTerminalSet()
-  // F2 (review r1): resolution uses the UNION of local + global index rows
-  // (matching buildPlaybookSection's cross-store resolution), so a global
-  // marker episode whose chain is declared in the cwd-local playbooks.json
-  // resolves through the global terminal. F9 (review r2) splits the SCAN
-  // from the RESOLUTION: only the chain-resolution rows are the union; the
-  // marker SCAN iterates ONLY the scanned store's dataDir rows (RFC:99
-  // "reachable from the scanned store" — a marker in another store is NOT
-  // a finding for the scan that doesn't touch that store).
+  //
+  // F9 (review r2): the marker SCAN iterates ONLY the scanned store's dataDir
+  // rows (RFC:99 "reachable from the scanned store"). Chain RESOLUTION
+  // uses the merged rows (a marker episode's terminal might live in another
+  // store; terminalOf walks must see it).
+  //
+  // NF4 (review r2 minimal form): ONE merge + ONE chain-map construction per
+  // checkPlaybookRegistration call. No module-scope memoization. The chain
+  // maps are threaded into collectDeclarationTerminalSet so the declaration
+  // pass and the marker scan share one construction.
   const scannedRows = loadIndex(dataDir, scopeName)
-  const resolutionRows = mergedIndexRowsForResolution()
-  const { byId, successorOf } = buildChainMaps(resolutionRows)
+  // NF4 (review r2): merge = (scanned store rows) + GLOBAL_DIR rows.
+  // Resolution must include the scanned store's own rows — a marker in the
+  // scanned store cannot resolve through terminalOf unless its id is in
+  // byId, and byId is built from the merged rows. For cwd-local this
+  // collapses to (LOCAL_DIR + GLOBAL_DIR); for a registered-store scan
+  // this is (registeredStore + GLOBAL_DIR), so cross-store chains resolve.
+  const mergedRows = mergeIndexRowsForChain(loadIndex(dataDir, scopeName), loadIndex(GLOBAL_DIR, 'global'))
+  const { byId, successorOf } = buildChainMaps(mergedRows)
+  const declSet = collectDeclarationTerminalSet(byId, successorOf)
 
   // (1) `playbook-unregistered`: an active, chain-terminal, marker-bearing
   // index row whose chain is NOT in the declaration set. Cycle-safe via

@@ -763,6 +763,87 @@ await t('t7c_all_projects_no_tdz: em-doctor --all-projects runs without TDZ cras
   }
 });
 
+// NF3 (review r2): --all-projects union with a registered consumer store.
+// Seed a second fixture store under a real-path project, register it in
+// the consumer registry (installs.json), give it its OWN playbooks.json
+// declaring a marker episode, and run em-doctor --all-projects. Assert
+// (a) the doctor visits the second store (a checks block exists for it),
+// (b) the second store's declaration is in the --all-projects union (a
+// declared marker episode there is silent — no `playbook-unregistered:warn`).
+//
+// The fixture roots are isolated under HOME/<project> — never touches the
+// repo's .episodic-memory/ or the test runner's HOME.
+await t('t7c2_all_projects_includes_registered_store: --all-projects union visits registered consumer stores (NF3)', () => {
+  const { cwd, home } = mkStore();
+  // (1) Build a second project dir + its own .episodic-memory.
+  const secondProject = path.join(home, 'projects', 'rfc015-second');
+  const secondStore = path.join(secondProject, '.episodic-memory');
+  fs.mkdirSync(path.join(secondStore, 'episodes'), { recursive: true });
+  // (2) Seed a marker episode in the second project + an index row.
+  const sid = '20260726-013000-t7c2-second-pb-abcd';
+  fs.writeFileSync(path.join(secondStore, 'episodes', `${sid}.md`), [
+    '---', `id: ${sid}`, 'date: 2026-07-26', 'time: "01:30"', 'project: rfc015-second', 'category: lesson',
+    'status: active', 'tags: []', 'summary: t7c2 second pb', 'playbook: true',
+    '---', '', '# t7c2 second pb', '', 'body', '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(secondStore, 'index.jsonl'), JSON.stringify({
+    id: sid, date: '2026-07-26', time: '01:30', project: 'rfc015-second', category: 'lesson',
+    status: 'active', supersedes: null, tags: [], summary: 't7c2 second pb', playbook: true,
+  }) + '\n');
+  // (3) Declare the chain in the SECOND project's playbooks.json (not the
+  // cwd-local one). --all-projects must union this declaration into the
+  // audit surface so the marker is recognized as declared.
+  fs.writeFileSync(path.join(secondStore, 'playbooks.json'), JSON.stringify({
+    schema_version: 1,
+    playbooks: [{ id: sid, mode: 'session_start' }],
+  }, null, 2));
+  // (4) Register the second project in the consumer registry under the
+  // isolated HOME. The registry resolver reads installs.json from
+  // $HOME/.episodic-memory/installs.json.
+  const globalHome = path.join(home, '.episodic-memory');
+  fs.mkdirSync(globalHome, { recursive: true });
+  const installs = {
+    schema_version: 1,
+    generated_at: '2026-07-26T01:30:00.000Z',
+    source_version: 'rfc015-r2-fixture',
+    entries: [
+      {
+        project_path: secondProject,
+        tool: 'claude-code',
+        project_label: 'rfc015-second',
+        installed_at: '2026-07-26T01:30:00.000Z',
+        install_method: 'test-fixture',
+      },
+    ],
+  };
+  fs.writeFileSync(path.join(globalHome, 'installs.json'), JSON.stringify(installs, null, 2));
+
+  // (5) Run em-doctor --scope all --all-projects from the isolated cwd.
+  const r = runDoctor(['--scope', 'all', '--all-projects'], cwd, home);
+  assert.equal(r.code, 0, `exit: ${r.stdout}\n${r.stderr}`);
+  // (a) The second store is visited (a check block exists for its scope).
+  const secondBlock = r.json.checks.find((c) => c.scope === 'project:rfc015-second');
+  assert.ok(secondBlock, `second store block present; got scopes: ${[...new Set(r.json.checks.map((c) => c.scope))].join(',')}`);
+  // (b) The marker in the second store is declared in its OWN playbooks.json
+  // — --all-projects must include that declaration in the union, so the
+  // second-store scan emits NO `playbook-unregistered:warn`. The marker
+  // belongs to the second store only (not cwd-local), so cwd-local scan
+  // sees none — also no warn there.
+  const uregSecond = r.json.checks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'project:rfc015-second');
+  assert.ok(uregSecond, 'playbook-unregistered row present for second store');
+  assert.equal(uregSecond.level, 'ok', `second-store scan silent (--all-projects union includes the declaration), got ${uregSecond.level}; message: ${uregSecond.message}`);
+  const uregLocal = r.json.checks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'local');
+  assert.equal(uregLocal.level, 'ok', `cwd-local scan silent (marker unreachable from local), got ${uregLocal.level}`);
+
+  // (c) Sanity: if the second project's declaration is REMOVED from
+  // playbooks.json, --all-projects union shrinks and the second-store
+  // scan fires warn (polarity check — the union actually consults that file).
+  fs.rmSync(path.join(secondStore, 'playbooks.json'));
+  const r2 = runDoctor(['--scope', 'all', '--all-projects'], cwd, home);
+  const uregSecond2 = r2.json.checks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'project:rfc015-second');
+  assert.equal(uregSecond2.level, 'warn', `without declaration, second store warns, got ${uregSecond2.level}; message: ${uregSecond2.message}`);
+});
+
 // F2 (review r1): global-store marker episode declared in the cwd-local
 // playbooks.json → no false `playbook-unregistered` warn (and no
 // `unresolvable` failure on the health check). The v15 canonical layout.

@@ -629,47 +629,51 @@ try {
   // lock span (NSP G1). F4 (review r1): the B-3 scope refusal is now
   // pre-write (above the lock acquisition) — this branch only handles
   // marker carry + advisory + registration.
-  if (playbookMarker || hasRegisterPlaybookFlag) {
-    try {
-      const reg = await import('./lib/playbook-registration.mjs')
-      let r = null
-      if (hasRegisterPlaybookFlag && result.status === 'ok') {
-        r = reg.registerPlaybook({ episodeId: newId, mode: registerMode, localDataDir: dataDir })
-        if (!r.ok) {
-          result = {
-            ...result,
-            status: 'error',
-            code: r.code,
-            message: r.message,
-            stored_id: newId,
+  // F8-r2 (review r2): re-indented — the if-pb block lives INSIDE the
+  // else block (which opens at indent 2), so the if keyword and its body
+  // shift to indent 4 / 6 / etc. The close of the if-pb is at indent 4
+  // (matching the keyword); the close of the else remains at indent 2.
+    if (playbookMarker || hasRegisterPlaybookFlag) {
+      try {
+        const reg = await import('./lib/playbook-registration.mjs')
+        let r = null
+        if (hasRegisterPlaybookFlag && result.status === 'ok') {
+          r = reg.registerPlaybook({ episodeId: newId, mode: registerMode, localDataDir: dataDir })
+          if (!r.ok) {
+            result = {
+              ...result,
+              status: 'error',
+              code: r.code,
+              message: r.message,
+              stored_id: newId,
+            }
           }
         }
-      }
-      if (playbookMarker && result.status === 'ok') {
-        // ALWAYS name the cwd LOCAL store as project_store, even when the
-        // revision lives in --scope global — registration is per-project
-        // (B-3), so the audit surface is the cwd local store.
-        result.playbook_advisory = reg.buildPlaybookAdvisory({
-          episodeId: newId,
-          localDataDir: LOCAL_DIR,
-          episodeStoreDir: dataDir,
-          effectiveTriggers: Array.isArray(activation && activation.triggers) ? activation.triggers : [],
-          mode: registerMode || 'session_start',
-        })
-        if (r && r.ok && r.buildCapped) {
-          result.playbook_advisory = {
-            ...result.playbook_advisory,
-            note: result.playbook_advisory.note + ' (build will cap; session_start count exceeds max_playbooks)',
-            build_capped: true,
+        if (playbookMarker && result.status === 'ok') {
+          // ALWAYS name the cwd LOCAL store as project_store, even when the
+          // revision lives in --scope global — registration is per-project
+          // (B-3), so the audit surface is the cwd local store.
+          result.playbook_advisory = reg.buildPlaybookAdvisory({
+            episodeId: newId,
+            localDataDir: LOCAL_DIR,
+            episodeStoreDir: dataDir,
+            effectiveTriggers: Array.isArray(activation && activation.triggers) ? activation.triggers : [],
+            mode: registerMode || 'session_start',
+          })
+          if (r && r.ok && r.buildCapped) {
+            result.playbook_advisory = {
+              ...result.playbook_advisory,
+              note: result.playbook_advisory.note + ' (build will cap; session_start count exceeds max_playbooks)',
+              build_capped: true,
+            }
           }
         }
-      }
-    } catch (e) {
-      if (result.status === 'ok') {
-        result.playbook_advisory = { registered: false, project_store: LOCAL_DIR, note: `advisory computation failed: ${e && e.message ? e.message : String(e)}` }
+      } catch (e) {
+        if (result.status === 'ok') {
+          result.playbook_advisory = { registered: false, project_store: LOCAL_DIR, note: `advisory computation failed: ${e && e.message ? e.message : String(e)}` }
+        }
       }
     }
-  }
   }
 } finally {
   releaseStoreWriteLocks(lockHandles)
