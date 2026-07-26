@@ -118,7 +118,7 @@
       "id": "RFC-015",
       "slug": "playbook-registration-audit",
       "title": "Playbook Registration: Store-Time Detection, Registration Audit, and Scope Rules",
-      "status": "draft",
+      "status": "accepted",
       "champion": "Charlton Ho",
       "file": "RFC-015-playbook-registration-audit.md"
     }

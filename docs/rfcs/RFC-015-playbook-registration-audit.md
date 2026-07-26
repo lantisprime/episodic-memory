@@ -2,7 +2,7 @@
 rfc_id: RFC-015
 slug: playbook-registration-audit
 title: "Playbook Registration: Store-Time Detection, Registration Audit, and Scope Rules"
-status: draft
+status: accepted
 champion: Charlton Ho
 created: 2026-07-26
 last_modified: 2026-07-26
