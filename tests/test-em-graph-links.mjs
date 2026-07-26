@@ -687,6 +687,45 @@ t('t_composes_first_backtick_run_wins', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Round-2 regression tests
+// ---------------------------------------------------------------------------
+
+t('t_composes_crlf_line_endings', () => {
+  resetRuleDir()
+  // Write the source file with explicit \r\n line endings. Before FIX 1
+  // the split('\n') left a trailing \r on each line and the bullet regex
+  // /^-[ \t]+(.*)$/ (no /m flag) failed to match, silently producing zero
+  // edges and zero dangling — the same false-pass signature REQ-6 traps.
+  const crlfBody = '---\r\nname: sentinel-a1b2c3-crlf-src\r\n---\r\n\r\n## Composes with\r\n- `sentinel-a1b2c3-crlf-tgt`\r\n'
+  fs.writeFileSync(path.join(RULE_DIR, 'feedback_crlf_src.md'), crlfBody, 'utf8')
+  writeRule('feedback_crlf_tgt.md', 'name: sentinel-a1b2c3-crlf-tgt')
+  const r = run(['--from', 'sentinel-a1b2c3-crlf-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  // Same edge as the LF equivalent: src -> tgt, type composes-with
+  const edge = (r.json.edges || []).find(e =>
+    e.from === 'sentinel-a1b2c3-crlf-src' && e.to === 'sentinel-a1b2c3-crlf-tgt' && e.type === 'composes-with')
+  assert.ok(edge, 'CRLF line endings produce the same edge as LF (FIX 1: split /\\r?\\n/)')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries')
+})
+
+t('t_composes_markdown_link_fragment_stripped', () => {
+  resetRuleDir()
+  // FIX 2: a markdown-link target carrying a #fragment must have the fragment
+  // stripped before basename resolution. Before FIX 2 the fragment was
+  // slugified into the target and the link dangled.
+  writeRule('feedback_frag_target.md', 'name: sentinel-a1b2c3-frag-tgt')
+  // Source with a #fragment in the markdown link path
+  writeRule('feedback_frag_src.md', 'name: sentinel-a1b2c3-frag-src',
+    'body\n## Composes with\n- [t](feedback_frag_target.md#sec)\n')
+  const r = run(['--from', 'sentinel-a1b2c3-frag-src', '--nodes', 'rule', '--edges', 'composes-with'])
+  assert.equal(r.code, 0, r.stdout)
+  const edge = (r.json.edges || []).find(e =>
+    e.from === 'sentinel-a1b2c3-frag-src' && e.to === 'sentinel-a1b2c3-frag-tgt' && e.type === 'composes-with')
+  assert.ok(edge, 'markdown link with #fragment resolves identically to one without (FIX 2: strip fragment before basename)')
+  assert.equal((r.json.dangling || []).length, 0, 'no dangling entries (fragment is stripped, not slugified)')
+})
+
+// ---------------------------------------------------------------------------
 // teardown
 // ---------------------------------------------------------------------------
 fs.rmSync(cwd, { recursive: true, force: true })

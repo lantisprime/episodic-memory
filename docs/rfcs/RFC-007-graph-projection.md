@@ -333,8 +333,6 @@ No integration with `em-rebuild-index.mjs` exists or is needed in v1, because no
   - Documentation: `docs/EM_SCRIPTS_GUIDE.md:732-750` describes the shipped behavior
 
 - **Unbuilt (recorded explicitly so it is enumerable, not deleted):**
-  - `rule` + `rfc` node projection (the feedback corpus and the RFC set traversable) — Phase 2
-  - `wiki-link` + `composes-with` edges with `slugify()` resolution and dangling tracking — Phase 3
   - `entry_point` frontmatter convention + `nodes_with_no_edges[]` + `entry_points[]` audit array — Phase 4
   - Graph-health audit surface (`--graph-health`, CI validator, contract-mirror validator `scripts/rfc-graph-contract-validate.mjs` — never created) — Phase 4
   - `cites-pr` edge; MEMORY.md machine-readable trigger block plus the `trigger-phrase` parser — Phase 5
@@ -685,7 +683,8 @@ Detailed round-1 finding table preserved below for historical record.
       "slug_resolver": "slugify",
       "skip_when": ["inside-fenced-code-block", "inside-inline-backticks", "empty-name"],
       "dangling_bucket": "wiki-link",
-      "idempotent": true
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:320"
     },
     {
       "type": "composes-with",
@@ -697,7 +696,8 @@ Detailed round-1 finding table preserved below for historical record.
       "slug_resolver": "slugify",
       "skip_when": ["empty-section", "nested-bullet"],
       "dangling_bucket": "composes-with",
-      "idempotent": true
+      "idempotent": true,
+      "shipped_at": "em-graph.mjs:332"
     },
     {
       "type": "trigger-phrase",

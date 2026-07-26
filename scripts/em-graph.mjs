@@ -262,10 +262,10 @@ const MD_LINK_RE = /^\[[^\]]*\]\(([^)]+)\)/
 function composesTargets(cleaned) {
   const out = []
   let inSection = false
-  for (const line of cleaned.split('\n')) {
+  for (const line of cleaned.split(/\r?\n/)) {
     if (COMPOSES_HEADING_RE.test(line.trim())) { inSection = true; continue }
     if (!inSection) continue
-    if (/^##[ \t]/.test(line)) break
+    if (/^##[ \t]/.test(line.trim())) break
     if (/^[ \t]+-[ \t]/.test(line)) continue
     const bullet = /^-[ \t]+(.*)$/.exec(line)
     if (!bullet) continue
@@ -279,7 +279,7 @@ function composesTargets(cleaned) {
     // skipped. Slugifying the whole line instead would manufacture a garbage
     // dangling entry like "rule-17-claude-md-global-bot-reviews".
     if (!link && !tick) continue
-    const raw = link ? path.basename(link[1], '.md') : tick[1]
+    const raw = link ? path.basename(link[1].replace(/#.*$/, ""), '.md') : tick[1]
     const slug = targetSlug(raw)
     if (slug) out.push(slug)
   }
