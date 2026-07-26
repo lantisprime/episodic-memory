@@ -63,6 +63,144 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex, tokenizeQuery } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
+import {
+  buildConsolidationAdvisory,
+  PLAYBOOK_PROTECTION_CLASS,
+  PLAYBOOK_PROTECTION_REASON,
+} from './lib/playbook-registration.mjs'
+
+// Abort kinds — the two fail-closed classes R4d distinguishes.
+const PROTECTION_ABORT_PLAYBOOKS = 'playbooks'   // a consulted playbooks.json is unparseable
+const PROTECTION_ABORT_PROTECTION = 'protection' // a consulted index.jsonl is unreadable
+
+// ---------------------------------------------------------------------------
+// RFC-015 R4b/R4d: ONE fail-closed protection resolution consumed by every
+// mutating path in this file (fold single, fold --all-projects, legacy cluster
+// apply, clerk apply). Two abort classes, two distinct named files:
+//   'playbooks'  — a consulted playbooks.json is present-but-unparseable (R4d)
+//   'protection' — a consulted index.jsonl could not be read, so the protection
+//                  set is UNKNOWABLE. "No rows read" is not "nothing to
+//                  protect": the pre-RFC-015 bare catch {} here yielded an EMPTY
+//                  map and silently disabled protection classes a-e entirely.
+// NEVER throws. NEVER returns a partially-populated result.
+// Scope rule (RFC-011 R5(b), scoped blast radius): willArchiveLocal is true only
+// for --scope local, and the consumer registry is read ONLY for --scope global —
+// so a sibling project's corrupt config can never abort a purely local run.
+// storeList is the CALLER's protection row source: an array of [dir, label] pairs.
+// It is a parameter, not a constant, because the --all-projects fold builds a
+// realpath-keyed union across cwd-local + global + EVERY registered store
+// (em-consolidate.mjs:317-325). Hardcoding [[LOCAL_DIR,'local'],[GLOBAL_DIR,'global']]
+// here would (i) drop third-store referencers — a lesson in projC whose evidence
+// names a projB chain member would stop protecting it — and (ii) collapse class-d's
+// per-store latestByStore buckets, because realpath labels are what keep registered
+// stores distinct. Review r1 F1 reproduced both: folded_total 0 -> 11, 11 episode
+// files archived, latest-run-record protected true -> false.
+// abortOnLocalPlaybooks is likewise a parameter, not `scopeArg === 'local'`.
+// The --all-projects fold passes FALSE and keeps its current semantics: the
+// registry names the stores it archives, and protection.mjs's registry loop
+// (:150-161) already aborts on any REGISTERED project's corrupt config, so an
+// unregistered cwd's corrupt file must not abort a fold that never touches it.
+// Every other caller passes TRUE — see the willArchiveLocal note below.
+function resolveProtectionOrAbort({ scopeArg, storeList, abortOnLocalPlaybooks = true }) {
+  const todayStr = new Date().toISOString().slice(0, 10)
+  // storeList is REQUIRED and has no default (review r2 F1). The obvious default
+  // — [[LOCAL_DIR,'local'],[GLOBAL_DIR,'global']] — is bit-for-bit the r1 F1
+  // data-loss defect, so its only reachable effect would be to reintroduce that
+  // bug silently in a future call site. Missing input is a fail-closed abort, not
+  // a throw, because this function's contract is "never throws".
+  if (!Array.isArray(storeList) || storeList.length === 0) {
+    return {
+      abort: { kind: PROTECTION_ABORT_PROTECTION, reason: 'internal: storeList not supplied', file: null },
+      protectedIds: new Map(),
+      playbookIds: [],
+    }
+  }
+  const stores = storeList
+  const willArchiveGlobal = scopeArg === 'global'
+  let registryStores = [], registryRebuilt = false, registryPath = null
+  if (willArchiveGlobal) {
+    const reg = resolveRegisteredStoresWithStatus()
+    registryStores = reg.stores
+    registryRebuilt = reg.registryRebuilt
+    registryPath = reg.registryPath
+  }
+  // willArchiveLocal comes from the caller, and is NOT `scopeArg === 'local'`.
+  // resolvePlaybookProtection parses the local config regardless of scope
+  // (protection.mjs:129-134) but gates the ABORT on this flag (:137). Declarations
+  // are local-only (B-3) while playbook episodes live in the global store
+  // (RFC-015 Problem 4), so for every path that supersedes or archives, the local
+  // file is the ONLY declaration source: an unreadable one makes protection
+  // unknowable no matter which store is written. Review r1 F2: with
+  // `scopeArg === 'local'` here, a corrupt local playbooks.json under
+  // --scope global from an unregistered cwd returned {abort:null, playbookIds:[]}
+  // — the R4d fail-open surviving inside the slice that exists to close it.
+  const { abort: pbAbort, playbookIds } = resolvePlaybookProtection({
+    localStoreDir: LOCAL_DIR,
+    willArchiveLocal: abortOnLocalPlaybooks,
+    registryStores,
+    registryRebuilt,
+    registryPath,
+  })
+  if (pbAbort) {
+    return { abort: { kind: PROTECTION_ABORT_PLAYBOOKS, reason: pbAbort.reason, file: pbAbort.file } }
+  }
+  const protectionRows = []
+  for (const [dir, label] of stores) {
+    try {
+      protectionRows.push(...loadProtectionRows(fs, path, dir, label))
+    } catch (e) {
+      return {
+        abort: {
+          kind: PROTECTION_ABORT_PROTECTION,
+          reason: `protection index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'})`,
+          file: path.join(dir, 'index.jsonl'),
+        },
+      }
+    }
+  }
+  let protectedIds
+  try {
+    protectedIds = computeProtectedIds(protectionRows, todayStr, playbookIds)
+  } catch (e) {
+    return {
+      abort: {
+        kind: PROTECTION_ABORT_PROTECTION,
+        reason: `protection computation failed (${(e && e.message) || 'unknown'})`,
+        file: path.join(LOCAL_DIR, 'index.jsonl'),
+      },
+    }
+  }
+  return { abort: null, protectedIds, playbookIds }
+}
+
+// Single emitter so every path prints the identical error shape. Callers that
+// hold a lock MUST release it before calling this (process.exit skips finally).
+function emitProtectionAbort(abort, mode) {
+  console.log(JSON.stringify({
+    status: 'error',
+    mode,
+    code: `protection-abort:${abort.kind}`,
+    message: `em-consolidate: aborting ${mode} — ${abort.reason} (${abort.file})`,
+  }))
+  process.exit(1)
+}
+
+// Splits protected clusters into playbook-caused and other. `allSkips` is what the
+// envelope reports; `playbookSkips` is the ONLY input the advisory may speak about.
+// Class-e is the sole playbook class (protection.mjs:245-267) and its `via` is the
+// CONFIGURED declaration id, which is exactly what the advisory must name.
+function partitionProtectionSkips(clusterMemberIdLists, protectedIds) {
+  const allSkips = [], playbookSkips = []
+  for (const memberIds of clusterMemberIdLists) {
+    const hitId = memberIds.find(id => protectedIds.has(id))
+    if (!hitId) continue
+    const hit = protectedIds.get(hitId)
+    const rec = { members: memberIds, reason: `protected:${hit.reason}`, via: hit.via }
+    allSkips.push(rec)
+    if (hit.reason === PLAYBOOK_PROTECTION_CLASS) playbookSkips.push(rec)
+  }
+  return { allSkips, playbookSkips }
+}
 import { resolveRegisteredStores, resolveRegisteredStoresWithStatus, realpathSafe } from './lib/registered-stores.mjs'
 import { TAG_JACCARD_MIN, SUMMARY_JACCARD_MIN, HIGH_DF_MIN, CADENCE_K_SHARED, CADENCE_N_LESSONS, PROPOSED_ACTIONS, RUN_RECORD_CATEGORY, RUN_RECORD_TYPE, CLERK_CUTOVER_MARKER, ATTRIBUTION_WINDOW_MS, ACTIVATION_LOG_NAME, ACTIVATION_LOG_MAX_BYTES, LOG_FORMAT_VERSION, computeCadence } from './lib/activation-log.mjs'
 import { illegalValueChar, illegalScalarChar, serializeInlineArray, ACTIVATION_ARRAY_FIELDS } from './lib/activation.mjs'
@@ -80,6 +218,12 @@ import { spawnSync } from 'node:child_process'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
+
+// The two-store row set used by every path whose archival target is a SINGLE store
+// (fold-single plus all five apply/pre-lock sites). Named once so the pair literal
+// appears exactly once in the file: the --all-projects fold must NOT use it — that
+// path passes its realpath-keyed registry union instead (review r1 F1).
+const SINGLE_SCOPE_PROTECTION_STORES = [[LOCAL_DIR, 'local'], [GLOBAL_DIR, 'global']]
 
 const argv = process.argv.slice(2)
 
@@ -319,27 +463,17 @@ if (foldSuperseded) {
       const key = realpathSafe(d)
       if (!protectionDirs.has(key)) protectionDirs.set(key, d)
     }
-    const protectionRows = []
-    for (const [key, d] of protectionDirs) {
-      protectionRows.push(...loadProtectionRows(fs, path, d, key))
-    }
     // RFC-011 R5(b): --fold-superseded binds to the SAME protection + abort
     // semantics as em-prune. --all-projects archives across the registry, so the
     // GLOBAL abort applies: a DEGRADED registry (installs.json rebuilt) OR any
     // registered project's corrupt playbooks.json aborts exit 1 and folds NOTHING,
     // naming the offending file (retention fails closed; advisory surfaces fail open).
-    const { abort: pbAbort, playbookIds } = resolvePlaybookProtection({
-      localStoreDir: LOCAL_DIR,
-      willArchiveLocal: false, // the registry (not a separate cwd-local fold) names the stores
-      registryStores: registered,
-      registryRebuilt: reg.registryRebuilt,
-      registryPath: reg.registryPath,
+    const { abort: pbAbort, protectedIds } = resolveProtectionOrAbort({
+      scopeArg: 'global',
+      storeList: [...protectionDirs].map(([key, d]) => [d, key]),
+      abortOnLocalPlaybooks: false,
     })
-    if (pbAbort) {
-      console.log(JSON.stringify({ status: 'error', message: `em-consolidate: aborting archival — ${pbAbort.reason} (${pbAbort.file})` }))
-      process.exit(1)
-    }
-    const protectedIds = computeProtectedIds(protectionRows, today, playbookIds)
+    if (pbAbort) emitProtectionAbort(pbAbort, 'fold-superseded')
 
     const stores = []
     let foldedTotal = 0
@@ -380,31 +514,12 @@ if (foldSuperseded) {
   // RFC-011 R5(b): binds to the identical SCOPED fail-closed abort as em-prune —
   // --scope local aborts only on the LOCAL corrupt playbooks.json; --scope global
   // aborts on a degraded registry OR any registered project's corrupt playbooks.json.
-  const willArchiveLocalCS = scope === 'local'
-  const willArchiveGlobalCS = scope === 'global'
-  let csRegistryStores = [], csRegistryRebuilt = false, csRegistryPath = null
-  if (willArchiveGlobalCS) {
-    const reg = resolveRegisteredStoresWithStatus()
-    csRegistryStores = reg.stores
-    csRegistryRebuilt = reg.registryRebuilt
-    csRegistryPath = reg.registryPath
-  }
-  const { abort: pbAbort, playbookIds } = resolvePlaybookProtection({
-    localStoreDir: LOCAL_DIR,
-    willArchiveLocal: willArchiveLocalCS,
-    registryStores: csRegistryStores,
-    registryRebuilt: csRegistryRebuilt,
-    registryPath: csRegistryPath,
+  const { abort: pbAbort, protectedIds } = resolveProtectionOrAbort({
+    scopeArg: scope,
+    storeList: SINGLE_SCOPE_PROTECTION_STORES,
+    abortOnLocalPlaybooks: true,
   })
-  if (pbAbort) {
-    console.log(JSON.stringify({ status: 'error', message: `em-consolidate: aborting archival — ${pbAbort.reason} (${pbAbort.file})` }))
-    process.exit(1)
-  }
-  const protectionRows = [
-    ...loadProtectionRows(fs, path, LOCAL_DIR, 'local'),
-    ...loadProtectionRows(fs, path, GLOBAL_DIR, 'global')
-  ]
-  const protectedIds = computeProtectedIds(protectionRows, today, playbookIds)
+  if (pbAbort) emitProtectionAbort(pbAbort, 'fold-superseded')
   const res = foldStore(DATA_DIR, scope, protectedIds)
 
   console.log(JSON.stringify({
@@ -804,16 +919,49 @@ function clusterReport(members) {
 const report = clusters.map(clusterReport)
 
 if (!apply) {
-  console.log(JSON.stringify({ status: 'ok', dry_run: true, clusters: report, applied: 0, hint: clusters.length ? 'Re-run with --apply to consolidate.' : undefined }))
+  const dryRunProt = resolveProtectionOrAbort({
+    scopeArg: scope,
+    storeList: SINGLE_SCOPE_PROTECTION_STORES,
+    abortOnLocalPlaybooks: true,
+  })
+  if (dryRunProt.abort) emitProtectionAbort(dryRunProt.abort, 'consolidate-dry-run')
+  const dryRunSkips = partitionProtectionSkips(clusters.map(m => m.map(x => x.id)), dryRunProt.protectedIds)
+  const dryRunAdvisory = buildConsolidationAdvisory({
+    localDataDir: LOCAL_DIR,
+    playbookIds: dryRunProt.playbookIds,
+    protectedClusters: dryRunSkips.playbookSkips,
+    substitutedClusters: [],
+  })
+  console.log(JSON.stringify({
+    status: 'ok',
+    dry_run: true,
+    clusters: report,
+    applied: 0,
+    hint: clusters.length ? 'Re-run with --apply to consolidate.' : undefined,
+    ...(dryRunSkips.allSkips.length ? { protection_skips: dryRunSkips.allSkips } : {}),
+    ...(dryRunAdvisory ? { playbook_advisory: dryRunAdvisory } : {}),
+  }))
   process.exit(0)
 }
 // No-clusters fast path: lock-free exit when --apply --confirm produced
 // zero clusters. Preserves the apply envelope exactly: status ok, clusters
 // empty, applied 0 — no dry_run field.
 if (clusters.length === 0) {
+  const zeroProt = resolveProtectionOrAbort({
+    scopeArg: scope,
+    storeList: SINGLE_SCOPE_PROTECTION_STORES,
+    abortOnLocalPlaybooks: true,
+  })
+  if (zeroProt.abort) emitProtectionAbort(zeroProt.abort, 'consolidate-apply')
   console.log(JSON.stringify({ status: 'ok', clusters: [], applied: 0 }))
   process.exit(0)
 }
+const manyProt = resolveProtectionOrAbort({
+  scopeArg: scope,
+  storeList: SINGLE_SCOPE_PROTECTION_STORES,
+  abortOnLocalPlaybooks: true,
+})
+if (manyProt.abort) emitProtectionAbort(manyProt.abort, 'consolidate-apply')
 if (clusters.length > 5 && !confirm) {
   console.log(JSON.stringify({ status: 'error', message: `${clusters.length} clusters would be folded (> 5). Re-run with --confirm (or narrow with --category/--project/--min-sim).` }))
   process.exit(2)
@@ -1019,6 +1167,24 @@ try {
   }
   _csLockHandles = lockRes.handles
 
+  // RFC-015 R4b/R4d + Gap G: resolve INSIDE the lock so a concurrent
+  // `em-store --register-playbook` cannot declare a chain between resolution and
+  // write, and hoisted BEFORE the cluster loop so no abort can fire mid-loop
+  // (there is no per-cluster rollback). process.exit skips finally, so the lock
+  // is released explicitly here.
+  const applyProt = resolveProtectionOrAbort({
+    scopeArg: scope,
+    storeList: SINGLE_SCOPE_PROTECTION_STORES,
+    abortOnLocalPlaybooks: true,
+  })
+  if (applyProt.abort) {
+    releaseStoreWriteLocks(_csLockHandles)
+    _csLockHandles = null
+    emitProtectionAbort(applyProt.abort, 'consolidate-apply')
+  }
+  const protectedIds = applyProt.protectedIds
+  const applyPlaybookIds = applyProt.playbookIds
+
   // Re-read index rows under the lock, then read episode files only for
   // members of the precomputed clusters. A cluster is accepted only when
   // every fresh row and fresh file still reports status active.
@@ -1054,6 +1220,16 @@ try {
     }
   }
 
+  // R4b: a cluster containing ANY protected member is skipped whole — a partial
+  // consolidation would strand the protected member's siblings behind a digest
+  // that does not consolidate it. Skip is not block (B-1): exit stays 0.
+  const { allSkips: protectionSkips, playbookSkips: protectionPlaybookSkips } =
+    partitionProtectionSkips(clustersToApply.map(c => c.memberIds), protectedIds)
+  const skipped = new Set(protectionSkips.flatMap(s => s.members))
+  const survivingClusters = clustersToApply.filter(c => !c.memberIds.some(id => skipped.has(id)))
+  clustersToApply.length = 0
+  clustersToApply.push(...survivingClusters)
+
   const indexFile = path.join(DATA_DIR, 'index.jsonl')
   const tagsFile = path.join(DATA_DIR, 'tags.json')
   const categoryIndexFile = path.join(DATA_DIR, 'category-index.json')
@@ -1064,6 +1240,7 @@ try {
     const project = members[0].project
     const tags = normalizeTags(members.flatMap(m => Array.isArray(m.tags) ? m.tags : []))
     const pinned = members.some(m => m.pinned === true)
+    const playbookMarked = members.some(m => m.playbook === true)
     const summary = `Consolidated: ${members[members.length - 1].summary} (+${members.length - 1} related)`
 
     const { dateStr, timeStr, idStamp } = nowParts()
@@ -1090,6 +1267,7 @@ try {
       `tags: [${tags.join(', ')}]`,
       `summary: ${summary}`,
       ...(pinned ? ['pinned: true'] : []),
+      ...(playbookMarked ? ['playbook: true'] : []),
       '---',
     ]
     const digestContent = `${fmLines.join('\n')}\n\n# ${summary}\n\n${digestBody}\n`
@@ -1120,6 +1298,7 @@ try {
       status: 'active', supersedes: null, consolidates: memberIds,
       tags, summary,
       ...(pinned ? { pinned: true } : {}),
+      ...(playbookMarked ? { playbook: true } : {}),
     }
     const rewritten = existingLines.map(line => {
       try {
@@ -1162,14 +1341,24 @@ try {
     // indexes 1:1 with the outer `c`. Re-derive via the original cluster
     // index captured in collisionSkips / by reverse lookup.)
     const reportEntry = report[originalIndex]
-    applied.push({ ...reportEntry, digest_id: digestId, digest_summary: summary })
+    applied.push({ ...reportEntry, digest_id: digestId, digest_summary: summary, members: memberIds, playbook_marked: playbookMarked })
   }
 
+  const applyAdvisory = buildConsolidationAdvisory({
+    localDataDir: LOCAL_DIR,
+    playbookIds: applyPlaybookIds,
+    protectedClusters: protectionPlaybookSkips,
+    markedConsolidations: applied
+      .filter(a => a.playbook_marked === true)
+      .map(a => ({ resolves_to: a.digest_id, kind: 'digest', members: a.members || [] })),
+  })
   _applyEnvelope = {
     status: 'ok',
     clusters: applied,
     applied: applied.length,
     ...(collisionSkips.length ? { collision_skips: collisionSkips } : {}),
+    ...(protectionSkips.length ? { protection_skips: protectionSkips } : {}),
+    ...(applyAdvisory ? { playbook_advisory: applyAdvisory } : {}),
   }
 } finally {
   // Release BEFORE final JSON output (REQ-13). Inherited handles, if any,
@@ -1241,6 +1430,7 @@ function clerkSerializeFrontmatter(fm) {
   if (typeof fm.record_type === 'string') lines.push(`record_type: ${fm.record_type}`)
   if (typeof fm.clerk_cutover === 'string') lines.push(`clerk_cutover: ${fm.clerk_cutover}`)
   if (fm.pinned === true) lines.push('pinned: true')
+  if (fm.playbook === true) lines.push('playbook: true')
   lines.push('---')
   return lines.join('\n')
 }
@@ -1320,6 +1510,7 @@ function clerkWrite(kind, frontmatter, dataDir) {
     ...(typeof frontmatter.record_type === 'string' ? { record_type: frontmatter.record_type } : {}),
     ...(typeof frontmatter.clerk_cutover === 'string' ? { clerk_cutover: frontmatter.clerk_cutover } : {}),
     ...(frontmatter.pinned === true ? { pinned: true } : {}),
+    ...(frontmatter.playbook === true ? { playbook: true } : {}),
   }
   fs.appendFileSync(indexFile, JSON.stringify(row) + '\n', 'utf8')
   updateInverted('tags.json', frontmatter.id, frontmatter.tags || [], true)
@@ -1513,6 +1704,7 @@ function clerkBuildMergeFrontmatter(members) {
     ...(priorities.length ? { priority: Math.max(...priorities) } : {}),
     ...(reviewBys.length ? { review_by: reviewBys.slice().sort()[reviewBys.length - 1] } : {}),
     clerk_cutover: CLERK_CUTOVER_MARKER,
+    ...(members.some(m => m.playbook === true) ? { playbook: true } : {}),
     body: digestBody,
   }
 }
@@ -1853,16 +2045,6 @@ async function clerkApplyMain() {
   try { triggerIndex = loadMergedTriggerIndex({ project: LOCAL_DIR === DATA_DIR ? path.dirname(LOCAL_DIR) : undefined }) } catch {}
   clerkRegisterTriggers(triggerIndex)
 
-  const today = new Date().toISOString().slice(0, 10)
-  let protectedIds = new Map()
-  try {
-    const protectionRows = [
-      ...loadProtectionRows(fs, path, LOCAL_DIR, 'local'),
-      ...loadProtectionRows(fs, path, GLOBAL_DIR, 'global'),
-    ]
-    protectedIds = computeProtectedIds(protectionRows, today, [])
-  } catch {}
-
   const { clusters, supersessionAdjacent } = clerkBuildClusters(activeRaw)
   const storeFp = clerkStoreFingerprint(activeRaw)
 
@@ -1902,6 +2084,20 @@ async function clerkApplyMain() {
     }
     lockHandle = acq.handle
   }
+  // R4d: the bare catch {} that used to wrap this is the anti-pattern RFC-015:91
+  // names. Protection failures abort; they are never swallowed. The hardcoded []
+  // third argument is replaced by the resolver's real declared ids (R4b).
+  const clerkProt = resolveProtectionOrAbort({
+    scopeArg: scope,
+    storeList: SINGLE_SCOPE_PROTECTION_STORES,
+    abortOnLocalPlaybooks: true,
+  })
+  if (clerkProt.abort) {
+    if (lockHandle) release(lockHandle)
+    emitProtectionAbort(clerkProt.abort, 'clerk-apply')
+  }
+  const protectedIds = clerkProt.protectedIds
+  const clerkPlaybookIds = clerkProt.playbookIds
   // GREEN: read the rejected set + mark suppression AFTER the lock is held.
   if (!_breakLockedReread) priorRejected = markSuppression()
   const newRejectedSet = new Set(priorRejected)
@@ -1927,7 +2123,7 @@ async function clerkApplyMain() {
       // Guard: protected non-pinned member blocks merge/dedupe (F4).
       const protectedHit = p.memberIds.find(id => protectedIds.has(id))
       if (protectedHit) { skippedGuard.push({ members: p.memberIds, reason: `protected:${protectedIds.get(protectedHit).reason}` }); continue }
-      const canonicalId = p.members[0].id
+      const canonicalId = (p.members.find(m => m.playbook === true) || p.members[0]).id
       if (_simRaceSupersedeCanonical) clerkWrite('index-flip', { id: canonicalId, superseded_by: '__race__' }, DATA_DIR)
       // Guard: canonical already superseded (F4) → refuse, no write.
       const freshCanon = clerkReadIndexRows(DATA_DIR).get(canonicalId)
@@ -1936,7 +2132,7 @@ async function clerkApplyMain() {
       if (p.action === 'dedupe') {
         for (const m of p.members) { if (m.id !== canonicalId) clerkWrite('index-flip', { id: m.id, superseded_by: canonicalId }, DATA_DIR) }
         if (_simCrashAfterSupersede) process.exit(1)
-        applied.push({ action: 'dedupe', canonical: canonicalId, superseded: p.memberIds.filter(id => id !== canonicalId), members: p.memberIds })
+        applied.push({ action: 'dedupe', canonical: canonicalId, superseded: p.memberIds.filter(id => id !== canonicalId), members: p.memberIds, playbook_marked: p.members.find(m => m.id === canonicalId)?.playbook === true })
       } else {
         const digest = clerkBuildMergeFrontmatter(p.members)
         if (_breakOldWriter) {
@@ -1952,7 +2148,7 @@ async function clerkApplyMain() {
           for (const m of p.members) clerkWrite('index-flip', { id: m.id, superseded_by: digest.id }, DATA_DIR) // (2) supersede
           if (_simCrashAfterSupersede) process.exit(1)     // dangerous orphan window
         }
-        applied.push({ action: 'merge', digest_id: digest.id, superseded: p.memberIds, members: p.memberIds })
+        applied.push({ action: 'merge', digest_id: digest.id, superseded: p.memberIds, members: p.memberIds, playbook_marked: p.members.some(m => m.playbook === true) })
       }
     }
 
@@ -1977,11 +2173,36 @@ async function clerkApplyMain() {
     release(lockHandle)
   }
 
+  const clerkProtectedClusters = (Array.isArray(skippedGuard) ? skippedGuard : [])
+    .filter(s => s && typeof s.reason === 'string' && s.reason.startsWith('protected:'))
+    .map(s => s.members)
+  const { allSkips: protectionSkips, playbookSkips: protectionPlaybookSkips } =
+    partitionProtectionSkips(clerkProtectedClusters, protectedIds)
+  const clerkMarkedConsolidations = applied
+    .filter(a => a.playbook_marked === true)
+    .map(a => {
+      if (a.action === 'merge') {
+        return { resolves_to: a.digest_id, kind: 'digest', members: a.members || [] }
+      }
+      if (a.action === 'dedupe') {
+        return { resolves_to: a.canonical, kind: 'canonical', members: a.members || [] }
+      }
+      return null
+    })
+    .filter(Boolean)
+  const applyAdvisory = buildConsolidationAdvisory({
+    localDataDir: LOCAL_DIR,
+    playbookIds: clerkPlaybookIds,
+    protectedClusters: protectionPlaybookSkips,
+    markedConsolidations: clerkMarkedConsolidations,
+  })
   const out = {
     status: 'ok', mode: 'clerk-apply',
     applied,
     proposals: proposals.filter(p => !p.suppressed).map(p => ({ members: p.memberIds, action: p.action, fingerprint: p.fingerprint })),
     rejected: rejectedThisRun, skipped_guard: skippedGuard,
+    ...(protectionSkips.length ? { protection_skips: protectionSkips } : {}),
+    ...(applyAdvisory ? { playbook_advisory: applyAdvisory } : {}),
     run_record: runRecordId, orphans,
     conversion: _applyConversion,
   }
