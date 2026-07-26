@@ -89,11 +89,22 @@ A registered `session_start` playbook that remains **unread** does not fall sile
 - **(a) Re-surfacing.** The activation adapter re-renders an unread `session_start` playbook pointer on subsequent `UserPromptSubmit` events — bounded to at most one playbook line per prompt event and suppressed the moment the read lands. *Unread* is computed from data the substrate already maintains: the episode's `last_accessed` (bumped by the R7/RFC-011 tracked read) versus the latest `session_start` inject event for that episode id in the activation log. This also closes the mid-session registration gap by construction: a playbook registered mid-session is unread by definition and surfaces on the very next prompt, not at the next session start.
 - **(b) Read-boundary amendment, stated explicitly.** RFC-009 REQ-19 confines event-time reads to the trigger index plus `lesson-suppress.json`; R7a adds the activation log tail (`.episodic-memory/activation-log.jsonl`, already written by this same adapter under RFC-009 R6) as a third sanctioned event-time read. Same store, append-only, stat-then-tail bounded; fail-open — an absent or unparseable log disables re-surfacing, never injection.
 - **(c) Doctor check `playbook-unread`** (joins the R5 table): warns when a declared playbook's inject count since its last read exceeds a threshold (default 3) — the a6c2 signature (seven injects, zero reads) becomes an operator-visible finding instead of a frozen counter nobody joins.
-- **(d) Enforcement stays out.** A gate that blocks work until the READ happens is a behavior-pattern concern (`bp-XXX`, RFC-008 layer) — named here as the recommended companion for operators who want the strong tier, and explicitly not part of this RFC (B-1).
+- **(d) Enforcement is layered, not smuggled.** R7a-c stay advisory (B-1). The blocking tier the operator directed (2026-07-26, "use hooks to solve this") is specced as **R9** — an enforcement-layer requirement, cleanly outside the substrate boundary.
 
 ### R8 — Digest body dedup in consolidation (Problem 6)
 
 `em-consolidate` digest assembly dedups member bodies by content before concatenation: byte-identical member bodies collapse to one copy, with the member provenance list (`(id: ..., date)` headers) preserved for every member. Applies to both digest-write paths (legacy `em-consolidate.mjs:1081-1095`, clerk `:1503-1517`). The v15 digest class (five identical editions, ~5x read cost) becomes one edition with five provenance headers. Near-identical bodies (revision chains consolidated together) are out of scope for P1 — only byte-identical dedup, the conservative half that cannot lose content.
+
+### R9 — Playbook-read gate (enforcement layer; operator-directed 2026-07-26)
+
+A behavior pattern (`patterns/bp-XXX.json`) plus a PreToolUse gate hook, living entirely in the enforcement layer (RFC-008 R1/R2: depends on the substrate, never the reverse; B-1 untouched because this is not substrate code):
+
+- **Trigger condition.** A `session_start`-mode playbook pointer was injected this session and the episode has no tracked read at or after that inject (same unread-join as R7a, computed from the activation log plus the index row).
+- **Gate behavior.** While the condition holds, the gate blocks the session's first **non-read-only** tool call (write/edit/commit-class, per the existing command classifier) with a message naming the exact pending `read_command`(s). Read-only calls — including the read command itself — always pass, so the gate can never deadlock the action that clears it (the `never_make_user_run_marker_commands` class).
+- **Consent and scope (Principle 12, all four invariants).** Registered only in `<project>/.claude/settings.json`, per-project opt-in, honors `enforce-config.json` `active` (currently `false` in this repo — the gate ships dormant until the operator arms it), removable by the per-project enforcement uninstall. The substrate and the R7 advisory tier function identically with the gate absent (I-4).
+- **Mute surface.** `lesson-suppress.json` muting a playbook id also clears it from the gate condition — one sanctioned mute surface, no second suppression path (RFC-011 R1 posture).
+
+**Why both tiers:** the advisory tier (R7) is cross-tool and always-on; the gate is the Rule-18 answer for harnesses with PreToolUse support, because this RFC's own origin evidence (seven injections, zero reads, and the orchestrator authoring this document skipping the pointer until operator intervention) shows advisory pointers lose to task momentum.
 
 ### Data-artifact contracts
 
@@ -140,6 +151,7 @@ One phase, two slices:
 - **P1-S2** — R4 consolidation closure (protection parity on both apply paths, marker inheritance, dangling-registration advisory). This slice **folds GitHub issue #610** (the standalone protection-gap defect report); #610 is closed against this RFC and tracked here, not as an issue.
 - **P1-S3** — R7 unread-pointer re-surfacing: adapter re-render leg + REQ-19 read-boundary amendment + `playbook-unread` doctor check (folds the 2026-07-26 follow-through finding: seven injections, zero reads).
 - **P1-S4** — R8 digest body dedup in both `em-consolidate` digest-write paths (folds the 2026-07-26 v15 5x-duplicate-digest finding).
+- **P1-S5** — R9 playbook-read gate: `bp-XXX` pattern + PreToolUse gate hook, per-project install path, dormant behind `enforce-config.json` (enforcement layer; separate PR from the substrate slices so the RFC-008 R1 boundary stays reviewable).
 
 **Finding-folding rule (operator directive, 2026-07-26):** defects and gaps surfaced by review rounds on this RFC are folded in as new slices (P1-S5, ...) or amendments — no standalone issues are filed for them.
 
@@ -159,6 +171,7 @@ One phase, two slices:
 | T10 | unread re-surfacing | after a session_start inject with no subsequent read, the next prompt event re-renders the pointer (at most one playbook line per event); a tracked `--read` suppresses re-surfacing on the following event; registering a playbook mid-session surfaces it on the next prompt without a session restart |
 | T11 | R7 fail-open | absent activation log / unparseable log / log naming an unknown episode → re-surfacing silently disabled, normal injection unaffected, exit 0, no decision field (RFC-009 advisory invariant preserved on every leg) |
 | T12 | digest dedup | consolidating five byte-identical member bodies yields one body copy + five provenance headers (both digest paths); non-identical bodies remain fully concatenated; digest read round-trips byte-exact for the surviving content |
+| T13 | read gate | mock-project E2E (real install, isolated HOME): with gate armed + unread session_start playbook, first write-class call blocks naming the pending read_command; the read command itself passes while blocked; after a tracked read the same call passes; `enforce-config.json` `active:false` → gate never fires on the same input (both polarities, nothing else changed); suppressed playbook id → gate clear; gate absent → substrate + R7 behavior byte-identical |
 
 ## Implementation
 
