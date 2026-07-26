@@ -137,7 +137,7 @@ R1-R6, R8: substrate-CLI-side — every tool that shells the `em-*` scripts gets
 
 ### Substrate script coverage (disposition per em-* script)
 
-- **CHANGED:** `em-store.mjs` (R1/R2/R3), `em-revise.mjs` (R1/R2/R3), `em-consolidate.mjs` (R4/R8), `em-doctor.mjs` (R5/R7c), `em-rebuild-index.mjs` (R1 marker joins the LOCKSTEP frontmatter whitelist, `:225-260` — round-1 F2), `em-trigger-index.mjs` (exports only: the shared chain-resolution helper, behavior identical — round-1 F7). Adapter-side (not em-*): the activation runner + matcher gain the R7a re-surfacing leg.
+- **CHANGED:** `em-store.mjs` (R1/R2/R3), `em-revise.mjs` (R1/R2/R3), `em-consolidate.mjs` (R4/R8), `em-doctor.mjs` (R5/R7c), `em-rebuild-index.mjs` (R1 marker joins the LOCKSTEP frontmatter whitelist, `:225-260` — round-1 F2), `em-trigger-index.mjs` (the shared chain-resolution helper export, behavior identical — round-1 F7; plus the P1-S5 `isMainModule` realpath hardening, an intentional CLI behavior change under symlinked invocation). Adapter-side (not em-*): the activation runner + matcher gain the R7a re-surfacing leg.
 - **INTERACTS, UNCHANGED:** `lib/protection.mjs` (class list unchanged; R4b feeds it real inputs — unless F7's export lands here instead of em-trigger-index), `em-prune.mjs` (protection stays declaration-based — the marker alone protects nothing, see Non-goals), `em-search.mjs` (`--read` untouched).
 - **UNCHANGED:** all remaining `em-*` scripts.
 
