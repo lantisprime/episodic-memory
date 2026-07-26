@@ -31,7 +31,7 @@ Empirical driver: the tiered-orchestration playbook v15 (`20260722-133545-consol
 
 ### Boundary invariants (bind every requirement below)
 
-- **B-1 Enforcement-free.** Every mechanism here is advisory data or a read-only audit; nothing gates, blocks, or decides (RFC-008 R1; CAPABILITIES.md criterion 4).
+- **B-1 Enforcement-free substrate, partitioned enforcement tier.** Every **substrate** mechanism (R1-R8) is advisory data or a read-only audit; nothing in any `em-*` script or the activation adapter gates, blocks, or decides (RFC-008 R1; CAPABILITIES.md criterion 4, and its boundary test: "if it gates workflow, it is an adjacent layer"). The one gating mechanism in this RFC (R9) lives entirely in that adjacent enforcement layer — `bp-XXX` pattern + project-registered hook under the `enforcement` plugin type (RFC-008 R8) — and the substrate plus R7 advisory tier behave byte-identically with it absent (P12 I-4; asserted by T13's final leg).
 - **B-2 Consent-preserving.** No code path writes `playbooks.json` without an explicit per-invocation operator flag. Detection and suggestion are automatic; the write is intentional (Principle 3; RFC-011 R1 "writing it is the activation consent" — this RFC gives the operator a pen, not an autopilot).
 - **B-3 Per-project scope.** Registration stays local-store-only (RFC-011 R1/R2 reaffirmed). No global variant is introduced.
 - **B-4 Marker is authoring-time data.** The `playbook` marker is frontmatter written when the episode is created or revised; episode ids and existing bodies are never mutated (Principle 7).
@@ -119,7 +119,7 @@ A behavior pattern (`patterns/bp-XXX.json`) plus a PreToolUse gate hook, living 
 
 ### Per-tool tier (Principle 5)
 
-R1-R6, R8: substrate-CLI-side — every tool that shells the `em-*` scripts gets identical behavior, STRONG across claude-code / codex / cursor / windsurf by construction. R7a-b touch the activation adapter's per-prompt surface and therefore inherit RFC-009/RFC-011's adapter tiers: claude-code STRONG; tools without a per-prompt hook surface degrade to session-start-only rendering (no re-surfacing) — honest WEAK, with R7c's doctor check as their fallback visibility.
+R1-R6, R8: substrate-CLI-side — every tool that shells the `em-*` scripts gets identical behavior, STRONG across claude-code / codex / cursor / windsurf by construction. R7a-b touch the activation adapter's per-prompt surface and therefore inherit RFC-009/RFC-011's adapter tiers: claude-code STRONG; tools without a per-prompt hook surface degrade to session-start-only rendering (no re-surfacing) — honest WEAK, with R7c's doctor check as their fallback visibility. R9 requires a blocking PreToolUse surface: claude-code STRONG; every tool without one has **no gate at all** — an honest absence per Principle 5, never emulated by a weaker mechanism, with R7 as the universal advisory floor.
 
 ### Substrate script coverage (disposition per em-* script)
 
