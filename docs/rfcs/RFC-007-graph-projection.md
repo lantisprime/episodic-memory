@@ -81,8 +81,8 @@ unprojectable. That tension is tracked on issue #585 with the other `entry_point
 | `evidence` | SHIPPED (`em-graph.mjs:177-180`) |
 | `cites` | SHIPPED (`em-graph.mjs:181-183`, `bodyCitations` at `:156-167`) |
 | `tags` | SHIPPED (`em-graph.mjs:184-186`), opt-in |
-| `wiki-link` | UNBUILT — Phase 3 |
-| `composes-with` | UNBUILT — Phase 3 |
+| `wiki-link` | SHIPPED — `em-graph.mjs:320` |
+| `composes-with` | SHIPPED — `em-graph.mjs:332` |
 | `trigger-phrase` | UNBUILT — Phase 5 |
 | `cites-pr` | UNBUILT — Phase 5 |
 
@@ -100,7 +100,7 @@ unprojectable. That tension is tracked on issue #585 with the other `entry_point
 
 **Unbuilt edge details (preserved verbatim from the original RFC).**
 
-- `wiki-link` — `[[name]]` matches in rule bodies; `source → target`; resolved against rule slug index via `slugify()`; dangling links recorded as `wiki-link-dangling`; fenced code blocks + inline backticks skipped.
+- `wiki-link` — `[[name]]` matches in rule bodies; `source → target`; resolved against rule slug index via `slugify()`; dangling links recorded in the `wiki-link` bucket; fenced code blocks + inline backticks skipped.
 - `composes-with` — top-level bullets under `## Composes with` heading in rule files; `source → target`; markdown-list-item parsing; same `slugify()` resolution as wiki-link; nested bullets ignored.
 - `trigger-phrase` — machine-readable trigger block in `MEMORY.md` (added in PR-5); `phrase → rule`; JSON-block parser; falls back to no-edges + stderr warning if block missing.
 - `cites-pr` — `pr-\d+` tag (primary). `#NNN` body mention contributes ONLY when episode is also tagged `pr-NNN`. `episode → pr` (pseudo-node); body-only mention without tag yields no edge — prevents meta-commentary false positives.
@@ -141,6 +141,16 @@ slugify(name) =
 ```
 
 Rule-file slugs derive from frontmatter `name:`. Filename-derived slugs are NOT used (filenames may carry `.md`, version suffixes, etc.). Two rule files producing the same slug = build-time error. The ASCII-after-NFC policy guarantees reproducibility across consumers in other languages (Python/Rust/etc.) reading `graph.json` directly.
+
+### Target resolution
+
+Node ids are `slugify(frontmatter name)` and nothing else — the rule above is unchanged. Link *targets* resolve in two steps, because authors write links by filename:
+
+1. `slugify(target)` matched against the node-id index.
+2. Failing that, matched against a filename-alias index: `slugify(basename)` of each rule file, mapped to that file's node id. A basename shared by two files is ambiguous and is dropped, so the link dangles rather than resolving to a guess.
+3. Failing both, the link is recorded in the edge type's dangling bucket.
+
+This is what the `composes-with` "resolved by file basename" clause below already requires, and it does not reintroduce filename-derived node *ids*. Measured against the reference corpus at adoption (135 rule files, 127 with `name:`): wiki-link resolution 13 → 122 of 132, composes-with 0 → 51 of 76.
 
 ### Edge extraction rules
 
@@ -381,7 +391,7 @@ No integration with `em-rebuild-index.mjs` exists or is needed in v1, because no
 |---|---|---|---|---|
 | Phase 1 | **SHIPPED** | Per-query typed-edge projection: `episode` + `tag` nodes; `supersedes`, `consolidates`, `evidence`, `cites`, `tags` edges; `--from` / `--orphans` / `--hubs` modes; depth + limit bounds; scope selection. Delivered by PR #468, hardened by PR #472. | `scripts/em-graph.mjs` | `tests/test-em-graph.mjs` (10 cases; CI-wired at `.github/workflows/tests.yml:401-402`) |
 | Phase 2 | **SHIPPED** | `rule` + `rfc` node projection (the feedback corpus and the RFC set become traversable); `entry_point` frontmatter convention. PR #604 (`df93920`). | `scripts/em-graph.mjs`; rule-file / RFC consumers | projection fixtures; entry-point allowlist fixture |
-| Phase 3 | **UNBUILT** | `wiki-link` + `composes-with` edges; `slugify()` resolution; dangling tracking; 15-shape variant fixture. | `scripts/em-graph.mjs` | parser fixtures |
+| Phase 3 | **SHIPPED** | `wiki-link` + `composes-with` edges; `slugify()` resolution; dangling tracking; 15-shape variant fixture. | `scripts/em-graph.mjs` | parser fixtures |
 | Phase 4 | **UNBUILT** | Graph-health audit surface: `dangling[]`, `nodes_with_no_edges[]`, `entry_points[]`, `--graph-health`; CI validator; contract-mirror validator (`scripts/rfc-graph-contract-validate.mjs` — never created). | `scripts/em-graph.mjs`; new `scripts/rfc-graph-contract-validate.mjs`; CI wiring | audit matrix; OQ-2 threshold fixture |
 | Phase 5 | **UNBUILT** | `cites-pr` edge; MEMORY.md machine-readable trigger block plus the `trigger-phrase` parser. | `MEMORY.md`; `scripts/em-graph.mjs` | parser fixtures; cluster-membership rule fixtures |
 | Phase 6 | **DEFERRED** | Persisted derived graph index (all of Storage Part 2): `graph.json` with `$schema_version` / `rebuilt_at` / `scope_root` / `node_count` / `edge_count` / `nodes` / `edges` / `dangling[]` / `nodes_with_no_edges[]`; atomic temp+rename; `entry_point` orphan allowlist; `entry_points[]` audit array; the `assertGraphFileLocation` axis-9 helper and its caller-cwd-elsewhere fixtures; the `envelope_version` envelope and `source` fallback enum. Trigger condition: rebuild cost per query becomes the binding constraint. | `scripts/em-graph.mjs`; `scripts/em-rebuild-index.mjs` | persisted-index fixtures; envelope-version migration |
@@ -391,8 +401,8 @@ No integration with `em-rebuild-index.mjs` exists or is needed in v1, because no
 ```mermaid
 graph TD
     P1[Phase 1 SHIPPED: per-query typed-edge projection]
-    P2[Phase 2 UNBUILT: rule + rfc node types]
-    P3[Phase 3 UNBUILT: wiki-link + composes-with]
+    P2[Phase 2 SHIPPED: rule + rfc node types]
+    P3[Phase 3 SHIPPED: wiki-link + composes-with]
     P4[Phase 4 UNBUILT: graph-health audit + contract-mirror validator]
     P5[Phase 5 UNBUILT: cites-pr + trigger-phrase]
     P6[Phase 6 DEFERRED: persisted derived graph.json index]
@@ -585,7 +595,7 @@ Detailed round-1 finding table preserved below for historical record.
   "_shipped_edge_types": ["supersedes", "consolidates", "evidence", "cites", "tags"],
   "_shipped_default_edges": ["supersedes", "consolidates", "evidence", "cites"],
   "slugify": {
-    "_shipped_use": "not used by the shipped script — tag names are lowercased and trimmed inline (em-graph.mjs:185); slugify() becomes load-bearing in Phase 3 (wiki-link, composes-with)",
+    "_shipped_use": "called by scanRuleNodes (lib/rule-nodes.mjs:117) for rule-node ids since Phase 2, and by the Phase 3 link parsers (em-graph.mjs:239 filename alias, em-graph.mjs:251 edge-target slug) for edge-target resolution. Tag ids still lowercase inline (em-graph.mjs:314) and do NOT use slugify.",
     "unicode_normalize": "NFC",
     "trim": true,
     "case": "lower",
@@ -667,11 +677,11 @@ Detailed round-1 finding table preserved below for historical record.
     },
     {
       "type": "wiki-link",
-      "status": "UNBUILT (Phase 3)",
+      "status": "SHIPPED",
       "source_node_type": "rule",
       "target_node_type": "rule",
       "source_field": "rule.body",
-      "parser": "regex:\\[\\[([^\\]|#]+)([|#][^\\]]*)?\\]\\]",
+      "parser": "regex:\\[\\[([^\\]|#]+)(?:#[^\\]|]*)?(?:\\|[^\\]]*)?\\]\\]",
       "slug_resolver": "slugify",
       "skip_when": ["inside-fenced-code-block", "inside-inline-backticks", "empty-name"],
       "dangling_bucket": "wiki-link",
@@ -679,7 +689,7 @@ Detailed round-1 finding table preserved below for historical record.
     },
     {
       "type": "composes-with",
-      "status": "UNBUILT (Phase 3)",
+      "status": "SHIPPED",
       "source_node_type": "rule",
       "target_node_type": "rule",
       "source_field": "rule.body['## Composes with' section, top-level bullets only]",
