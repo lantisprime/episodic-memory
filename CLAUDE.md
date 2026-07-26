@@ -54,4 +54,5 @@ node scripts/em-list.mjs
 node scripts/em-revise.mjs --original <id> --summary "revised" --body "correction"
 node scripts/em-search.mjs --history <id> --full
 node scripts/em-rebuild-index.mjs --scope all
+node scripts/em-store.mjs --project test --category lesson --summary "pb" --body "b" --scope local --playbook --register-playbook session_start
 ```
