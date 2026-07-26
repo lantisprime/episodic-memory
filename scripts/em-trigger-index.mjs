@@ -148,7 +148,10 @@ function accessCountById(rows) {
 // ---------------------------------------------------------------------------
 
 /** Follow the supersession chain FORWARD to the terminal row (cycle-safe). */
-function terminalOf(id, byId, successorOf) {
+// RFC-015 R2/F7: exported so the registration advisory + the doctor audit
+// reuse the SAME chain-walker (a second terminal walker would drift exactly
+// the way second parsers do). Behavior unchanged.
+export function terminalOf(id, byId, successorOf) {
   const seen = new Set()
   let cur = id
   while (!seen.has(cur)) {
@@ -161,7 +164,10 @@ function terminalOf(id, byId, successorOf) {
   return byId.get(cur) // cycle: return where we stopped
 }
 
-function buildChainMaps(rows) {
+// RFC-015 R2/F7: exported alongside terminalOf for the same reason — the
+// registration advisory + doctor audit must reuse the single chain-map
+// builder. Behavior unchanged.
+export function buildChainMaps(rows) {
   const byId = new Map()
   const successorOf = new Map() // predecessor id -> successor id (via `supersedes`)
   for (const row of rows) {
@@ -310,7 +316,10 @@ export function parsePlaybooksConfig(storeDir) {
 }
 
 /** Hand-rolled structural validation mirroring schemas/playbooks.schema.json. */
-function validatePlaybooksShape(doc) {
+// RFC-015 R2/F7: exported so registerPlaybook (scripts/lib/playbook-registration.mjs)
+// reuses the parser's own validator (the unique-by-id check + maxItems + the
+// schema mirroring checks live here, not duplicated downstream).
+export function validatePlaybooksShape(doc) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return 'root must be an object'
   for (const k of Object.keys(doc)) if (!PLAYBOOKS_TOP_KEYS.has(k)) return `unknown key "${k}"`
   if (doc.schema_version !== 1) return 'schema_version must be the integer 1'

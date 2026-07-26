@@ -48,7 +48,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope local|global] [--pin] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-store.mjs', usage: 'node em-store.mjs --project <name> --category <cat> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope local|global] [--pin] [--playbook] [--register-playbook [session_start|on_demand]] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before the script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 
@@ -105,6 +105,61 @@ const lessonLinks = flagAll('--lesson')
 // --pin: exempt from time decay (recall floor 0.6 instead of 0.1) and from
 // em-prune archival. For foundational decisions that must not fade.
 const pinned = argv.includes('--pin')
+
+// RFC-015 P1-S1: marker + registration flag.
+// --playbook: write `playbook: true` to episode frontmatter + index row.
+// --no-playbook: accepted, no-op (the marker default is absent).
+// --register-playbook [session_start|on_demand]: upsert the entry into the
+// CURRENT project's local playbooks.json; implies --playbook; bare flag
+// defaults to session_start. Contradictions with --no-playbook are refused
+// BEFORE any write (§12 validate-then-write). Scope + mode refusals also
+// fire here.
+const hasPlaybookFlag = argv.includes('--playbook')
+const hasNoPlaybookFlag = argv.includes('--no-playbook')
+const hasRegisterPlaybookFlag = argv.includes('--register-playbook')
+if (hasPlaybookFlag && hasNoPlaybookFlag) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--playbook and --no-playbook are contradictory; pass only one.',
+  }))
+  process.exit(1)
+}
+if (hasRegisterPlaybookFlag && hasNoPlaybookFlag) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--register-playbook and --no-playbook are contradictory; pass only one.',
+  }))
+  process.exit(1)
+}
+if (hasRegisterPlaybookFlag && scope === 'global') {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--register-playbook requires a local-scope store (B-3); registration is per-project.',
+  }))
+  process.exit(1)
+}
+// Resolve --register-playbook's mode (bare flag = session_start; next-token
+// must be a mode string OR the next flag, never arbitrary). Mirrors the
+// validate-then-write discipline of em-store's body flag handling.
+let registerMode = null
+if (hasRegisterPlaybookFlag) {
+  const i = argv.indexOf('--register-playbook')
+  const next = argv[i + 1]
+  if (next === undefined || next.startsWith('--')) {
+    registerMode = 'session_start'
+  } else if (next === 'session_start' || next === 'on_demand') {
+    registerMode = next
+  } else {
+    console.log(JSON.stringify({
+      status: 'error',
+      message: `--register-playbook mode must be session_start or on_demand (got "${next}")`,
+    }))
+    process.exit(1)
+  }
+}
+// --register-playbook implies --playbook (the file is the consent; the
+// marker is the assertion that THIS episode is the playbook).
+const playbookMarker = hasPlaybookFlag || hasRegisterPlaybookFlag
 
 // Category vocabulary comes from categories.json via lib/categories.mjs (RFC-009 R10b).
 // USAGE derives the member list fail-safely so --help never crashes when the vocab is
@@ -354,6 +409,10 @@ if (lessonLinks.length) fmLines.push(`lessons: [${serializeInlineArray(lessonLin
 // T6 typed scalar (REQ-8): violation-side passthrough from em-violation's handoff.
 if (violatedPattern !== undefined) fmLines.push(`violated_pattern: ${violatedPattern}`)
 if (pinned) fmLines.push('pinned: true')
+// RFC-015 R1: the playbook marker is an authoring-time predicate written
+// alongside the present-only activation fields (mirrors the `pinned` line
+// pattern; round-trips the rebuild whitelist).
+if (playbookMarker) fmLines.push('playbook: true')
 if (url) {
   fmLines.push(`url: ${url}`)
   fmLines.push(`fetched: ${dateStr}`)
@@ -390,6 +449,7 @@ const indexEntry = JSON.stringify({
   status: 'active', supersedes: null, tags, summary,
   ...activationIndexFields,
   ...(pinned ? { pinned: true } : {}),
+  ...(playbookMarker ? { playbook: true } : {}),
   ...(url ? { url, fetched: dateStr } : {})
 })
 fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
@@ -402,6 +462,59 @@ updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeConte
 
   storedId = id
   successPayload = { status: 'ok', id, file: filePath, scope }
+
+  // RFC-015 P1-S1: marker carry + registration + advisory. Still INSIDE the
+  // store-write-lock span (NSP G1 concurrency contract: registration runs
+  // alongside the episode write, no new lock site). Lazy-imported so the
+  // absent-flag path carries zero import cost (REQ-6 zero-cost for
+  // non-playbook stores).
+  if (playbookMarker || hasRegisterPlaybookFlag) {
+    try {
+      const reg = await import('./lib/playbook-registration.mjs')
+      let regResult = null
+      // (a) registration: only when the flag is present. Refusal ALWAYS
+      // wins; the file is untouched (file byte-identical). The episode is
+      // already stored — refusal prints the error JSON + exit 1 AFTER the
+      // episode has landed, recoverable via re-run with --register-playbook
+      // (EC6 / T15-driven ordering decision).
+      if (hasRegisterPlaybookFlag) {
+        regResult = reg.registerPlaybook({ episodeId: id, mode: registerMode, localDataDir: dataDir })
+        if (!regResult.ok) {
+          successPayload = {
+            ...successPayload,
+            status: 'error',
+            code: regResult.code,
+            message: regResult.message,
+            stored_id: id,
+          }
+        }
+      }
+      // (b) advisory: marker present (with or without --register-playbook)
+      // → append playbook_advisory. Computation NEVER throws the caller
+      // (try/catch inside buildPlaybookAdvisory). Falls through to the
+      // stdout print below.
+      if (playbookMarker && successPayload.status === 'ok') {
+        // ALWAYS name the cwd LOCAL store as project_store, even when the
+        // episode lives in --scope global — registration is per-project
+        // (B-3), so the audit surface is the cwd local store.
+        successPayload.playbook_advisory = reg.buildPlaybookAdvisory({ episodeId: id, localDataDir: LOCAL_DIR })
+        // (c) registration ok with a build-cap note: annotate the advisory.
+        if (regResult && regResult.ok && regResult.buildCapped) {
+          successPayload.playbook_advisory = {
+            ...successPayload.playbook_advisory,
+            note: successPayload.playbook_advisory.note + ' (build will cap; session_start count exceeds max_playbooks)',
+            build_capped: true,
+          }
+        }
+      }
+    } catch (e) {
+      // Import or unexpected failure: register the error in the payload
+      // but never throw the caller. The episode is already stored.
+      if (successPayload.status === 'ok') {
+        successPayload.playbook_advisory = { registered: false, project_store: LOCAL_DIR, note: `advisory computation failed: ${e && e.message ? e.message : String(e)}` }
+      }
+    }
+  }
 } finally {
   releaseStoreWriteLocks(lockHandles)
 }
@@ -447,6 +560,12 @@ if (category === 'decision') {
 }
 
 console.log(JSON.stringify(successPayload))
+
+// RFC-015: registration refusal prints the error payload AND exits non-zero
+// (the user asked for a write; a refusal is a failure of THAT write). The
+// episode is already stored (post-store refusal per EC6 — recoverable via
+// re-run with --register-playbook).
+if (successPayload.status === 'error') process.exit(1)
 
 // Incrementally maintain category-index.json under the episode's canonical category key,
 // structurally mirroring updateTagsIndex (RFC-009 R10d). Deprecated names map to the successor

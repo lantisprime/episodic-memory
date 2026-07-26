@@ -47,7 +47,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before this script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [--playbook] [--no-playbook] [--register-playbook [session_start|on_demand]] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before this script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
   process.exit(0)
 }
 
@@ -90,6 +90,46 @@ const priorityFlag = flag('--priority')
 const reviewBy = flag('--review-by')
 const evidence = flagAll('--evidence')
 const promotionSourcesJson = flag('--promotion-sources-json')
+
+// RFC-015 P1-S1: marker + registration flag (revise-side parity with em-store).
+// The marker is INHERITED from the original episode unless --no-playbook
+// clears it; --playbook sets it on the revision; --register-playbook upserts
+// the entry into the CURRENT project's local playbooks.json. Contradictions
+// fire BEFORE any write (§12 validate-then-write); scope refusal defers
+// until dataDir is resolved (depends on --scope inheritance).
+const hasPlaybookFlag = argv.includes('--playbook')
+const hasNoPlaybookFlag = argv.includes('--no-playbook')
+const hasRegisterPlaybookFlag = argv.includes('--register-playbook')
+if (hasPlaybookFlag && hasNoPlaybookFlag) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--playbook and --no-playbook are contradictory; pass only one.',
+  }))
+  process.exit(1)
+}
+if (hasRegisterPlaybookFlag && hasNoPlaybookFlag) {
+  console.log(JSON.stringify({
+    status: 'error',
+    message: '--register-playbook and --no-playbook are contradictory; pass only one.',
+  }))
+  process.exit(1)
+}
+let registerMode = null
+if (hasRegisterPlaybookFlag) {
+  const i = argv.indexOf('--register-playbook')
+  const next = argv[i + 1]
+  if (next === undefined || next.startsWith('--')) {
+    registerMode = 'session_start'
+  } else if (next === 'session_start' || next === 'on_demand') {
+    registerMode = next
+  } else {
+    console.log(JSON.stringify({
+      status: 'error',
+      message: `--register-playbook mode must be session_start or on_demand (got "${next}")`,
+    }))
+    process.exit(1)
+  }
+}
 
 const VALID_SCOPES_REVISE = ['inherit', 'local', 'global']
 if (!VALID_SCOPES_REVISE.includes(scope)) {
@@ -384,6 +424,7 @@ try {
   // Update the index entry for the original + capture origTags in one pass
   let origTagsFromIndex = []
   let origPinned = false
+  let origPlaybook = false
   const lines = fs.readFileSync(originalIndexFile, 'utf8').trim().split('\n').filter(Boolean)
   const updated = lines.map(line => {
     try {
@@ -391,6 +432,7 @@ try {
       if (entry.id === originalId) {
         if (Array.isArray(entry.tags)) origTagsFromIndex = entry.tags
         if (entry.pinned === true) origPinned = true
+        if (entry.playbook === true) origPlaybook = true
         entry.status = 'superseded'
         return JSON.stringify(entry)
       }
@@ -480,6 +522,13 @@ try {
   // decision. --pin additionally pins an unpinned chain at revision time.
   const pinned = origPinned || argv.includes('--pin')
 
+  // RFC-015 R2: marker inheritance on revise. The marker survives revision
+  // the way pinning does (a corrected playbook episode is still a playbook
+  // episode); --playbook additionally sets it on an undeclared chain;
+  // --no-playbook clears it explicitly (R3 / OQ-1 backfill hop).
+  const playbookMarker =
+    !hasNoPlaybookFlag && (origPlaybook || hasPlaybookFlag || hasRegisterPlaybookFlag)
+
   // RFC-009 R1 activation frontmatter — present-only, arrays UNQUOTED inline
   // (REQ-2/I4); mirrors em-store's serialization (revise-side parity).
   const activationFmLines = []
@@ -510,6 +559,7 @@ try {
     `summary: ${summary}`,
     ...activationFmLines,
     ...(pinned ? ['pinned: true'] : []),
+    ...(playbookMarker ? ['playbook: true'] : []),
     '---',
   ].join('\n')
 
@@ -537,7 +587,8 @@ try {
     category: origCategory, status: 'active', supersedes: originalId,
     tags: mergedTags, summary,
     ...activationIndexFields,
-    ...(pinned ? { pinned: true } : {})
+    ...(pinned ? { pinned: true } : {}),
+    ...(playbookMarker ? { playbook: true } : {})
   })
   fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
 
@@ -558,6 +609,53 @@ try {
   result = {
     status: 'ok', id, file: filePath,
     supersedes: originalId, scope: dataDir === GLOBAL_DIR ? 'global' : 'local'
+  }
+
+  // RFC-015 P1-S1: registration + advisory. Still INSIDE the store-write-
+  // lock span (NSP G1). For em-revise, the effective non-local target is
+  // `dataDir` — we refuse --register-playbook when that resolves to the
+  // GLOBAL store (B-3).
+  if (hasRegisterPlaybookFlag && dataDir === GLOBAL_DIR) {
+    result = {
+      ...result,
+      status: 'error',
+      code: 'playbooks-scope',
+      message: '--register-playbook requires a local-scope store (B-3); registration is per-project.',
+    }
+  } else if (playbookMarker || hasRegisterPlaybookFlag) {
+    try {
+      const reg = await import('./lib/playbook-registration.mjs')
+      let r = null
+      if (hasRegisterPlaybookFlag && result.status === 'ok') {
+        r = reg.registerPlaybook({ episodeId: newId, mode: registerMode, localDataDir: dataDir })
+        if (!r.ok) {
+          result = {
+            ...result,
+            status: 'error',
+            code: r.code,
+            message: r.message,
+            stored_id: newId,
+          }
+        }
+      }
+      if (playbookMarker && result.status === 'ok') {
+        // ALWAYS name the cwd LOCAL store as project_store, even when the
+        // revision lives in --scope global — registration is per-project
+        // (B-3), so the audit surface is the cwd local store.
+        result.playbook_advisory = reg.buildPlaybookAdvisory({ episodeId: newId, localDataDir: LOCAL_DIR })
+        if (r && r.ok && r.buildCapped) {
+          result.playbook_advisory = {
+            ...result.playbook_advisory,
+            note: result.playbook_advisory.note + ' (build will cap; session_start count exceeds max_playbooks)',
+            build_capped: true,
+          }
+        }
+      }
+    } catch (e) {
+      if (result.status === 'ok') {
+        result.playbook_advisory = { registered: false, project_store: LOCAL_DIR, note: `advisory computation failed: ${e && e.message ? e.message : String(e)}` }
+      }
+    }
   }
   }
 } finally {
@@ -584,4 +682,7 @@ if (result.status === 'ok' && activation && Array.isArray(activation.triggers) &
 }
 
 console.log(JSON.stringify(result))
+// RFC-015: registration refusal (or scope refusal) prints the error payload
+// AND exits non-zero. The revision IS already stored when this fires
+// (post-store refusal per EC6).
 if (result.status === 'error') process.exit(1)

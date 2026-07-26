@@ -60,6 +60,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { findContradictionCandidates, SUMMARY_JACCARD_MIN } from './lib/contradiction.mjs'
 import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
+import { parsePlaybooksConfig, terminalOf, buildChainMaps } from './em-trigger-index.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -586,7 +587,204 @@ function checkInstallsDrift() {
 function checkStoreWithDir(dataDir, scopeName) {
   const before = checks.length
   checkStore(dataDir, scopeName)
+  checkPlaybookRegistration(dataDir, scopeName)
   for (let i = before; i < checks.length; i++) checks[i].data_dir = dataDir
+}
+
+// ---------------------------------------------------------------------------
+// RFC-015 R5 (P1-S1) doctor checks — read-only registration audit. Three
+// per-store checks (`playbook-unregistered`, `playbook-registration-health`,
+// `playbook-content-substitution`) + one one-shot (`playbook-global-file`).
+// All warn, all `fix`-less (consent file repair is a consent decision, B-2;
+// not a doctor --fix target). Per-store check recurses via terminalOf (chain-
+// safe via the `seen` set in em-trigger-index.mjs:151-162) so a cyclic chain
+// terminates and reports rather than looping forever (EC8 / T7 cyclic leg).
+//
+// Declaration set (default): the cwd project's playbooks.json — the LITERAL
+// limitation is named in the message (RFC-015 R5). Under --all-projects, the
+// set unions every registered store's playbooks.json (resolveRegisteredStores).
+// ---------------------------------------------------------------------------
+
+// Build a Map<declared-terminal-id, mode> by recomputing each declared entry's
+// chain terminal NOW (RFC-015 R5: never read from cached build_report — the
+// global-store section is zero-state by design and would silently miss
+// declarations that resolve through a local cross-store chain).
+function declaredTerminalMap(entries, localDataDir) {
+  const out = new Map()
+  if (!Array.isArray(entries)) return out
+  // Load this store's index rows + walk chain via the shared terminalOf.
+  let rows = []
+  try {
+    for (const line of fs.readFileSync(path.join(localDataDir, 'index.jsonl'), 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try { const e = JSON.parse(line); if (e && typeof e.id === 'string') rows.push(e) } catch {}
+    }
+  } catch { /* missing index — empty */ }
+  const { byId, successorOf } = buildChainMaps(rows)
+  for (const entry of entries) {
+    if (!entry || typeof entry.id !== 'string') continue
+    const t = terminalOf(entry.id, byId, successorOf)
+    if (t && t.id) out.set(t.id, entry.mode || 'session_start')
+  }
+  return out
+}
+
+// Build a Set<declared-terminal-id> across ALL declaration sources for the
+// current scope — cwd playbooks.json under default scope; the union of every
+// registered store's playbooks.json under --all-projects. Used by the
+// `playbook-unregistered` check to know which marker-bearing terminals are
+// declared (and thus should NOT warn).
+function collectDeclarationTerminalSet(localDataDir) {
+  const set = new Set()
+  // (a) cwd project declaration file (RFC-015 R5 default scope)
+  const cwdPb = parsePlaybooksConfig(localDataDir)
+  if (cwdPb.ok && cwdPb.config) {
+    for (const id of declaredTerminalMap(cwdPb.config.playbooks, localDataDir).keys()) set.add(id)
+  }
+  // (b) --all-projects: union of every registered project's declarations
+  if (allProjects) {
+    for (const st of registeredStores) {
+      const pb = parsePlaybooksConfig(st.data_dir)
+      if (!pb.ok || !pb.config) continue
+      for (const id of declaredTerminalMap(pb.config.playbooks, st.data_dir).keys()) set.add(id)
+    }
+  }
+  return set
+}
+
+function checkPlaybookRegistration(dataDir, scopeName) {
+  const entries = loadIndex(dataDir, scopeName)
+  // (1) `playbook-unregistered`: an active, chain-terminal, marker-bearing
+  // index row whose chain is NOT in the declaration set. Cycle-safe via
+  // terminalOf (seen-set terminates on a cycle; such rows are reported
+  // `unresolvable` so the operator sees the cycle explicitly).
+  const declSet = collectDeclarationTerminalSet(dataDir)
+  const unregistered = []
+  const cyclicSeen = new Set()
+  for (const e of entries) {
+    if (e.playbook !== true) continue
+    if (e.status !== 'active') continue
+    // chain-terminal: terminalOf returns the row itself only when there's no
+    // resolvable forward successor (the same definition em-trigger-index.mjs
+    // uses for build exclusion). We skip rows that are mid-chain — only the
+    // chain-terminal row bears the marker obligation.
+    const { byId, successorOf } = buildChainMaps(entries)
+    const t = terminalOf(e.id, byId, successorOf)
+    if (!t) continue
+    if (t.id !== e.id) continue // not chain-terminal (an earlier id superseded it)
+    if (cyclicSeen.has(e.id)) continue
+    cyclicSeen.add(e.id)
+    if (declSet.has(e.id)) continue
+    unregistered.push(e.id)
+  }
+  if (unregistered.length) {
+    report(
+      'playbook-unregistered', scopeName, 'warn',
+      `${unregistered.length} marker-bearing playbook terminal(s) not declared in any playbooks.json — declare with em-store --register-playbook session_start (limit: cwd playbooks.json under default scope${allProjects ? '; --all-projects unions registered stores' : ''})`,
+      verbose ? { episode_ids: unregistered } : undefined,
+    )
+  } else {
+    report('playbook-unregistered', scopeName, 'ok', 'every marker-bearing playbook terminal is declared (or none present)')
+  }
+
+  // (2) `playbook-registration-health`: declared entries that FAIL resolution
+  // NOW (recomputed from parsePlaybooksConfig + terminalOf over the current
+  // index — never read from cached build_report). Reasons: unresolvable,
+  // inactive, chain_collision, config malformed. The check stays warn for
+  // every reason (the operator decides what to do).
+  const cwdPb = parsePlaybooksConfig(dataDir)
+  if (!cwdPb.ok) {
+    // The cwd file is malformed/absent under default scope. Under
+    // --all-projects we still emit one finding for THIS store's file (the
+    // per-store audit owns its own dataDir). A truly absent file is fine
+    // (State A — not a health failure, the absence is in the
+    // `playbook-unregistered` line above).
+    if (cwdPb.reason) {
+      report(
+        'playbook-registration-health', scopeName, 'warn',
+        `playbooks.json: ${cwdPb.reason} — declaration is unparseable; repair before relying on it (RFC-015 R5, fail-closed posture)`,
+      )
+    } else {
+      report('playbook-registration-health', scopeName, 'ok', 'no playbooks.json to audit (clean absent)')
+    }
+  } else if (!cwdPb.config || !Array.isArray(cwdPb.config.playbooks) || cwdPb.config.playbooks.length === 0) {
+    report('playbook-registration-health', scopeName, 'ok', 'no declared playbooks to audit')
+  } else {
+    const rows = entries
+    const { byId, successorOf } = buildChainMaps(rows)
+    const byTerminal = new Map()
+    const failures = []
+    for (const entry of cwdPb.config.playbooks) {
+      if (!entry || typeof entry.id !== 'string') continue
+      const t = terminalOf(entry.id, byId, successorOf)
+      if (!t) { failures.push({ id: entry.id, reason: 'unresolvable' }); continue }
+      if (t.status !== 'active') { failures.push({ id: entry.id, reason: 'inactive' }); continue }
+      // chain_collision: another declared entry's chain resolves to the
+      // same terminal (the build drops both — RFC-011 R2.2 same-chain rule).
+      const list = byTerminal.get(t.id) || []
+      list.push(entry.id)
+      byTerminal.set(t.id, list)
+    }
+    for (const [, ids] of byTerminal) {
+      if (ids.length > 1) {
+        for (const id of ids) failures.push({ id, reason: 'chain_collision' })
+      }
+    }
+    if (failures.length) {
+      report(
+        'playbook-registration-health', scopeName, 'warn',
+        `${failures.length} declared playbook(s) fail check-time resolution: ${failures.map((f) => `${f.id} (${f.reason})`).join(', ')}`,
+        verbose ? { failures } : undefined,
+      )
+    } else {
+      report('playbook-registration-health', scopeName, 'ok', 'every declared playbook resolves cleanly (recomputed now, not cached)')
+    }
+  }
+
+  // (3) `playbook-content-substitution`: a declared id resolves to a terminal
+  // with non-empty `consolidates` AND terminal id !== declared id (the
+  // declaration now renders auto-generated digest text the operator never
+  // curated; RFC-015 R5 / Problem 2a). Reports the digest id.
+  if (cwdPb.ok && cwdPb.config && Array.isArray(cwdPb.config.playbooks) && cwdPb.config.playbooks.length) {
+    const rows = entries
+    const { byId, successorOf } = buildChainMaps(rows)
+    const substituted = []
+    for (const entry of cwdPb.config.playbooks) {
+      if (!entry || typeof entry.id !== 'string') continue
+      const t = terminalOf(entry.id, byId, successorOf)
+      if (!t) continue
+      if (t.id === entry.id) continue // resolves to itself → not substituted
+      if (!Array.isArray(t.consolidates) || t.consolidates.length === 0) continue // not a digest
+      substituted.push({ declared: entry.id, digest: t.id })
+    }
+    if (substituted.length) {
+      report(
+        'playbook-content-substitution', scopeName, 'warn',
+        `${substituted.length} declared playbook(s) now render a consolidation digest (auto-generated, not curated) — update the declaration or curate the digest body`,
+        verbose ? { substituted } : undefined,
+      )
+    } else {
+      report('playbook-content-substitution', scopeName, 'ok', 'no declared playbook renders a digest terminal')
+    }
+  } else {
+    report('playbook-content-substitution', scopeName, 'ok', 'no declared playbooks to audit')
+  }
+}
+
+// (4) `playbook-global-file`: ONE-SHOT — `~/.episodic-memory/playbooks.json`
+// exists. RFC-015 R6: registration stays per-project (B-3); a global
+// declaration file is silently ignored by the build. The check warns so the
+// operator sees the file.
+function checkPlaybookGlobalFile() {
+  const p = path.join(GLOBAL_DIR, 'playbooks.json')
+  if (fs.existsSync(p)) {
+    report(
+      'playbook-global-file', 'global', 'warn',
+      `${p} exists — global playbooks.json is silently ignored by the build (RFC-015 R6, B-3); registration is per-project only`,
+    )
+  } else {
+    report('playbook-global-file', 'global', 'ok', 'no global playbooks.json (per-project scope, RFC-015 R6)')
+  }
 }
 
 const ranStoreDirs = new Set()
@@ -610,6 +808,8 @@ if (scope === 'global' || scope === 'all') checkInstallsDrift()
 checkInstalledScripts()
 checkBackupConfig()
 checkDrafts()
+// RFC-015 R5: one-shot `playbook-global-file` (runs once, not per-store).
+checkPlaybookGlobalFile()
 
 // ---------------------------------------------------------------------------
 // --fix: rebuild indexes for scopes with rebuildable findings, then re-verify
