@@ -309,6 +309,20 @@ const dataDir = scope === 'inherit'
 const episodesDir = path.join(dataDir, 'episodes')
 const indexFile = path.join(dataDir, 'index.jsonl')
 
+// F4 (review r1): --register-playbook requires a local-scope target (B-3).
+// Refuse BEFORE any lock / write so a global-target revision never lands.
+// The dataDir above is already resolved (scope inheritance done), so the
+// check is unconditional. Exits 1, no revision written — no stored_id
+// (that asymmetry is correct: a pre-write refusal has nothing to point at).
+if (hasRegisterPlaybookFlag && dataDir === GLOBAL_DIR) {
+  console.log(JSON.stringify({
+    status: 'error',
+    code: 'playbooks-scope',
+    message: '--register-playbook requires a local-scope store (B-3); registration is per-project.',
+  }))
+  process.exit(1)
+}
+
 // ---------------------------------------------------------------------------
 // PR-562 snapshot helper (§8.2 in-lock reread, file/index coherence, and the
 // direct-successor set): captures (fileStatus, indexStatus, successors) so
@@ -612,17 +626,10 @@ try {
   }
 
   // RFC-015 P1-S1: registration + advisory. Still INSIDE the store-write-
-  // lock span (NSP G1). For em-revise, the effective non-local target is
-  // `dataDir` — we refuse --register-playbook when that resolves to the
-  // GLOBAL store (B-3).
-  if (hasRegisterPlaybookFlag && dataDir === GLOBAL_DIR) {
-    result = {
-      ...result,
-      status: 'error',
-      code: 'playbooks-scope',
-      message: '--register-playbook requires a local-scope store (B-3); registration is per-project.',
-    }
-  } else if (playbookMarker || hasRegisterPlaybookFlag) {
+  // lock span (NSP G1). F4 (review r1): the B-3 scope refusal is now
+  // pre-write (above the lock acquisition) — this branch only handles
+  // marker carry + advisory + registration.
+  if (playbookMarker || hasRegisterPlaybookFlag) {
     try {
       const reg = await import('./lib/playbook-registration.mjs')
       let r = null
@@ -642,7 +649,13 @@ try {
         // ALWAYS name the cwd LOCAL store as project_store, even when the
         // revision lives in --scope global — registration is per-project
         // (B-3), so the audit surface is the cwd local store.
-        result.playbook_advisory = reg.buildPlaybookAdvisory({ episodeId: newId, localDataDir: LOCAL_DIR })
+        result.playbook_advisory = reg.buildPlaybookAdvisory({
+          episodeId: newId,
+          localDataDir: LOCAL_DIR,
+          episodeStoreDir: dataDir,
+          effectiveTriggers: Array.isArray(activation && activation.triggers) ? activation.triggers : [],
+          mode: registerMode || 'session_start',
+        })
         if (r && r.ok && r.buildCapped) {
           result.playbook_advisory = {
             ...result.playbook_advisory,

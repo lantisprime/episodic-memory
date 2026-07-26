@@ -196,7 +196,7 @@ await t('t1_marker_store: --playbook writes fm + index row + advisory with sugge
   assert.match(r.json.playbook_advisory.note, /not declared/, 'note names the absent declaration');
 });
 
-await t('t2_no_flag_byte_identical: no marker → no advisory → stdout shape exactly {status,id,file,scope}', () => {
+await t('t2_no_flag_byte_identical: no marker → no advisory → stdout byte-identical to the pre-change golden', () => {
   const { cwd, home } = mkStore();
   const r = runStore(
     ['--project', 'rfc015', '--category', 'decision', '--summary', 'rfc015 t2', '--body', 'b', '--scope', 'local'],
@@ -211,10 +211,14 @@ await t('t2_no_flag_byte_identical: no marker → no advisory → stdout shape e
   });
   const idxRow = JSON.parse(idxLine);
   assert.equal(idxRow.playbook, undefined, 'no playbook field in index row');
-  // advisory absent — byte-identical to pre-change golden
-  assert.equal(r.json.playbook_advisory, undefined, 'no playbook_advisory field');
-  const keys = Object.keys(r.json).sort();
-  assert.deepEqual(keys, NO_MARKER_STDOUT_KEYS.slice().sort(), `stdout keys exactly {status,id,file,scope}; got ${keys.join(',')}`);
+  // F6 (review r1): full-stdout golden. Reconstruct the expected object from
+  // the parsed values (id/file are run-generated) and re-serialize with the
+  // exact four keys in the exact pre-change order, then compare to the raw
+  // captured line. This pins both KEY ORDER and ABSENCE of extra keys — the
+  // EC5 intent the prior key-set assert under-asserted.
+  const expected = { status: 'ok', id: r.json.id, file: r.json.file, scope: 'local' }
+  const expectedSerialized = JSON.stringify(expected)
+  assert.equal(r.stdout.trim(), expectedSerialized, `stdout byte-identical to golden; got ${r.stdout.trim()}`)
 });
 
 await t('t14_rebuild_roundtrip: em-rebuild-index preserves `playbook: true` (whitelist lockstep)', () => {
@@ -330,6 +334,13 @@ await t('t16_empty_trigger: register on_demand for triggerless → succeeds + em
   assert.equal(r.json.status, 'ok');
   // The episode is stored with marker + an advisory that warns empty_triggers.
   assert.ok(r.json.playbook_advisory, 'advisory present');
+  // F3 (review r1): STRENGTHEN. The advisory must carry the empty_triggers
+  // warning at write time (REQ-12) — the build-half assert below stays, but
+  // the write-half is what tells the operator to add triggers before the
+  // build silently excludes the entry.
+  assert.equal(r.json.playbook_advisory.empty_triggers, true, 'advisory carries empty_triggers:true');
+  assert.match(r.json.playbook_advisory.note, /empty_triggers/, 'advisory note names empty_triggers');
+  assert.match(r.json.playbook_advisory.note, /no effective triggers/, 'note names the missing triggers');
   // playbooks.json was written
   const pb = readPlaybooks(cwd);
   assert.equal(pb.playbooks.length, 1);
@@ -483,7 +494,7 @@ await t('t8_no_flag_no_write: flagless store + revise + marker-only store → pl
   assert.equal(fs.statSync(playbooksPath(cwd)).size, beforeSize, 'playbooks.json size unchanged');
 });
 
-await t('t9_scope_refusal: --scope global refused exit 1; global-store marker advisory names LOCAL project_store', () => {
+await t('t9_scope_refusal: --scope global refused exit 1; global-store marker advisory names LOCAL project_store; global marker declared locally resolves registered:true', async () => {
   const { cwd, home } = mkStore();
   // (a) --scope global --register-playbook refused (B-3)
   const r1 = runStore(
@@ -502,6 +513,27 @@ await t('t9_scope_refusal: --scope global refused exit 1; global-store marker ad
   assert.ok(r2.json.playbook_advisory, 'advisory present');
   const localStore = storeDir(cwd);
   assert.equal(r2.json.playbook_advisory.project_store, localStore, 'advisory project_store = local cwd store');
+
+  // (c) F5 (review r1): global-store marker whose chain is declared locally
+  // → advisory registered:true. The episode's own store dir (global) is the
+  // INDEX source for terminal resolution (so the marker finds its GLOBAL
+  // terminal), while project_store stays the local cwd path. This is the
+  // v15 canonical layout: episode lives global, declared local.
+  const gid = r2.json.id
+  writePlaybooks(cwd, { schema_version: 1, playbooks: [{ id: gid, mode: 'session_start' }] });
+  // Re-run a no-op store to refresh the advisory (the marker is on the existing
+  // episode, so we just need to fetch a fresh advisory via buildPlaybookAdvisory).
+  // The cleanest way is to import the lib directly.
+  const regLib = await import('../scripts/lib/playbook-registration.mjs');
+  const adv = regLib.buildPlaybookAdvisory({
+    episodeId: gid,
+    localDataDir: localStore,
+    episodeStoreDir: path.join(home, '.episodic-memory'),
+    effectiveTriggers: [],
+    mode: 'session_start',
+  });
+  assert.equal(adv.registered, true, 'global marker declared locally → registered:true (F5)');
+  assert.equal(adv.project_store, localStore, 'project_store still the local store (B-3)');
 });
 
 await t('t15_corrupt_fail_closed: unparseable + schema-invalid refusal; file byte-identical', () => {
@@ -589,6 +621,60 @@ await t('t17_concurrent_survive: two concurrent --register-playbook invocations 
   assert.ok(pb.playbooks.every((e) => typeof e.id === 'string' && (e.mode === 'session_start' || e.mode === 'on_demand')), 'every entry shape valid');
 });
 
+// t9c (F5): global marker declared locally → registered:true (now part of t9
+// above). The t9 leg was extended in place rather than split.
+
+// F4 (review r1): em-revise --register-playbook on a global original
+// (default scope=inherit) is refused PRE-WRITE — exit 1, code
+// playbooks-scope, no revision landed. Count the global store's episode
+// files before + after; the count must be unchanged.
+await t('t17b_revise_global_original_register_refused: pre-write scope refusal (F4)', () => {
+  const { cwd, home } = mkStore();
+  // Seed an original episode IN THE GLOBAL STORE so scope=inherit resolves
+  // to GLOBAL_DIR. The episode + index row live there.
+  const gid = '20260726-013000-t17b-g-original-abcd';
+  const globalEpDir = path.join(home, '.episodic-memory', 'episodes');
+  const globalIndex = path.join(home, '.episodic-memory', 'index.jsonl');
+  fs.mkdirSync(globalEpDir, { recursive: true });
+  fs.writeFileSync(path.join(globalEpDir, `${gid}.md`), [
+    '---', `id: ${gid}`, 'date: 2026-07-26', 'time: "01:30"', 'project: rfc015', 'category: decision',
+    'status: active', 'tags: []', 'summary: t17b global orig',
+    '---', '', '# t17b global orig', '', 'body', '',
+  ].join('\n'));
+  fs.appendFileSync(globalIndex, JSON.stringify({
+    id: gid, date: '2026-07-26', time: '01:30', project: 'rfc015', category: 'decision',
+    status: 'active', supersedes: null, tags: [], summary: 't17b global orig',
+  }) + '\n');
+
+  // Count global episode files BEFORE the refused revise.
+  const beforeFiles = fs.readdirSync(globalEpDir).filter((f) => f.endsWith('.md')).length;
+  const beforeIndexRows = fs.readFileSync(globalIndex, 'utf8').split('\n').filter(Boolean).length;
+
+  // Run the refused revise. Default --scope=inherit → dataDir=GLOBAL_DIR →
+  // --register-playbook refused pre-write (F4).
+  const r = runRevise(
+    [
+      '--original', gid,
+      '--project', 'rfc015',
+      '--summary', 'rfc015 t17b refused rev',
+      '--body', 'b2',
+      '--register-playbook', 'session_start',
+    ],
+    cwd, home,
+  );
+  assert.equal(r.code, 1, 'pre-write scope refusal exit 1');
+  assert.equal(r.json.code, 'playbooks-scope', 'code = playbooks-scope');
+  assert.match(r.json.message, /local-scope/, 'message names the local-scope rule');
+  // No stored_id (pre-write refusal — nothing stored).
+  assert.equal(r.json.stored_id, undefined, 'no stored_id on pre-write refusal (F7 asymmetry resolved)');
+
+  // Count AFTER: global episode count unchanged.
+  const afterFiles = fs.readdirSync(globalEpDir).filter((f) => f.endsWith('.md')).length;
+  const afterIndexRows = fs.readFileSync(globalIndex, 'utf8').split('\n').filter(Boolean).length;
+  assert.equal(afterFiles, beforeFiles, `global episode file count unchanged (pre=${beforeFiles}, post=${afterFiles})`);
+  assert.equal(afterIndexRows, beforeIndexRows, `global index row count unchanged (pre=${beforeIndexRows}, post=${afterIndexRows})`);
+});
+
 // ===========================================================================
 // Group 4: R5 doctor (2 legs)
 // ===========================================================================
@@ -646,6 +732,148 @@ await t('t7b_clean_silent: clean fixture → all four playbook-* ids present at 
     assert.equal(check.level, 'ok', `${id} silent (ok) on a clean fixture, got ${check.level}`);
     assert.equal(check.fix, undefined, `${id} carries NO fix key`);
   }
+});
+
+// F1 (review r1): em-doctor --all-projects must NOT crash with a TDZ
+// ReferenceError. The per-store check references `registeredStores` (which
+// is now hoisted above the scan); without the hoist the first --all-projects
+// invocation crashed at collectDeclarationTerminalSet. This leg asserts
+// (a) exit is either 0 or 1 (never a crash signal), (b) stdout is valid
+// JSON (parseable), (c) the four playbook check ids are present and
+// behave as on a non-all-projects fixture (both polarities NOT required —
+// crash absence + valid JSON is the assertion).
+await t('t7c_all_projects_no_tdz: em-doctor --all-projects runs without TDZ crash (F1)', () => {
+  const { cwd, home } = mkStore();
+  storeBare(cwd, home, 'rfc015 t7c clean');
+  const r = runDoctor(['--scope', 'all', '--all-projects'], cwd, home);
+  // Exit 0 (healthy) or 1 (warns) — BOTH are valid; a crash would surface
+  // as a non-zero exit from Node's ReferenceError before JSON is emitted.
+  assert.ok(r.code === 0 || r.code === 1, `exit in {0,1}, got ${r.code}: ${r.stdout.slice(0, 200)}\n${r.stderr.slice(0, 400)}`);
+  // Stdout IS valid JSON (no ReferenceError text leaked into stdout).
+  assert.ok(r.json && typeof r.json === 'object', 'stdout is valid JSON');
+  assert.ok(Array.isArray(r.json.checks), 'JSON has checks array');
+  // No TDZ ReferenceError text leaked.
+  assert.ok(!/ReferenceError/.test(r.stdout) && !/ReferenceError/.test(r.stderr), 'no ReferenceError in output');
+  // The four playbook check ids still fire.
+  const playbookChecks = r.json.checks.filter((c) => c.id.startsWith('playbook'));
+  const requiredIds = ['playbook-unregistered', 'playbook-registration-health', 'playbook-content-substitution', 'playbook-global-file'];
+  for (const id of requiredIds) {
+    const check = playbookChecks.find((c) => c.id === id);
+    assert.ok(check, `${id} present under --all-projects`);
+  }
+});
+
+// F2 (review r1): global-store marker episode declared in the cwd-local
+// playbooks.json → no false `playbook-unregistered` warn (and no
+// `unresolvable` failure on the health check). The v15 canonical layout.
+// Also: the inverse — global marker NOT declared → playbook-unregistered
+// fires once. Both polarities.
+await t('t7d_global_marker_declared_locally: cross-store resolution parity (F2)', () => {
+  // (a) Declare locally → silent
+  {
+    const { cwd, home } = mkStore();
+    // A global-store marker episode (v15 canonical layout).
+    const gid = '20260726-013000-t7d-g-pb-abcd';
+    const gDir = path.join(home, '.episodic-memory');
+    const gEpDir = path.join(gDir, 'episodes');
+    fs.mkdirSync(gEpDir, { recursive: true });
+    fs.writeFileSync(path.join(gEpDir, `${gid}.md`), [
+      '---', `id: ${gid}`, 'date: 2026-07-26', 'time: "01:30"', 'project: rfc015', 'category: lesson',
+      'status: active', 'tags: []', 'summary: t7d g pb', 'playbook: true',
+      '---', '', '# t7d g pb', '', 'body', '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(gDir, 'index.jsonl'), JSON.stringify({
+      id: gid, date: '2026-07-26', time: '01:30', project: 'rfc015', category: 'lesson',
+      status: 'active', supersedes: null, tags: [], summary: 't7d g pb', playbook: true,
+    }) + '\n');
+    // Declare the chain LOCALLY (cwd-local playbooks.json).
+    writePlaybooks(cwd, { schema_version: 1, playbooks: [{ id: gid, mode: 'session_start' }] });
+    // Run doctor --scope all on the fixture.
+    const r = runDoctor(['--scope', 'all'], cwd, home);
+    assert.equal(r.code, 0, `declared doctor exit: ${r.stdout}\n${r.stderr}`);
+    const playbookChecks = r.json.checks.filter((c) => c.id.startsWith('playbook'));
+    // The four polarities:
+    const ureg = playbookChecks.find((c) => c.id === 'playbook-unregistered');
+    assert.equal(ureg.level, 'ok', `playbook-unregistered silent when declared locally, got ${ureg.level}; message: ${ureg.message}`);
+    const health = playbookChecks.find((c) => c.id === 'playbook-registration-health');
+    assert.equal(health.level, 'ok', `playbook-registration-health silent when declared resolves, got ${health.level}; message: ${health.message}`);
+  }
+
+  // (b) NOT declared → warn (the inverse polarity). F9 (review r2): the
+  // marker lives in the GLOBAL store; the GLOBAL scan sees it (warn);
+  // the LOCAL scan does NOT (ok, because F9 scopes the marker scan to
+  // the scanned store's dataDir rows — a marker in another store is not
+  // a finding for a scan that doesn't touch that store).
+  {
+    const { cwd, home } = mkStore();
+    const gid = '20260726-013000-t7d-g-undec-abcd';
+    const gDir = path.join(home, '.episodic-memory');
+    const gEpDir = path.join(gDir, 'episodes');
+    fs.mkdirSync(gEpDir, { recursive: true });
+    fs.writeFileSync(path.join(gEpDir, `${gid}.md`), [
+      '---', `id: ${gid}`, 'date: 2026-07-26', 'time: "01:30"', 'project: rfc015', 'category: lesson',
+      'status: active', 'tags: []', 'summary: t7d g undec', 'playbook: true',
+      '---', '', '# t7d g undec', '', 'body', '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(gDir, 'index.jsonl'), JSON.stringify({
+      id: gid, date: '2026-07-26', time: '01:30', project: 'rfc015', category: 'lesson',
+      status: 'active', supersedes: null, tags: [], summary: 't7d g undec', playbook: true,
+    }) + '\n');
+    // No declaration — the global scan warns; the local scan is silent.
+    const r = runDoctor(['--scope', 'all'], cwd, home);
+    const playbookChecks = r.json.checks.filter((c) => c.id.startsWith('playbook'));
+    const uregLocal = playbookChecks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'local');
+    const uregGlobal = playbookChecks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'global');
+    assert.ok(uregLocal, 'local-scope playbook-unregistered row present');
+    assert.ok(uregGlobal, 'global-scope playbook-unregistered row present');
+    assert.equal(uregLocal.level, 'ok', `local scan silent on marker-unreachable, got ${uregLocal.level}`);
+    assert.equal(uregGlobal.level, 'warn', `global scan warns on undeclared marker, got ${uregGlobal.level}`);
+    assert.match(uregGlobal.message, /marker-bearing playbook terminal\(s\) not declared/, 'global warn names the failure class');
+    // The id list lives under verbose `episode_ids`; re-run with --verbose
+    // to pin it. This protects against a future regression that drops the
+    // id from the diagnostic payload entirely.
+    const rV = runDoctor(['--scope', 'global', '--verbose'], cwd, home);
+    const uregV = rV.json.checks.find((c) => c.id === 'playbook-unregistered');
+    assert.ok(Array.isArray(uregV.episode_ids) && uregV.episode_ids.includes(gid), `verbose episode_ids includes ${gid}`);
+  }
+});
+
+// F9 (review r2): the marker SCAN must scope to the scanned store's dataDir
+// rows. Fixture: cwd-local store holds an UNDECLARED marker episode; the
+// GLOBAL store holds none. The cwd-local scan emits exactly ONE warn; the
+// global scan emits ZERO warns (the cwd-local marker is unreachable from
+// the global scanned store per RFC:99). Pre-F9 this test failed because
+// the marker scan over-merged and produced a warn in EVERY scanned store.
+await t('t7e_marker_scan_scoped_to_scanned_store: cwd marker undeclared, second store silent (F9)', () => {
+  const { cwd, home } = mkStore();
+  // (a) Cwd-local store: a marker-bearing, undeclared playbook episode.
+  const lid = '20260726-013000-t7e-l-pb-undec-abcd';
+  fs.mkdirSync(episodesDir(cwd), { recursive: true });
+  fs.writeFileSync(path.join(episodesDir(cwd), `${lid}.md`), [
+    '---', `id: ${lid}`, 'date: 2026-07-26', 'time: "01:30"', 'project: rfc015', 'category: lesson',
+    'status: active', 'tags: []', 'summary: t7e l pb undec', 'playbook: true',
+    '---', '', '# t7e l pb undec', '', 'body', '',
+  ].join('\n'));
+  fs.appendFileSync(indexFile(cwd), JSON.stringify({
+    id: lid, date: '2026-07-26', time: '01:30', project: 'rfc015', category: 'lesson',
+    status: 'active', supersedes: null, tags: [], summary: 't7e l pb undec', playbook: true,
+  }) + '\n');
+  // No declaration in cwd-local playbooks.json (the marker is intentionally undeclared).
+  // The global store is empty (no marker episodes there).
+  const r = runDoctor(['--scope', 'all'], cwd, home);
+  const playbookChecks = r.json.checks.filter((c) => c.id.startsWith('playbook'));
+  const uregLocal = playbookChecks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'local');
+  const uregGlobal = playbookChecks.find((c) => c.id === 'playbook-unregistered' && c.scope === 'global');
+  assert.ok(uregLocal, 'local-scope playbook-unregistered row present');
+  assert.ok(uregGlobal, 'global-scope playbook-unregistered row present');
+  assert.equal(uregLocal.level, 'warn', `cwd-local scan warns on its own undeclared marker, got ${uregLocal.level}`);
+  assert.equal(uregGlobal.level, 'ok', `global scan silent (marker unreachable from scanned store), got ${uregGlobal.level}`);
+  // The cwd-local scan warns EXACTLY once (the single marker, lid).
+  const rV = runDoctor(['--scope', 'local', '--verbose'], cwd, home);
+  const uregV = rV.json.checks.find((c) => c.id === 'playbook-unregistered');
+  assert.ok(Array.isArray(uregV.episode_ids), 'cwd-local verbose episode_ids is an array');
+  assert.equal(uregV.episode_ids.length, 1, `cwd-local scan warns EXACTLY once, got ${uregV.episode_ids.length}`);
+  assert.equal(uregV.episode_ids[0], lid, 'cwd-local warn names the lid id');
 });
 
 // ===========================================================================

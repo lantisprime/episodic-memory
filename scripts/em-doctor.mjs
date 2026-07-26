@@ -609,17 +609,14 @@ function checkStoreWithDir(dataDir, scopeName) {
 // chain terminal NOW (RFC-015 R5: never read from cached build_report — the
 // global-store section is zero-state by design and would silently miss
 // declarations that resolve through a local cross-store chain).
-function declaredTerminalMap(entries, localDataDir) {
+//
+// F2 (review r1): the row source is the UNION of local + global index rows
+// (matching buildPlaybookSection's cross-store resolution), so a declaration
+// whose id resolves through a global terminal is recognized.
+function declaredTerminalMap(entries, declarationDataDir) {
   const out = new Map()
   if (!Array.isArray(entries)) return out
-  // Load this store's index rows + walk chain via the shared terminalOf.
-  let rows = []
-  try {
-    for (const line of fs.readFileSync(path.join(localDataDir, 'index.jsonl'), 'utf8').split('\n')) {
-      if (!line.trim()) continue
-      try { const e = JSON.parse(line); if (e && typeof e.id === 'string') rows.push(e) } catch {}
-    }
-  } catch { /* missing index — empty */ }
+  const rows = mergedIndexRowsForResolution()
   const { byId, successorOf } = buildChainMaps(rows)
   for (const entry of entries) {
     if (!entry || typeof entry.id !== 'string') continue
@@ -629,17 +626,36 @@ function declaredTerminalMap(entries, localDataDir) {
   return out
 }
 
+// F2 (review r1): cross-store resolution. Re-implements the R2.1 precedence
+// rule (continuing > stale; local > global on tie) the build uses for its
+// merged index. Returns the row union as a flat array.
+function mergedIndexRowsForResolution() {
+  const byId = new Map()
+  const consider = (row) => {
+    if (!row || typeof row.id !== 'string') return
+    const ex = byId.get(row.id)
+    if (!ex) { byId.set(row.id, row); return }
+    const exCont = !!ex.superseded_by
+    const curCont = !!row.superseded_by
+    if (curCont && !exCont) byId.set(row.id, row) // continuing outranks a stale terminal snapshot
+  }
+  for (const r of loadIndex(LOCAL_DIR, 'local')) consider(r)
+  for (const r of loadIndex(GLOBAL_DIR, 'global')) consider(r)
+  return [...byId.values()]
+}
+
 // Build a Set<declared-terminal-id> across ALL declaration sources for the
-// current scope — cwd playbooks.json under default scope; the union of every
-// registered store's playbooks.json under --all-projects. Used by the
-// `playbook-unregistered` check to know which marker-bearing terminals are
-// declared (and thus should NOT warn).
-function collectDeclarationTerminalSet(localDataDir) {
+// current scope. F2 (review r1): under DEFAULT scope the declaration source
+// is the CWD-LOCAL project's playbooks.json (LOCAL_DIR) — NOT the scanned
+// store's dataDir. Registration is per-project (B-3), so the audit surface
+// is the cwd-local declaration regardless of which store the per-store scan
+// targets. Under --all-projects, union every registered store's playbooks.json.
+function collectDeclarationTerminalSet() {
   const set = new Set()
   // (a) cwd project declaration file (RFC-015 R5 default scope)
-  const cwdPb = parsePlaybooksConfig(localDataDir)
+  const cwdPb = parsePlaybooksConfig(LOCAL_DIR)
   if (cwdPb.ok && cwdPb.config) {
-    for (const id of declaredTerminalMap(cwdPb.config.playbooks, localDataDir).keys()) set.add(id)
+    for (const id of declaredTerminalMap(cwdPb.config.playbooks, LOCAL_DIR).keys()) set.add(id)
   }
   // (b) --all-projects: union of every registered project's declarations
   if (allProjects) {
@@ -653,22 +669,39 @@ function collectDeclarationTerminalSet(localDataDir) {
 }
 
 function checkPlaybookRegistration(dataDir, scopeName) {
-  const entries = loadIndex(dataDir, scopeName)
+  // F2 (review r1): under DEFAULT scope, the per-store audit's declaration
+  // source is the CWD-LOCAL project's playbooks.json (LOCAL_DIR), NOT the
+  // scanned store's dataDir. Registration is per-project (B-3). Under
+  // --all-projects the union includes every registered store's declarations.
+  const declSet = collectDeclarationTerminalSet()
+  // F2 (review r1): resolution uses the UNION of local + global index rows
+  // (matching buildPlaybookSection's cross-store resolution), so a global
+  // marker episode whose chain is declared in the cwd-local playbooks.json
+  // resolves through the global terminal. F9 (review r2) splits the SCAN
+  // from the RESOLUTION: only the chain-resolution rows are the union; the
+  // marker SCAN iterates ONLY the scanned store's dataDir rows (RFC:99
+  // "reachable from the scanned store" — a marker in another store is NOT
+  // a finding for the scan that doesn't touch that store).
+  const scannedRows = loadIndex(dataDir, scopeName)
+  const resolutionRows = mergedIndexRowsForResolution()
+  const { byId, successorOf } = buildChainMaps(resolutionRows)
+
   // (1) `playbook-unregistered`: an active, chain-terminal, marker-bearing
   // index row whose chain is NOT in the declaration set. Cycle-safe via
   // terminalOf (seen-set terminates on a cycle; such rows are reported
   // `unresolvable` so the operator sees the cycle explicitly).
-  const declSet = collectDeclarationTerminalSet(dataDir)
+  // F9 (review r2): the candidate set is the SCANNED store's index rows.
+  // terminalOf still walks the merged rows so cross-store chains resolve
+  // (a marker episode's terminal might live in another store).
   const unregistered = []
   const cyclicSeen = new Set()
-  for (const e of entries) {
+  for (const e of scannedRows) {
     if (e.playbook !== true) continue
     if (e.status !== 'active') continue
     // chain-terminal: terminalOf returns the row itself only when there's no
     // resolvable forward successor (the same definition em-trigger-index.mjs
     // uses for build exclusion). We skip rows that are mid-chain — only the
     // chain-terminal row bears the marker obligation.
-    const { byId, successorOf } = buildChainMaps(entries)
     const t = terminalOf(e.id, byId, successorOf)
     if (!t) continue
     if (t.id !== e.id) continue // not chain-terminal (an earlier id superseded it)
@@ -680,7 +713,7 @@ function checkPlaybookRegistration(dataDir, scopeName) {
   if (unregistered.length) {
     report(
       'playbook-unregistered', scopeName, 'warn',
-      `${unregistered.length} marker-bearing playbook terminal(s) not declared in any playbooks.json — declare with em-store --register-playbook session_start (limit: cwd playbooks.json under default scope${allProjects ? '; --all-projects unions registered stores' : ''})`,
+      `${unregistered.length} marker-bearing playbook terminal(s) not declared in this project's playbooks.json — declare with em-store --register-playbook session_start (limit: cwd playbooks.json under default scope${allProjects ? '; --all-projects unions registered stores' : ''})`,
       verbose ? { episode_ids: unregistered } : undefined,
     )
   } else {
@@ -692,13 +725,13 @@ function checkPlaybookRegistration(dataDir, scopeName) {
   // index — never read from cached build_report). Reasons: unresolvable,
   // inactive, chain_collision, config malformed. The check stays warn for
   // every reason (the operator decides what to do).
-  const cwdPb = parsePlaybooksConfig(dataDir)
+  // F2 (review r1): the cwd-local declaration is the audit surface under
+  // default scope (not the scanned store's dataDir).
+  const cwdPb = parsePlaybooksConfig(LOCAL_DIR)
   if (!cwdPb.ok) {
-    // The cwd file is malformed/absent under default scope. Under
-    // --all-projects we still emit one finding for THIS store's file (the
-    // per-store audit owns its own dataDir). A truly absent file is fine
-    // (State A — not a health failure, the absence is in the
-    // `playbook-unregistered` line above).
+    // The cwd-local file is malformed/absent under default scope. A truly
+    // absent file is fine (State A — not a health failure, the absence is
+    // in the `playbook-unregistered` line above).
     if (cwdPb.reason) {
       report(
         'playbook-registration-health', scopeName, 'warn',
@@ -710,8 +743,6 @@ function checkPlaybookRegistration(dataDir, scopeName) {
   } else if (!cwdPb.config || !Array.isArray(cwdPb.config.playbooks) || cwdPb.config.playbooks.length === 0) {
     report('playbook-registration-health', scopeName, 'ok', 'no declared playbooks to audit')
   } else {
-    const rows = entries
-    const { byId, successorOf } = buildChainMaps(rows)
     const byTerminal = new Map()
     const failures = []
     for (const entry of cwdPb.config.playbooks) {
@@ -746,8 +777,6 @@ function checkPlaybookRegistration(dataDir, scopeName) {
   // declaration now renders auto-generated digest text the operator never
   // curated; RFC-015 R5 / Problem 2a). Reports the digest id.
   if (cwdPb.ok && cwdPb.config && Array.isArray(cwdPb.config.playbooks) && cwdPb.config.playbooks.length) {
-    const rows = entries
-    const { byId, successorOf } = buildChainMaps(rows)
     const substituted = []
     for (const entry of cwdPb.config.playbooks) {
       if (!entry || typeof entry.id !== 'string') continue
@@ -787,6 +816,15 @@ function checkPlaybookGlobalFile() {
   }
 }
 
+// F1 (review r1): hoist the registered-stores resolution ABOVE the per-store
+// scan block. `collectDeclarationTerminalSet` is invoked inside the per-store
+// scan and references `registeredStores` directly; the prior ordering put the
+// declaration at the bottom of the file, triggering a TDZ ReferenceError the
+// first time --all-projects ran. Resolving it here (one time) lets both the
+// per-store scan and the --all-projects loop below read the same Map.
+const registeredStores = allProjects ? resolveRegisteredStores() : []
+const registeredByDir = new Map(registeredStores.map(st => [st.data_dir, st]))
+
 const ranStoreDirs = new Set()
 if (scope === 'local' || scope === 'all') { checkStoreWithDir(LOCAL_DIR, 'local'); ranStoreDirs.add(realpathSafe(LOCAL_DIR)) }
 if (scope === 'global' || scope === 'all') { checkStoreWithDir(GLOBAL_DIR, 'global'); ranStoreDirs.add(realpathSafe(GLOBAL_DIR)) }
@@ -794,8 +832,6 @@ if (scope === 'global' || scope === 'all') { checkStoreWithDir(GLOBAL_DIR, 'glob
 // --all-projects: store-class checks per consumer-registry store not already
 // covered (realpath both sides — a cwd-local store symlinked to a registered
 // store must not produce two blocks). Non-store checks below still run once.
-const registeredStores = allProjects ? resolveRegisteredStores() : []
-const registeredByDir = new Map(registeredStores.map(st => [st.data_dir, st]))
 for (const st of registeredStores) {
   const key = realpathSafe(st.data_dir)
   if (ranStoreDirs.has(key)) continue

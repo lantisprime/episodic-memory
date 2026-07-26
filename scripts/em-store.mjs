@@ -497,7 +497,19 @@ updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeConte
         // ALWAYS name the cwd LOCAL store as project_store, even when the
         // episode lives in --scope global — registration is per-project
         // (B-3), so the audit surface is the cwd local store.
-        successPayload.playbook_advisory = reg.buildPlaybookAdvisory({ episodeId: id, localDataDir: LOCAL_DIR })
+        // F5 (review r1): pass the episode's OWN store dir as the index
+        // source so terminalOf resolves a global-store marker episode
+        // through its GLOBAL terminal (not "deferred").
+        // F3 (review r1): pass the just-written episode's effective trigger
+        // set + the authored mode so on_demand+empty_triggers warns at write time.
+        const effectiveTriggers = Array.isArray(activation && activation.triggers) ? activation.triggers : []
+        successPayload.playbook_advisory = reg.buildPlaybookAdvisory({
+          episodeId: id,
+          localDataDir: LOCAL_DIR,
+          episodeStoreDir: dataDir,
+          effectiveTriggers,
+          mode: registerMode || 'session_start',
+        })
         // (c) registration ok with a build-cap note: annotate the advisory.
         if (regResult && regResult.ok && regResult.buildCapped) {
           successPayload.playbook_advisory = {

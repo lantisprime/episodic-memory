@@ -73,7 +73,7 @@ function readLocalIndexRows(localDataDir) {
 }
 
 /**
- * buildPlaybookAdvisory({ episodeId, localDataDir, indexRows })
+ * buildPlaybookAdvisory({ episodeId, localDataDir, indexRows, episodeStoreDir, effectiveTriggers })
  *   → PlaybookAdvisory | { registered: false, note: <string>, project_store: <abs> }
  *
  * RFC-015 R2 advisory shape (RFC:64-71): the `note` field is ALWAYS
@@ -81,68 +81,117 @@ function readLocalIndexRows(localDataDir) {
  * a malformed declaration file the note carries the parse reason and the
  * function NEVER writes.
  *
+ * F5 (review r1): `episodeStoreDir` is the dir the episode was JUST WRITTEN
+ * to (LOCAL_DIR for --scope local, GLOBAL_DIR for --scope global). It is
+ * the INDEX source for terminal resolution so a global-store marker
+ * episode resolves through the GLOBAL terminal — not "deferred". The
+ * declaration source and the `project_store` field stay pinned to the
+ * cwd-local playbooks.json (B-3, t9(b) unchanged).
+ *
+ * F3 (review r1): `effectiveTriggers` is the just-written episode's effective
+ * trigger array (already in hand in both CLIs). When mode==='on_demand' and
+ * the set is empty, the advisory appends the empty_triggers warning + sets
+ * `empty_triggers: true` so the operator sees it BEFORE the build excludes
+ * the entry.
+ *
  * Computation is wrapped in try/catch so the advisory never throws the
  * store/revise flow (§8.1 invariant).
  *
- * @param {{episodeId: string, localDataDir: string, indexRows?: Array<object>}} args
+ * @param {{
+ *   episodeId: string,
+ *   localDataDir: string,            // cwd-local project store (declaration source + project_store field)
+ *   indexRows?: Array<object>,       // optional override; defaults to episodeStoreDir's index
+ *   episodeStoreDir?: string,        // index source (defaults to localDataDir)
+ *   effectiveTriggers?: string[],    // just-written episode's trigger set
+ * }} args
  * @returns {{
  *   registered: boolean,
  *   project_store: string,
  *   suggested_entry?: {id: string, mode: string},
+ *   empty_triggers?: boolean,
  *   note: string
  * }}
  */
-export function buildPlaybookAdvisory({ episodeId, localDataDir, indexRows }) {
+export function buildPlaybookAdvisory({ episodeId, localDataDir, indexRows, episodeStoreDir, effectiveTriggers, mode }) {
+  // project_store + declaration source = cwd-local store (B-3). This stays
+  // even when the episode lives in --scope global.
   const project_store = localDataDir
   const base = { project_store }
+  const indexSourceDir = episodeStoreDir || localDataDir
+  // F3 (review r1): the caller-supplied `mode` is the AUTHORED mode (the
+  // mode the operator passed to --register-playbook, or the implied
+  // session_start default). The annotation fires when the actual authored
+  // mode is on_demand AND the episode's effective trigger set is empty.
   try {
     const pb = parsePlaybooksConfig(localDataDir)
     if (!pb.ok) {
       // State C malformed: degrade to a note, never a write.
-      return { ...base, registered: false, note: `playbooks.json present but ${pb.reason}; declaration unreadable — register or repair it (RFC-015 R2, fail-open)` }
-    }
-    if (pb.config === null) {
-      // State A absent: not declared, suggest a session_start entry.
-      return {
+      return annotateEmptyTriggers({
         ...base,
         registered: false,
-        suggested_entry: { id: episodeId, mode: 'session_start' },
+        note: `playbooks.json present but ${pb.reason}; declaration unreadable — register or repair it (RFC-015 R2, fail-open)`,
+      }, mode, effectiveTriggers)
+    }
+    if (pb.config === null) {
+      // State A absent: not declared, suggest an entry whose mode matches
+      // the authored mode (F3: when on_demand, suggest on_demand).
+      return annotateEmptyTriggers({
+        ...base,
+        registered: false,
+        suggested_entry: { id: episodeId, mode: mode || 'session_start' },
         note: "playbook episode not declared in this project's playbooks.json; add the entry or re-run with --register-playbook",
-      }
+      }, mode, effectiveTriggers)
     }
     // State B valid: walk the declared set, find the entry whose chain
     // resolves to the same terminal as episodeId.
-    const rows = Array.isArray(indexRows) ? indexRows : readLocalIndexRows(localDataDir)
+    const rows = Array.isArray(indexRows) ? indexRows : readLocalIndexRows(indexSourceDir)
     const { byId, successorOf } = buildChainMaps(rows)
     const targetTerminal = terminalOf(episodeId, byId, successorOf)
     if (!targetTerminal) {
-      return {
+      return annotateEmptyTriggers({
         ...base,
         registered: false,
-        suggested_entry: { id: episodeId, mode: 'session_start' },
+        suggested_entry: { id: episodeId, mode: mode || 'session_start' },
         note: "playbook episode is not in the local index yet; declaration check deferred until the index is readable",
-      }
+      }, mode, effectiveTriggers)
     }
     for (const entry of pb.config.playbooks) {
       if (!entry || typeof entry.id !== 'string') continue
       const t = terminalOf(entry.id, byId, successorOf)
       if (t && t.id === targetTerminal.id) {
-        return {
+        return annotateEmptyTriggers({
           ...base,
           registered: true,
           note: "declared in this project's playbooks.json",
-        }
+        }, mode, effectiveTriggers)
       }
     }
-    return {
+    return annotateEmptyTriggers({
       ...base,
       registered: false,
-      suggested_entry: { id: episodeId, mode: 'session_start' },
+      suggested_entry: { id: episodeId, mode: mode || 'session_start' },
       note: "playbook episode not declared in this project's playbooks.json; add the entry or re-run with --register-playbook",
-    }
+    }, mode, effectiveTriggers)
   } catch (e) {
     // Advisory must never throw the caller — degrade to a note.
     return { ...base, registered: false, note: `advisory computation failed: ${e && e.message ? e.message : String(e)}` }
+  }
+}
+
+// F3 (review r1): when mode===on_demand and the episode's effective trigger
+// set is empty, the advisory must warn — the build will exclude the entry
+// as empty_triggers and the operator needs to know at write time, not at
+// build time (REQ-12).
+function annotateEmptyTriggers(advisory, mode, effectiveTriggers) {
+  // Only meaningful for the on_demand case; session_start entries ignore
+  // the trigger set per RFC-011 R1.
+  if (mode !== 'on_demand') return advisory
+  const empty = !Array.isArray(effectiveTriggers) || effectiveTriggers.length === 0
+  if (!empty) return advisory
+  return {
+    ...advisory,
+    empty_triggers: true,
+    note: advisory.note + ' (build will exclude this entry as empty_triggers: the episode has no effective triggers)',
   }
 }
 
