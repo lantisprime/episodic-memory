@@ -330,3 +330,83 @@ export function registerPlaybook({ episodeId, mode, localDataDir }) {
 
   return { ok: true, entry, created, buildCapped }
 }
+
+/**
+ * buildConsolidationAdvisory({ localDataDir, protectedClusters, substitutedClusters })
+ *   → ConsolidationAdvisory | null
+ *
+ * RFC-015 R4c. Two live triggers:
+ *   (i)  a cluster skipped because a member belongs to a DECLARED chain — the
+ *        operator needs to know why curation did not happen, and how to allow it;
+ *   (ii) a marker-bearing but UNDECLARED member consolidated into a digest — the
+ *        marker alone protects nothing (RFC-015:148), so this one really is the
+ *        content substitution Problem 2a describes.
+ *
+ * Returns null when neither fired, so a non-playbook store's stdout stays
+ * byte-identical to the pre-RFC-015 shape (Principle 6, zero cost when unused).
+ * Advisory only — nothing here blocks (B-1). Never throws.
+ *
+ * @param {{
+ *   localDataDir: string,
+ *   protectedClusters?: Array<{members: string[], reason: string, via: string|null}>,
+ *   substitutedClusters?: Array<{resolves_to: string, kind: 'digest'|'canonical', members: string[]}>,
+ * }} args
+ */
+// Review r2 F3: ONE constant, shared by partitionProtectionSkips (which matches by
+// prefix) and by the advisory (which matched the literal exactly). Two duplicated
+// literals would drift the moment a second playbook protection class is added:
+// the partition would classify it as protection while the advisory silently dropped
+// it, yielding a skip with no advisory and no error. Defined here rather than
+// exported from protection.mjs so that file stays byte-identical (RFC:141).
+export const PLAYBOOK_PROTECTION_CLASS = 'playbook-referenced'
+export const PLAYBOOK_PROTECTION_REASON = `protected:${PLAYBOOK_PROTECTION_CLASS}`
+
+export function buildConsolidationAdvisory({ localDataDir, playbookIds, protectedClusters, markedConsolidations }) {
+  const declared = new Set(Array.isArray(playbookIds) ? playbookIds : [])
+  // Callers MUST pass only playbook-caused skips (partitionProtectionSkips's
+  // playbookSkips). This filter is defence in depth: an advisory that calls a
+  // `pinned` or `trigger-bearing-lesson` skip a declared playbook chain, and tells
+  // the operator to edit a playbooks.json that may not exist, is a false statement
+  // (review r1 F3). Belt and braces, because both apply paths feed this and the
+  // clerk's skippedGuard also carries non-protection entries like
+  // `canonical-superseded` (em-consolidate.mjs:1935).
+  const prot = (Array.isArray(protectedClusters) ? protectedClusters : [])
+    .filter(p => p && p.reason === PLAYBOOK_PROTECTION_REASON)
+  const marked = Array.isArray(markedConsolidations) ? markedConsolidations : []
+  if (prot.length === 0 && marked.length === 0) return null
+  const base = { project_store: localDataDir }
+  try {
+    const notes = []
+    const out = { ...base }
+    if (prot.length) {
+      out.protected_declarations = prot.map(p => ({
+        declaration_id: declared.has(p.via) ? p.via : null,
+        members: p.members,
+        reason: p.reason,
+      }))
+      notes.push(
+        `${prot.length} cluster(s) were not consolidated because a member belongs to a declared playbook chain; ` +
+        'to allow consolidation, remove the declaration from this project\'s playbooks.json first'
+      )
+    }
+    if (marked.length) {
+      // NOT called a "substitution": these members carry the marker but are NOT
+      // declared, so nothing renders them and nothing is being substituted
+      // (review r1 F3). The marker is inherited so the digest stays discoverable
+      // by the R1 detection predicate and by em-doctor's playbook-unregistered check.
+      out.marker_inheritance = marked.map(s => ({
+        resolves_to: s.resolves_to,
+        kind: s.kind,
+        members: s.members,
+      }))
+      notes.push(
+        `${marked.length} consolidation(s) folded a playbook-marked but UNDECLARED episode; the marker was ` +
+        'inherited by the result, whose body is now the auto-generated digest — re-curate it before declaring it'
+      )
+    }
+    out.note = notes.join('; ')
+    return out
+  } catch (e) {
+    return { ...base, note: `advisory computation failed: ${e && e.message ? e.message : String(e)}` }
+  }
+}
