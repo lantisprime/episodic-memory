@@ -185,6 +185,27 @@ function emitProtectionAbort(abort, mode) {
   process.exit(1)
 }
 
+// #626: a corrupt primary index (e.g. index.jsonl that is a directory — EISDIR)
+// must abort with the R4d envelope above, never a raw stack trace. Every run
+// mode's primary-store load routes through loadIndexOrAbort. The one in-lock
+// reload (consolidate-apply) instead inlines indexUnreadableAbort after
+// releasing its lock: emitProtectionAbort exits, and exit skips finally.
+function indexUnreadableAbort(dataDir, e) {
+  return {
+    kind: PROTECTION_ABORT_PROTECTION,
+    reason: `episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'})`,
+    file: path.join(dataDir, 'index.jsonl'),
+  }
+}
+
+function loadIndexOrAbort(dataDir, source, mode) {
+  try {
+    return loadIndex(dataDir, source)
+  } catch (e) {
+    emitProtectionAbort(indexUnreadableAbort(dataDir, e), mode)
+  }
+}
+
 // Splits protected clusters into playbook-caused and other. `allSkips` is what the
 // envelope reports; `playbookSkips` is the ONLY input the advisory may speak about.
 // Class-e is the sole playbook class (protection.mjs:245-267) and its `via` is the
@@ -589,7 +610,7 @@ const CLERK_SCALAR_FM_FIELDS = ['id', 'date', 'project', 'category', 'status', '
 if (clerk && !apply && !enrich) {
   const _clerkBreakReportWrite = process.argv.includes('--break-report-write')
   const _clerkBreakDrain = process.argv.includes('--break-drain')
-  const _clerkAllRows = loadIndex(DATA_DIR, scope)
+  const _clerkAllRows = loadIndexOrAbort(DATA_DIR, scope, 'clerk-report')
   const _clerkActiveRaw = _clerkAllRows.filter(r =>
     r.status !== 'superseded' &&
     typeof r.id === 'string' &&
@@ -747,7 +768,7 @@ if (clerk && !apply && !enrich) {
     const candidates = []
     const lessonHits = new Map() // id -> [{ts,n}, ...] most-recent first
     try {
-      const allRows = loadIndex(DATA_DIR, scope)
+      const allRows = loadIndexOrAbort(DATA_DIR, scope, 'clerk-report')
       const rrRows = allRows
         .filter(r => r.record_type === RUN_RECORD_TYPE && r.category === RUN_RECORD_CATEGORY)
         .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')))
@@ -827,7 +848,7 @@ if (clerk && enrich) {
 // ---------------------------------------------------------------------------
 // Load candidates
 // ---------------------------------------------------------------------------
-const rows = loadIndex(DATA_DIR, scope).filter(r =>
+const rows = loadIndexOrAbort(DATA_DIR, scope, apply ? 'consolidate-apply' : 'consolidate-dry-run').filter(r =>
   r.status !== 'superseded' &&
   typeof r.id === 'string' &&
   typeof r.summary === 'string' &&
@@ -1210,7 +1231,14 @@ try {
   // Re-read index rows under the lock, then read episode files only for
   // members of the precomputed clusters. A cluster is accepted only when
   // every fresh row and fresh file still reports status active.
-  const freshLiveRows = loadIndex(DATA_DIR, scope)
+  let freshLiveRows
+  try {
+    freshLiveRows = loadIndex(DATA_DIR, scope)
+  } catch (e) {
+    releaseStoreWriteLocks(_csLockHandles)
+    _csLockHandles = null
+    emitProtectionAbort(indexUnreadableAbort(DATA_DIR, e), 'consolidate-apply')
+  }
   const freshById = new Map(freshLiveRows.map(r => [r.id, r]))
   const freshContents = new Map()
   const collisionSkips = []
@@ -2051,7 +2079,7 @@ async function clerkApplyMain() {
     process.exit(1)
   }
 
-  const activeRaw = loadIndex(DATA_DIR, scope).filter(r =>
+  const activeRaw = loadIndexOrAbort(DATA_DIR, scope, 'clerk-apply').filter(r =>
     r.status !== 'superseded' &&
     typeof r.id === 'string' &&
     typeof r.summary === 'string' &&
@@ -2294,7 +2322,7 @@ async function clerkEnrichMain() {
   const _enrichHome = process.env.HOME || os.homedir()
   const _revisePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'em-revise.mjs')
 
-  const activeRaw = loadIndex(DATA_DIR, scope).filter(r =>
+  const activeRaw = loadIndexOrAbort(DATA_DIR, scope, 'clerk-enrich').filter(r =>
     r.status !== 'superseded' &&
     typeof r.id === 'string' &&
     typeof r.summary === 'string' &&
