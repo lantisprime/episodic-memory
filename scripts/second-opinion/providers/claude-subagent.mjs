@@ -21,6 +21,8 @@
 
 import { spawnSync } from 'node:child_process'
 
+const MAX_BUFFER_BYTES = 64 * 1024 * 1024
+
 const HELP_SIGNATURE = /\bclaude\b/i
 
 export const id = 'claude-subagent'
@@ -66,6 +68,7 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout,
+    maxBuffer: MAX_BUFFER_BYTES,
     env: { ...process.env, CLAUDE_SCHEDULED_TASK: '1' },
   })
 

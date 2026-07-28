@@ -10,6 +10,8 @@
 
 import { spawnSync } from 'node:child_process'
 
+const MAX_BUFFER_BYTES = 64 * 1024 * 1024
+
 export const id = 'stub'
 export const binary = 'stub-provider'
 
@@ -58,6 +60,7 @@ export function dispatch({ prompt, projectRoot, timeout }) {
       stdio: ['ignore', 'pipe', 'pipe'],
       encoding: 'utf8',
       ...(timeout === undefined ? {} : { timeout }),
+      maxBuffer: MAX_BUFFER_BYTES,
     })
     if (child.signal === 'SIGTERM' && child.error?.code === 'ETIMEDOUT') {
       return { ok: false, exitCode: null, stdout: child.stdout || '', stderr: child.stderr || '', timedOut: true }
