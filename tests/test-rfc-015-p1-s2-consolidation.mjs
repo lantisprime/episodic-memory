@@ -24,15 +24,11 @@ async function t(name, fn) {
   catch (e) { fail++; console.log(`FAIL ${name}\n     ${e.message}`) }
 }
 
-// #626: scripts/em-consolidate.mjs:808 does `const rows = loadIndex(DATA_DIR, scope)`
-// at module-init with no guard, so t4b's EISDIR fixture (an index.jsonl that is a
-// directory) throws inside relevance.mjs:100 BEFORE resolveProtectionOrAbort ever
-// runs. The process dies with a raw Node stack trace and empty stdout, so `r.json`
-// is null and `r.json.message` throws — not a flaky test, a real product gap.
-// Flip this to `false` once #626 lands (em-consolidate.mjs guards the module-init
-// load and routes the EISDIR into the normal abort path, so r.json.message is set)
-// to re-enable the assertions below unchanged.
-const T4B_PENDING_626 = true
+// #626 (fixed): em-consolidate now guards every primary-index load — a corrupt
+// store (EISDIR) routes into emitProtectionAbort instead of crashing with a raw
+// stack trace. T4B_PENDING_626 stays as the pending mechanism's example wiring;
+// tPending is kept for future issue-blocked legs.
+const T4B_PENDING_626 = false
 async function tPending(name, issue, fn) {
   if (ONLY && name !== ONLY) return
   if (T4B_PENDING_626) {
@@ -201,6 +197,62 @@ await tPending('t4b_abort_message_discriminates', '#626', () => {
     `must NOT blame playbooks.json when the playbook config is valid, got ${r.json.message}`)
   assert.equal(r.json.code, 'protection-abort:protection',
     `abort class must be the protection class, got ${r.json.code}`)
+})
+
+await t('t4c_dry_run_abort_envelope', () => {
+  const s = mkStore()
+  addClusterPair(s, { prefix: 'dryrun' })
+  writePlaybooks(s, { schema_version: 1, playbooks: [] })
+  fs.rmSync(path.join(s.dir, 'index.jsonl'))
+  fs.mkdirSync(path.join(s.dir, 'index.jsonl'))
+  const r = run(s, ['--scope', 'local', '--min-sim', '0.3'])
+  assert.equal(r.code, 1, `dry-run must abort on a corrupt index, got exit ${r.code}: ${r.stdout}`)
+  assert.equal(r.json && r.json.code, 'protection-abort:protection', `got ${r.json && r.json.code}`)
+  assert.equal(r.json.mode, 'consolidate-dry-run', `got ${r.json.mode}`)
+  assert.match(r.json.message, /index\.jsonl/, `must name index.jsonl, got ${r.json.message}`)
+  assert.match(r.json.message, /episode index unreadable/, `must carry the init-guard reason prefix, got ${r.json.message}`)
+})
+
+await t('t4d_clerk_report_abort_envelope', () => {
+  const s = mkStore()
+  addClusterPair(s, { prefix: 'clerkrep' })
+  writePlaybooks(s, { schema_version: 1, playbooks: [] })
+  fs.rmSync(path.join(s.dir, 'index.jsonl'))
+  fs.mkdirSync(path.join(s.dir, 'index.jsonl'))
+  const r = run(s, ['--clerk', '--scope', 'local'])
+  assert.equal(r.code, 1, `clerk report must abort on a corrupt index, got exit ${r.code}: ${r.stdout}`)
+  assert.equal(r.json && r.json.code, 'protection-abort:protection', `got ${r.json && r.json.code}`)
+  assert.equal(r.json.mode, 'clerk-report', `got ${r.json.mode}`)
+  assert.match(r.json.message, /index\.jsonl/, `must name index.jsonl, got ${r.json.message}`)
+  assert.match(r.json.message, /episode index unreadable/, `must carry the init-guard reason prefix, got ${r.json.message}`)
+})
+
+await t('t4e_clerk_apply_abort_envelope', () => {
+  const s = mkStore()
+  addClusterPair(s, { prefix: 'clerkapp' })
+  writePlaybooks(s, { schema_version: 1, playbooks: [] })
+  fs.rmSync(path.join(s.dir, 'index.jsonl'))
+  fs.mkdirSync(path.join(s.dir, 'index.jsonl'))
+  const r = run(s, ['--clerk', '--scope', 'local', '--apply', '--confirm'])
+  assert.equal(r.code, 1, `clerk apply must abort on a corrupt index, got exit ${r.code}: ${r.stdout}`)
+  assert.equal(r.json && r.json.code, 'protection-abort:protection', `got ${r.json && r.json.code}`)
+  assert.equal(r.json.mode, 'clerk-apply', `got ${r.json.mode}`)
+  assert.match(r.json.message, /index\.jsonl/, `must name index.jsonl, got ${r.json.message}`)
+  assert.match(r.json.message, /episode index unreadable/, `must carry the init-guard reason prefix, got ${r.json.message}`)
+})
+
+await t('t4f_clerk_enrich_abort_envelope', () => {
+  const s = mkStore()
+  addClusterPair(s, { prefix: 'clerkenr' })
+  writePlaybooks(s, { schema_version: 1, playbooks: [] })
+  fs.rmSync(path.join(s.dir, 'index.jsonl'))
+  fs.mkdirSync(path.join(s.dir, 'index.jsonl'))
+  const r = run(s, ['--clerk', '--enrich', '--scope', 'local'])
+  assert.equal(r.code, 1, `clerk enrich must abort on a corrupt index, got exit ${r.code}: ${r.stdout}`)
+  assert.equal(r.json && r.json.code, 'protection-abort:protection', `got ${r.json && r.json.code}`)
+  assert.equal(r.json.mode, 'clerk-enrich', `got ${r.json.mode}`)
+  assert.match(r.json.message, /index\.jsonl/, `must name index.jsonl, got ${r.json.message}`)
+  assert.match(r.json.message, /episode index unreadable/, `must carry the init-guard reason prefix, got ${r.json.message}`)
 })
 
 await t('t6_dryrun_aborts', () => {
