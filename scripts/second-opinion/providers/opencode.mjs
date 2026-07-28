@@ -23,6 +23,8 @@
 
 import { spawnSync } from 'node:child_process'
 
+const MAX_BUFFER_BYTES = 64 * 1024 * 1024
+
 const HELP_SIGNATURE = /\bopencode\s+run\b/
 const DEFAULT_MODEL = 'deepseek/deepseek-v4-pro'
 
@@ -84,6 +86,7 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     shell: false,               // CRITICAL: no shell interpretation (I-6)
     stdio: ['ignore', 'pipe', 'pipe'],   // stdin: ignore → no hang waiting on input
     timeout,
+    maxBuffer: MAX_BUFFER_BYTES,
   })
 
   return {

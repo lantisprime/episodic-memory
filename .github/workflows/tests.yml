@@ -218,6 +218,9 @@ jobs:
       - name: Run second-opinion install-snapshot suite (#573 wiring sweep — I-27a/I-27b freshness + tamper)
         run: node tests/test-second-opinion-install-snapshot.mjs
 
+      - name: Run second-opinion maxbuffer suite (#611 — explicit 64 MiB maxBuffer on provider dispatch)
+        run: node tests/test-second-opinion-maxbuffer.mjs
+
       - name: Run second-opinion preamble suite (#573 wiring sweep — composer + registry validator)
         run: node tests/test-second-opinion-preamble.mjs
 

@@ -17,6 +17,8 @@
 
 import { spawnSync } from 'node:child_process'
 
+const MAX_BUFFER_BYTES = 64 * 1024 * 1024
+
 const HELP_SIGNATURE = /\bUsage:\s+codex\s+exec\b/
 
 export const id = 'codex'
@@ -76,6 +78,7 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     shell: false,               // CRITICAL: no shell interpretation (I-6)
     stdio: ['ignore', 'pipe', 'pipe'],   // stdin: ignore → codex sees EOF immediately
     timeout,
+    maxBuffer: MAX_BUFFER_BYTES,
   })
 
   return {
