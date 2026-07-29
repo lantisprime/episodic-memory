@@ -216,6 +216,19 @@ Verified at `838b224`.
 | same | 609-627 | R6 telemetry append; maps `result.entries` | unchanged — re-surfaced entries flow through as-is |
 | same | end of file | — | APPEND the `EVENT_TIME_READS` constant (parsed from source by the validator; the hook cannot export) |
 | `scripts/lib/activation-log.mjs` | end of file (96 lines) | writer + constants only, no reader | APPEND `loadInjectState` + `RESURFACE_TAIL_MAX_BYTES`. **This is where the reader lives** (R1-F2) — side-effect-free and importable, unlike the hook |
+| `plugins/claude-code-activation/manifest.json` | 19 | pins a sha256 for every owned support file (Principle 10) | **Checksum MUST be updated whenever the hook changes.** Missed by the original plan and by all three review rounds; caught only by CI. See the note below |
+
+> **Owned-artifact checksums are invisible to diff review (CI-caught defect, 2026-07-29).**
+> `plugins/claude-code-activation/manifest.json:19` pins the hook's sha256. Editing the hook
+> without updating it fails three suites at once — `test-plugin-registry`,
+> `test-activation-manifest`, and the `test-em-promote` gauntlet leg — all on the same
+> `A-support-checksum` violation. Nothing local caught it: the manifest appears in neither the
+> plan nor the diff, so a diff reviewer has no reason to open it, and none of the five suites run
+> during the build exercises the registry. **Any future slice touching a file listed in a plugin
+> manifest must carry an explicit checksum step.** Audited repo-wide at the time: the codex
+> manifests (`plugins/codex-activation/manifest.json`, `.codex/episodic-memory-activation/manifest.json`)
+> pin their own separate hook and matcher copies, both verified unchanged, and no manifest pins
+> `scripts/lib/activation-log.mjs` at all.
 | `scripts/lib/activation-match.mjs` | 367-428 | `selectAndBound` returns `{lines, overflowNote, entries}` | EDIT: also return `totalTokens` (additive; no existing caller reads it) |
 | same | 729-742 | `matchActivation` prompt/tool path, early-returns when `entries.length === 0` | EDIT: restructure so the re-surface leg runs even with zero lesson entries |
 | same | end of file | — | APPEND `pickResurfacePlaybook` |
@@ -1494,6 +1507,7 @@ the command: `Amended by RFC-015 R7b` → 0; `P1-S3a` in RFC-015 → 0; `EVENT_T
 | 1.8 | `plugins/.../activation-hook-run.mjs` | EDIT | Listing L5d (pass the 6th arg) | `grep -c 'max_tokens: 500 }, injectState' plugins/claude-code-activation/hooks/activation-hook-run.mjs` → `1` |
 | 1.9 | — | — | Confirm the hook gained NO read call site | see the fenced command below this table → `6` |
 | 1.10 | `scripts/lib/activation-match.mjs` | EDIT+APPEND | Listings L6a-L6d (three EDITs + one APPEND) | `grep -c 'function pickResurfacePlaybook' scripts/lib/activation-match.mjs` → `1`; then `node tests/test-activation-sessionstart.mjs` → same pass count as the 1.0 baseline |
+| 1.10b | `plugins/claude-code-activation/manifest.json` | EDIT | Update the `support_files` sha256 for `activation-hook-run.mjs` to the post-edit value. **Compute it, never copy it from this plan** | `node tests/test-activation-manifest.mjs` → `35 passed, 0 failed`; `node tests/test-plugin-registry.mjs` → `205 passed, 0 failed` |
 | 1.11 | `docs/rfcs/RFC-009-lesson-activation.contract.json` | EDIT | Listing L3 | see the fenced command below this table → exit 0 |
 | 1.12 | `scripts/validate-rfc-009-contract-mirror.mjs` | APPEND | Listing L4 | `grep -c 'function checkEventTimeReads' scripts/validate-rfc-009-contract-mirror.mjs` → `1` |
 | 1.13 | `scripts/validate-rfc-009-contract-mirror.mjs` | EDIT | Listing L4b (wiring) | `node scripts/validate-rfc-009-contract-mirror.mjs` → exit 0 and stdout `{"status":"ok",...}` |
