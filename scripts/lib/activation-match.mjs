@@ -424,7 +424,10 @@ function selectAndBound(candidates, bounds) {
     ? `+${dropped.length} more matches suppressed, incl. critical ${criticalDropped.episode_id}`
     : null;
 
-  return { lines, overflowNote, entries };
+  // totalTokens is returned additively for RFC-015 R7a: matchActivation appends at
+  // most one re-surfaced playbook line and must respect the SAME shared budget.
+  // No existing caller reads this field.
+  return { lines, overflowNote, entries, totalTokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -715,7 +718,7 @@ function renderSessionStart(sessionStart, identity, suppress, bounds) {
  * @param {{max_matches?:number, max_tokens?:number}} [bounds]
  * @returns {MatchResult}
  */
-export function matchActivation(index, event, identity, suppress, bounds) {
+export function matchActivation(index, event, identity, suppress, bounds, injectState) {
   try {
     const kind = event && event.kind;
 
@@ -726,20 +729,47 @@ export function matchActivation(index, event, identity, suppress, bounds) {
       return renderSessionStart(index && index.session_start, identity, suppress, bounds);
     }
 
-    const entries = sanitizeEntries(index);
-    if (entries.length === 0) return { lines: [], overflowNote: null, entries: [] };
-
     if (kind !== "prompt" && kind !== "tool") {
       // any other/unknown kind: empty, advisory (fail open).
       return { lines: [], overflowNote: null, entries: [] };
     }
 
-    const candidates = candidatesForEvent(entries, event, index, identity);
+    const entries = sanitizeEntries(index);
+    // RFC-015 R7a: a zero-lesson index must NOT short-circuit the re-surface leg —
+    // a project with one declared playbook and no trigger-bearing lessons is the
+    // exact case R7a's mid-session registration clause targets (plan EC6).
+    const candidates = entries.length === 0 ? [] : candidatesForEvent(entries, event, index, identity);
     const surviving = filterSuppressed(candidates, suppress);
-    const deduped = dedupByEpisodePreferPlaybook(surviving); // RFC-011 R2.9(b) one-per-episode + playbook-wins
-    if (deduped.length === 0) return { lines: [], overflowNote: null, entries: [] };
+    const deduped = dedupByEpisodePreferPlaybook(surviving);
+    const base = deduped.length === 0
+      ? { lines: [], overflowNote: null, entries: [], totalTokens: 0 }
+      : selectAndBound(deduped, bounds);
 
-    return selectAndBound(deduped, bounds);
+    if (kind !== "prompt") return { lines: base.lines, overflowNote: base.overflowNote, entries: base.entries };
+
+    const maxTokens = Number.isInteger(bounds && bounds.max_tokens) && bounds.max_tokens > 0 ? bounds.max_tokens : 500;
+    const rendered = new Set(base.entries.map((e) => e.id));
+    const pick = pickResurfacePlaybook(index && index.resurface_playbooks, injectState, suppress, rendered);
+    if (pick) {
+      const line = renderPlaybookLine(pick);
+      const t = estimateTokens(line);
+      // Playbooks consume ONLY the shared token budget, never a max_matches slot —
+      // parity with the session-start playbook band (see the R3 note above).
+      if (t <= maxTokens && base.totalTokens + t <= maxTokens) {
+        base.lines.push(line);
+        base.entries.push({
+          id: pick.episode_id,
+          effective_priority: pick.effective_priority ?? 0,
+          rendered: "imperative",
+          source_scope: pick.source_scope ?? null,
+          // REQ-8b: sourced from the ROW's own access_count, NEVER from injectState.
+          // Echoing the injectState snapshot forward would break the equality
+          // invariant that lets a real read terminate re-surfacing.
+          access_count_at_inject: pick.access_count ?? 0,
+        });
+      }
+    }
+    return { lines: base.lines, overflowNote: base.overflowNote, entries: base.entries };
   } catch {
     return { lines: [], overflowNote: null, entries: [] };
   }
@@ -749,3 +779,49 @@ export function matchActivation(index, event, identity, suppress, bounds) {
 // helpers (word-boundary/regex-metachar/tool-glob edge cases) without
 // re-deriving them through full matchActivation fixtures.
 export { matchesPhrase, matchesToolTrigger, parseToolTrigger, scopeOk, isImperative, renderLine, renderPlainLine, renderPlaybookLine, estimateTokens, renderSessionStart, dedupByEpisodePreferPlaybook };
+
+// pickResurfacePlaybook(playbooks, injectState, suppress, excludeIds) -> row | null
+// Pure. RFC-015 R7a: select at most ONE unread declared session_start playbook,
+// round-robin by least-recently-surfaced. See plan §12 for the state table.
+function pickResurfacePlaybook(playbooks, injectState, suppress, excludeIds) {
+  if (!Array.isArray(playbooks) || playbooks.length === 0) return null; // state A
+  if (!injectState || typeof injectState !== "object") return null; // state B
+  const s = suppress instanceof Set ? suppress : new Set();
+  const ex = excludeIds instanceof Set ? excludeIds : new Set();
+  const unread = [];
+  for (const p of playbooks) {
+    if (!p || typeof p !== "object") continue; // state I
+    const id = p.episode_id;
+    if (typeof id !== "string" || !id) continue; // state I
+    if (s.has(id)) continue; // state G
+    if (ex.has(id)) continue; // state H
+    const st = Object.prototype.hasOwnProperty.call(injectState, id) ? injectState[id] : null;
+    if (!st) {
+      // state F: never injected (or rotated away) => unread by definition, and
+      // sorts FIRST so a fresh mid-session registration surfaces immediately.
+      unread.push({ row: p, ts: "" });
+      continue;
+    }
+    // R1-F4: coerce a non-finite row count to 0 (=> unread) rather than skipping
+    // the candidate. `?? 0` alone is NOT enough — it catches only null/undefined,
+    // so a string like "x" survives it and Number("x") is NaN. Skipping on NaN
+    // would SUPPRESS a pointer on malformed input, the one inversion of fail-open.
+    const rawCurrent = Number(p.access_count);
+    const current = Number.isFinite(rawCurrent) ? rawCurrent : 0;
+    const rawSnapshot = Number(st.access_count_at_inject);
+    if (!Number.isFinite(rawSnapshot)) {
+      // No usable snapshot is equivalent to no inject row => unread, sorts first.
+      unread.push({ row: p, ts: "" });
+      continue;
+    }
+    // state J: `<=` not `===` — a backward-moved counter stays on the fail-open
+    // side (extra advisory line) instead of suppressing the pointer forever.
+    if (current <= rawSnapshot) unread.push({ row: p, ts: typeof st.ts === "string" ? st.ts : "" });
+  }
+  if (unread.length === 0) return null; // state C
+  unread.sort((a, b) => {
+    if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
+    return a.row.episode_id < b.row.episode_id ? -1 : a.row.episode_id > b.row.episode_id ? 1 : 0;
+  });
+  return unread[0].row; // states D / E
+}

@@ -97,6 +97,59 @@ t('testContractMirrorDetectsDrift', () => {
   assert.ok(r6.json.errors.some((e) => e.includes('read_command')), `names the dropped entry field: ${r6.stdout}`);
 });
 
+t('t14_mirror_boundary_ok', () => {
+  const r = run([]);
+  assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+  assert.equal(r.json.status, 'ok');
+});
+
+t('t15_mirror_boundary_drift', () => {
+  const doc = JSON.parse(fs.readFileSync(CONTRACT, 'utf8'));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ctr009-etr-'));
+
+  // (a) entry ADDED to contract.json event_time_reads.files
+  const withExtra = structuredClone(doc);
+  withExtra.event_time_reads.files.push('tags.json');
+  const pa = path.join(d, 'etr-add.json');
+  fs.writeFileSync(pa, JSON.stringify(withExtra));
+  const ra = run(['--contract', pa]);
+  assert.equal(ra.code, 1, 'added entry exits 1');
+  assert.equal(ra.json.status, 'drift');
+  assert.ok(ra.json.errors.some((e) => e.includes('tags.json')), `names the added entry: ${ra.stdout}`);
+
+  // (b) entry DROPPED from contract.json event_time_reads.files
+  const withoutLog = structuredClone(doc);
+  withoutLog.event_time_reads.files = withoutLog.event_time_reads.files.filter((f) => f !== 'activation-log.jsonl');
+  const pb = path.join(d, 'etr-drop.json');
+  fs.writeFileSync(pb, JSON.stringify(withoutLog));
+  const rb = run(['--contract', pb]);
+  assert.equal(rb.code, 1, 'dropped entry exits 1');
+  assert.equal(rb.json.status, 'drift');
+  assert.ok(rb.json.errors.some((e) => e.includes('activation-log.jsonl')), `names the dropped entry: ${rb.stdout}`);
+
+  // (c) a genuinely new fs.readFileSync call added to a THROWAWAY COPY of the
+  // hook SOURCE, contract.json left untouched — the only sub-case that
+  // exercises the real failure mode RFC-009:47 forbids (R2-G3). A full repo
+  // copy is required: a stub repo makes the validator exit 2 (missing
+  // activation.mjs / em-trigger-index.mjs / activation-classes.json / README.md),
+  // not 1.
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ctr009-repo-'));
+  fs.cpSync(REPO, tmpRepo, {
+    recursive: true,
+    filter: (src) => !src.includes(`${path.sep}.git`) && !src.includes(`${path.sep}node_modules`),
+  });
+  const hookCopy = path.join(tmpRepo, 'plugins/claude-code-activation/hooks/activation-hook-run.mjs');
+  const hookSrc = fs.readFileSync(hookCopy, 'utf8');
+  fs.writeFileSync(hookCopy, hookSrc + `\nfs.readFileSync(path.join(dataDir, 'tags.json'), 'utf8')\n`);
+  const rc = run(['--repo', tmpRepo]);
+  assert.equal(rc.code, 1, `planted source drift exits 1: ${rc.stdout}\n${rc.stderr}`);
+  assert.equal(rc.json.status, 'drift');
+  assert.ok(
+    rc.json.errors.some((e) => /has 7 fs read call site\(s\), contract pins 6/.test(e)),
+    `names the count-pin drift: ${rc.stdout}`
+  );
+});
+
 t('testContractMirrorBadArgvExits2', () => {
   const r = run(['--nonsense']);
   assert.equal(r.code, 2, 'bad argv is exit 2, never a fake drift');

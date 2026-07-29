@@ -19,7 +19,10 @@
 // READ BOUNDARY (REQ-19): the FRESH path reads ONLY the persisted per-store
 // trigger-index.json files (stat-only freshness check against index.jsonl,
 // never its content) plus lesson-suppress.json (REQ-13) and its schema
-// (REQ-14) — never index.jsonl content, tags.json, activation-classes.json,
+// (REQ-14), plus a bounded 64 KiB TAIL of this adapter's own append log
+// activation-log.jsonl (RFC-015 R7b — read on `prompt` events ONLY, fail-open:
+// absent/unparseable disables re-surfacing and never affects injection)
+// — never index.jsonl content, tags.json, activation-classes.json,
 // or process.env. The STALE/CORRUPT path's rebuild is an explicit CARVE-OUT:
 // it shells out to the standalone `em-trigger-index` CLI as a SUBPROCESS
 // (never imports the writer module directly), so the index.jsonl read that
@@ -575,6 +578,34 @@ async function main() {
     merged.session_start = mergeSessionStart(localSS, globalSS)
   }
 
+  // RFC-015 R7a: the prompt path needs the DECLARED session_start playbooks to
+  // re-surface unread pointers. merged.session_start is deliberately computed on
+  // the SessionStart branch only (see the SYMMETRY note above), so we attach a
+  // narrow, separately-named field instead of populating that section here — the
+  // R3 merged shape stays byte-identical. The playbooks trio is LOCAL-only by
+  // contract (mergeSessionStart threads it unchanged; global never produces one).
+  let injectState = null
+  if (event.kind === 'prompt') {
+    const localSS = sessionStartStatus(local)
+    const pb = localSS.ok && localSS.value && Array.isArray(localSS.value.playbooks)
+      ? localSS.value.playbooks
+      : []
+    if (pb.length) merged.resurface_playbooks = pb
+    // The reader lives in the activation-log lib (R1-F2), reached the same way
+    // the telemetry writer already is. Fail-open: any import or read failure
+    // leaves injectState null, which disables re-surfacing and nothing else.
+    try {
+      if (ACTIVATION_LOG_LIB_PATH) {
+        const logMod = await import(pathToFileURL(ACTIVATION_LOG_LIB_PATH).href)
+        if (typeof logMod.loadInjectState === 'function') {
+          injectState = logMod.loadInjectState(path.join(identity.root, '.episodic-memory'))
+        }
+      }
+    } catch {
+      injectState = null
+    }
+  }
+
   const suppress = await loadSuppressSet(identity.root)
 
   let matchActivation
@@ -589,7 +620,7 @@ async function main() {
 
   let result
   try {
-    result = matchActivation(merged, event, identity, suppress, { max_matches: 3, max_tokens: 500 })
+    result = matchActivation(merged, event, identity, suppress, { max_matches: 3, max_tokens: 500 }, injectState)
   } catch {
     result = { lines: [], overflowNote: null }
   }
@@ -637,3 +668,15 @@ async function main() {
 main()
   .then(() => process.exit(0))
   .catch(() => process.exit(0)) // advisory invariant: never a non-zero exit, never a decision field
+
+// RFC-015 R7b: the COMPLETE set of artifacts this event plane may read. Mirrored
+// as event_time_reads.files in RFC-009-lesson-activation.contract.json and diffed
+// in CI. Adding a read here without updating the contract fails validation; so
+// does adding one to the code without listing it here.
+const EVENT_TIME_READS = [
+  'trigger-index.json',
+  'lesson-suppress.json',
+  'lesson-suppress.schema.json',
+  'manifest.json',
+  'activation-log.jsonl',
+]

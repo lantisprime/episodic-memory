@@ -109,6 +109,9 @@ async function main() {
 
   checkActivationFlags(contract)
 
+  // RFC-015 R7b: event-time read boundary (declared set + call-site count pin).
+  checkEventTimeReads(contract)
+
   const codeFields = [...activationLib.ACTIVATION_ARRAY_FIELDS, ...activationLib.ACTIVATION_SCALAR_FIELDS, 'violated_pattern']
   diffBoth('activation-fields', contract.activation_fields ?? [], codeFields)
 
@@ -181,3 +184,81 @@ main().catch(e => {
   process.stderr.write(`internal error: ${e.stack || e.message}\n`)
   process.exit(2)
 })
+
+// RFC-015 R7b: the event-time read boundary is enforced in TWO halves, because
+// neither half alone is sufficient.
+//
+//   (1) DECLARED SET — the EVENT_TIME_READS array literal in the hook source,
+//       diffed bidirectionally against contract.event_time_reads.files. This is
+//       readable and reviewable, but a contributor could add a read and simply
+//       not update the constant.
+//   (2) COUNT PIN — the number of read-API occurrences in each event-plane file,
+//       compared against contract read_call_sites. This is what catches a new
+//       read that the contributor did not declare in the constant.
+//
+// HONEST SCOPE (R2-G4). The pin covers `fs.`-prefixed readFileSync / openSync /
+// readSync / readFile / createReadStream. It does NOT catch: an `fs/promises`
+// import, a destructured or aliased import (`import {readFileSync}` / `const rf =
+// fs.readFileSync`), or a read added to a THIRD file the hook imports. Those are
+// stylistic departures from every existing call site in these two files and are
+// review-visible, but they are NOT mechanically blocked. The claim this check
+// supports is "a new read written in the local idiom fails CI", not "no
+// undeclared read is possible". RFC-009:47 asks the mirror to make a quiet patch
+// a CI failure; before this slice there was NO mechanical check of the read set
+// at all, so this is a real gain with a stated ceiling — see §17 DEFER-6.
+//
+// Extracting the literal PATH from each call site is NOT possible — every real
+// site passes a variable (fs.readFileSync(triggerIndexPath, 'utf8')), so a
+// path-scanning regex returns the empty set. The count pin is the workable
+// mechanical proxy. Convention note: like diffBoth, these push into the shared
+// module-level `errors` array and return nothing.
+function extractEventTimeReadsConstant(hookSource) {
+  // Anchored on the exact declaration. Non-greedy to the first closing bracket;
+  // the constant is a flat array of string literals by contract.
+  const m = /const\s+EVENT_TIME_READS\s*=\s*\[([\s\S]*?)\]/.exec(hookSource)
+  if (!m) return null
+  const out = []
+  const litRe = /['"]([^'"]+)['"]/g
+  let lit
+  while ((lit = litRe.exec(m[1])) !== null) out.push(lit[1])
+  return out.sort()
+}
+
+function countReadCallSites(src) {
+  // R2-G4: widened beyond the three original spellings to the read APIs a
+  // contributor might realistically reach for in this codebase's idiom.
+  const m = src.match(/fs\.(?:readFileSync|openSync|readSync|readFile|createReadStream)\s*\(/g)
+  return m ? m.length : 0
+}
+
+function checkEventTimeReads(contract) {
+  const etr = contract && contract.event_time_reads
+  if (!etr || !Array.isArray(etr.files) || !etr.read_call_sites || typeof etr.read_call_sites !== 'object') {
+    errors.push('event_time_reads: missing or malformed in contract.json (expected {files:[...], read_call_sites:{...}})')
+    return
+  }
+  const hookRel = 'plugins/claude-code-activation/hooks/activation-hook-run.mjs'
+  const hookPath = path.join(repoRoot, hookRel)
+  if (!fs.existsSync(hookPath)) {
+    errors.push(`event_time_reads: hook not found at ${hookPath}`)
+    return
+  }
+  const hookSource = fs.readFileSync(hookPath, 'utf8')
+  const declared = extractEventTimeReadsConstant(hookSource)
+  if (declared === null) {
+    errors.push(`event_time_reads: no EVENT_TIME_READS constant found in ${hookRel}`)
+  } else {
+    diffBoth('event_time_reads', [...etr.files].sort(), declared)
+  }
+  for (const [rel, expected] of Object.entries(etr.read_call_sites)) {
+    const p = path.join(repoRoot, rel)
+    if (!fs.existsSync(p)) {
+      errors.push(`event_time_reads: read_call_sites names a missing file ${rel}`)
+      continue
+    }
+    const actual = countReadCallSites(fs.readFileSync(p, 'utf8'))
+    if (actual !== expected) {
+      errors.push(`event_time_reads: ${rel} has ${actual} fs read call site(s), contract pins ${expected} — a read was added or removed without updating the boundary contract`)
+    }
+  }
+}
