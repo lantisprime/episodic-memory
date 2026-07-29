@@ -4,7 +4,7 @@
  *
  * Locks in the script-identity cache-key behavior across both buildTuple
  * implementations (classifier-marker.mjs and scripts/lib/classifier-cache.mjs)
- * + the agent_classify_command env-prefix guard (FU-1).
+ * + agent_classify_command literal-lane behavior for env-prefixed commands (FIX-435).
  *
  * Acceptance contract:
  *   1. In-repo interpreter command (`node scripts/X.mjs <args>`) keys on script
@@ -16,7 +16,7 @@
  *      (predicate rejects; digest is null anyway).
  *   6. External (non-in-repo) interpreter script stays arg-sensitive (digest null).
  *   7. Marker plant + read with varied args round-trips via the same key.
- *   8. agent_classify_command refuses env-prefix at the cache authority (FU-1).
+ *   8. agent_classify_command returns 1 for an env-prefixed command when only a clean marker exists (FIX-435: literal-lane miss; the FU-1 categorical refusal was removed — safety lives in the key).
  *   9. Predicate parity: classifier-marker and classifier-cache use the SAME
  *      shared predicate (no parallel divergence).
  */
@@ -210,11 +210,12 @@ test('SI-M03 marker: env-prefix variant does NOT hit clean script marker', () =>
 
 // === agent_classify_command env-prefix guard (FU-1) =======================
 
-test('SI-A01 agent_classify_command: env-prefix command returns 1 (FU-1)', () => {
+test('SI-A01 agent_classify_command: env-prefix returns 1 (literal-lane miss; FIX-435)', () => {
   const repo = mkrepo('agent-env-guard')
   const sid = 'sik-fu1'
-  // Even with a CLEAN script marker present, the agent_classify_command guard
-  // must refuse to consult the cache for an env-prefixed command.
+  // With only a CLEAN script marker present, an env-prefixed command consults
+  // the literal lane and MISSES (FIX-435): rc 1, no decision. The old FU-1
+  // categorical refusal was removed; safety lives in the key (§EP2/§K4).
   markerWrite(repo, 'node scripts/hello.mjs', sid, 'read_only')
 
   const out = spawnSync('bash', ['-c', `
@@ -222,7 +223,7 @@ test('SI-A01 agent_classify_command: env-prefix command returns 1 (FU-1)', () =>
     source "${SHELL_LIB}"
     # source emits agent-classifier.sh too via internal sourcing; call directly.
     source "${path.join(ROOT, 'plugins', 'claude-code', 'hooks/lib/agent-classifier.sh')}"
-    # FU-1 guard: env-prefix command returns 1 (no decision).
+    # FIX-435: env-prefix command returns 1 (literal-lane miss, no decision).
     if agent_classify_command "FOO=bar node scripts/hello.mjs" "${repo}" "${repo}"; then
       echo "UNEXPECTED_HIT"
     else
@@ -230,7 +231,7 @@ test('SI-A01 agent_classify_command: env-prefix command returns 1 (FU-1)', () =>
     fi
   `], { env: { ...process.env, CLAUDE_CODE_SESSION_ID: sid }, encoding: 'utf8' })
 
-  assert.ok(out.stdout.includes('REFUSED_OK'), `FU-1 guard must refuse env-prefix; got stdout=${out.stdout} stderr=${out.stderr}`)
+  assert.ok(out.stdout.includes('REFUSED_OK'), `env-prefix with only a clean marker must miss (rc 1); got stdout=${out.stdout} stderr=${out.stderr}`)
 })
 
 // === Run ==================================================================

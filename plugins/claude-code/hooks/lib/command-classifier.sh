@@ -979,13 +979,13 @@ _detect_helper_invocation() {
 # structural hard-deny lane — env-prefix classifier-marker override, shell
 # wrappers, marker writes, push_or_pr_create, unsafe_complex, git/gh, rm/tee/
 # touch — classifies and RETURNS earlier in _classify_segment, so it can never
-# reach this helper and can never be downgraded by a planted marker. As
-# defense-in-depth, env_prefix_count>0 additionally short-circuits (mirrors the
-# Tier-0 lookup's env-prefix gate — cross-session attack class, PR #271).
+# reach this helper and can never be downgraded by a planted marker.
+# FIX-435: env-prefixed forms now consult too — the literal-lane key (full
+# prefix-bearing text + session_id) is the isolation mechanism (§EP tests).
 #
 # Reads _classify_segment locals via dynamic scope (TOKS, target_root,
-# caller_cwd_authoritative, env_prefix_count) — identical to how the
-# interpreter branch reads them.
+# caller_cwd_authoritative) — identical to how the interpreter branch
+# reads them.
 # ---------------------------------------------------------------------------
 # Resolve the command text used for the marker cache-key lookup. PREFER the raw
 # command threaded from classify_command (_seg_raw_command via dynamic scope) —
@@ -1013,10 +1013,9 @@ _resolve_marker_cmd_text() {
 }
 
 _try_agent_marker_verdict() {
-  # env-prefix forms never escape (cross-session attack class, PR #271).
-  if [ "${env_prefix_count:-0}" -ne 0 ]; then
-    return 1
-  fi
+  # FIX-435: env-prefix forms may consult the marker cache; the literal-lane
+  # key carries the full prefix-bearing text + session_id, so no cross-shape
+  # or cross-session reuse is possible (see agent_classify_command's FIX-435 note).
   # Lazy-source the agent-classifier wrapper once (same guard + resolution the
   # interpreter branch uses).
   if [ -z "${__AGENT_CLASSIFIER_SOURCED:-}" ]; then
@@ -1949,14 +1948,16 @@ _classify_segment() {
           __AGENT_CLASSIFIER_SOURCED=0
         fi
       fi
-      # R1-finding-1 (codex plan-review BLOCKER): env-prefix forms must NOT
-      # consult the marker cache. Under the script-identity key the env prefix
-      # no longer rides in normalized_command, so `SKIP_PREFLIGHT=1 node x.mjs`
-      # could otherwise reuse the clean `node x.mjs` marker. Guard on the shell's
-      # authoritative env_prefix_count (reliable even when the token/raw
-      # reconstruction drops the prefix) — mirrors Site A (_try_agent_marker_verdict)
-      # and composes with FU-1's guard inside agent_classify_command.
-      if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" = "1" ] && [ "${env_prefix_count:-0}" -eq 0 ]; then
+      # FIX-435 (revises R1-finding-1): env-prefix forms may consult the marker
+      # cache. R1-finding-1's concern — script-identity reuse where the prefix
+      # no longer rides in normalized_command — is closed at the KEY layer:
+      # isInterpreterScriptIdentity() rejects env-prefixed text (toks[0] is not
+      # an interpreter), so these shapes key under the LITERAL lane where the
+      # prefix and session_id ride in the sha256 tuple; `SKIP_PREFLIGHT=1 node
+      # x.mjs` can never reuse the clean `node x.mjs` marker (§EP1/§EP3/§EP7).
+      # Raw threading via _resolve_marker_cmd_text preserves the prefix so
+      # normalizeCommand(read) == normalizeCommand(write).
+      if [ "${__AGENT_CLASSIFIER_SOURCED:-0}" = "1" ]; then
         # Command text via the shared helper (raw threaded command preferred so
         # normalizeCommand(read)==normalizeCommand(write) for the residual
         # non-digest interpreter case; identical resolution to Site A so the two
