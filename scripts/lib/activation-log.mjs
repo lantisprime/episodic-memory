@@ -94,3 +94,86 @@ export function computeCadence(entries, rows, now = new Date()) {
 
 // Contract-mirror pin (REQ-11): the full key set session_start.cadence can carry.
 export const CADENCE_FIELDS = ['enabled', 'phrase_sharing', 'active_lessons', 'k_shared', 'n_lessons', 'line']
+
+// RFC-015 R7b: bounded tail of this adapter's own append log. 64 KiB against the
+// writer's 1 MiB cap (ACTIVATION_LOG_MAX_BYTES) — the log is rotated on clerk
+// cadence, not at size, so it can sit near the cap and the tail must stay cheap
+// on EVERY prompt event.
+export const RESURFACE_TAIL_MAX_BYTES = 65536
+
+// loadInjectState(dataDir) -> {episode_id: {access_count_at_inject:int, ts:string}} | null
+// null means "log unavailable" and disables re-surfacing. {} means "readable, no
+// qualifying rows" and leaves every declared playbook UNREAD by REQ-4's no-row
+// clause. Never throws. See plan §12 for the exhaustive state table.
+export function loadInjectState(dataDir) {
+  try {
+    const p = path.join(dataDir, ACTIVATION_LOG_NAME)
+    let fd
+    try {
+      fd = fs.openSync(p, 'r')
+    } catch {
+      return null // states A / A2: absent, incl. the post-rotation steady state
+    }
+    let text
+    try {
+      const size = fs.fstatSync(fd).size
+      if (size === 0) return {} // state B
+      const start = size > RESURFACE_TAIL_MAX_BYTES ? size - RESURFACE_TAIL_MAX_BYTES : 0
+      const len = size - start
+      const buf = Buffer.allocUnsafe(len)
+      fs.readSync(fd, buf, 0, len, start)
+      text = buf.toString('utf8')
+      if (start > 0) {
+        // State D vs D2: we may have started mid-line. Read the single byte
+        // BEFORE the window; if it is a newline the first line is whole and must
+        // be kept. Otherwise drop the leading partial line. State D3: no newline
+        // anywhere means one oversized line and nothing usable.
+        const prev = Buffer.allocUnsafe(1)
+        fs.readSync(fd, prev, 0, 1, start - 1)
+        if (prev.toString('utf8') !== '\n') {
+          const nl = text.indexOf('\n')
+          text = nl === -1 ? '' : text.slice(nl + 1)
+        }
+      }
+    } finally {
+      try { fs.closeSync(fd) } catch {}
+    }
+    // H1 (round-3 NIT): a null-prototype map. On a plain object an episode id of
+    // the literal string "__proto__" would invoke the prototype setter instead of
+    // creating an own property, so the hasOwnProperty lookup in
+    // pickResurfacePlaybook would never find it and that playbook would
+    // re-surface forever. Fail-open and unreachable with real date-prefixed ids,
+    // but Object.create(null) removes the class outright.
+    const out = Object.create(null)
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue
+      let row
+      try {
+        row = JSON.parse(line)
+      } catch {
+        continue // states E / F: torn or garbage line
+      }
+      if (!row || typeof row !== 'object') continue
+      // State G2: the module's OWN constant — the version dimension cannot drift
+      // from the writer above or from the clerk's reader (REQ-1c, structural).
+      if (row.v !== LOG_FORMAT_VERSION) continue
+      if (row.event !== 'inject') continue // state G
+      if (row.surface !== 'session_start' && row.surface !== 'per_prompt') continue // state G3
+      if (!Array.isArray(row.entries)) continue // state G
+      const ts = typeof row.ts === 'string' ? row.ts : ''
+      for (const e of row.entries) {
+        if (!e || typeof e !== 'object') continue
+        if (typeof e.id !== 'string' || !e.id) continue
+        // State G4 (REQ-1b): a malformed count is SKIPPED, never coerced. Coercing
+        // it would make the join read "already read" and wrongly suppress a
+        // genuinely unread pointer — the one inversion of fail-open.
+        if (typeof e.access_count_at_inject !== 'number') continue
+        if (!Number.isFinite(e.access_count_at_inject)) continue
+        out[e.id] = { access_count_at_inject: e.access_count_at_inject, ts }
+      }
+    }
+    return out
+  } catch {
+    return null // state H
+  }
+}

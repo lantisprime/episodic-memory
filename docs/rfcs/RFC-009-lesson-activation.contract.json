@@ -24,6 +24,20 @@
       "--lesson"
     ]
   },
+  "event_time_reads": {
+    "_doc": "RFC-009 R4 read boundary as amended by RFC-015 R7b. `files` is the COMPLETE set of artifacts the event plane may read; it is diffed bidirectionally against the EVENT_TIME_READS constant declared in activation-hook-run.mjs. `read_call_sites` pins how many fs.readFileSync/openSync/readSync occurrences each event-plane file may contain: adding an undeclared read changes the count and fails CI even if the contributor never touches the constant. Validated by scripts/validate-rfc-009-contract-mirror.mjs.",
+    "files": [
+      "trigger-index.json",
+      "lesson-suppress.json",
+      "lesson-suppress.schema.json",
+      "manifest.json",
+      "activation-log.jsonl"
+    ],
+    "read_call_sites": {
+      "plugins/claude-code-activation/hooks/activation-hook-run.mjs": 6,
+      "scripts/lib/activation-log.mjs": 3
+    }
+  },
   "activation_fields": [
     "triggers",
     "applies_to_projects",
