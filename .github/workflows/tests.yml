@@ -221,6 +221,9 @@ jobs:
       - name: Run second-opinion maxbuffer suite (#611 — explicit 64 MiB maxBuffer on provider dispatch)
         run: node tests/test-second-opinion-maxbuffer.mjs
 
+      - name: Run codex env-propagation suite (#636 — CLAUDE_SCHEDULED_TASK marker on codex dispatch)
+        run: node tests/test-codex-env-propagation.mjs
+
       - name: Run second-opinion preamble suite (#573 wiring sweep — composer + registry validator)
         run: node tests/test-second-opinion-preamble.mjs
 
