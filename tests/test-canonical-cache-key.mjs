@@ -349,6 +349,96 @@ test('§E3 gate E2E polarity: redirect variant of the SAME cached command is sti
   assert.ok((r.stdout || '').includes('"block"'), `expected block, got: ${r.stdout || r.stderr}`)
 })
 
+// ===== §EP: env-prefixed commands — literal-lane consult (issue #435) ======
+
+test('§EP1 unit: env-prefixed and bare forms produce DISTINCT cache keys', () => {
+  const repo = mkrepo('ep1')
+  const sid = 's_ep1'
+  const wPrefixed = markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', sid, 'read_only')
+  const wBare = markerWrite(repo, 'node craftool.mjs --alpha 1', sid, 'read_only')
+  assert.notStrictEqual(wPrefixed.cache_key, wBare.cache_key, 'env prefix must ride in the key')
+})
+
+test('§EP2 unit: env-prefixed write/read use the LITERAL lane and hit same-session', () => {
+  const repo = mkrepo('ep2')
+  const sid = 's_ep2'
+  const w = markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', sid, 'read_only')
+  const body = JSON.parse(fs.readFileSync(w.file, 'utf8'))
+  assert.strictEqual(body.key_form, 'literal', `expected literal lane, got ${body.key_form}`)
+  const r = markerRead(repo, 'FOO=bar node craftool.mjs --alpha 1', sid)
+  assert.strictEqual(r.json && r.json.status, 'hit', `expected hit: ${JSON.stringify(r.json)}`)
+  assert.strictEqual(r.json.key_form, 'literal')
+  assert.strictEqual(r.json.cache_key, w.cache_key)
+})
+
+test('§EP3 unit polarity: bare↔prefixed never share a verdict (both directions)', () => {
+  const repo = mkrepo('ep3')
+  const sid = 's_ep3'
+  markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', sid, 'read_only')
+  const rBare = markerRead(repo, 'node craftool.mjs --alpha 1', sid)
+  assert.notStrictEqual(rBare.json && rBare.json.status, 'hit', `bare must miss: ${JSON.stringify(rBare.json)}`)
+  const repo2 = mkrepo('ep3b')
+  markerWrite(repo2, 'node craftool.mjs --alpha 1', sid, 'read_only')
+  const rPref = markerRead(repo2, 'FOO=bar node craftool.mjs --alpha 1', sid)
+  assert.notStrictEqual(rPref.json && rPref.json.status, 'hit', `prefixed must miss: ${JSON.stringify(rPref.json)}`)
+})
+
+test('§EP4 unit polarity: a different prefix VALUE is a different shape', () => {
+  const repo = mkrepo('ep4')
+  const sid = 's_ep4'
+  markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', sid, 'read_only')
+  const r = markerRead(repo, 'FOO=other node craftool.mjs --alpha 1', sid)
+  assert.notStrictEqual(r.json && r.json.status, 'hit', `value variant must miss: ${JSON.stringify(r.json)}`)
+})
+
+test('§EP5 unit polarity: another session never reads the prefixed verdict', () => {
+  const repo = mkrepo('ep5')
+  markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', 's_ep5a', 'read_only')
+  const r = markerRead(repo, 'FOO=bar node craftool.mjs --alpha 1', 's_ep5b')
+  assert.notStrictEqual(r.json && r.json.status, 'hit', `cross-session must miss: ${JSON.stringify(r.json)}`)
+})
+
+test('§EP6 gate E2E: same-session verdict for an env-prefixed command satisfies the gate on retry (issue #435)', () => {
+  const repo = mkrepo('ep6')
+  const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'canonkey-home-'))
+  const sid = 's_ep6'
+  markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', sid, 'read_only')
+  const r = runGate(repo, testHome, sid, 'FOO=bar node craftool.mjs --alpha 1')
+  assert.strictEqual(r.status, 0, `gate errored: ${r.stderr}`)
+  assert.ok(!(r.stdout || '').includes('"block"'), `expected allow, got: ${r.stdout}`)
+})
+
+test('§EP7 gate E2E polarity: the bare variant is still held after the prefixed verdict', () => {
+  const repo = mkrepo('ep7')
+  const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'canonkey-home-'))
+  const sid = 's_ep7'
+  markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', sid, 'read_only')
+  const r = runGate(repo, testHome, sid, 'node craftool.mjs --alpha 1')
+  assert.ok((r.stdout || '').includes('"block"'), `expected block, got: ${r.stdout || r.stderr}`)
+})
+
+test('§EP8 gate E2E polarity: another session\'s prefixed verdict does not satisfy the gate', () => {
+  const repo = mkrepo('ep8')
+  const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'canonkey-home-'))
+  markerWrite(repo, 'FOO=bar node craftool.mjs --alpha 1', 's_ep8a', 'read_only')
+  const r = runGate(repo, testHome, 's_ep8b', 'FOO=bar node craftool.mjs --alpha 1')
+  assert.ok((r.stdout || '').includes('"block"'), `expected block, got: ${r.stdout || r.stderr}`)
+})
+
+test('§EP9 unit: multi-prefix is its own literal shape (exact hit; set and order variants miss)', () => {
+  const repo = mkrepo('ep9')
+  const sid = 's_ep9'
+  const wMulti = markerWrite(repo, 'A=1 B=2 node craftool.mjs --alpha 1', sid, 'read_only')
+  const bodyMulti = JSON.parse(fs.readFileSync(wMulti.file, 'utf8'))
+  assert.strictEqual(bodyMulti.key_form, 'literal', `expected literal lane, got ${bodyMulti.key_form}`)
+  const wSingle = markerWrite(repo, 'A=1 node craftool.mjs --alpha 1', sid, 'read_only')
+  assert.notStrictEqual(wMulti.cache_key, wSingle.cache_key, 'prefix-set variant must not share a key')
+  const rHit = markerRead(repo, 'A=1 B=2 node craftool.mjs --alpha 1', sid)
+  assert.strictEqual(rHit.json && rHit.json.status, 'hit', `exact multi-prefix shape must hit: ${JSON.stringify(rHit.json)}`)
+  const rOrder = markerRead(repo, 'B=2 A=1 node craftool.mjs --alpha 1', sid)
+  assert.notStrictEqual(rOrder.json && rOrder.json.status, 'hit', `reordered prefixes are a different literal shape: ${JSON.stringify(rOrder.json)}`)
+})
+
 console.log(`\n${passed}/${passed + failed} pass`)
 if (failed > 0) {
   for (const f of failures) console.error(`FAIL: ${f.name}: ${f.error}`)

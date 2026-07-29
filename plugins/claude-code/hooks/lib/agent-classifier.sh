@@ -189,17 +189,22 @@ agent_classify_command() {
     return 1
   fi
 
-  # FU-1 (codex plan-review R2): env-prefix refusal at the marker-cache AUTHORITY
-  # itself, not only at the shell call sites. A leading `FOO=bar` assignment is a
-  # cross-session attack vector (PR #271/#272 F-4): a command-local env override
-  # can desync session_id and, under the script-identity key, let an env-prefixed
-  # invocation reuse a clean script marker. Refuse here so "env-prefix never
-  # reaches the marker cache" is locally verifiable in ONE place; the call-site
-  # guards (Site A + the interpreter Tier-2/3 branch) remain as defense-in-depth.
-  local _first_tok="${command%%[[:space:]]*}"
-  case "$_first_tok" in
-    [A-Za-z_]*=*) return 1 ;;
-  esac
+  # FIX-435 (revises FU-1): env-prefixed commands MAY consult the marker cache.
+  # Safety lives in the KEY, not in a categorical refusal: the helper keys an
+  # env-prefixed command under the LITERAL lane only — the full prefix-bearing
+  # normalized_command plus session_id ride in the sha256 tuple — so a verdict
+  # for `FOO=bar node x.mjs` can never serve `node x.mjs`, another prefix value,
+  # or another session (PR #271/#272 F-4 invariants preserved; pinned by
+  # tests §EP1-§EP9 in tests/test-canonical-cache-key.mjs). Generalizing lanes
+  # still refuse the shape: command-canonical.mjs returns none('env_prefix') and
+  # isInterpreterScriptIdentity requires toks[0] to be the interpreter. An env
+  # prefix on the classifier-marker.mjs INVOCATION itself remains hard-denied
+  # (classifier_marker_env_override) upstream in _classify_segment. Beyond the
+  # marker cache, this authority also reaches the config-gated legacy
+  # direct-fetch fallback and the autopersist hook (CREV F1); both stay
+  # env-prefix-safe downstream — classifier-override-persist.mjs silent-skips
+  # the shape (hasEnvPrefix) and the legacy dispatcher is per-invocation with
+  # no session cache.
 
   local session_id
   session_id="$(__agent_classifier_session_id)"
