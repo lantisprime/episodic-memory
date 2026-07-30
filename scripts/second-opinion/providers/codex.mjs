@@ -79,6 +79,14 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     stdio: ['ignore', 'pipe', 'pipe'],   // stdin: ignore → codex sees EOF immediately
     timeout,
     maxBuffer: MAX_BUFFER_BYTES,
+    // CLAUDE_SCHEDULED_TASK=1 (issue #636, mirrors claude-subagent.mjs / #232):
+    // a project's session-start hooks (e.g. session-handoff-prompt.sh via
+    // .codex/hooks.json) skip non-interactive routines on this marker. Without
+    // it a headless `codex exec` seat obeys the blocking session-start y/n
+    // protocol and its entire reply is the first question — the harness then
+    // correctly rejects it as reply-too-short-no-summary, so every dispatch
+    // in a hook-bearing repo fails deterministically.
+    env: { ...process.env, CLAUDE_SCHEDULED_TASK: '1' },
   })
 
   return {
