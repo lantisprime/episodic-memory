@@ -104,11 +104,14 @@ const REPO_PLUGIN_PI = path.join(REPO_DIR, 'plugins', 'pi-agent')
 // can be suppressed and process.exitCode set on any failure.
 let installFailed = false
 
-// P2 (code review): warn if --install-hooks-force passed without --install-hooks.
-// Without the base flag, the entire hook-install block is skipped; a force flag
-// alone silently no-ops and a user might think their settings were updated.
-if (installHooksForce && !installHooks) {
-  console.log('Warning: --install-hooks-force has no effect without --install-hooks; ignoring.')
+// P2 (code review): warn if --install-hooks-force passed without any flag that
+// consumes it. Without a base flag, the entire hook-install block is skipped; a
+// force flag alone silently no-ops and a user might think their settings were
+// updated. FIX-638 REQ-3: --install-enforcement and --install-activation (the
+// latter also gates codex activation via `tool === 'codex'`) both honor the
+// force flag, so only warn when NONE of them is present.
+if (installHooksForce && !installHooks && !installEnforcement && !installActivation) {
+  console.log('Warning: --install-hooks-force has no effect without --install-hooks/--install-enforcement/--install-activation; ignoring.')
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,7 +1471,7 @@ function removeHookEntryByCommand(hooks, event, command) {
   return before - hooks[event].length
 }
 
-function installHookFile(repoFile, destFile, force) {
+function installHookFile(repoFile, destFile, force, prevSha = null) {
   if (!fs.existsSync(repoFile)) return 'missing-source'
   if (!fs.existsSync(destFile)) {
     fs.mkdirSync(path.dirname(destFile), { recursive: true })
@@ -1479,6 +1482,15 @@ function installHookFile(repoFile, destFile, force) {
   const a = fs.readFileSync(repoFile)
   const b = fs.readFileSync(destFile)
   if (a.equals(b)) return 'unchanged'
+  // FIX-638 REQ-1: deployed bytes hash-match the sha the PREVIOUS install
+  // recorded for this path → provably our earlier clean deploy, just stale.
+  // Refresh without force; genuine operator edits (match neither) fall through.
+  if (typeof prevSha === 'string' &&
+      crypto.createHash('sha256').update(b).digest('hex') === prevSha) {
+    fs.copyFileSync(repoFile, destFile)
+    fs.chmodSync(destFile, 0o755)
+    return 'refreshed-stale'
+  }
   if (force) {
     fs.copyFileSync(repoFile, destFile)
     fs.chmodSync(destFile, 0o755)
@@ -1750,6 +1762,10 @@ function runInstallActivation(projectDir) {
   for (const f of activationOwnedFiles()) {
     const src = path.join(srcHooksDir, f)
     const dst = path.join(userHooksDir, f)
+    // FIX-638 NIT-2 guard: the prevSha oracle is deliberately NOT wired here
+    // (plan §17 deferral). If a follow-up passes prevSha at this site, it MUST
+    // also add 'refreshed-stale' to this block's switch arms and eligibility
+    // sets, or a refreshed file is silently unlogged and unregistered.
     const result = installHookFile(src, dst, installHooksForce)
     fileResults[f] = result
     switch (result) {
@@ -2419,6 +2435,10 @@ function installCodexActivation(projectDir) {
   for (const file of owned) {
     const src = path.join(REPO_PLUGIN_CODEX_ACTIVATION, 'hooks', file)
     const dst = path.join(P.hooksDir, file)
+    // FIX-638 NIT-2 guard: the prevSha oracle is deliberately NOT wired here
+    // (plan §17 deferral). If a follow-up passes prevSha at this site, it MUST
+    // also add 'refreshed-stale' to this block's switch arms and eligibility
+    // sets, or a refreshed file is silently unlogged and unregistered.
     const result = installHookFile(src, dst, installHooksForce)
     results.set(file, result)
     if (result === 'skipped-divergent' || result === 'missing-source') report.withheld.push(dst)
@@ -2719,6 +2739,20 @@ if (installEnforcement && tool === 'opencode') {
   const userHooksLibDir = path.join(userHooksDir, 'lib')
   const REPO_HOOKS_LIB = path.join(REPO_HOOKS, 'lib')
   const touched = { hooks: [], settings: [], hookLib: [] }
+  // FIX-638: previous-manifest sha oracle, read BEFORE the copy loops. Maps
+  // artifact.path (destRel, posix) → artifact.sha256 as recorded by the
+  // PREVIOUS install. A deployed file whose current bytes hash-match that sha
+  // is provably ours (clean-but-stale), refreshed without force; a file
+  // matching neither oracle stays skipped-divergent (operator edit protected).
+  const prevShaByPath = new Map()
+  const prevHooksManifest = readJsonSafe(projectManifestPath(projectAbs))
+  if (prevHooksManifest && Array.isArray(prevHooksManifest.artifacts)) {
+    for (const art of prevHooksManifest.artifacts) {
+      if (art && typeof art.path === 'string' && typeof art.sha256 === 'string') {
+        prevShaByPath.set(art.path, art.sha256)
+      }
+    }
+  }
   try {
    // Shared enforcement lib-install state, hoisted so every installEnforcement
    // sub-block (5_lib, 5c registration gating, classifier-sync warning) sees it.
@@ -2743,7 +2777,8 @@ if (installEnforcement && tool === 'opencode') {
       for (const file of hookLibFiles) {
         const src = path.join(REPO_HOOKS_LIB, file)
         const dst = path.join(userHooksLibDir, file)
-        const result = installHookFile(src, dst, installHooksForce)
+        const result = installHookFile(src, dst, installHooksForce,
+          prevShaByPath.get(path.relative(projectAbs, dst).split(path.sep).join('/')) ?? null)
         libResults[file] = result
         switch (result) {
           case 'copied':
@@ -2755,6 +2790,10 @@ if (installEnforcement && tool === 'opencode') {
             break
           case 'forced':
             console.log(`Force-overwrote hook lib: ${dst}`)
+            touched.hookLib.push(dst)
+            break
+          case 'refreshed-stale':
+            console.log(`Refreshed stale hook lib (matched previous install): ${dst}`)
             touched.hookLib.push(dst)
             break
           case 'skipped-divergent':
@@ -2782,7 +2821,7 @@ if (installEnforcement && tool === 'opencode') {
         reason: 'renamed → agent-classifier-dispatch.mjs (PR-B)' }
     ]
     const agentClassifierCurrent =
-      ['copied', 'unchanged', 'forced'].includes(libResults['agent-classifier.sh'])
+      ['copied', 'unchanged', 'forced', 'refreshed-stale'].includes(libResults['agent-classifier.sh'])
     const commandClassifierSafe =
       libResults['command-classifier.sh'] !== 'skipped-divergent'
     if (agentClassifierCurrent && commandClassifierSafe) {
@@ -2852,7 +2891,8 @@ if (installEnforcement && tool === 'opencode') {
     for (const spec of hookSpecs) {
       const repoFile = path.join(REPO_HOOKS, spec.file)
       const destFile = path.join(userHooksDir, spec.file)
-      const result = installHookFile(repoFile, destFile, installHooksForce)
+      const result = installHookFile(repoFile, destFile, installHooksForce,
+        prevShaByPath.get(path.relative(projectAbs, destFile).split(path.sep).join('/')) ?? null)
       fileResults[spec.file] = result
       switch (result) {
         case 'copied':
@@ -2864,6 +2904,10 @@ if (installEnforcement && tool === 'opencode') {
           break
         case 'forced':
           console.log(`Force-overwrote hook: ${destFile}`)
+          touched.hooks.push(destFile)
+          break
+        case 'refreshed-stale':
+          console.log(`Refreshed stale hook (matched previous install): ${destFile}`)
           touched.hooks.push(destFile)
           break
         case 'skipped-divergent':
@@ -2880,10 +2924,14 @@ if (installEnforcement && tool === 'opencode') {
     // hooks dir too, so its registration points at <project>/.claude/hooks/.
     const seRepo = path.join(REPO_SCRIPTS, SESSION_END_SCRIPT)
     const seDest = path.join(userHooksDir, SESSION_END_SCRIPT)
-    const seFileResult = installHookFile(seRepo, seDest, installHooksForce)
+    const seFileResult = installHookFile(seRepo, seDest, installHooksForce,
+      prevShaByPath.get(path.relative(projectAbs, seDest).split(path.sep).join('/')) ?? null)
     fileResults[SESSION_END_SCRIPT] = seFileResult
     if (seFileResult === 'copied' || seFileResult === 'forced') {
       console.log(`Installed SessionEnd hook script: ${seDest}`)
+      touched.hooks.push(seDest)
+    } else if (seFileResult === 'refreshed-stale') {
+      console.log(`Refreshed stale hook (matched previous install): ${seDest}`)
       touched.hooks.push(seDest)
     } else if (seFileResult === 'unchanged') {
       console.log(`SessionEnd hook script already current: ${seDest}`)
@@ -3022,7 +3070,7 @@ if (installEnforcement && tool === 'opencode') {
     // bootstrap circularity). A future hook (e.g. push-gate.sh in PR-E)
     // that sources hooks/lib/ is automatically included; a stateless hook
     // is automatically excluded.
-    const eligibleForReg = new Set(['copied', 'unchanged', 'forced'])
+    const eligibleForReg = new Set(['copied', 'unchanged', 'forced', 'refreshed-stale'])
     const libDependentHooks = new Set()
     // Build the set of expected lib basenames (so a hook need not literally
     // contain "hooks/lib/" — variable-built paths via $LIB_DIR/ also match).
@@ -3528,6 +3576,16 @@ try {
     buildArtifactEntries(perProjectArtifactPairs(REPO_DIR, projectAbs)),
     projectAbs,
   )
+  // FIX-638 REQ-4: entries carried forward from the previous manifest whose
+  // recorded sha no longer matches the current repo source are stale-but-ours
+  // (or operator-modified); surface the count on the recorded-version line.
+  let carriedForwardStale = 0
+  for (const art of projectArtifacts) {
+    if (!art || typeof art.source !== 'string' || typeof art.sha256 !== 'string') continue
+    const srcAbs = path.join(REPO_DIR, art.source)
+    if (!fs.existsSync(srcAbs)) continue
+    try { if (sha256File(srcAbs) !== art.sha256) carriedForwardStale++ } catch {}
+  }
   writeJsonAtomic(projectManifestPath(projectAbs), buildManifest({
     scope: 'project',
     tool,
@@ -3619,7 +3677,7 @@ try {
   // consumers without this repo checkout present. Prunes superseded versions.
   if (!uninstallEnforcement && !uninstallActivation) {
     const dist = deployDistCache(REPO_DIR, GLOBAL_DIR, sourceVersion)
-    console.log(`Recorded install version ${sourceVersion.slice(0, 12)} (manifests + registry); dist cache: ${dist.files} payload file(s) at ${dist.target}`)
+    console.log(`Recorded install version ${sourceVersion.slice(0, 12)} (manifests + registry); dist cache: ${dist.files} payload file(s) at ${dist.target}${carriedForwardStale > 0 ? `; ${carriedForwardStale} artifact(s) carried forward at non-current recorded content (stale deploy or local edit)` : ''}`)
   }
 } catch (e) {
   console.log(`WARNING: could not record install version manifests: ${e.message} (install itself is complete; --update-consumers and the drift notice need a successful manifest write)`)

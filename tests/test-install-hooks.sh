@@ -809,6 +809,111 @@ if echo "$output" | grep -q "FAIL CLOSED"; then r=true; else r=false; fi
 assert_eq "T20d post-P3c divergent classifier emits 'FAIL CLOSED' WARN" "true" "$r"
 
 # ---------------------------------------------------------------------------
+# T21: FIX-638 — clean-but-stale (deployed bytes match the sha recorded in the
+# PREVIOUS project manifest) is refreshed without force; operator-divergent
+# (matches NEITHER previous manifest sha NOR current source) still skips.
+# ---------------------------------------------------------------------------
+# T21a (REQ-1, hook libs): fabricate a "previous clean deploy at older
+# version": full install, then overwrite the DEPLOYED command-classifier.sh
+# with sentinel OLD content AND hand-edit the project manifest entry's sha256
+# to the sentinel's sha. The next --install-enforcement (no force) must
+# refresh it from the repo source, not skip it as divergent.
+echo "[T21] FIX-638 stale-vs-divergent oracle"
+reset_state
+run_installer --install-enforcement
+MANIFEST="$TEST_PROJECT/.episodic-memory-install.json"
+printf '#!/bin/bash\n# FIX-638 T21a sentinel OLD clean deploy\n' \
+  > "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+SENTINEL_SHA=$(shasum -a 256 "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh" | awk '{print $1}')
+tmp_m="$MANIFEST.tmp"
+jq --arg s "$SENTINEL_SHA" \
+  '(.artifacts[] | select(.path == ".claude/hooks/lib/command-classifier.sh") | .sha256) = $s' \
+  "$MANIFEST" > "$tmp_m" && mv "$tmp_m" "$MANIFEST"
+output=$(run_installer_capture --install-enforcement)
+sha_repo=$(shasum "$REPO_ROOT/plugins/claude-code/hooks/lib/command-classifier.sh" | awk '{print $1}')
+sha_dest=$(shasum "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh" | awk '{print $1}')
+assert_eq "T21a stale-but-ours hook lib refreshed to repo source without force" "$sha_repo" "$sha_dest"
+if echo "$output" | grep -q "Refreshed stale hook lib (matched previous install)"; then r=true; else r=false; fi
+assert_eq "T21a2 'Refreshed stale hook lib' log line printed" "true" "$r"
+if echo "$output" | grep -q "Skipped hook lib (divergent local edit).*command-classifier"; then r=true; else r=false; fi
+assert_eq "T21a3 no divergent-skip line for the stale-but-ours lib" "false" "$r"
+
+# T21b (REQ-1, HOOK_SPECS path): same fabrication for the deployed
+# checkpoint-gate.sh → refreshed without force via the 5b hook-specs loop.
+reset_state
+run_installer --install-enforcement
+MANIFEST="$TEST_PROJECT/.episodic-memory-install.json"
+printf '#!/bin/bash\n# FIX-638 T21b sentinel OLD clean deploy\n' \
+  > "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+SENTINEL_SHA=$(shasum -a 256 "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+tmp_m="$MANIFEST.tmp"
+jq --arg s "$SENTINEL_SHA" \
+  '(.artifacts[] | select(.path == ".claude/hooks/checkpoint-gate.sh") | .sha256) = $s' \
+  "$MANIFEST" > "$tmp_m" && mv "$tmp_m" "$MANIFEST"
+output=$(run_installer_capture --install-enforcement)
+sha_repo=$(shasum "$REPO_ROOT/plugins/claude-code/hooks/checkpoint-gate.sh" | awk '{print $1}')
+sha_dest=$(shasum "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh" | awk '{print $1}')
+assert_eq "T21b stale-but-ours hook refreshed to repo source without force" "$sha_repo" "$sha_dest"
+if echo "$output" | grep -q "Refreshed stale hook (matched previous install).*checkpoint-gate.sh"; then r=true; else r=false; fi
+assert_eq "T21b2 'Refreshed stale hook' log line printed" "true" "$r"
+if echo "$output" | grep -q "Skipped (divergent local edit).*checkpoint-gate.sh"; then r=true; else r=false; fi
+assert_eq "T21b3 no divergent-skip line for the stale-but-ours hook" "false" "$r"
+
+# T21c (REQ-2 negative control): deployed content matching NEITHER the previous
+# manifest sha NOR the current source is a genuine operator edit → still
+# skipped-divergent, file untouched.
+reset_state
+run_installer --install-enforcement
+printf '#!/bin/bash\n# FIX-638 T21c genuine operator edit\n' \
+  > "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+sha_before=$(shasum "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh" | awk '{print $1}')
+output=$(run_installer_capture --install-enforcement)
+sha_after=$(shasum "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh" | awk '{print $1}')
+assert_eq "T21c operator-divergent lib NOT overwritten (byte-compare)" "$sha_before" "$sha_after"
+if echo "$output" | grep -q "Skipped hook lib (divergent local edit).*command-classifier"; then r=true; else r=false; fi
+assert_eq "T21c2 divergent-skip line still printed for genuine operator edit" "true" "$r"
+
+# ---------------------------------------------------------------------------
+# T22a (FIX-638 REQ-3): --install-enforcement --install-hooks-force → the
+# 'has no effect' warning must NOT fire (force IS honored by enforcement), and
+# the divergent file is Force-overwritten.
+# ---------------------------------------------------------------------------
+echo "[T22] FIX-638 force-flag warning honesty"
+reset_state
+mkdir -p "$TEST_PROJECT/.claude/hooks"
+echo "#!/bin/bash" > "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+echo "# user-customized" >> "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+chmod +x "$TEST_PROJECT/.claude/hooks/checkpoint-gate.sh"
+output=$(run_installer_capture --install-enforcement --install-hooks-force)
+if echo "$output" | grep -q "has no effect without --install-hooks"; then r=true; else r=false; fi
+assert_eq "T22a no 'has no effect' warning when enforcement consumes force" "false" "$r"
+if echo "$output" | grep -q "Force-overwrote"; then r=true; else r=false; fi
+assert_eq "T22a2 force honored: divergent file Force-overwritten" "true" "$r"
+
+# ---------------------------------------------------------------------------
+# T23 (FIX-638 REQ-4): an enforcement artifact carried forward at older
+# content (deployed bytes != current source, manifest entry kept by the merge)
+# is counted on the 'Recorded install version' line.
+# ---------------------------------------------------------------------------
+echo "[T23] FIX-638 carried-forward-stale count"
+reset_state
+run_installer --install-enforcement
+MANIFEST="$TEST_PROJECT/.episodic-memory-install.json"
+printf '#!/bin/bash\n# FIX-638 T23 sentinel OLD clean deploy\n' \
+  > "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh"
+SENTINEL_SHA=$(shasum -a 256 "$TEST_PROJECT/.claude/hooks/lib/command-classifier.sh" | awk '{print $1}')
+tmp_m="$MANIFEST.tmp"
+jq --arg s "$SENTINEL_SHA" \
+  '(.artifacts[] | select(.path == ".claude/hooks/lib/command-classifier.sh") | .sha256) = $s' \
+  "$MANIFEST" > "$tmp_m" && mv "$tmp_m" "$MANIFEST"
+# Bare --install-hooks runs NO enforcement copy loops (5_lib/5b are gated on
+# --install-enforcement), so the sentinel stays on disk and the previous
+# manifest entry is carried forward by the 7b merge.
+output=$(run_installer_capture --install-hooks)
+if echo "$output" | grep -q "Recorded install version.*; 1 artifact(s) carried forward at non-current recorded content (stale deploy or local edit)"; then r=true; else r=false; fi
+assert_eq "T23 recorded-version line reports 1 artifact carried forward at non-current recorded content" "true" "$r"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
