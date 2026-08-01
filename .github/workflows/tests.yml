@@ -487,6 +487,9 @@ jobs:
       - name: Run SessionStart drift-notice + opt-in auto-update suite (Layer 1)
         run: node tests/test-install-drift-notice.mjs
 
+      - name: Run plan-listing discipline lint suite (#627)
+        run: node tests/test-plan-listing-discipline.mjs
+
       # #504 class closure: every top-level tests/test-*.{mjs,sh} must be
       # referenced by a workflow, run by the P12 meta-runner, or listed in the
       # shrink-only KNOWN_UNWIRED baseline inside the lint. A new suite that is

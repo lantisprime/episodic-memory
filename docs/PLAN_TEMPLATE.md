@@ -583,6 +583,11 @@ falsifiable-test bar) is an instance of this one rule. Satisfy the parent, not j
   a no-op passes it;
 - greps for a literal string the step *itself* writes into a comment, `echo`, or heredoc
   (self-fulfilling — it proves only that the author can type);
+- states a **relative** count expectation ("decreases by 1", "drops from the baseline") over a
+  pattern that appears **anywhere in the step's own Listing or `REPLACE` text, comments included** —
+  the paste re-introduces the counted string, so the delta can never land (issue #627). Count-based
+  Verifies state absolute observed → expected values and explicitly account for every occurrence
+  their own Listing introduces;
 - runs the unit on the happy path **only**, with no negative control proving it can fail
   (see §A.9 red-then-green);
 - for a **MUST** requirement or a **§7 Safety** mitigation, is a manual or `command -v …`-skippable
@@ -591,8 +596,10 @@ falsifiable-test bar) is an instance of this one rule. Satisfy the parent, not j
 **Positive obligation:** every Verify names (a) the **observed value** it inspects — captured
 stdout / exit code / written-file contents / imported-function return — and (b) the **expected
 concrete value** it compares against. "Exits 0" / "script runs" names no value and fails the gate.
-Author obligation, discharged by hand until a lint exists: scan every Verify cell; any cell missing either the observed value or the expected value marks the
-row as not-executor-ready.
+Author obligation: scan every Verify cell; any cell missing either the observed value or the expected value marks the
+row as not-executor-ready. The relative-count subset is mechanized — run
+`node scripts/validate-plan-listing-discipline.mjs <plan.md>` (CI lints every changed
+`docs/plans/*.md`); the rest of the scan is still discharged by hand.
 
 > **Compound-bash caveat (this repo):** a Verify is **one command** — no `;`/`&&`/`||`/pipes/subshells
 > (`compound-bash-gate` hard-blocks them). Express a negative control as a single command the broken
@@ -618,7 +625,10 @@ names exactly one file; every `EDIT` quotes a verbatim `ANCHOR` + exact `REPLACE
 reformatting of untouched lines); whole-file `Write` appears only in `CREATE` steps; no step text
 contains a §0.2 forbidden phrase or — as a *description of intent* — "assert that", "verify that",
 "check that", or "ensure"; every constant, error string, regex, and signature appears verbatim (here
-or in §A.5); every Verify passes §A.6b. A step that would touch a second file, rewrite a whole
+or in §A.5); every Verify passes §A.6b; **a step whose scope names N edit sites is backed by N
+fenced code blocks** (in its Listing or inline) — prose describing a site is not a Listing, and a
+step that codes some named sites while describing others will STOP a disciplined executor
+(§A.2.3; issue #627). A step that would touch a second file, rewrite a whole
 function, `Write`-overwrite an existing file, or ship a Verify a no-op would pass is a planning bug —
 split, re-anchor, or strengthen it.
 
