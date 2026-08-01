@@ -472,6 +472,61 @@ t('identity::testIndexCarriesIdentityFields', () => {
   assert(typeof detachRow.detaches_identity_root === 'string', 'detach row must carry detaches_identity_root')
 })
 
+// --- FIX-635 named-root detach legs (issue #635, L6 Group 1) ---
+// handRoot's id is `19990101-000000-store-identity-${storeId.slice(0,4)}` so we
+// can construct the root episode id directly from the storeId argument.
+
+t('identity::testNamedRootCollapseSuccess', () => {
+  const s = mkStore('collapse-success')
+  handRoot(s.dataDir, 'aaaa1111aaaa1111')
+  handRoot(s.dataDir, 'bbbb2222bbbb2222')
+  const epsBefore = episodesMd(s.dataDir).length
+  const aaaaId = '19990101-000000-store-identity-aaaa'
+  const bbbbId = '19990101-000000-store-identity-bbbb'
+  const result = detachStoreIdentity(s.dataDir, { detachRootId: bbbbId })
+  assert(!result.error, `detach returned error: ${JSON.stringify(result)}`)
+  assert(/^[0-9a-f]{16}$/.test(result.active_id), `active_id hex: ${result.active_id}`)
+  eq(result.detached_root_id, bbbbId, 'detached_root_id')
+  eq(result.superseded_terminal, aaaaId, 'superseded_terminal')
+  eq(result.prior_id, 'aaaa1111aaaa1111', 'prior_id')
+  const r = resolveStoreIdentity(s.dataDir)
+  eq(r.active_id, result.active_id, 'resolve active_id after collapse')
+  assert(r.aliases.includes('aaaa1111aaaa1111'), `aliases includes survivor: ${JSON.stringify(r.aliases)}`)
+  eq(episodesMd(s.dataDir).length, epsBefore + 1, 'episode count went +1 only')
+})
+
+t('identity::testDetachRootNotActive', () => {
+  const s = mkStore('detach-root-not-active')
+  handRoot(s.dataDir, 'aaaa1111aaaa1111')
+  handRoot(s.dataDir, 'bbbb2222bbbb2222')
+  const epsBefore = episodesMd(s.dataDir).length
+  const result = detachStoreIdentity(s.dataDir, { detachRootId: 'no-such-episode' })
+  eq(result.error, 'detach-root-not-active', 'detach-root-not-active error')
+  eq(episodesMd(s.dataDir).length, epsBefore, 'episode count unchanged')
+})
+
+t('identity::testStillAmbiguousAfterDetach', () => {
+  const s = mkStore('still-ambiguous')
+  handRoot(s.dataDir, 'aaaa1111aaaa1111')
+  handRoot(s.dataDir, 'bbbb2222bbbb2222')
+  handRoot(s.dataDir, 'cccc3333cccc3333')
+  const epsBefore = episodesMd(s.dataDir).length
+  const ccccId = '19990101-000000-store-identity-cccc'
+  const result = detachStoreIdentity(s.dataDir, { detachRootId: ccccId })
+  eq(result.error, 'duplicate-identity-chain', 'still-ambiguous returns duplicate-identity-chain')
+  eq(episodesMd(s.dataDir).length, epsBefore, 'episode count unchanged')
+})
+
+t('identity::testStoreNotDuplicate', () => {
+  const s = mkStore('store-not-duplicate')
+  handRoot(s.dataDir, 'aaaa1111aaaa1111')
+  const epsBefore = episodesMd(s.dataDir).length
+  const aaaaId = '19990101-000000-store-identity-aaaa'
+  const result = detachStoreIdentity(s.dataDir, { detachRootId: aaaaId })
+  eq(result.error, 'store-not-duplicate', 'store-not-duplicate error')
+  eq(episodesMd(s.dataDir).length, epsBefore, 'episode count unchanged')
+})
+
 // =====================
 // Group 2 — real install.mjs E2E
 // =====================
@@ -647,6 +702,49 @@ t('registry::testReservedGlobalForgeryFailsLoud', () => {
     fRow = (reg.entries || []).find((e) => e.project_path === fProj)
   }
   assert(!fRow, 'forged-global project must NOT have a registry row')
+})
+
+// --- FIX-635 CLI ceremony (issue #635, L6 Group 2) ---
+// Spawned em-identity.mjs exercises the operator ceremony without going through
+// install.mjs: --status diagnosis, --detach-root plan (no write), --detach-root
+// --confirm (writes), and a follow-up --status verifying the collapse.
+
+t('identity::testEmIdentityCLICeremony', () => {
+  const s = mkStore('cli-ceremony')
+  handRoot(s.dataDir, 'aaaa1111aaaa1111')
+  handRoot(s.dataDir, 'bbbb2222bbbb2222')
+  const identityScript = path.join(REPO, 'scripts', 'em-identity.mjs')
+  const bbbbId = '19990101-000000-store-identity-bbbb'
+
+  // --status (no --detach-root) reports duplicate-identity-chain + 2 active roots.
+  const r1 = spawnSync(process.execPath, [identityScript, '--store', s.dataDir], { encoding: 'utf8' })
+  eq(r1.status, 0, `em-identity --status exits 0: stderr=${r1.stderr}`)
+  const o1 = JSON.parse(r1.stdout)
+  eq(o1.resolution.error, 'duplicate-identity-chain', 'resolution.error')
+  eq(o1.active_roots.length, 2, '2 active roots')
+
+  // --detach-root without --confirm MUST NOT touch the store.
+  const epsBefore = episodesMd(s.dataDir).length
+  const r2 = spawnSync(process.execPath, [identityScript, '--store', s.dataDir, '--detach-root', bbbbId], { encoding: 'utf8' })
+  eq(r2.status, 0, `plan invocation exits 0: stderr=${r2.stderr}`)
+  const o2 = JSON.parse(r2.stdout)
+  eq(o2.status, 'plan', 'plan status')
+  eq(episodesMd(s.dataDir).length, epsBefore, 'episode count unchanged after plan')
+
+  // --detach-root --confirm collapses the duplicate chain.
+  const r3 = spawnSync(process.execPath, [identityScript, '--store', s.dataDir, '--detach-root', bbbbId, '--confirm'], { encoding: 'utf8' })
+  eq(r3.status, 0, `confirm invocation exits 0: stderr=${r3.stderr}`)
+  const o3 = JSON.parse(r3.stdout)
+  eq(o3.status, 'ok', 'ok status')
+
+  // Follow-up --status: 1 active root, survivor store_id in aliases.
+  const r4 = spawnSync(process.execPath, [identityScript, '--store', s.dataDir], { encoding: 'utf8' })
+  eq(r4.status, 0, `post-confirm --status exits 0: stderr=${r4.stderr}`)
+  const o4 = JSON.parse(r4.stdout)
+  assert(!o4.resolution.error, `post-confirm resolution: ${JSON.stringify(o4.resolution)}`)
+  eq(o4.active_roots.length, 1, '1 active root after collapse')
+  assert(o4.resolution.aliases.includes('aaaa1111aaaa1111'),
+    `survivor store_id in aliases: ${JSON.stringify(o4.resolution.aliases)}`)
 })
 
 // --- main ---

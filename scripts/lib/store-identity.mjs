@@ -240,13 +240,12 @@ function applyIdentityIndexUpdate(storeDir, fields) {
 
 // --- exports ---
 
-export function resolveStoreIdentity(storeDir) {
+// Shared identity-graph analysis (FIX-635): roots, detached roots, active roots.
+// Single source of truth for resolveStoreIdentity and the named-root detach path.
+function identityGraph(storeDir) {
   const eps = listIdentityEpisodes(storeDir)
-  if (eps.length === 0) return { error: 'no-identity' }
-  // Roots: episodes whose supersedes is absent or names no identity episode.
   const byId = new Map(eps.map((e) => [e.id, e]))
   const roots = eps.filter((e) => !e.supersedes || !byId.has(e.supersedes))
-  // Detached roots are those referenced by SOME episode's detaches_identity_root.
   const detachedRootIds = new Set()
   for (const e of eps) {
     if (e.detaches_identity_root && byId.has(e.detaches_identity_root)) {
@@ -254,10 +253,10 @@ export function resolveStoreIdentity(storeDir) {
     }
   }
   const activeRoots = roots.filter((r) => !detachedRootIds.has(r.id))
-  if (activeRoots.length === 0) return { error: 'identity-chain-cycle' }
-  if (activeRoots.length > 1) return { error: 'duplicate-identity-chain' }
-  const root = activeRoots[0]
-  // Walk successors from the single active root. A revisit = cycle.
+  return { eps, byId, roots, detachedRootIds, activeRoots }
+}
+
+function walkChain(eps, root) {
   const visited = new Set([root.id])
   const chainMembers = [root]
   let current = root
@@ -269,6 +268,18 @@ export function resolveStoreIdentity(storeDir) {
     chainMembers.push(successor)
     current = successor
   }
+  return { chainMembers }
+}
+
+export function resolveStoreIdentity(storeDir) {
+  const { eps, activeRoots } = identityGraph(storeDir)
+  if (eps.length === 0) return { error: 'no-identity' }
+  if (activeRoots.length === 0) return { error: 'identity-chain-cycle' }
+  if (activeRoots.length > 1) return { error: 'duplicate-identity-chain' }
+  const root = activeRoots[0]
+  const walked = walkChain(eps, root)
+  if (walked.error) return { error: walked.error }
+  const chainMembers = walked.chainMembers
   // Episodes belonging to detached chains (their root is in detachedRootIds) are
   // intentionally not reachable from the active root — they stay in the store but
   // contribute no active id and no aliases (§A.5 lib error 'detachedChainExcluded').
@@ -279,6 +290,18 @@ export function resolveStoreIdentity(storeDir) {
     aliases,
     root_id: root.id,
     terminal_episode_id: terminal.id,
+  }
+}
+
+// FIX-635: operator-facing diagnosis. Never writes. Lists every active root so a
+// duplicate-root store can be repaired by naming which root to detach.
+export function storeIdentityStatus(storeDir) {
+  const resolution = resolveStoreIdentity(storeDir)
+  const { activeRoots, detachedRootIds } = identityGraph(storeDir)
+  return {
+    resolution,
+    active_roots: activeRoots.map((r) => ({ episode_id: r.id, store_id: r.store_id })),
+    detached_root_ids: [...detachedRootIds],
   }
 }
 
@@ -361,9 +384,60 @@ export function rebindStoreIdentity(storeDir, { lockTimeoutS } = {}) {
   }, { timeoutS: lockTimeoutS })
 }
 
-export function detachStoreIdentity(storeDir, { lockTimeoutS } = {}) {
+export function detachStoreIdentity(storeDir, { lockTimeoutS, detachRootId } = {}) {
   return withStoreLockSync(storeDir, () => {
     const existing = resolveStoreIdentity(storeDir)
+    if (detachRootId) {
+      // FIX-635 duplicate-collapse: name the stray root; the surviving chain's
+      // terminal is superseded by ONE new episode that also detaches the stray
+      // root (the only single-episode shape that yields exactly one active root
+      // — see plan Evidence table). Validate-then-write: no write on any error.
+      if (existing.error && existing.error !== 'duplicate-identity-chain') {
+        return { error: existing.error }
+      }
+      if (!existing.error) return { error: 'store-not-duplicate' }
+      const { eps, activeRoots } = identityGraph(storeDir)
+      const target = activeRoots.find((r) => r.id === detachRootId)
+      if (!target) return { error: 'detach-root-not-active' }
+      const remaining = activeRoots.filter((r) => r.id !== detachRootId)
+      if (remaining.length !== 1) return { error: 'duplicate-identity-chain' }
+      const walked = walkChain(eps, remaining[0])
+      if (walked.error) return { error: walked.error }
+      const terminal = walked.chainMembers[walked.chainMembers.length - 1]
+      const newStoreId = crypto.randomBytes(8).toString('hex')
+      const now = new Date()
+      const id = newEpisodeId(newStoreId, now)
+      const y = now.getFullYear()
+      const mo = String(now.getMonth() + 1).padStart(2, '0')
+      const d = String(now.getDate()).padStart(2, '0')
+      const h = String(now.getHours()).padStart(2, '0')
+      const mi = String(now.getMinutes()).padStart(2, '0')
+      const project = path.basename(path.dirname(storeDir)) || 'store'
+      const fields = {
+        id,
+        date: `${y}-${mo}-${d}`,
+        time: `${h}:${mi}`,
+        project,
+        summary: `Store identity duplicate-collapse ${newStoreId}`,
+        store_id: newStoreId,
+        supersedes: terminal.id,
+        detaches_identity_root: detachRootId,
+        bodyLine: 'Store identity duplicate-collapse successor (issue #635; RFC-012 P2 REQ-5 detach + P7 successor revision). Detached chain contributes no active id and no aliases; the surviving chain continues through this terminal.',
+      }
+      const episodesDir = path.join(storeDir, 'episodes')
+      const content = identityEpisodeContent(fields)
+      const writeResult = writeIdentityEpisodeAtomic(episodesDir, id, content)
+      if (writeResult.error) return writeResult
+      const idx = applyIdentityIndexUpdate(storeDir, fields)
+      const out = {
+        active_id: newStoreId,
+        detached_root_id: detachRootId,
+        superseded_terminal: terminal.id,
+        prior_id: terminal.store_id,
+      }
+      if (idx.stale) out.index_stale = true
+      return out
+    }
     if (existing.error) return { error: existing.error }
     const newStoreId = crypto.randomBytes(8).toString('hex')
     const now = new Date()

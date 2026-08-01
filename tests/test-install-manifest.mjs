@@ -354,7 +354,131 @@ console.log('=== T7: --update-consumers with an empty registry is a no-op ===')
 }
 
 // ===========================================================================
-console.log('=== T8: --uninstall-enforcement never touches global Layer-1 state; flag heals on next install ===')
+console.log('=== T8: identity degrade + dry-run parity (#635) ===')
+// ===========================================================================
+// Forge a duplicate-identity-chain in project A and an empty store in project C;
+// make A, B, C refresh-eligible. T8a/b exercise the duplicate-chain behavior
+// (dry-run predicts, apply degrades instead of aborting); T8c exercises the
+// no-identity case (dry-run silent, apply mints).
+// ===========================================================================
+{
+  const S8 = mkSandbox('identity-degrade')
+  const SA = S8.project
+  const SB = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'l1-proj-identity-degrade-b-')))
+  execFileSync('git', ['init', '-q'], { cwd: SB })
+  fs.mkdirSync(path.join(SB, '.episodic-memory', 'episodes'), { recursive: true })
+  cleanups.push(SB)
+  const SC = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'l1-proj-identity-degrade-c-')))
+  execFileSync('git', ['init', '-q'], { cwd: SC })
+  fs.mkdirSync(path.join(SC, '.episodic-memory', 'episodes'), { recursive: true })
+  cleanups.push(SC)
+
+  // Install A, B, C (each mints identity via upsertRegistryEntries during install).
+  truthy('T8: install A exits 0',
+    runInstall({ home: S8.home, project: SA, extra: ['--install-enforcement'] }).status === 0, 'install A failed')
+  truthy('T8: install B exits 0',
+    runInstall({ home: S8.home, project: SB }).status === 0, 'install B failed')
+  truthy('T8: install C exits 0',
+    runInstall({ home: S8.home, project: SC }).status === 0, 'install C failed')
+
+  // Capture A's row before the apply so we can verify "identity fields untouched".
+  const regBeforeApply = readJson(registryFilePath(S8.home))
+  const aRowBefore = regBeforeApply.entries.find((e) => e.project_path === SA)
+  const aStoreIdBefore = aRowBefore.store_id
+  const aAliasesBefore = aRowBefore.store_aliases || []
+
+  // Forge a second active identity root into A's local store (two frontmatter
+  // files, distinct 16-hex store_ids, no supersedes).
+  const aStoreEpisodes = path.join(SA, '.episodic-memory', 'episodes')
+  const handRoot = (storeId) => {
+    const id = `19990101-000000-store-identity-${storeId.slice(0, 4)}`
+    const lines = ['---', `id: ${id}`, `date: 1999-01-01`, `time: "00:00"`, `project: hand`, `category: context`, `status: active`, `tags: [store-identity]`, `summary: hand root ${storeId}`, `record_type: store-identity`, `store_id: ${storeId}`, '---', '', `# hand root ${storeId}`, '', 'hand-crafted for forged fixture.']
+    fs.writeFileSync(path.join(aStoreEpisodes, id + '.md'), lines.join('\n') + '\n')
+  }
+  handRoot('cccc3333cccc3333')
+  handRoot('dddd4444dddd4444')
+
+  // Empty C's store (delete the identity episode that install minted) so the
+  // no-identity path is exercised on the sweep.
+  const cEpisodesDir = path.join(SC, '.episodic-memory', 'episodes')
+  for (const f of fs.readdirSync(cEpisodesDir)) {
+    if (f.endsWith('.md')) fs.unlinkSync(path.join(cEpisodesDir, f))
+  }
+  const cEpCountBefore = fs.readdirSync(cEpisodesDir).filter((f) => f.endsWith('.md')).length
+
+  // Make A, B, C refresh-eligible the same way T5 legs do (stale skill bytes +
+  // old sha + old version stamp).
+  const makeRefreshEligible = (projectDir, contentLabel) => {
+    const oldSkill = Buffer.from(`OLD SKILL CONTENT (${contentLabel})\n`)
+    fs.writeFileSync(path.join(projectDir, SKILL_REL), oldSkill)
+    const m = readJson(projManifestPath(projectDir))
+    m.artifacts.find((a) => a.path === SKILL_REL).sha256 = sha256(oldSkill)
+    m.source_version = '1'.repeat(40)
+    fs.writeFileSync(projManifestPath(projectDir), JSON.stringify(m, null, 2))
+  }
+  makeRefreshEligible(SA, 'simulated older install A')
+  makeRefreshEligible(SB, 'simulated older install B')
+  makeRefreshEligible(SC, 'simulated older install C')
+
+  // --- T8a dry-run predicts -----------------------------------------------
+  const dr = runSweep(S8.home, true)
+  truthy('T8a: dry-run exits 0', dr.status === 0, `status=${dr.status} stderr=${(dr.stderr || '').slice(-300)}`)
+  const dryReport = JSON.parse(dr.stdout)
+  truthy('T8a: report.identity_degraded has exactly one entry',
+    Array.isArray(dryReport.identity_degraded) && dryReport.identity_degraded.length === 1,
+    JSON.stringify(dryReport.identity_degraded))
+  const dryEntry = dryReport.identity_degraded[0]
+  truthy('T8a: entry.project_path === A path', dryEntry.project_path === SA,
+    `${dryEntry.project_path} vs ${SA}`)
+  truthy('T8a: entry.error matches /^duplicate-identity-chain: /',
+    /^duplicate-identity-chain: /.test(dryEntry.error), dryEntry.error)
+  // A's episode file count unchanged (no mint on dry-run). The original install
+  // minted 1 identity episode, then we forged 2 more → 3 total.
+  const dryEpCount = fs.readdirSync(aStoreEpisodes).filter((f) => f.endsWith('.md')).length
+  truthy('T8a: A episode file count unchanged (no mint on dry-run)', dryEpCount === 3,
+    `count=${dryEpCount}`)
+  // T8c dry-run half: no identity_degraded entry for C (probe skips no-identity).
+  truthy('T8c dry-run: no identity_degraded entry for C (no-identity is silent)',
+    !dryReport.identity_degraded.some((e) => e.project_path === SC),
+    JSON.stringify(dryReport.identity_degraded))
+
+  // --- T8b apply degrades instead of aborting -----------------------------
+  const ar = runSweep(S8.home, false)
+  truthy('T8b: apply exits 0', ar.status === 0, `status=${ar.status} stderr=${(ar.stderr || '').slice(-300)}`)
+  const applyReport = JSON.parse(ar.stdout)
+  truthy('T8b: report.identity_degraded has exactly one entry',
+    Array.isArray(applyReport.identity_degraded) && applyReport.identity_degraded.length === 1,
+    JSON.stringify(applyReport.identity_degraded))
+  const applyEntry = applyReport.identity_degraded[0]
+  truthy('T8b: entry string-identical to T8a entry (resolve-error parity)',
+    JSON.stringify(applyEntry) === JSON.stringify(dryEntry),
+    `dry=${JSON.stringify(dryEntry)} apply=${JSON.stringify(applyEntry)}`)
+  const reg = readJson(registryFilePath(S8.home))
+  const aRow = reg.entries.find((e) => e.project_path === SA)
+  truthy('T8b: A registry row stamped to new version (stamp survives degrade)',
+    aRow && aRow.version === GIT_HEAD, JSON.stringify(aRow))
+  truthy('T8b: A identity fields untouched (degrade skips the row)',
+    aRow && aRow.store_id === aStoreIdBefore &&
+    JSON.stringify(aRow.store_aliases || []) === JSON.stringify(aAliasesBefore),
+    `before=${JSON.stringify(aRowBefore)} after=${JSON.stringify(aRow)}`)
+  const bRow = reg.entries.find((e) => e.project_path === SB)
+  truthy('T8b: B registry row stamped to new version',
+    bRow && bRow.version === GIT_HEAD, JSON.stringify(bRow))
+  truthy('T8b: B registry row carries store_id',
+    bRow && /^[0-9a-f]{16}$/.test(bRow.store_id || ''), JSON.stringify(bRow))
+
+  // --- T8c apply mint on no-identity -------------------------------------
+  const cEpCountAfter = fs.readdirSync(cEpisodesDir).filter((f) => f.endsWith('.md')).length
+  truthy('T8c: apply mints exactly one identity episode in C store (count 0 → 1)',
+    cEpCountBefore === 0 && cEpCountAfter === 1,
+    `before=${cEpCountBefore} after=${cEpCountAfter}`)
+  const cRow = reg.entries.find((e) => e.project_path === SC)
+  truthy('T8c: C registry row gains a store_id',
+    cRow && /^[0-9a-f]{16}$/.test(cRow.store_id || ''), JSON.stringify(cRow))
+}
+
+// ===========================================================================
+console.log('=== T9: --uninstall-enforcement never touches global Layer-1 state; flag heals on next install ===')
 // Regression (found by test-uninstall-enforcement t_no_global_touch during
 // Layer 1 implementation, 2026-07-08): the first cut wrote the global
 // manifest + registry + dist cache on EVERY run, so an uninstall run mutated
@@ -364,20 +488,20 @@ console.log('=== T8: --uninstall-enforcement never touches global Layer-1 state;
 // from disk truth (engine file gone) on the next regular install run.
 // ===========================================================================
 {
-  const S8 = mkSandbox('uninstall')
-  runInstall({ home: S8.home, project: S8.project, extra: ['--install-enforcement'] })
-  const preGlobal = snapshotTree(path.join(S8.home, '.episodic-memory'))
-  const u = runInstall({ home: S8.home, project: S8.project, extra: ['--uninstall-enforcement'] })
-  truthy('T8: uninstall run exits 0', u.status === 0, `status=${u.status}`)
-  truthy('T8: global ~/.episodic-memory byte-identical across the uninstall run',
-    snapshotsEqual(preGlobal, snapshotTree(path.join(S8.home, '.episodic-memory'))), 'global scope changed')
-  const pm = readJson(projManifestPath(S8.project))
-  truthy('T8: project manifest dropped the removed enforcement entries',
+  const S9 = mkSandbox('uninstall')
+  runInstall({ home: S9.home, project: S9.project, extra: ['--install-enforcement'] })
+  const preGlobal = snapshotTree(path.join(S9.home, '.episodic-memory'))
+  const u = runInstall({ home: S9.home, project: S9.project, extra: ['--uninstall-enforcement'] })
+  truthy('T9: uninstall run exits 0', u.status === 0, `status=${u.status}`)
+  truthy('T9: global ~/.episodic-memory byte-identical across the uninstall run',
+    snapshotsEqual(preGlobal, snapshotTree(path.join(S9.home, '.episodic-memory'))), 'global scope changed')
+  const pm = readJson(projManifestPath(S9.project))
+  truthy('T9: project manifest dropped the removed enforcement entries',
     !pm.artifacts.some((a) => a.path === '.claude/hooks/checkpoint-gate.sh'), 'stale enforcement entry kept')
-  const r2 = runInstall({ home: S8.home, project: S8.project })
-  truthy('T8: next regular install exits 0', r2.status === 0, `status=${r2.status}`)
-  const reg = readJson(registryFilePath(S8.home))
-  truthy('T8: enforcement_installed healed to false from disk truth',
+  const r2 = runInstall({ home: S9.home, project: S9.project })
+  truthy('T9: next regular install exits 0', r2.status === 0, `status=${r2.status}`)
+  const reg = readJson(registryFilePath(S9.home))
+  truthy('T9: enforcement_installed healed to false from disk truth',
     reg.entries.find((e) => e.tool === 'claude-code').enforcement_installed === false,
     JSON.stringify(reg.entries))
 }
