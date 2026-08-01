@@ -38,3 +38,13 @@ analysis/
 .codex/
 .agents/
 AGENTS.md
+
+# Episodic memory install-version manifest
+.episodic-memory-install.json
+
+# Installer-deployed copies of tracked sources (scripts/bp1-*.mjs,
+# scripts/lib/bp1-*.mjs, skills/classify-correction/) — hash-verified
+# identical at deploy time, managed by install.mjs, never committed
+.claude/hooks/bp1-*.mjs
+.claude/hooks/lib/
+.claude/skills/classify-correction/
