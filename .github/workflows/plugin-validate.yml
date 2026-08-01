@@ -153,3 +153,13 @@ jobs:
 
       - name: Run pattern-health CI gate suite (RFC-009 R5b, P3-S4)
         run: node tests/test-pattern-health-check-gate.mjs
+
+      # #644: claude plugin update is version-gated on plugin.json, so a merge
+      # that changes plugin content without a bump makes the update a permanent
+      # no-op. Diffs against the merge-base (fetch-depth 0 above is load-bearing
+      # here too) and fails when content changed without a semver advance.
+      - name: Check plugin.json version bump on content changes (#644)
+        run: node scripts/check-plugin-version-bump.mjs --base-ref origin/${{ github.base_ref || 'main' }}
+
+      - name: Run plugin version-bump gate suite (#644)
+        run: node tests/test-plugin-version-bump.mjs
