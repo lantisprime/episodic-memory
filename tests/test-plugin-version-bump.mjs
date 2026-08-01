@@ -75,12 +75,17 @@ const present = (v) => ({ state: 'present', version: v })
   assert(parseArgs(['main']).error !== undefined, 'parseArgs: positional rejected')
   assert(parseArgs(['--base-ref']).error !== undefined, 'parseArgs: missing value rejected')
   assert(parseArgs(['--base-ref', 'a', '--base-ref', 'b']).error !== undefined, 'parseArgs: duplicate flag rejected')
-  assert(parseArgs(['--base-ref', 'a', '--base-sha', 'b']).error !== undefined, 'parseArgs: base-ref + base-sha mutually exclusive')
-  assert(parseArgs(['--project', '.', '--base-sha', 'abc']).opts !== undefined, 'parseArgs: valid combination ok')
+  assert(parseArgs(['--base-ref', 'a', '--base-sha', 'b'.repeat(40)]).error !== undefined, 'parseArgs: base-ref + base-sha mutually exclusive')
+  // codex R3 F12: --base-sha must be an immutable full object name.
+  for (const bad of ['HEAD', 'main', 'abc123', 'HEAD~1', 'a'.repeat(39), 'A'.repeat(40)]) {
+    assert(parseArgs(['--base-sha', bad]).error !== undefined, `parseArgs: mutable/abbreviated --base-sha rejected: ${bad}`)
+  }
+  assert(parseArgs(['--project', '.', '--base-sha', 'a1b2c3d4'.repeat(5)]).opts !== undefined, 'parseArgs: full 40-hex sha ok')
+  assert(parseArgs(['--base-sha', '0'.repeat(40)]).opts !== undefined, 'parseArgs: forty-zero sha ok (branch creation)')
 }
 {
   // codex R1 F3 + R2 F9: the runtime data surface is content.
-  for (const p of ['patterns/taxonomy.json', 'categories.json', 'activation-classes.json', 'docs/EM_SCRIPTS_GUIDE.md', '.claude/hooks/bp1-approval-check.sh', 'schemas/runtime/structured-alert.schema.json']) {
+  for (const p of ['patterns/taxonomy.json', 'categories.json', 'activation-classes.json', 'docs/EM_SCRIPTS_GUIDE.md', '.claude/hooks/bp1-approval-check.sh', 'schemas/runtime/structured-alert.schema.json', 'learning/em-promote.json']) {
     const r = decideBump({ changedPaths: [p], base: present('0.1.0'), headVersion: '0.1.0' })
     assert(r.ok === false, `runtime surface path requires bump: ${p}`, r.reason)
   }
@@ -234,6 +239,35 @@ function runGate(cwd, ...extra) {
   const repo = mkRepo()
   const r = runGate(repo, '--base-reff', 'main')
   assert(r.status === 1 && r.json?.status === 'error', 'E2E unknown flag: JSON error, fail closed', JSON.stringify(r.json ?? r.stdout))
+}
+{
+  // codex R3 F12 E2E: --base-sha HEAD would self-compare to an empty diff.
+  const repo = mkRepo()
+  fs.writeFileSync(path.join(repo, 'scripts/a.mjs'), '// v2\n')
+  git(repo, 'commit', '-aqm', 'change script')
+  const r = runGate(repo, '--base-sha', 'HEAD')
+  assert(r.status === 1 && r.json?.status === 'error', 'E2E --base-sha HEAD: rejected, no self-compare', JSON.stringify(r.json ?? r.stdout))
+}
+{
+  // codex R3 F11 E2E: inherited GIT_DIR/GIT_WORK_TREE must not rebind the
+  // gate's reads to a decoy repository (--base-ref and --base-sha shapes).
+  const target = mkRepo()
+  const beforeSha = git(target, 'rev-parse', 'HEAD')
+  fs.writeFileSync(path.join(target, 'scripts/a.mjs'), '// v2\n')
+  git(target, 'commit', '-aqm', 'content change, no bump')
+  const decoy = mkRepo() // clean: no delta vs its origin/main
+  const poisoned = {
+    ...process.env,
+    GIT_DIR: path.join(decoy, '.git'),
+    GIT_WORK_TREE: decoy,
+  }
+  for (const extra of [[], ['--base-sha', beforeSha]]) {
+    const r = spawnSync(process.execPath, [GATE, '--project', target, ...extra], { cwd: decoy, encoding: 'utf8', env: poisoned })
+    let json = null
+    try { json = JSON.parse(r.stdout) } catch {}
+    assert(r.status === 1 && json?.ok === false && json?.project_root === target,
+      `E2E poisoned GIT_DIR/GIT_WORK_TREE (${extra[0] ?? '--base-ref default'}): reads stay bound to --project`, JSON.stringify(json))
+  }
 }
 {
   // codex R1 F2: --project binds authority; ambient cwd must not.

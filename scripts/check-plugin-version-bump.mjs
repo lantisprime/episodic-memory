@@ -55,6 +55,7 @@ export const CONTENT_PREFIXES = [
   'instructions/',
   'patterns/',
   'schemas/', // runtime data of installed libs, e.g. structured-alert.mjs reads schemas/runtime/ (codex R2 F9)
+  'learning/', // live registry descriptors — plugins/_index.json points at learning/*.json (codex R3 F13)
   'install.mjs',
   'categories.json',
   'activation-classes.json',
@@ -135,6 +136,13 @@ export function parseArgs(argv) {
     i++
   }
   if ('--base-ref' in opts && '--base-sha' in opts) return { error: '--base-ref and --base-sha are mutually exclusive' }
+  // --base-sha is an IMMUTABLE baseline: full 40-hex object names only.
+  // HEAD, branch names, abbreviations, and revision expressions would let the
+  // baseline float — --base-sha HEAD self-compares to an empty diff (codex R3
+  // F12). Mutable baselines belong to --base-ref's merge-base semantics.
+  if ('--base-sha' in opts && !/^[0-9a-f]{40}$/.test(opts['--base-sha'])) {
+    return { error: `--base-sha must be a full 40-hex commit sha, got ${JSON.stringify(opts['--base-sha'])}` }
+  }
   return { opts }
 }
 
@@ -153,7 +161,14 @@ function main() {
   } catch (err) {
     fail({ reason: `cannot resolve --project: ${err.message}` })
   }
-  const git = (args) => execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8' })
+  // Sanitized environment: inherited repository-selection variables (GIT_DIR,
+  // GIT_WORK_TREE, …) override cwd and would silently rebind every read to a
+  // different repository while the JSON still names projectRoot (codex R3 F11).
+  const gitEnv = { ...process.env }
+  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_INDEX_FILE']) {
+    delete gitEnv[k]
+  }
+  const git = (args) => execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8', env: gitEnv })
 
   if (baseSha !== undefined && ZERO_SHA.test(baseSha)) {
     // push event with no previous tip (branch creation): nothing to diff against.
