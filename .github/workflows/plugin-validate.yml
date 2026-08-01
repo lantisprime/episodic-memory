@@ -156,10 +156,14 @@ jobs:
 
       # #644: claude plugin update is version-gated on plugin.json, so a merge
       # that changes plugin content without a bump makes the update a permanent
-      # no-op. Diffs against the merge-base (fetch-depth 0 above is load-bearing
-      # here too) and fails when content changed without a semver advance.
+      # no-op. Diffs against an EVENT-SPECIFIC immutable baseline (codex R1 F1):
+      # github.base_ref exists only on pull_request; on push the checkout IS the
+      # pushed tip, so a ref baseline degenerates to comparing HEAD with itself —
+      # github.event.before is the pre-push sha instead (all-zeros on branch
+      # creation, which the gate passes explicitly). fetch-depth 0 above is
+      # load-bearing here too.
       - name: Check plugin.json version bump on content changes (#644)
-        run: node scripts/check-plugin-version-bump.mjs --base-ref origin/${{ github.base_ref || 'main' }}
+        run: node scripts/check-plugin-version-bump.mjs --project "$GITHUB_WORKSPACE" --base-ref "${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}"
 
       - name: Run plugin version-bump gate suite (#644)
         run: node tests/test-plugin-version-bump.mjs
