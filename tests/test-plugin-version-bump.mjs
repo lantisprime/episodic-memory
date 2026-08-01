@@ -15,7 +15,7 @@ import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { decideBump, isContentPath, parseSemver, semverGreater } from '../scripts/check-plugin-version-bump.mjs'
+import { decideBump, isContentPath, parseArgs, parseSemver, semverGreater } from '../scripts/check-plugin-version-bump.mjs'
 import { perProjectArtifactPairs } from '../scripts/lib/install-version.mjs'
 
 const REPO_ROOT = fs.realpathSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..'))
@@ -69,8 +69,18 @@ const present = (v) => ({ state: 'present', version: v })
   assert(r.ok === true && r.bump_required === false, 'exact-file entry does not prefix-match siblings', r.reason)
 }
 {
-  // codex R1 F3: the runtime data surface is content.
-  for (const p of ['patterns/taxonomy.json', 'categories.json', 'activation-classes.json', 'docs/EM_SCRIPTS_GUIDE.md', '.claude/hooks/bp1-approval-check.sh']) {
+  // codex R2 F10: strict fail-closed argv contract.
+  assert(parseArgs([]).opts !== undefined, 'parseArgs: empty argv ok')
+  assert(parseArgs(['--base-reff', 'main']).error !== undefined, 'parseArgs: unknown flag rejected')
+  assert(parseArgs(['main']).error !== undefined, 'parseArgs: positional rejected')
+  assert(parseArgs(['--base-ref']).error !== undefined, 'parseArgs: missing value rejected')
+  assert(parseArgs(['--base-ref', 'a', '--base-ref', 'b']).error !== undefined, 'parseArgs: duplicate flag rejected')
+  assert(parseArgs(['--base-ref', 'a', '--base-sha', 'b']).error !== undefined, 'parseArgs: base-ref + base-sha mutually exclusive')
+  assert(parseArgs(['--project', '.', '--base-sha', 'abc']).opts !== undefined, 'parseArgs: valid combination ok')
+}
+{
+  // codex R1 F3 + R2 F9: the runtime data surface is content.
+  for (const p of ['patterns/taxonomy.json', 'categories.json', 'activation-classes.json', 'docs/EM_SCRIPTS_GUIDE.md', '.claude/hooks/bp1-approval-check.sh', 'schemas/runtime/structured-alert.schema.json']) {
     const r = decideBump({ changedPaths: [p], base: present('0.1.0'), headVersion: '0.1.0' })
     assert(r.ok === false, `runtime surface path requires bump: ${p}`, r.reason)
   }
@@ -175,10 +185,55 @@ function runGate(cwd, ...extra) {
   fs.writeFileSync(path.join(repo, 'scripts/a.mjs'), '// v2\n')
   git(repo, 'commit', '-aqm', 'pushed content change, no bump')
   git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD') // ref now useless as baseline
-  const r = runGate(repo, '--base-ref', beforeSha)
+  const r = runGate(repo, '--base-sha', beforeSha)
   assert(r.status === 1 && r.json?.ok === false, 'E2E push baseline: explicit before-sha catches missing bump', JSON.stringify(r.json))
-  const zero = runGate(repo, '--base-ref', '0'.repeat(40))
+  const zero = runGate(repo, '--base-sha', '0'.repeat(40))
   assert(zero.status === 0 && zero.json?.ok === true, 'E2E push baseline: all-zeros before sha (branch creation) passes', JSON.stringify(zero.json))
+}
+{
+  // codex R2 F7: non-fast-forward push. Ancestor A (1.0.0) -> pre-push tip B
+  // (5.0.0); force-pushed HEAD H based on A carries 2.0.0. --base-sha B must
+  // treat B as the exact baseline and fail the 5.0.0 -> 2.0.0 downgrade;
+  // merge-base reduction would compare against A and false-accept.
+  const repo = mkRepo()
+  fs.writeFileSync(path.join(repo, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'fixture', version: '1.0.0' }))
+  git(repo, 'commit', '-aqm', 'A: 1.0.0')
+  const shaA = git(repo, 'rev-parse', 'HEAD')
+  fs.writeFileSync(path.join(repo, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'fixture', version: '5.0.0' }))
+  fs.writeFileSync(path.join(repo, 'scripts/a.mjs'), '// B\n')
+  git(repo, 'commit', '-aqm', 'B: 5.0.0')
+  const shaB = git(repo, 'rev-parse', 'HEAD')
+  git(repo, 'checkout', '-q', shaA)
+  git(repo, 'checkout', '-qb', 'rewrite')
+  fs.writeFileSync(path.join(repo, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'fixture', version: '2.0.0' }))
+  fs.writeFileSync(path.join(repo, 'scripts/a.mjs'), '// H\n')
+  git(repo, 'commit', '-aqm', 'H: 2.0.0 (force-push shape)')
+  const r = runGate(repo, '--base-sha', shaB)
+  assert(r.status === 1 && r.json?.ok === false && r.json?.baseline === shaB,
+    'E2E non-fast-forward push: exact base-sha catches the downgrade merge-base would hide', JSON.stringify(r.json))
+}
+{
+  // codex R2 F8: rename out of the surface must still gate (the source
+  // endpoint is removed installed content). And into the surface likewise.
+  const repo = mkRepo()
+  git(repo, 'mv', 'scripts/a.mjs', 'docs/a.mjs')
+  git(repo, 'commit', '-qm', 'rename runtime -> excluded')
+  const out = runGate(repo)
+  assert(out.status === 1 && out.json?.content_paths?.includes('scripts/a.mjs'),
+    'E2E rename runtime->excluded: source endpoint still gates', JSON.stringify(out.json))
+
+  const repo2 = mkRepo()
+  git(repo2, 'mv', 'docs/readme.md', 'scripts/readme.md')
+  git(repo2, 'commit', '-qm', 'rename excluded -> runtime')
+  const into = runGate(repo2)
+  assert(into.status === 1 && into.json?.content_paths?.includes('scripts/readme.md'),
+    'E2E rename excluded->runtime: destination endpoint gates', JSON.stringify(into.json))
+}
+{
+  // codex R2 F10 E2E: unknown flag fails closed with one JSON error.
+  const repo = mkRepo()
+  const r = runGate(repo, '--base-reff', 'main')
+  assert(r.status === 1 && r.json?.status === 'error', 'E2E unknown flag: JSON error, fail closed', JSON.stringify(r.json ?? r.stdout))
 }
 {
   // codex R1 F2: --project binds authority; ambient cwd must not.

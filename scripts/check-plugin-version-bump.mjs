@@ -11,12 +11,15 @@
 // install-surface path changed, .claude-plugin/plugin.json must carry a
 // strictly greater semver than the merge-base copy.
 //
-// Baseline is event-specific (codex R1 F1): github.base_ref exists only on
-// pull_request events; on push the checkout IS the pushed tip, so a ref
-// baseline degenerates to merge-base(HEAD, HEAD) and the gate sees an empty
-// diff. Callers pass an immutable pre-change baseline instead — the PR base
-// ref on pull_request, github.event.before on push. The all-zeros before-sha
-// (branch creation) is the one case with no baseline and passes explicitly.
+// Baseline is event-specific (codex R1 F1, R2 F7): github.base_ref exists
+// only on pull_request events; on push the checkout IS the pushed tip, so a
+// ref baseline degenerates to merge-base(HEAD, HEAD) and the gate sees an
+// empty diff. PRs pass --base-ref (merge-base semantics against the target
+// branch); pushes pass --base-sha github.event.before, which is EXACT — no
+// merge-base reduction, because on a non-fast-forward push the merge-base
+// walks past the pre-push tip and hides a version downgrade. The all-zeros
+// before-sha (branch creation) is the one case with no baseline and passes
+// explicitly.
 //
 // Content paths are the plugin's install surface, not the whole repo: docs,
 // tests, and workflow edits change the marketplace clone's sha but not the
@@ -27,7 +30,7 @@
 // locked by tests/test-plugin-version-bump.mjs's conformance axis against the
 // install-version.mjs artifact enumerator.
 //
-// Usage: node scripts/check-plugin-version-bump.mjs [--project <path>] [--base-ref <ref|sha>]
+// Usage: node scripts/check-plugin-version-bump.mjs [--project <path>] [--base-ref <ref> | --base-sha <sha>]
 // Output: exactly one JSON report on stdout in every reachable outcome; exit 1
 // when a required bump is missing or the comparison cannot be made (fail
 // closed, matching the validate-bp-contract stable-ID precedent).
@@ -51,6 +54,7 @@ export const CONTENT_PREFIXES = [
   'plugins/',
   'instructions/',
   'patterns/',
+  'schemas/', // runtime data of installed libs, e.g. structured-alert.mjs reads schemas/runtime/ (codex R2 F9)
   'install.mjs',
   'categories.json',
   'activation-classes.json',
@@ -116,48 +120,79 @@ function fail(report) {
   process.exit(1)
 }
 
-function main() {
-  const argv = process.argv.slice(2)
-  const flag = (name, dflt) => {
-    const i = argv.indexOf(name)
-    return i !== -1 ? argv[i + 1] : dflt
+// Strict fail-closed parser (codex R2 F10): known value-flags only — no
+// unknown flags, positionals, duplicates, or missing values.
+export function parseArgs(argv) {
+  const KNOWN = new Set(['--project', '--base-ref', '--base-sha'])
+  const opts = {}
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (!KNOWN.has(a)) return { error: `unknown argument ${JSON.stringify(a)}; expected --project/--base-ref/--base-sha` }
+    if (a in opts) return { error: `duplicate flag ${a}` }
+    const v = argv[i + 1]
+    if (v === undefined || v.startsWith('--')) return { error: `flag ${a} requires a value` }
+    opts[a] = v
+    i++
   }
-  const baseRef = flag('--base-ref', 'origin/main')
+  if ('--base-ref' in opts && '--base-sha' in opts) return { error: '--base-ref and --base-sha are mutually exclusive' }
+  return { opts }
+}
+
+function main() {
+  const parsed = parseArgs(process.argv.slice(2))
+  if (parsed.error) fail({ reason: parsed.error })
+  const opts = parsed.opts
+  const baseSha = opts['--base-sha']
+  const baseRef = opts['--base-ref'] ?? (baseSha === undefined ? 'origin/main' : undefined)
 
   // One explicit project root; every git call binds to it and the report
   // names it (codex R1 F2 — no ambient-cwd authority).
   let projectRoot
   try {
-    projectRoot = fs.realpathSync(path.resolve(flag('--project', '.')))
+    projectRoot = fs.realpathSync(path.resolve(opts['--project'] ?? '.'))
   } catch (err) {
     fail({ reason: `cannot resolve --project: ${err.message}` })
   }
   const git = (args) => execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8' })
 
-  if (ZERO_SHA.test(baseRef)) {
+  if (baseSha !== undefined && ZERO_SHA.test(baseSha)) {
     // push event with no previous tip (branch creation): nothing to diff against.
     console.log(JSON.stringify({
-      status: 'ok', project_root: projectRoot, base_ref: baseRef, ok: true,
+      status: 'ok', project_root: projectRoot, base_sha: baseSha, ok: true,
       bump_required: false, content_paths: [], reason: 'no pre-push baseline (all-zeros before sha)',
     }, null, 2))
     return
   }
 
-  let mergeBase
-  try {
-    mergeBase = git(['merge-base', 'HEAD', baseRef]).trim()
-  } catch (err) {
-    // Fail closed: shallow clone or missing baseline means the gate cannot run.
-    fail({ project_root: projectRoot, reason: `merge-base with ${baseRef} failed: ${err.message}` })
+  // Baseline commit: --base-sha is EXACT (codex R2 F7 — merge-base reduction
+  // hides non-fast-forward downgrades); --base-ref keeps merge-base semantics
+  // for PR branches that are behind their target.
+  let baseline
+  if (baseSha !== undefined) {
+    try {
+      baseline = git(['rev-parse', '--verify', `${baseSha}^{commit}`]).trim()
+    } catch (err) {
+      // Fail closed: an unreachable pre-push sha means the gate cannot run.
+      fail({ project_root: projectRoot, reason: `--base-sha ${baseSha} does not resolve to a commit: ${err.message}` })
+    }
+  } else {
+    try {
+      baseline = git(['merge-base', 'HEAD', baseRef]).trim()
+    } catch (err) {
+      // Fail closed: shallow clone or missing baseline means the gate cannot run.
+      fail({ project_root: projectRoot, reason: `merge-base with ${baseRef} failed: ${err.message}` })
+    }
   }
 
   let changedPaths
   try {
     // -z: NUL-delimited raw paths — core.quotePath octal-escapes non-ASCII in
-    // newline mode and breaks prefix matching (codex R1 F5).
-    changedPaths = git(['diff', '--name-only', '-z', mergeBase, 'HEAD']).split('\0').filter(Boolean)
+    // newline mode and breaks prefix matching (codex R1 F5). --no-renames:
+    // rename detection would report only the destination endpoint, hiding a
+    // content-path source that moved out of the surface (codex R2 F8).
+    changedPaths = git(['diff', '--no-renames', '--name-only', '-z', baseline, 'HEAD']).split('\0').filter(Boolean)
   } catch (err) {
-    fail({ project_root: projectRoot, merge_base: mergeBase, reason: `git diff failed: ${err.message}` })
+    fail({ project_root: projectRoot, baseline, reason: `git diff failed: ${err.message}` })
   }
 
   // Base manifest state: 'absent' only on a PROVEN missing path (empty
@@ -165,35 +200,35 @@ function main() {
   // decideBump — corruption is never "first introduction" (codex R1 F4).
   let base
   try {
-    const entry = git(['ls-tree', '--name-only', mergeBase, '--', MANIFEST]).trim()
+    const entry = git(['ls-tree', '--name-only', baseline, '--', MANIFEST]).trim()
     if (entry === '') {
       base = { state: 'absent' }
     } else {
       let version
       try {
-        version = JSON.parse(git(['show', `${mergeBase}:${MANIFEST}`])).version
+        version = JSON.parse(git(['show', `${baseline}:${MANIFEST}`])).version
       } catch (err) {
         version = `<unreadable: ${err.message.split('\n')[0]}>`
       }
       base = { state: 'present', version }
     }
   } catch (err) {
-    fail({ project_root: projectRoot, merge_base: mergeBase, reason: `reading base ${MANIFEST} state failed: ${err.message}` })
+    fail({ project_root: projectRoot, baseline, reason: `reading base ${MANIFEST} state failed: ${err.message}` })
   }
 
   let headVersion
   try {
     headVersion = JSON.parse(git(['show', `HEAD:${MANIFEST}`])).version
   } catch (err) {
-    fail({ project_root: projectRoot, merge_base: mergeBase, reason: `cannot read HEAD ${MANIFEST}: ${err.message}` })
+    fail({ project_root: projectRoot, baseline, reason: `cannot read HEAD ${MANIFEST}: ${err.message}` })
   }
 
   const verdict = decideBump({ changedPaths, base, headVersion })
   console.log(JSON.stringify({
     status: 'ok',
     project_root: projectRoot,
-    base_ref: baseRef,
-    merge_base: mergeBase,
+    ...(baseSha !== undefined ? { base_sha: baseSha } : { base_ref: baseRef }),
+    baseline,
     base_manifest: base,
     head_version: headVersion,
     ...verdict,
