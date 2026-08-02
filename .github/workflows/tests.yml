@@ -311,6 +311,9 @@ jobs:
       - name: Run RFC-009 P0 prune-protection tests
         run: node tests/test-prune-protection.mjs
 
+      - name: "Run #628 sibling-init-guard tests"
+        run: node tests/test-628-sibling-init-guard.mjs
+
       - name: Run em-consolidate suite
         run: node tests/test-em-consolidate.mjs
 

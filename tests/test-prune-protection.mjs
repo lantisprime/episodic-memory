@@ -82,7 +82,7 @@ function prune(world, args, scope = 'local') {
   // Success: {status:'ok', results:[...]}; R5(b) abort: {status:'error', message}.
   let parsed = null
   try { parsed = JSON.parse(r.stdout) } catch {}
-  return { status: r.status, out: parsed && Array.isArray(parsed.results) ? parsed.results[0] : parsed, raw: r.stdout }
+  return { status: r.status, out: parsed && Array.isArray(parsed.results) ? parsed.results[0] : parsed, raw: r.stdout, stderr: r.stderr }
 }
 function survives(world, id) {
   return fs.existsSync(path.join(world.proj, '.episodic-memory', 'episodes', `${id}.md`)) &&
@@ -490,6 +490,51 @@ t('testConsolidateAllProjectsSiblingCorruptAborts', () => {
   assert(fs.readdirSync(localEpisodes(w)).length === localBefore, 'local episodes moved during --all-projects abort')
   assert(w.sibling && fs.readdirSync(path.join(w.sibling, '.episodic-memory', 'episodes')).length === sibBefore, 'sibling episodes moved during --all-projects abort')
 })
+
+function corruptIndexDir(dir) {
+  fs.rmSync(path.join(dir, 'index.jsonl'))
+  fs.mkdirSync(path.join(dir, 'index.jsonl'))
+}
+
+function testCorruptLocalIndexAbortsTyped() {
+  const w = mkWorld([row('20240101-000000-keep-aaaa')], [], {})
+  corruptIndexDir(path.join(w.proj, '.episodic-memory'))
+  const r = prune(w, [], 'local')
+  assert(r.status === 1, `exit 1, got ${r.status}`)
+  assert(r.out && r.out.status === 'error', 'typed envelope on stdout')
+  assert(/episode index unreadable/.test(r.out.message), 'reason discriminator')
+  assert(/index\.jsonl/.test(r.out.message), 'names index.jsonl')
+  assert(!/playbooks\.json/.test(r.out.message), 'not attributed to playbooks')
+  assert(!/at .*\.mjs/.test(r.stderr), 'no raw stack frames on stderr')
+  assert(fs.existsSync(path.join(w.proj, '.episodic-memory', 'episodes', '20240101-000000-keep-aaaa.md')), 'nothing archived')
+}
+
+function testCorruptGlobalIndexAbortsTyped() {
+  const w = mkWorld([], [row('20240101-000000-keep-bbbb')], {})
+  corruptIndexDir(path.join(w.home, '.episodic-memory'))
+  const r = prune(w, [], 'global')
+  assert(r.status === 1, `exit 1, got ${r.status}`)
+  assert(r.out && r.out.status === 'error', 'typed envelope on stdout')
+  assert(/episode index unreadable/.test(r.out.message), 'reason discriminator')
+  assert(/index\.jsonl/.test(r.out.message), 'names index.jsonl')
+  assert(fs.existsSync(path.join(w.home, '.episodic-memory', 'episodes', '20240101-000000-keep-bbbb.md')), 'nothing archived')
+}
+
+function testCorruptLocalIndexAttributionUnderGlobalScope() {
+  // §19 Round 0 axis-6: the :244 union loads BOTH stores regardless of --scope;
+  // the abort must name the store that is actually corrupt (local), not global.
+  const w = mkWorld([row('20240101-000000-keep-cccc')], [row('20240101-000000-keep-dddd')], {})
+  corruptIndexDir(path.join(w.proj, '.episodic-memory'))
+  const r = prune(w, [], 'global')
+  assert(r.status === 1, `exit 1, got ${r.status}`)
+  assert(r.out && r.out.status === 'error', 'typed envelope on stdout')
+  assert(r.out.message.includes(path.join('proj', '.episodic-memory', 'index.jsonl')), 'names the LOCAL index')
+  assert(!r.out.message.includes(path.join('home', '.episodic-memory', 'index.jsonl')), 'does not blame the global index')
+}
+
+t('testCorruptLocalIndexAbortsTyped', testCorruptLocalIndexAbortsTyped)
+t('testCorruptGlobalIndexAbortsTyped', testCorruptGlobalIndexAbortsTyped)
+t('testCorruptLocalIndexAttributionUnderGlobalScope', testCorruptLocalIndexAttributionUnderGlobalScope)
 
 let pass = 0
 for (const [name, fn] of tests) {

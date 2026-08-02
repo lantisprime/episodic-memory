@@ -129,6 +129,21 @@ const insufficientStores = stores.length < 2
 const warnings = []
 const missingSources = []
 
+// #628: the module-init loads (:140, :238) and the pre-lock migrate-path loads
+// (:447, :466, :468) abort with a typed envelope on a corrupt index.jsonl
+// (EISDIR class) instead of a raw stack. The remaining raw sites (:653, :671,
+// :795) are TOCTOU-only — reachable solely via mid-run corruption after these
+// guarded loads already succeeded — and stay raw, mirroring #626's foldStore.
+function loadIndexOrAbort(dataDir, source) {
+  try {
+    return loadIndex(dataDir, source)
+  } catch (e) {
+    const file = path.join(dataDir, 'index.jsonl')
+    console.log(JSON.stringify({ status: 'error', message: `em-promote: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${file})` }))
+    process.exit(1)
+  }
+}
+
 // Member identity binds the immutable episode bytes. Replicas collapse only
 // when id and normalized-byte content hash both match.
 const byKey = new Map() // key -> {id, summary, project, tags, tokens, stores: Set, storeShown: string}
@@ -137,7 +152,7 @@ for (const st of stores) {
     warnings.push({ store: st.label, problem: `store identity unavailable${st.store_identity_error ? `: ${st.store_identity_error}` : ''}` })
     continue
   }
-  const rows = loadIndex(st.data_dir, st.label)
+  const rows = loadIndexOrAbort(st.data_dir, st.label)
   for (const r of rows) {
     if (r.status === 'superseded') continue
     if (typeof r.id !== 'string' || typeof r.summary !== 'string') continue
@@ -235,7 +250,7 @@ candidates.sort((a, b) => a.hash.localeCompare(b.hash))
 // Existing promoted episodes: dedupe set + drift warnings + superset back-refs.
 // ---------------------------------------------------------------------------
 const HASH_TAG_RE = /^promoted:[0-9a-f]{8}$/
-const globalRows = loadIndex(GLOBAL_DIR, 'global')
+const globalRows = loadIndexOrAbort(GLOBAL_DIR, 'global')
 const existingByHashTag = new Map() // 'promoted:<sha8>' -> episode id
 const existingSourceSets = []       // {id, representation:'typed'|'legacy', ids:Set<string>}
 for (const r of globalRows) {
@@ -444,7 +459,7 @@ export function selectMigrationCandidates(rows) {
       const text = fs.readFileSync(path.join(GLOBAL_DIR, 'episodes', `${row.id}.md`), 'utf8')
       if (!text.includes('## Sources')) { skipped.push({ hash: row.id, reason: 'no-parseable-sources' }); continue }
       for (const match of text.matchAll(/^- (\S+) \(([^,]+),/gm)) {
-        const source = stores.flatMap(st => loadIndex(st.data_dir, st.label).filter(r => r.id === match[1]).map(r => ({ store_id: st.store_id, episode_id: r.id, content_sha256: computeContentSha256(fs.readFileSync(path.join(st.data_dir, 'episodes', `${r.id}.md`))) })))
+        const source = stores.flatMap(st => loadIndexOrAbort(st.data_dir, st.label).filter(r => r.id === match[1]).map(r => ({ store_id: st.store_id, episode_id: r.id, content_sha256: computeContentSha256(fs.readFileSync(path.join(st.data_dir, 'episodes', `${r.id}.md`))) })))
         sources.push(...source)
       }
     } catch {}
@@ -463,9 +478,9 @@ export function selectMigrationCandidates(rows) {
 // the F6 knownSet guard AND the migrate branch so a confirmed-fingerprint
 // check sees the same row set the migration selector will iterate.
 function migrationRows() {
-  const out = loadIndex(GLOBAL_DIR, 'global')
+  const out = loadIndexOrAbort(GLOBAL_DIR, 'global')
   for (const st of stores) {
-    for (const r of loadIndex(st.data_dir, st.label)) out.push(r)
+    for (const r of loadIndexOrAbort(st.data_dir, st.label)) out.push(r)
   }
   return out
 }
