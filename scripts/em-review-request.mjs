@@ -210,10 +210,20 @@ function loadIndex(dataDir, source) {
   }).filter(Boolean)
 }
 
+// #628: module-init index loads abort via fail() on a corrupt index.jsonl
+// (EISDIR class) instead of a raw stack trace.
+function loadIndexOrAbort(dataDir, source) {
+  try {
+    return loadIndex(dataDir, source)
+  } catch (e) {
+    fail(1, `em-review-request: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${path.join(dataDir, 'index.jsonl')})`)
+  }
+}
+
 // Load BOTH scopes regardless of --scope (folded gap #4 — wrapper-validator
 // scope parity contract; mirrors em-workflow-validate.mjs:489-495).
-const localEntries = loadIndex(LOCAL_DIR, 'local')
-const globalEntries = loadIndex(GLOBAL_DIR, 'global')
+const localEntries = loadIndexOrAbort(LOCAL_DIR, 'local')
+const globalEntries = loadIndexOrAbort(GLOBAL_DIR, 'global')
 const indexById = new Map()
 for (const e of globalEntries) indexById.set(e.id, e)
 for (const e of localEntries) indexById.set(e.id, e) // local wins

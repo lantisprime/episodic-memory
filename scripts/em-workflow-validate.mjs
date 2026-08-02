@@ -136,6 +136,17 @@ function loadIndex(dataDir, source) {
   }).filter(Boolean)
 }
 
+// #628: module-init index loads abort via fail() on a corrupt index.jsonl
+// (EISDIR class) instead of a raw stack trace. Exit 1 preserves today's
+// observable exit code (the uncaught crash also exits 1).
+function loadIndexOrAbort(dataDir, source) {
+  try {
+    return loadIndex(dataDir, source)
+  } catch (e) {
+    fail(`em-workflow-validate: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${path.join(dataDir, 'index.jsonl')})`, 1)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Frontmatter scalar read (issue 558, §12 frontmatterScalar contract).
 //
@@ -904,8 +915,8 @@ function validateChain(events, errors, warnings, gateArg, headArg, selectedChain
 // Without this split, a local chain that cites a global log would fail with
 // "not found (checked local + global)" — the exact behavior Codex reproduced
 // in the PR #98 re-review (#98 finding 2 follow-up).
-const localEntries = loadIndex(LOCAL_DIR, 'local')
-const globalEntries = loadIndex(GLOBAL_DIR, 'global')
+const localEntries = loadIndexOrAbort(LOCAL_DIR, 'local')
+const globalEntries = loadIndexOrAbort(GLOBAL_DIR, 'global')
 
 // Resolver index: every id from both scopes, local takes priority on collision.
 const indexById = new Map()

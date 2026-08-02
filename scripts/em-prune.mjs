@@ -82,6 +82,19 @@ function loadIndexRows(dataDir, storeLabel) {
   return out
 }
 
+// #628: a corrupt primary index (e.g. index.jsonl that is a directory — EISDIR)
+// must abort with the R5(b) envelope, never a raw stack trace. Both module-init
+// reference-scan loads route through this guard: exit 1, archive nothing, name
+// the offending file. Shape mirrors the R5(b) abort emitter below.
+function loadIndexRowsOrAbort(dataDir, storeLabel) {
+  try {
+    return loadIndexRows(dataDir, storeLabel)
+  } catch (e) {
+    const file = path.join(dataDir, 'index.jsonl')
+    console.log(JSON.stringify({ status: 'error', message: `em-prune: aborting archival — episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${file})` }))
+    process.exit(1)
+  }
+}
 
 function loadInvertedIndex(dataDir, fileName) {
   const indexPath = path.join(dataDir, fileName)
@@ -241,7 +254,7 @@ function pruneDir(dataDir, label, protectedIds) {
 // shadow an active referencer). Like the archived-index append race below, the
 // scan-to-archive window is a documented limitation: an episode stored mid-prune
 // protects one run late (recovery: em-restore / archived-index).
-const referenceRows = [...loadIndexRows(LOCAL_DIR, 'local'), ...loadIndexRows(GLOBAL_DIR, 'global')]
+const referenceRows = [...loadIndexRowsOrAbort(LOCAL_DIR, 'local'), ...loadIndexRowsOrAbort(GLOBAL_DIR, 'global')]
 
 // RFC-011 R5(b): playbook-referenced chain protection + SCOPED fail-closed abort.
 // The registry is consulted ONLY when the GLOBAL store is being archived, so a
