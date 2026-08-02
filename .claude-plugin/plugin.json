@@ -1,6 +1,6 @@
 {
   "name": "episodic-memory",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Cross-tool episodic memory + BP-1 auto-pilot (RFC-004). All BP-1 surfaces are activation-gated and remain inert until M5 dry-run flips bp1.enabled per project.",
   "scheduled-tasks": [
     {
