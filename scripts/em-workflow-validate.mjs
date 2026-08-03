@@ -31,6 +31,7 @@ import path from 'path'
 import os from 'os'
 import { execFileSync } from 'child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { readIndexFileOrThrow } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -125,8 +126,9 @@ if ((gate === 'push-allowed' || gate === 'review-request') && !head) {
 // ---------------------------------------------------------------------------
 function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
+  return raw.trim().split('\n').filter(Boolean).map(line => {
     try {
       const entry = JSON.parse(line)
       entry._source = source

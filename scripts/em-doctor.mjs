@@ -61,6 +61,7 @@ import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { findContradictionCandidates, SUMMARY_JACCARD_MIN } from './lib/contradiction.mjs'
 import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
 import { parsePlaybooksConfig, terminalOf, buildChainMaps, mergeIndexRowsForChain } from './em-trigger-index.mjs'
+import { assertReadableIndex } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -132,7 +133,20 @@ function checkStore(dataDir, scopeName) {
   const episodesDir = path.join(dataDir, 'episodes')
   const indexFile = path.join(dataDir, 'index.jsonl')
   const hasEpisodes = fs.existsSync(episodesDir)
-  const hasIndex = fs.existsSync(indexFile)
+
+  // #651: classify (lstat-based) instead of existsSync — existsSync's false
+  // negative on a symlink loop/dangling link/EACCES parent would report a
+  // healthy-looking "absent" index instead of the defect it actually is.
+  // em-doctor is the non-abort adopter: REPORT 'unreadable (<CODE>)', never
+  // crash on the disease it diagnoses, and never silently report 'ok'.
+  let hasIndex
+  let indexUnreadableCode = null
+  try {
+    hasIndex = assertReadableIndex(fs, indexFile) === 'ok'
+  } catch (e) {
+    hasIndex = false
+    indexUnreadableCode = (e && e.code) || 'UNKNOWN'
+  }
 
   // Episode files on disk (source of truth for drift checks).
   const episodeIds = new Set(
@@ -141,141 +155,175 @@ function checkStore(dataDir, scopeName) {
       : []
   )
 
-  if (!hasIndex && episodeIds.size === 0) {
+  // #651: also classify archived-index.jsonl — a health tool must not die on
+  // the disease it diagnoses, and must not report fail-open 'ok' the way
+  // existsSync-based absence-detection would on a broken/looping link.
+  try {
+    const archivedState = assertReadableIndex(fs, path.join(dataDir, 'archived-index.jsonl'))
+    report('archived-index', scopeName, 'ok', archivedState === 'ok' ? 'archived-index.jsonl readable' : 'archived-index.jsonl absent')
+  } catch (e) {
+    report('archived-index', scopeName, 'error', `archived-index.jsonl unreadable (${(e && e.code) || 'UNKNOWN'})`,
+      { fix: 'remove the corrupt archived-index.jsonl and re-run em-rebuild-index' })
+  }
+
+  if (!hasIndex && !indexUnreadableCode && episodeIds.size === 0) {
     report('store', scopeName, 'ok', `Empty store at ${dataDir}`)
     return
   }
   report('store', scopeName, 'ok', `Store at ${dataDir}: ${episodeIds.size} episode file(s)`)
 
-  // --- index-parse: count rows that fail to parse -------------------------
-  let rawLines = []
-  let badLines = 0
-  if (hasIndex) {
-    rawLines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-    for (const line of rawLines) {
-      try { JSON.parse(line) } catch { badLines++ }
-    }
-  }
-  if (badLines > 0) {
-    report('index-parse', scopeName, 'error', `${badLines} malformed line(s) in index.jsonl`, { fix: 'em-rebuild-index' })
+  if (indexUnreadableCode) {
+    // The index-row-dependent checks below (row-shape, index-drift,
+    // tags/category/tokens dangling-ref, supersedes-links, contradiction
+    // candidates) all need to read index.jsonl rows: with no readable rows
+    // there is nothing honest to report for them (reporting index-drift
+    // against an empty row set would fabricate "every episode file
+    // unindexed"), so they are skipped. tmp-litter/stale-locks are
+    // directory-level and still run below.
+    report('index-parse', scopeName, 'error', `index.jsonl unreadable (${indexUnreadableCode})`,
+      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
   } else {
-    report('index-parse', scopeName, 'ok', hasIndex ? `index.jsonl: ${rawLines.length} row(s), all parse` : 'index.jsonl absent')
-  }
-
-  // --- row-shape: schema-deviant rows (#448 class) -------------------------
-  // Hand-appended rows missing string date/time/summary (or with non-array
-  // tags) no longer crash readers (#447) but sort last and degrade filters.
-  // em-rebuild-index backfills date/time from the id prefix, so the fix hint
-  // is a real repair, not just a report.
-  const entriesForShape = loadIndex(dataDir, scopeName)
-  const deviant = entriesForShape.filter(e =>
-    typeof e.id !== 'string' || typeof e.date !== 'string' ||
-    typeof e.time !== 'string' || typeof e.summary !== 'string' ||
-    !Array.isArray(e.tags)
-  )
-  if (deviant.length) {
-    report('row-shape', scopeName, 'warn',
-      `${deviant.length} index row(s) missing typed id/date/time/summary/tags (hand-appended?). Rebuild backfills date/time from the episode id.`,
-      { fix: 'em-rebuild-index', ...(verbose ? { rows: deviant.map(e => e.id).filter(Boolean) } : {}) })
-  } else if (entriesForShape.length) {
-    report('row-shape', scopeName, 'ok', 'all index rows carry typed id/date/time/summary/tags')
-  }
-
-  // --- index-drift: index rows ↔ episode files ----------------------------
-  const entries = entriesForShape
-  const indexedIds = new Set(entries.map(e => e.id))
-  const missingFiles = [...indexedIds].filter(id => !episodeIds.has(id))
-  const unindexed = [...episodeIds].filter(id => !indexedIds.has(id))
-  if (missingFiles.length || unindexed.length) {
-    report('index-drift', scopeName, 'error',
-      `${missingFiles.length} indexed id(s) with no episode file; ${unindexed.length} episode file(s) not in index`,
-      { fix: 'em-rebuild-index', ...(verbose ? { missing_files: missingFiles, unindexed_files: unindexed } : {}) })
-  } else {
-    report('index-drift', scopeName, 'ok', 'index.jsonl and episodes/ agree')
-  }
-
-  // --- tags-index / category-index / tokens-index ---------------------------
-  for (const [checkId, fileName] of [['tags-index', 'tags.json'], ['category-index', 'category-index.json'], ['tokens-index', 'tokens.json']]) {
-    const p = path.join(dataDir, fileName)
-    if (!fs.existsSync(p)) {
-      if (indexedIds.size > 0) {
-        report(checkId, scopeName, 'warn', `${fileName} missing — searches fall back to slow linear scan`, { fix: 'em-rebuild-index' })
-      } else {
-        report(checkId, scopeName, 'ok', `${fileName} absent (empty store)`)
+    // --- index-parse: count rows that fail to parse -------------------------
+    let rawLines = []
+    let badLines = 0
+    if (hasIndex) {
+      rawLines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+      for (const line of rawLines) {
+        try { JSON.parse(line) } catch { badLines++ }
       }
-      continue
     }
-    let idx
-    try {
-      idx = JSON.parse(fs.readFileSync(p, 'utf8'))
-    } catch {
-      report(checkId, scopeName, 'error', `${fileName} is corrupt (invalid JSON)`, { fix: 'em-rebuild-index' })
-      continue
-    }
-    const danglers = []
-    for (const [key, ids] of Object.entries(idx)) {
-      // tokens.json df-diet marker: value is dropped TOKEN strings, not ids.
-      if (fileName === 'tokens.json' && key === TOKENS_DROPPED_KEY) continue
-      if (!Array.isArray(ids)) continue
-      for (const id of ids) if (!indexedIds.has(id)) danglers.push(id)
-    }
-    if (danglers.length) {
-      report(checkId, scopeName, 'warn', `${fileName} references ${danglers.length} id(s) not in index.jsonl`, { fix: 'em-rebuild-index', ...(verbose ? { dangling: [...new Set(danglers)] } : {}) })
+    if (badLines > 0) {
+      report('index-parse', scopeName, 'error', `${badLines} malformed line(s) in index.jsonl`, { fix: 'em-rebuild-index' })
     } else {
-      report(checkId, scopeName, 'ok', `${fileName} consistent`)
+      report('index-parse', scopeName, 'ok', hasIndex ? `index.jsonl: ${rawLines.length} row(s), all parse` : 'index.jsonl absent')
     }
-  }
 
-  // --- tokens-bloat ---------------------------------------------------------
-  // tokens.json is derived from the same episodes index.jsonl describes; a
-  // byte ratio above TOKENS_BLOAT_RATIO means the vocabulary is dominated by
-  // non-discriminating posting lists (common tokens). A rebuild applies the
-  // df diet (em-rebuild-index drops >40%-df posting lists) and shrinks it.
-  try {
-    const idxBytes = fs.statSync(indexFile).size
-    const tokBytes = fs.statSync(path.join(dataDir, 'tokens.json')).size
-    if (idxBytes > 0) {
-      const ratio = tokBytes / idxBytes
-      if (ratio > TOKENS_BLOAT_RATIO) {
-        report('tokens-bloat', scopeName, 'warn',
-          `tokens.json is ${Math.round(ratio)}x the size of index.jsonl (threshold ${TOKENS_BLOAT_RATIO}x) — rebuild to apply the df diet`,
-          { fix: 'em-rebuild-index' })
+    // --- row-shape: schema-deviant rows (#448 class) -------------------------
+    // Hand-appended rows missing string date/time/summary (or with non-array
+    // tags) no longer crash readers (#447) but sort last and degrade filters.
+    // em-rebuild-index backfills date/time from the id prefix, so the fix hint
+    // is a real repair, not just a report.
+    let entriesForShape
+    try {
+      entriesForShape = loadIndex(dataDir, scopeName)
+    } catch (e) {
+      // TOCTOU: readable at classify time, swapped to unreadable by read time.
+      report('index-parse', scopeName, 'error', `index.jsonl unreadable (${(e && e.code) || 'UNKNOWN'})`,
+        { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+      entriesForShape = []
+      indexUnreadableCode = (e && e.code) || 'UNKNOWN'
+    }
+    const deviant = entriesForShape.filter(e =>
+      typeof e.id !== 'string' || typeof e.date !== 'string' ||
+      typeof e.time !== 'string' || typeof e.summary !== 'string' ||
+      !Array.isArray(e.tags)
+    )
+    if (deviant.length) {
+      report('row-shape', scopeName, 'warn',
+        `${deviant.length} index row(s) missing typed id/date/time/summary/tags (hand-appended?). Rebuild backfills date/time from the episode id.`,
+        { fix: 'em-rebuild-index', ...(verbose ? { rows: deviant.map(e => e.id).filter(Boolean) } : {}) })
+    } else if (entriesForShape.length) {
+      report('row-shape', scopeName, 'ok', 'all index rows carry typed id/date/time/summary/tags')
+    }
+
+    if (!indexUnreadableCode) {
+      // --- index-drift: index rows ↔ episode files ----------------------------
+      const entries = entriesForShape
+      const indexedIds = new Set(entries.map(e => e.id))
+      const missingFiles = [...indexedIds].filter(id => !episodeIds.has(id))
+      const unindexed = [...episodeIds].filter(id => !indexedIds.has(id))
+      if (missingFiles.length || unindexed.length) {
+        report('index-drift', scopeName, 'error',
+          `${missingFiles.length} indexed id(s) with no episode file; ${unindexed.length} episode file(s) not in index`,
+          { fix: 'em-rebuild-index', ...(verbose ? { missing_files: missingFiles, unindexed_files: unindexed } : {}) })
       } else {
-        report('tokens-bloat', scopeName, 'ok', `tokens.json/index.jsonl ratio ${Math.round(ratio * 10) / 10}x`)
+        report('index-drift', scopeName, 'ok', 'index.jsonl and episodes/ agree')
+      }
+
+      // --- tags-index / category-index / tokens-index ---------------------------
+      for (const [checkId, fileName] of [['tags-index', 'tags.json'], ['category-index', 'category-index.json'], ['tokens-index', 'tokens.json']]) {
+        const p = path.join(dataDir, fileName)
+        if (!fs.existsSync(p)) {
+          if (indexedIds.size > 0) {
+            report(checkId, scopeName, 'warn', `${fileName} missing — searches fall back to slow linear scan`, { fix: 'em-rebuild-index' })
+          } else {
+            report(checkId, scopeName, 'ok', `${fileName} absent (empty store)`)
+          }
+          continue
+        }
+        let idx
+        try {
+          idx = JSON.parse(fs.readFileSync(p, 'utf8'))
+        } catch {
+          report(checkId, scopeName, 'error', `${fileName} is corrupt (invalid JSON)`, { fix: 'em-rebuild-index' })
+          continue
+        }
+        const danglers = []
+        for (const [key, ids] of Object.entries(idx)) {
+          // tokens.json df-diet marker: value is dropped TOKEN strings, not ids.
+          if (fileName === 'tokens.json' && key === TOKENS_DROPPED_KEY) continue
+          if (!Array.isArray(ids)) continue
+          for (const id of ids) if (!indexedIds.has(id)) danglers.push(id)
+        }
+        if (danglers.length) {
+          report(checkId, scopeName, 'warn', `${fileName} references ${danglers.length} id(s) not in index.jsonl`, { fix: 'em-rebuild-index', ...(verbose ? { dangling: [...new Set(danglers)] } : {}) })
+        } else {
+          report(checkId, scopeName, 'ok', `${fileName} consistent`)
+        }
+      }
+
+      // --- tokens-bloat ---------------------------------------------------------
+      // tokens.json is derived from the same episodes index.jsonl describes; a
+      // byte ratio above TOKENS_BLOAT_RATIO means the vocabulary is dominated by
+      // non-discriminating posting lists (common tokens). A rebuild applies the
+      // df diet (em-rebuild-index drops >40%-df posting lists) and shrinks it.
+      try {
+        const idxBytes = fs.statSync(indexFile).size
+        const tokBytes = fs.statSync(path.join(dataDir, 'tokens.json')).size
+        if (idxBytes > 0) {
+          const ratio = tokBytes / idxBytes
+          if (ratio > TOKENS_BLOAT_RATIO) {
+            report('tokens-bloat', scopeName, 'warn',
+              `tokens.json is ${Math.round(ratio)}x the size of index.jsonl (threshold ${TOKENS_BLOAT_RATIO}x) — rebuild to apply the df diet`,
+              { fix: 'em-rebuild-index' })
+          } else {
+            report('tokens-bloat', scopeName, 'ok', `tokens.json/index.jsonl ratio ${Math.round(ratio * 10) / 10}x`)
+          }
+        }
+      } catch { /* either file absent — covered by the presence checks above */ }
+
+      // --- supersedes-links ----------------------------------------------------
+      const dangling = entries.filter(e => e.supersedes && !indexedIds.has(e.supersedes)).map(e => e.id)
+      if (dangling.length) {
+        // Dangling supersedes can be legitimate (chain crosses scopes, or the
+        // original was pruned) — surface, don't fail.
+        report('supersedes-links', scopeName, 'warn', `${dangling.length} episode(s) supersede id(s) not present in this scope`, verbose ? { episodes: dangling } : undefined)
+      } else {
+        report('supersedes-links', scopeName, 'ok', 'all supersedes pointers resolve')
+      }
+
+      // --- contradiction-candidates (#537) --------------------------------------
+      // Two ACTIVE decision episodes in one project with near-identical summaries
+      // are very likely the same decision stored twice — the correction written
+      // with em-store instead of em-revise, so nothing links them and both stay
+      // searchable. Advisory only: warn, no fix hint (the repair is human judgment,
+      // em-rebuild-index cannot do it), and never an error.
+      const contradiction = findContradictionCandidates(entries)
+      if (contradiction.pairs.length) {
+        report('contradiction-candidates', scopeName, 'warn',
+          `${contradiction.pairs.length} pair(s) of active decision episodes share >= ${SUMMARY_JACCARD_MIN} summary-token similarity — one may be an unlinked correction; link them with em-revise --original <id>`,
+          {
+            ...(verbose ? { pairs: contradiction.pairs } : {}),
+            ...(contradiction.skipped.length ? { skipped_projects: contradiction.skipped } : {})
+          })
+      } else if (contradiction.skipped.length) {
+        report('contradiction-candidates', scopeName, 'warn',
+          `${contradiction.skipped.length} project group(s) above the pairwise scan cap were not checked for contradictions`,
+          { skipped_projects: contradiction.skipped })
+      } else {
+        report('contradiction-candidates', scopeName, 'ok', 'no active decision episodes with near-identical summaries')
       }
     }
-  } catch { /* either file absent — covered by the presence checks above */ }
-
-  // --- supersedes-links ----------------------------------------------------
-  const dangling = entries.filter(e => e.supersedes && !indexedIds.has(e.supersedes)).map(e => e.id)
-  if (dangling.length) {
-    // Dangling supersedes can be legitimate (chain crosses scopes, or the
-    // original was pruned) — surface, don't fail.
-    report('supersedes-links', scopeName, 'warn', `${dangling.length} episode(s) supersede id(s) not present in this scope`, verbose ? { episodes: dangling } : undefined)
-  } else {
-    report('supersedes-links', scopeName, 'ok', 'all supersedes pointers resolve')
-  }
-
-  // --- contradiction-candidates (#537) --------------------------------------
-  // Two ACTIVE decision episodes in one project with near-identical summaries
-  // are very likely the same decision stored twice — the correction written
-  // with em-store instead of em-revise, so nothing links them and both stay
-  // searchable. Advisory only: warn, no fix hint (the repair is human judgment,
-  // em-rebuild-index cannot do it), and never an error.
-  const contradiction = findContradictionCandidates(entries)
-  if (contradiction.pairs.length) {
-    report('contradiction-candidates', scopeName, 'warn',
-      `${contradiction.pairs.length} pair(s) of active decision episodes share >= ${SUMMARY_JACCARD_MIN} summary-token similarity — one may be an unlinked correction; link them with em-revise --original <id>`,
-      {
-        ...(verbose ? { pairs: contradiction.pairs } : {}),
-        ...(contradiction.skipped.length ? { skipped_projects: contradiction.skipped } : {})
-      })
-  } else if (contradiction.skipped.length) {
-    report('contradiction-candidates', scopeName, 'warn',
-      `${contradiction.skipped.length} project group(s) above the pairwise scan cap were not checked for contradictions`,
-      { skipped_projects: contradiction.skipped })
-  } else {
-    report('contradiction-candidates', scopeName, 'ok', 'no active decision episodes with near-identical summaries')
   }
 
   // --- tmp-litter -----------------------------------------------------------
@@ -671,14 +719,31 @@ function checkPlaybookRegistration(dataDir, scopeName) {
   // checkPlaybookRegistration call. No module-scope memoization. The chain
   // maps are threaded into collectDeclarationTerminalSet so the declaration
   // pass and the marker scan share one construction.
-  const scannedRows = loadIndex(dataDir, scopeName)
+  // #651: em-doctor is the non-abort adopter — a corrupt index REPORTS
+  // 'unreadable (<CODE>)' and this check is skipped (nothing honest to scan
+  // for playbook registration without readable rows), it never crashes.
+  let scannedRows
+  try {
+    scannedRows = loadIndex(dataDir, scopeName)
+  } catch (e) {
+    report('playbook-registration', scopeName, 'error', `index.jsonl unreadable (${(e && e.code) || 'UNKNOWN'}) — cannot check playbook registration`,
+      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+    return
+  }
   // NF4 (review r2): merge = (scanned store rows) + GLOBAL_DIR rows.
   // Resolution must include the scanned store's own rows — a marker in the
   // scanned store cannot resolve through terminalOf unless its id is in
   // byId, and byId is built from the merged rows. For cwd-local this
   // collapses to (LOCAL_DIR + GLOBAL_DIR); for a registered-store scan
   // this is (registeredStore + GLOBAL_DIR), so cross-store chains resolve.
-  const mergedRows = mergeIndexRowsForChain(loadIndex(dataDir, scopeName), loadIndex(GLOBAL_DIR, 'global'))
+  let mergedRows
+  try {
+    mergedRows = mergeIndexRowsForChain(loadIndex(dataDir, scopeName), loadIndex(GLOBAL_DIR, 'global'))
+  } catch (e) {
+    report('playbook-registration', scopeName, 'error', `index unreadable (${(e && e.code) || 'UNKNOWN'}) — cannot check playbook registration`,
+      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+    return
+  }
   const { byId, successorOf } = buildChainMaps(mergedRows)
   const declSet = collectDeclarationTerminalSet(byId, successorOf)
 

@@ -24,6 +24,7 @@ import {
   normalizeTags, loadTagsIndex, loadIndex,
   computeScore, writeBackAccessTracking
 } from './lib/relevance.mjs'
+import { IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -249,11 +250,19 @@ function inferContext() {
 // ---------------------------------------------------------------------------
 let allEntries = []
 
-if (scope === 'local' || scope === 'all') {
-  allEntries.push(...loadIndex(LOCAL_DIR, 'local'))
-}
-if (scope === 'global' || scope === 'all') {
-  allEntries.push(...loadIndex(GLOBAL_DIR, 'global'))
+try {
+  if (scope === 'local' || scope === 'all') {
+    allEntries.push(...loadIndex(LOCAL_DIR, 'local'))
+  }
+  if (scope === 'global' || scope === 'all') {
+    allEntries.push(...loadIndex(GLOBAL_DIR, 'global'))
+  }
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-recall: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
 }
 
 const totalEpisodeCount = allEntries.length

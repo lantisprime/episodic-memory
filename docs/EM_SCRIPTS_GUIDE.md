@@ -91,6 +91,24 @@ default.
    default behavior, including a real `em-prune` pass; if `--help` returns
    anything other than `status: "help"`, refresh the install before probing
    further, and read the flag lists in this guide instead.
+6. Index existence contract (issue #651): `index.jsonl` presence is classified
+   `lstat`-first, not by `existsSync`. **Absent** (no file, and the parent store
+   dir is itself absent or a clean symlink) keeps today's behavior — `[]` /
+   skip / create-on-first-use. **Unreadable** (a symlink loop or dangling
+   symlink, an EACCES/broken parent directory, a FIFO/socket/device, a
+   directory where the index should be, or a file that fails to read) is a
+   defect, never treated as an empty store: every reader aborts with
+   `{"status":"error","message":"...episode index unreadable (<CODE>)
+   (<path>)..."}` and exit 1, instead of fabricating an empty result or (for a
+   FIFO) blocking forever. `em-doctor` is the one non-abort adopter — it
+   REPORTS `index: "unreadable (<CODE>)"` as a problem entry so the health
+   tool never dies on the disease it diagnoses. `em-rebuild-index` classifies
+   before acquiring its store lock and never truncates/replaces a corrupt
+   `index.jsonl`; its abort envelope adds a `remediation` hint (remove the
+   corrupt file and re-run). Recovery for any of the above: remove the
+   offending `index.jsonl` (or fix the symlink/permission) and run
+   `em-rebuild-index`, which rebuilds it from `episodes/*.md` (the source of
+   truth).
 
 ---
 

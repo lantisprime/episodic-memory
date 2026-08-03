@@ -34,6 +34,29 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { assertReadableIndex, readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
+
+// #651: store-selection filter for the write-lock candidate set. A store is
+// a WRITE target here (feedback counters are mutated), so an unreadable
+// index.jsonl must never be silently dropped the way existsSync's false
+// negative would drop it — that would skip locking/writing a store that
+// actually needs the write. absent -> drop (today's behavior, nothing to
+// write); unreadable -> typed abort, exit 1.
+function filterReadableStoreDirs(dirs) {
+  const kept = []
+  for (const dir of dirs) {
+    const indexFile = path.join(dir, 'index.jsonl')
+    let state
+    try {
+      state = assertReadableIndex(fs, indexFile)
+    } catch (e) {
+      console.log(JSON.stringify({ status: 'error', message: `em-feedback: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${indexFile})` }))
+      process.exit(1)
+    }
+    if (state === 'ok') kept.push(dir)
+  }
+  return kept
+}
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -98,19 +121,26 @@ if (scanTextFile !== undefined) {
   // preserves the historical report exactly. The real write path acquires
   // every existing selected store before rereading its index, so resolving an
   // id and incrementing its counter are one serialized read-modify-write.
+  // #651 F1 (revision 3, step 7d): classify-before-read — a raw readFileSync
+  // wrapped in a swallowing catch degraded an unreadable store to "no ids"
+  // AND could block forever opening a FIFO (this ran in BOTH dry-run and
+  // write mode). readIndexFileOrThrow classifies first (never opens a FIFO)
+  // and throws IndexUnreadableError instead of silently degrading; callers
+  // below type it into an envelope for both modes.
   const resolveIds = () => {
     const idsByDir = new Map(dirs.map(([name]) => [name, new Set()]))
     const dirIndexIds = dirs.map(([name, dir]) => {
       const ids = new Set()
-      try {
-        for (const line of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n')) {
+      const raw = readIndexFileOrThrow(fs, path.join(dir, 'index.jsonl'))
+      if (raw !== null) {
+        for (const line of raw.split('\n')) {
           if (!line.trim()) continue
           try {
             const e = JSON.parse(line)
             if (typeof e.id === 'string') ids.add(e.id)
           } catch {}
         }
-      } catch {}
+      }
       return [name, ids]
     })
     const resolved = []
@@ -131,11 +161,17 @@ if (scanTextFile !== undefined) {
   let skipped
   let recorded = 0
   if (dryRun) {
-    ({ resolved, skipped } = resolveIds())
+    try {
+      ({ resolved, skipped } = resolveIds())
+    } catch (e) {
+      if (e instanceof IndexUnreadableError) {
+        console.log(JSON.stringify({ status: 'error', message: `em-feedback: ${e.message}` }))
+        process.exit(1)
+      }
+      throw e
+    }
   } else {
-    const lockDirs = dirs
-      .map(([, dir]) => dir)
-      .filter(dir => fs.existsSync(path.join(dir, 'index.jsonl')))
+    const lockDirs = filterReadableStoreDirs(dirs.map(([, dir]) => dir))
     const lockResult = lockDirs.length
       ? acquireStoreWriteLocksSync(lockDirs)
       : { ok: true, handles: [] }
@@ -204,8 +240,7 @@ const delta = useful ? 1 : -1
 // Lock every existing candidate store before reading the mutable rows. Local
 // remains first in the scan, so the historical local-priority resolution is
 // unchanged while two feedback writers now serialize the whole counter RMW.
-const candidateDirs = [LOCAL_DIR, GLOBAL_DIR]
-  .filter(dir => fs.existsSync(path.join(dir, 'index.jsonl')))
+const candidateDirs = filterReadableStoreDirs([LOCAL_DIR, GLOBAL_DIR])
 const lockResult = candidateDirs.length
   ? acquireStoreWriteLocksSync(candidateDirs)
   : { ok: true, handles: [] }

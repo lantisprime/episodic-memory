@@ -41,6 +41,7 @@ import { nullProtoIndex } from './lib/relevance.mjs'
 // derived-index merge so two restore targets cannot diverge before both
 // locks are held.
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { readIndexFileOrThrow } from './lib/index-state.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -408,8 +409,9 @@ function writeJSONAtomic(filePath, obj) {
 // ---------------------------------------------------------------------------
 function loadIndexJsonl(filePath) {
   const map = new Map()
-  if (!fs.existsSync(filePath)) return map
-  const content = fs.readFileSync(filePath, 'utf8').trim()
+  const raw = readIndexFileOrThrow(fs, filePath)
+  if (raw === null) return map
+  const content = raw.trim()
   if (!content) return map
   for (const line of content.split('\n')) {
     if (!line.trim()) continue

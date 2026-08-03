@@ -26,6 +26,7 @@ import {
   scanTopicTracks,
   applyTopicTracks,
 } from './topic-tracks/engine.mjs'
+import { IndexUnreadableError } from './lib/index-state.mjs'
 
 const argv = process.argv.slice(2)
 const SCRIPT_NAME = 'em-topic-tracks.mjs'
@@ -168,6 +169,11 @@ try {
         ? `members=${err.observed} > cap=${err.max_episodes}`
         : 'members exceeded committed hard cap',
       2)
+  }
+  // #651 F4 (revision 3, step 7e): a corrupt index.jsonl is a distinct
+  // failure class from a malformed config.json — don't misattribute it.
+  if (err instanceof IndexUnreadableError) {
+    emitError('episode-index-unreadable', err.message, 1)
   }
   emitError('topic-tracks-config-invalid', err && err.message, 1)
 }

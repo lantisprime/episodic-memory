@@ -49,6 +49,7 @@ import { execFileSync } from 'child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { nullProtoIndex, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -199,8 +200,9 @@ function refTarget(ref) {
 
 function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
+  return raw.trim().split('\n').filter(Boolean).map(line => {
     try {
       const entry = JSON.parse(line)
       entry._source = source
@@ -507,8 +509,20 @@ try {
   // Re-read both collision surfaces under lock rather than silently
   // overwriting an episode or duplicating its index row.
   let idInIndex = false
-  if (fs.existsSync(indexFile)) {
-    for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+  let collisionRaw
+  try {
+    collisionRaw = readIndexFileOrThrow(fs, indexFile)
+  } catch (e) {
+    if (e instanceof IndexUnreadableError) {
+      // fail() calls process.exit, which skips this try's finally — release
+      // the lock explicitly first (mirrors em-consolidate's emitProtectionAbort).
+      releaseStoreWriteLocks(lockResult.handles)
+      fail(1, `em-review-request: ${e.message}`)
+    }
+    throw e
+  }
+  if (collisionRaw !== null) {
+    for (const line of collisionRaw.split('\n')) {
       if (!line.trim()) continue
       try {
         if (JSON.parse(line).id === id) { idInIndex = true; break }

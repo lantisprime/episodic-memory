@@ -63,6 +63,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex, tokenizeQuery } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
+import { assertReadableIndex, readIndexFileOrThrow } from './lib/index-state.mjs'
 import {
   buildConsolidationAdvisory,
   PLAYBOOK_PROTECTION_CLASS,
@@ -190,11 +191,17 @@ function emitProtectionAbort(abort, mode) {
 // mode's primary-store load routes through loadIndexOrAbort. The one in-lock
 // reload (consolidate-apply) instead inlines indexUnreadableAbort after
 // releasing its lock: emitProtectionAbort exits, and exit skips finally.
-function indexUnreadableAbort(dataDir, e) {
+// #651 F2b (revision 4): file defaults to the primary index.jsonl (every
+// existing caller stays byte-identical) but the two archived-index.jsonl
+// preflight/backstop sites in foldStore (below) pass it explicitly — the
+// caught error is real (fail-closed, correct) but was misnaming the file,
+// pointing an operator at a healthy index.jsonl instead of the broken
+// archived-index.jsonl.
+function indexUnreadableAbort(dataDir, e, file = path.join(dataDir, 'index.jsonl')) {
   return {
     kind: PROTECTION_ABORT_PROTECTION,
     reason: `episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'})`,
-    file: path.join(dataDir, 'index.jsonl'),
+    file,
   }
 }
 
@@ -444,6 +451,20 @@ if (foldSuperseded) {
       const archivedDir = path.join(dataDir, 'archived')
       const indexFile = path.join(dataDir, 'index.jsonl')
       const archivedIndexFile = path.join(dataDir, 'archived-index.jsonl')
+
+      // #651 F2 (revision 3, step 7c): classify archived-index.jsonl BEFORE
+      // any file move — the read-merge-replace at the end of this block
+      // (below) previously discovered a FIFO/broken archived-index only
+      // AFTER episode files were already renamed and index.jsonl/tags.json
+      // already rewritten. Self-contained (calls emitProtectionAbort
+      // directly) so it aborts correctly regardless of which caller
+      // (--all-projects loop or single-store path) invoked foldStore.
+      try {
+        assertReadableIndex(fs, archivedIndexFile)
+      } catch (e) {
+        emitProtectionAbort(indexUnreadableAbort(dataDir, e, archivedIndexFile), 'fold-superseded')
+      }
+
       fs.mkdirSync(archivedDir, { recursive: true })
 
       for (const id of allFoldIds) {
@@ -481,7 +502,14 @@ if (foldSuperseded) {
       fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
       fs.renameSync(tagsTmp, tagsFile)
 
-      const existingArchived = fs.existsSync(archivedIndexFile) ? fs.readFileSync(archivedIndexFile, 'utf8') : ''
+      // Backstop wrap (TOCTOU against the preflight classify above, same
+      // trust domain as DEFER D1) — classify-before-read even here.
+      let existingArchived
+      try {
+        existingArchived = readIndexFileOrThrow(fs, archivedIndexFile) || ''
+      } catch (e) {
+        emitProtectionAbort(indexUnreadableAbort(dataDir, e, archivedIndexFile), 'fold-superseded')
+      }
       const archivedTmp = archivedIndexFile + '.tmp'
       fs.writeFileSync(archivedTmp, existingArchived + archivedLines.join('\n') + '\n', 'utf8')
       fs.renameSync(archivedTmp, archivedIndexFile)
@@ -525,7 +553,17 @@ if (foldSuperseded) {
         stores.push({ project_path: st.project_path, data_dir: st.data_dir, label: st.label, skipped_store: 'non-root-store' })
         continue
       }
-      if (!fs.existsSync(path.join(st.data_dir, 'index.jsonl'))) {
+      // #651: classify before deciding skip-vs-abort — existsSync's false
+      // negative on a broken/EACCES-parent store would silently skip a
+      // defect the same way it would a genuinely absent one. absent -> keep
+      // the skip; unreadable -> typed abort (never skip a real defect).
+      let idxState
+      try {
+        idxState = assertReadableIndex(fs, path.join(st.data_dir, 'index.jsonl'))
+      } catch (e) {
+        emitProtectionAbort(indexUnreadableAbort(st.data_dir, e), 'fold-superseded')
+      }
+      if (idxState === 'absent') {
         stores.push({ project_path: st.project_path, data_dir: st.data_dir, label: st.label, skipped_store: 'no-index' })
         continue
       }
@@ -563,7 +601,15 @@ if (foldSuperseded) {
     abortOnLocalPlaybooks: true,
   })
   if (pbAbort) emitProtectionAbort(pbAbort, 'fold-superseded')
-  const res = foldStore(DATA_DIR, scope, protectedIds)
+  // #651 NEW-SITE (revision 2, §7 step 7b): foldStore's own loadIndex read
+  // (unlike the --all-projects loop above, which classifies before calling
+  // foldStore) has no precondition check — mirrors loadIndexOrAbort's shape.
+  let res
+  try {
+    res = foldStore(DATA_DIR, scope, protectedIds)
+  } catch (e) {
+    emitProtectionAbort(indexUnreadableAbort(DATA_DIR, e), 'fold-superseded')
+  }
 
   console.log(JSON.stringify({
     status: 'ok',
@@ -1895,9 +1941,13 @@ function _parseLogForConversion(filePath, now, windowMs, opts) {
         // earliest access that could have converted). Row-order independent.
         try {
           const indexFile = path.join(sourceDataDir, 'index.jsonl')
-          if (fs.existsSync(indexFile)) {
+          // #651: classify-before-read (readIndexFileOrThrow) so a FIFO/loop-
+          // shaped index can never be opened; unreadable falls into the
+          // catch below and this scan stays conservative (§4 advisory).
+          const raw = readIndexFileOrThrow(fs, indexFile)
+          if (raw !== null) {
             let minLa = null
-            for (const ln of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+            for (const ln of raw.split('\n')) {
               if (!ln.trim()) continue
               try {
                 const row = JSON.parse(ln)

@@ -29,6 +29,7 @@ import { categoryLifecycle, canonicalCategory } from './lib/categories.mjs'
 import { computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
 import { resolveRegisteredStoresWithStatus } from './lib/registered-stores.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { assertReadableIndex, readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -69,9 +70,10 @@ const TODAY = new Date().toISOString().slice(0, 10)
 
 function loadIndexRows(dataDir, storeLabel) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
   const out = []
-  for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+  for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {
       const e = JSON.parse(line)
@@ -107,11 +109,18 @@ function loadInvertedIndex(dataDir, fileName) {
 
 function partitionPrunable(dataDir, protectedIds) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) {
+  // #651: routes through the shared classify+wrapped-read helper (like
+  // loadIndexRows/loadIndexRowsOrAbort above) instead of a raw existsSync
+  // check — absent keeps today's "missing" shortcut; unreadable throws
+  // IndexUnreadableError, caught by the results.push(pruneDir(...)) try/catch
+  // below so a corrupt index aborts typed instead of fabricating an empty
+  // preview or a raw stack.
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) {
     return { missing: true, entries: [], toPrune: [], toKeep: [], protectedEntries: [] }
   }
 
-  const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+  const lines = raw.trim().split('\n').filter(Boolean)
   const entries = lines.map(line => {
     try { return JSON.parse(line) } catch { return null }
   }).filter(Boolean)
@@ -202,6 +211,16 @@ function pruneDir(dataDir, label, protectedIds) {
       return { scope: label, pruned: 0, remaining: toKeep.length, freed_bytes: 0, protected: protectedEntries.length }
     }
 
+    // #651 F2 (revision 3, step 7c): classify archived-index.jsonl BEFORE any
+    // file move — a FIFO/broken archived-index discovered only at the
+    // read-merge-replace step below (after episode files are already
+    // renamed into archived/ and index.jsonl already replaced) leaves a
+    // killed process with moved files unrecorded in archived-index. absent/ok
+    // are both fine to continue; unreadable throws IndexUnreadableError,
+    // caught by the top-level results.push(pruneDir(...)) handler below —
+    // nothing has moved yet.
+    assertReadableIndex(fs, archivedIndexFile)
+
     fs.mkdirSync(archivedDir, { recursive: true })
 
     let freedBytes = 0
@@ -239,7 +258,9 @@ function pruneDir(dataDir, label, protectedIds) {
     }
 
     // Read-merge-replace archived-index while still holding the same lock.
-    const existingArchived = fs.existsSync(archivedIndexFile) ? fs.readFileSync(archivedIndexFile, 'utf8') : ''
+    // Backstop wrap (TOCTOU against the preflight classify above, same trust
+    // domain as DEFER D1) — classify-before-read even here, never a raw open.
+    const existingArchived = readIndexFileOrThrow(fs, archivedIndexFile) || ''
     atomicReplaceFileSync(archivedIndexFile, existingArchived + archivedEntries.join('\n') + '\n')
 
     return { scope: label, pruned: toPrune.length, remaining: toKeep.length, freed_bytes: freedBytes, protected: protectedEntries.length }
@@ -293,6 +314,10 @@ try {
 } catch (error) {
   if (error?.code === 'store-write-lock-timeout') {
     console.log(JSON.stringify({ status: 'error', code: error.code, heldBy: error.heldBy, message: error.message }))
+    process.exit(1)
+  }
+  if (error instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-prune: aborting archival — episode index unreadable (${error.code}) (${error.file})` }))
     process.exit(1)
   }
   throw error

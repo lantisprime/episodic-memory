@@ -22,6 +22,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, computeScore } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -127,10 +128,18 @@ function statsFor(dataDir, label) {
     if (r.pinned !== true && computeScore(r, 1.0) < PRUNE_THRESHOLD) prunable++
   }
 
+  // #651: archived-index.jsonl is a documented advisory degrade surface —
+  // classify-before-read (never open a FIFO), and an unreadable shape
+  // degrades `archived` to 0 while surfacing the defect via
+  // archived_unreadable (a health/analytics tool must not silently hide it).
   let archived = 0
+  let archivedUnreadable = false
   try {
-    archived = fs.readFileSync(path.join(dataDir, 'archived-index.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length
-  } catch {}
+    const raw = readIndexFileOrThrow(fs, path.join(dataDir, 'archived-index.jsonl'))
+    if (raw !== null) archived = raw.trim().split('\n').filter(Boolean).length
+  } catch {
+    archivedUnreadable = true
+  }
 
   // Derived-index bloat: tokens.json is DERIVED from the same episodes
   // index.jsonl describes, so their byte ratio is a health signal — a ratio
@@ -148,6 +157,9 @@ function statsFor(dataDir, label) {
     dir: dataDir,
     episodes: { total: rows.length, active: active.length, superseded: rows.length - active.length, pinned },
     archived,
+    // #651 F5 (revision 3, step 7f): surface only on the unreadable case
+    // (a healthy store's schema stays exactly as it was pre-#651).
+    ...(archivedUnreadable ? { archived_unreadable: true } : {}),
     by_category: byCategory,
     top_projects: topN(byProject, top),
     top_tags: topN(byTag, top),
@@ -167,21 +179,29 @@ function statsFor(dataDir, label) {
 }
 
 const scopes = []
-if (scope === 'local' || scope === 'all') scopes.push(statsFor(LOCAL_DIR, 'local'))
-if (scope === 'global' || scope === 'all') scopes.push(statsFor(GLOBAL_DIR, 'global'))
+try {
+  if (scope === 'local' || scope === 'all') scopes.push(statsFor(LOCAL_DIR, 'local'))
+  if (scope === 'global' || scope === 'all') scopes.push(statsFor(GLOBAL_DIR, 'global'))
 
-// --all-projects: one block per consumer-registry store not already covered.
-// Identity is realpath on BOTH comparison operands (the dir field a block
-// carries is the unresolved spelling; a cwd-local store symlinked to a
-// registered store must not double-count).
-if (argv.includes('--all-projects')) {
-  const included = new Set(scopes.map(s => realpathSafe(s.dir)))
-  for (const st of resolveRegisteredStores()) {
-    const key = realpathSafe(st.data_dir)
-    if (included.has(key)) continue
-    included.add(key)
-    scopes.push(statsFor(st.data_dir, st.label))
+  // --all-projects: one block per consumer-registry store not already covered.
+  // Identity is realpath on BOTH comparison operands (the dir field a block
+  // carries is the unresolved spelling; a cwd-local store symlinked to a
+  // registered store must not double-count).
+  if (argv.includes('--all-projects')) {
+    const included = new Set(scopes.map(s => realpathSafe(s.dir)))
+    for (const st of resolveRegisteredStores()) {
+      const key = realpathSafe(st.data_dir)
+      if (included.has(key)) continue
+      included.add(key)
+      scopes.push(statsFor(st.data_dir, st.label))
+    }
   }
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-stats: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
 }
 
 const totals = {

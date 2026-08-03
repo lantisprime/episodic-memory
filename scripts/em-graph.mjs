@@ -46,6 +46,7 @@ import os from 'os'
 import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 import { loadIndex } from './lib/relevance.mjs'
 import { resolveRuleDir, scanRuleNodes, scanRfcNodes, slugify } from './lib/rule-nodes.mjs'
+import { IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -126,8 +127,16 @@ if ([from !== undefined, orphans, hubs].filter(Boolean).length !== 1) {
 // Load rows (local shadows global on id collision, matching the readers)
 // ---------------------------------------------------------------------------
 let rows = []
-if (scope === 'local' || scope === 'all') rows.push(...loadIndex(LOCAL_DIR, 'local'))
-if (scope === 'global' || scope === 'all') rows.push(...loadIndex(GLOBAL_DIR, 'global'))
+try {
+  if (scope === 'local' || scope === 'all') rows.push(...loadIndex(LOCAL_DIR, 'local'))
+  if (scope === 'global' || scope === 'all') rows.push(...loadIndex(GLOBAL_DIR, 'global'))
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-graph: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
+}
 const seen = new Set()
 rows = rows.filter(r => {
   if (typeof r.id !== 'string' || seen.has(r.id)) return false
