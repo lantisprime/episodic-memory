@@ -29,6 +29,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { assertReadableIndex, readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const TAG_ALIASES = ['codex', 'codex-review', 'codex-reply']
 const VALID_SCOPES = ['local', 'global', 'all']
@@ -90,7 +91,16 @@ function findLocalStore(startDir) {
   while (true) {
     if (dir === home) return null
     const candidate = path.join(dir, '.episodic-memory', 'index.jsonl')
-    if (fs.existsSync(candidate)) return path.join(dir, '.episodic-memory')
+    // #651: classify, don't existsSync — a broken (unreadable) ancestor store
+    // must abort here, never be silently skipped as "absent" and let the walk
+    // bind a DIFFERENT, unrelated ancestor's store instead.
+    let state
+    try {
+      state = assertReadableIndex(fs, candidate)
+    } catch (e) {
+      fail(`em-watch-codex: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${candidate})`, 1)
+    }
+    if (state === 'ok') return path.join(dir, '.episodic-memory')
     const parent = path.dirname(dir)
     if (parent === dir) return null
     dir = parent
@@ -153,9 +163,9 @@ function saveCursor(cursor) {
 // ---------------------------------------------------------------------------
 function loadIndex(dataDir) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
   const out = []
-  const raw = fs.readFileSync(indexFile, 'utf8')
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {
@@ -257,20 +267,27 @@ const newCursor = { local: cursorBefore.local, global: cursorBefore.global }
 const allMatches = []
 let warning = null
 
-for (const s of SCOPES_QUERIED) {
-  const sinceForScope = since !== undefined ? since : cursorBefore[s]
-  const { matches, usedFallback, hasIndexFile } = queryScope(s, sinceForScope)
-  if (usedFallback && hasIndexFile) {
-    warning = `tags.json missing for ${s}; used linear scan. Run em-rebuild-index.mjs to regenerate.`
-  }
-  for (const m of matches) allMatches.push(m)
+try {
+  for (const s of SCOPES_QUERIED) {
+    const sinceForScope = since !== undefined ? since : cursorBefore[s]
+    const { matches, usedFallback, hasIndexFile } = queryScope(s, sinceForScope)
+    if (usedFallback && hasIndexFile) {
+      warning = `tags.json missing for ${s}; used linear scan. Run em-rebuild-index.mjs to regenerate.`
+    }
+    for (const m of matches) allMatches.push(m)
 
-  // Advance cursor only to max id of *returned* episodes for this scope.
-  // Zero-result → no-advance (preserves cursor against partial writes / races).
-  if (matches.length > 0) {
-    const maxId = matches[matches.length - 1].id
-    newCursor[s] = maxId
+    // Advance cursor only to max id of *returned* episodes for this scope.
+    // Zero-result → no-advance (preserves cursor against partial writes / races).
+    if (matches.length > 0) {
+      const maxId = matches[matches.length - 1].id
+      newCursor[s] = maxId
+    }
   }
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    fail(`em-watch-codex: ${e.message}`, 1)
+  }
+  throw e
 }
 
 // Dedup across scopes by id (in case of cross-scope copies — local takes priority,

@@ -24,6 +24,7 @@
 import fs from 'fs'
 import path from 'path'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './store-write-lock.mjs'
+import { assertReadableIndex, readIndexFileOrThrow } from './index-state.mjs'
 
 // Per-token field weights for the multi-term tier. Summary tokens count just
 // under a contiguous summary substring (0.7); tags sit between summary and
@@ -93,11 +94,18 @@ export function loadCategoryIndex(dataDir) {
 // ---------------------------------------------------------------------------
 // loadIndex(dataDir, source) — read index.jsonl rows, tagging each with the
 // scope it came from. Malformed lines are skipped, not fatal.
+//
+// Existence semantics (#651): absent (genuinely no store) -> []; unreadable
+// (symlink loop/dangling, EACCES parent, FIFO/socket/device, EISDIR, or a
+// read failure such as file-mode-000) -> throws IndexUnreadableError. Callers
+// that must never fabricate empty results on a real defect catch this; see
+// scripts/lib/index-state.mjs for the full classification table.
 // ---------------------------------------------------------------------------
 export function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
+  return raw.trim().split('\n').filter(Boolean).map(line => {
     try {
       const entry = JSON.parse(line)
       entry._source = source
@@ -113,11 +121,20 @@ export function loadIndex(dataDir, source) {
 // move an episode file to archived/). Same tolerant shape as loadIndex, plus
 // _archived: true so callers resolve bodies from archived/ instead of
 // episodes/. Used by the em-search --history walk so folded/pruned chain
-// members stay resolvable. Missing/corrupt file degrades to [].
+// members stay resolvable. Documented advisory degrade surface (#651 §4):
+// classify before any read (never open a FIFO), and degrade to [] on BOTH
+// absent and unreadable — this is a history-walk convenience index, not
+// index.jsonl's authoritative store.
 // ---------------------------------------------------------------------------
 export function loadArchivedIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'archived-index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
+  let state
+  try {
+    state = assertReadableIndex(fs, indexFile)
+  } catch {
+    return [] // unreadable (incl. non-regular): classify-before-read, never open, degrade
+  }
+  if (state !== 'ok') return [] // absent
   try {
     return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
       try {
@@ -128,7 +145,7 @@ export function loadArchivedIndex(dataDir, source) {
         return entry
       } catch { return null }
     }).filter(Boolean)
-  } catch { return [] }
+  } catch { return [] } // read failure (e.g. TOCTOU swap) also degrades
 }
 
 // ---------------------------------------------------------------------------

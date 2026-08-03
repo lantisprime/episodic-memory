@@ -24,6 +24,7 @@ import {
   acquireStoreWriteLocksSync,
   releaseStoreWriteLocks,
 } from '../lib/store-write-lock.mjs'
+import { readIndexFileOrThrow } from '../lib/index-state.mjs'
 
 // --- §A.5 frozen constants ---
 export const TOPIC_TRACK_TAG = 'topic-track'
@@ -156,11 +157,14 @@ export function loadTopicTracksConfig(pathOverride) {
   })
 }
 
-// --- Minimal JSONL index reader. Tolerates missing files (returns []). ---
+// --- Minimal JSONL index reader. Absent -> []; unreadable (#651: classified
+// BEFORE read — a symlink loop/FIFO/EACCES-parent index.jsonl is a defect,
+// not an empty store) -> throws IndexUnreadableError, which the CLI entry
+// (em-topic-tracks.mjs) already routes to its generic error envelope. ---
 function loadIndexRows(dataDir) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  let text
-  try { text = fs.readFileSync(indexFile, 'utf8') } catch { return [] }
+  const text = readIndexFileOrThrow(fs, indexFile)
+  if (text === null) return []
   const out = []
   for (const line of text.split('\n')) {
     const trimmed = line.trim()

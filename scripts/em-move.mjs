@@ -46,6 +46,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { normalizeTags, episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -95,8 +96,9 @@ const SRC_SCOPE_OF = dir => (dir === GLOBAL_DIR ? 'global' : 'local')
 // ---------------------------------------------------------------------------
 function readIndexRows(dataDir) {
   const p = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(p)) return []
-  return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map(l => {
+  const raw = readIndexFileOrThrow(fs, p)
+  if (raw === null) return []
+  return raw.trim().split('\n').filter(Boolean).map(l => {
     try { return JSON.parse(l) } catch { return null }
   }).filter(Boolean)
 }
@@ -182,14 +184,22 @@ else {
   const tag = normalizeTags(filterTag)[0]
   if (!tag) usageError('--filter-tag requires a non-empty tag.')
   const seen = new Set()
-  for (const dir of [LOCAL_DIR, GLOBAL_DIR]) {
-    for (const row of readIndexRows(dir)) {
-      if (typeof row.id !== 'string' || seen.has(row.id)) continue
-      if (Array.isArray(row.tags) && row.tags.map(t => String(t).toLowerCase().trim()).includes(tag)) {
-        seen.add(row.id)
-        ids.push(row.id)
+  try {
+    for (const dir of [LOCAL_DIR, GLOBAL_DIR]) {
+      for (const row of readIndexRows(dir)) {
+        if (typeof row.id !== 'string' || seen.has(row.id)) continue
+        if (Array.isArray(row.tags) && row.tags.map(t => String(t).toLowerCase().trim()).includes(tag)) {
+          seen.add(row.id)
+          ids.push(row.id)
+        }
       }
     }
+  } catch (e) {
+    if (e instanceof IndexUnreadableError) {
+      console.log(JSON.stringify({ status: 'error', message: `em-move: ${e.message}` }))
+      process.exit(1)
+    }
+    throw e
   }
 }
 

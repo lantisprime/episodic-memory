@@ -15,6 +15,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -38,8 +39,9 @@ const scope = flag('--scope') || 'all'
 
 function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
+  return raw.trim().split('\n').filter(Boolean).map(line => {
     try {
       const entry = JSON.parse(line)
       entry._source = source
@@ -49,8 +51,16 @@ function loadIndex(dataDir, source) {
 }
 
 let results = []
-if (scope === 'local' || scope === 'all') results.push(...loadIndex(LOCAL_DIR, 'local'))
-if (scope === 'global' || scope === 'all') results.push(...loadIndex(GLOBAL_DIR, 'global'))
+try {
+  if (scope === 'local' || scope === 'all') results.push(...loadIndex(LOCAL_DIR, 'local'))
+  if (scope === 'global' || scope === 'all') results.push(...loadIndex(GLOBAL_DIR, 'global'))
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-check-stale: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
+}
 
 // Dedupe
 const seen = new Set()

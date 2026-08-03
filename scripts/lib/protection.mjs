@@ -20,16 +20,23 @@
 
 import path from 'node:path'
 import { parsePlaybooksConfig } from '../em-trigger-index.mjs'
+import { readIndexFileOrThrow } from './index-state.mjs'
 
 // index.jsonl rows for one store, tagged with a store label. UNION both stores'
 // output before computeProtectedIds: a global lesson's evidence can name a local
 // violation, so protection is cross-store. Deliberately NO id-dedupe — a stale
 // superseded copy in one store must not shadow an active referencer in the other.
+//
+// #651: absent index.jsonl -> []; unreadable (symlink loop/dangling, EACCES
+// parent, FIFO/socket/device, EISDIR, or a read failure) -> throws
+// IndexUnreadableError — a retention consumer must never treat a defect as an
+// empty (unprotected) store.
 export function loadProtectionRows(fs, path, dataDir, storeLabel) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
   const out = []
-  for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+  for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {
       const e = JSON.parse(line)

@@ -18,6 +18,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { nullProtoIndex, episodeTokens, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
@@ -238,7 +239,21 @@ try {
   } catch {
     tagsIndex = Object.create(null)
   }
-  const existingIndex = fs.existsSync(globalIndexFile) ? fs.readFileSync(globalIndexFile, 'utf8') : ''
+  // #651: classify + wrapped read; unreadable is a real defect on a store
+  // this run is about to write into — release the held lock and abort typed
+  // instead of silently treating the store as empty (existsSync's false
+  // negative on a broken index) or reading past a defect.
+  let existingIndex
+  try {
+    existingIndex = readIndexFileOrThrow(fs, globalIndexFile) || ''
+  } catch (e) {
+    if (e instanceof IndexUnreadableError) {
+      releaseStoreWriteLocks(lockResult.handles)
+      console.log(JSON.stringify({ status: 'error', message: `em-seed-patterns: ${e.message}` }))
+      process.exit(1)
+    }
+    throw e
+  }
   const existingIds = new Set(existingIndex.split('\n').filter(Boolean).map(line => {
     try { return JSON.parse(line).id } catch { return null }
   }).filter(Boolean))

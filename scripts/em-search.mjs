@@ -26,6 +26,7 @@ import {
   computeScore, writeBackAccessTracking, scoreTextMatch,
   tokenizeQuery, loadTokensIndex, tokenCandidates, scorePartialMatch
 } from './lib/relevance.mjs'
+import { IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -79,11 +80,19 @@ const searchStart = Date.now()
 // ---------------------------------------------------------------------------
 let results = []
 
-if (scope === 'local' || scope === 'all') {
-  results.push(...loadIndex(LOCAL_DIR, 'local'))
-}
-if (scope === 'global' || scope === 'all') {
-  results.push(...loadIndex(GLOBAL_DIR, 'global'))
+try {
+  if (scope === 'local' || scope === 'all') {
+    results.push(...loadIndex(LOCAL_DIR, 'local'))
+  }
+  if (scope === 'global' || scope === 'all') {
+    results.push(...loadIndex(GLOBAL_DIR, 'global'))
+  }
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-search: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
 }
 
 const totalEpisodeCount = results.length

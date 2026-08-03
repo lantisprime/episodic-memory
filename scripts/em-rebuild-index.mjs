@@ -19,6 +19,7 @@ import { episodeTokens, DF_DROP_RATIO, TOKENS_DROPPED_KEY } from './lib/relevanc
 import { resolveStoreIdentity } from './lib/store-identity.mjs'
 import { STRUCTURED_FIELDS } from './lib/promotion-sources.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { assertReadableIndex, readIndexFileOrThrow } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -57,6 +58,18 @@ class RebuildFailure extends Error {
     super(payload.error || 'rebuild failed')
     this.payload = payload
   }
+}
+
+// #651 (audit Gap 4 / REQ-8): a corrupt index.jsonl aborts typed, with a
+// remediation hint, BEFORE any write — the same envelope shape whether the
+// defect is caught before lock acquisition or on the in-lock re-read.
+function unreadableIndexFailure(indexFile, label, e) {
+  return new RebuildFailure({
+    status: 'error',
+    scope: label,
+    message: `em-rebuild-index: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${indexFile})`,
+    remediation: 'remove the corrupt index.jsonl and re-run em-rebuild-index',
+  })
 }
 
 // --check: drift DETECTION only (R10f). Lists every episode whose stored category is unknown or
@@ -131,22 +144,46 @@ function parseFrontmatter(content) {
  * Load old index.jsonl into a map keyed by episode ID.
  * Used to carry forward access_count and last_accessed during rebuild.
  */
-function loadOldIndex(dataDir) {
+function loadOldIndex(dataDir, label) {
   const indexFile = path.join(dataDir, 'index.jsonl')
   const map = new Map()
+  let raw
   try {
-    const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line)
-        if (entry.id) map.set(entry.id, entry)
-      } catch {}
-    }
-  } catch {}
+    raw = readIndexFileOrThrow(fs, indexFile)
+  } catch (e) {
+    // In-lock re-read found a defect (TOCTOU against the pre-lock classify
+    // below, or the pre-lock classify's absent->created-since race) — abort
+    // rather than silently losing access_count carry-forward and proceeding
+    // to truncate/replace a corrupt index (REQ-8).
+    throw unreadableIndexFailure(indexFile, label, e)
+  }
+  if (raw === null) return map
+  for (const line of raw.trim().split('\n').filter(Boolean)) {
+    try {
+      const entry = JSON.parse(line)
+      if (entry.id) map.set(entry.id, entry)
+    } catch {}
+  }
   return map
 }
 
 function rebuildDir(dataDir, label) {
+  // Scans episodes/ only — archived/ is intentionally ignored
+  const episodesDir = path.join(dataDir, 'episodes')
+  const indexFile = path.join(dataDir, 'index.jsonl')
+
+  // #651 (audit Gap 4): classify index.jsonl AND check episodesDir BEFORE
+  // acquiring the store lock. acquireStoreWriteLocksSync itself writes into
+  // dataDir and dies with a raw stack under an eaccess/broken store; an
+  // unreadable index must abort typed, with a remediation hint, before any
+  // lock is taken or any write happens — never truncated/replaced (REQ-8).
+  try {
+    assertReadableIndex(fs, indexFile)
+  } catch (e) {
+    throw unreadableIndexFailure(indexFile, label, e)
+  }
+  const hasEpisodesDir = fs.existsSync(episodesDir)
+
   // Hold the per-store lock from the episode scan through every derived
   // replacement. Rebuild is a full snapshot transaction, not four unrelated
   // renames that can interleave with a writer.
@@ -154,18 +191,16 @@ function rebuildDir(dataDir, label) {
   if (!lockResult.ok) throw new RebuildFailure({ status: 'error', code: lockResult.code, heldBy: lockResult.heldBy, scope: label })
   const lockHandles = lockResult.handles
   try {
-  // Scans episodes/ only — archived/ is intentionally ignored
-  const episodesDir = path.join(dataDir, 'episodes')
-  const indexFile = path.join(dataDir, 'index.jsonl')
-
-  if (!fs.existsSync(episodesDir)) {
+  if (!hasEpisodesDir) {
+    // absent episodesDir with a readable (or genuinely absent) index parent
+    // still takes today's create path.
     fs.mkdirSync(episodesDir, { recursive: true })
     atomicReplaceFileSync(indexFile, '')
     return { scope: label, count: 0 }
   }
 
   // Load old index to preserve access metadata
-  const oldIndex = loadOldIndex(dataDir)
+  const oldIndex = loadOldIndex(dataDir, label)
 
   const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort()
   const entries = []

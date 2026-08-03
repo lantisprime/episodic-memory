@@ -35,6 +35,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { walkTranscripts } from './lib/transcript-walker.mjs'
 import { resolveRepoRoot } from './lib/local-dir.mjs'
+import { readIndexFileOrThrow } from './lib/index-state.mjs'
 
 // ---------------------------------------------------------------------------
 // Trigger config
@@ -117,9 +118,13 @@ function loadDedupeCorpus() {
   return corpus
 }
 
+// #651: classify before reading — dedupe is best-effort (worst case: a
+// duplicate episode, not evidence loss), but the read must still be
+// classified before opening so an index-shaped FIFO can never be blocked on.
 function addIndexToCorpus(file, corpus) {
   let raw
-  try { raw = fs.readFileSync(file, 'utf8') } catch { return }
+  try { raw = readIndexFileOrThrow(fs, file) } catch { return }
+  if (raw === null) return
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {

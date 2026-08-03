@@ -30,10 +30,55 @@ const maxDays = parseInt(flag('--days') || '30', 10)
 const project = flag('--project')
 const scope = flag('--scope') || 'all'
 
+// #651: lstat-based index existence classifier, inlined (no lib/ in this
+// vendored copy). absent -> null (loadIndex returns []); unreadable (symlink
+// loop/dangling, EACCES parent, FIFO/socket/device, EISDIR, or a read
+// failure) -> throws with .code, so the caller aborts typed instead of
+// silently degrading or blocking forever on an unguarded FIFO read.
+function classifyIndexFile(filePath) {
+  let st
+  try { st = fs.lstatSync(filePath) } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      const dir = path.dirname(filePath)
+      let dirStat
+      try { dirStat = fs.lstatSync(dir) } catch (e2) {
+        return (e2 && e2.code === 'ENOENT') ? { state: 'absent' } : { state: 'unreadable', code: (e2 && e2.code) || 'UNKNOWN' }
+      }
+      if (dirStat.isSymbolicLink()) {
+        try { fs.statSync(dir) } catch (e3) { return { state: 'unreadable', code: (e3 && e3.code) || 'UNKNOWN' } }
+      }
+      return { state: 'absent' }
+    }
+    return { state: 'unreadable', code: (e && e.code) || 'UNKNOWN' }
+  }
+  if (st.isSymbolicLink()) {
+    try { st = fs.statSync(filePath) } catch (e) { return { state: 'unreadable', code: (e && e.code) || 'UNKNOWN' } }
+  }
+  if (st.isDirectory()) return { state: 'unreadable', code: 'EISDIR' }
+  if (!st.isFile()) return { state: 'unreadable', code: 'ENOTREG' }
+  return { state: 'ok' }
+}
+
+function readIndexOrThrow(filePath) {
+  const c = classifyIndexFile(filePath)
+  if (c.state === 'absent') return null
+  if (c.state === 'unreadable') {
+    const err = new Error(`episode index unreadable (${c.code}) (${filePath})`)
+    err.code = c.code
+    throw err
+  }
+  try { return fs.readFileSync(filePath, 'utf8') } catch (e) {
+    const err = new Error(`episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${filePath})`)
+    err.code = (e && e.code) || 'UNKNOWN'
+    throw err
+  }
+}
+
 function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
-  return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+  const raw = readIndexOrThrow(indexFile)
+  if (raw === null) return []
+  return raw.trim().split('\n').filter(Boolean).map(line => {
     try {
       const entry = JSON.parse(line)
       entry._source = source
@@ -43,8 +88,13 @@ function loadIndex(dataDir, source) {
 }
 
 let results = []
-if (scope === 'local' || scope === 'all') results.push(...loadIndex(LOCAL_DIR, 'local'))
-if (scope === 'global' || scope === 'all') results.push(...loadIndex(GLOBAL_DIR, 'global'))
+try {
+  if (scope === 'local' || scope === 'all') results.push(...loadIndex(LOCAL_DIR, 'local'))
+  if (scope === 'global' || scope === 'all') results.push(...loadIndex(GLOBAL_DIR, 'global'))
+} catch (e) {
+  console.log(JSON.stringify({ status: 'error', message: `em-check-stale: ${e.message}` }))
+  process.exit(1)
+}
 
 // Dedupe
 const seen = new Set()

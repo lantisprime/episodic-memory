@@ -20,6 +20,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const HOME = os.homedir()
 const CWD = process.cwd()
@@ -150,9 +151,10 @@ if (effectiveScope === 'global' || effectiveScope === 'all') SCOPE_DIRS.push({ d
 // invocation picks up the now-complete entry.
 function loadIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'index.jsonl')
-  if (!fs.existsSync(indexFile)) return []
+  const raw = readIndexFileOrThrow(fs, indexFile)
+  if (raw === null) return []
   const out = []
-  for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+  for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {
       const e = JSON.parse(line)
@@ -172,7 +174,15 @@ function loadTagsIndex(dataDir) {
 }
 
 const allEntries = []
-for (const s of SCOPE_DIRS) allEntries.push(...loadIndex(s.dir, s.source))
+try {
+  for (const s of SCOPE_DIRS) allEntries.push(...loadIndex(s.dir, s.source))
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-pattern-health: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
+}
 
 // Dedupe by id (local takes priority over global) — mirrors em-search.mjs:159-164
 const seen = new Set()

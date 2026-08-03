@@ -314,6 +314,9 @@ jobs:
       - name: "Run #628 sibling-init-guard tests"
         run: node tests/test-628-sibling-init-guard.mjs
 
+      - name: "Run #651 index existence-contract tests"
+        run: node tests/test-651-index-existence.mjs
+
       - name: Run em-consolidate suite
         run: node tests/test-em-consolidate.mjs
 

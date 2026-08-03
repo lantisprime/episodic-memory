@@ -34,6 +34,7 @@ import {
   HASH_MODEL, hashEmbed, buildIdf, cmdEmbed, cosine, loadEmbeddings, contentHash,
   loadEmbedConfig, resolveEmbedSettings
 } from './lib/embeddings.mjs'
+import { IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -139,7 +140,15 @@ if (provider === 'hash') {
 // Rank
 // ---------------------------------------------------------------------------
 let entries = []
-for (const [dir, label] of dirs) entries.push(...loadIndex(dir, label))
+try {
+  for (const [dir, label] of dirs) entries.push(...loadIndex(dir, label))
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-semantic: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
+}
 const seen = new Set()
 entries = entries.filter(e => {
   if (seen.has(e.id)) return false
