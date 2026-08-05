@@ -38,6 +38,7 @@ import { episodeTokens, updateTokensIndex, nullProtoIndex, loadIndex } from './l
 import { findContradictionsFor } from './lib/contradiction.mjs'
 import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { assertReadableIndex, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -319,6 +320,24 @@ if (lessonLinks.length) {
 const dataDir = scope === 'global' ? GLOBAL_DIR : LOCAL_DIR
 const episodesDir = path.join(dataDir, 'episodes')
 const indexFile = path.join(dataDir, 'index.jsonl')
+
+// F3 (issue #653 follow-up — #651 §4 DEFER): classify index.jsonl BEFORE any
+// read OR append so a FIFO-shaped index aborts typed, exit 1, instead of
+// blocking forever (opening a FIFO for append blocks exactly like a read —
+// see docs/plans/issue-651-index-existence-contract.md §4 review F3 note).
+// Classify-before-open mirrors em-rebuild-index's REQ-8 pattern; em-store's
+// append path was outside #651's loader scope. Placed BEFORE the lock so
+// lock acquisition (which writes into dataDir) never races a corrupt store,
+// and BEFORE the indexIdSet read so the FIFO never opens.
+try {
+  assertReadableIndex(fs, indexFile)
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-store: ${e.message}` }))
+    process.exit(1)
+  }
+  throw e
+}
 
 // Issue 546 / REQ-4: hold the canonical store-write lock across episode
 // persistence and every derived-index update. Validation above stays before
