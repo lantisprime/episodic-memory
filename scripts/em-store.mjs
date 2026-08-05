@@ -360,14 +360,22 @@ const dateStr = now.toISOString().slice(0, 10)
 const timeStr = now.toISOString().slice(11, 16)
 const ts = now.toISOString().slice(0, 19).replace(/[-:T]/g, '').replace(/(\d{8})(\d{6})/, '$1-$2')
 const slug = summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+// Capture the prior index content for the DEFER-3 atomic-replace below
+// (write-ordering fix). Reuses the same read pass that builds indexIdSet
+// so there's no extra disk syscall — absent/empty stores bottom out at
+// "" and atomic-replace creates a fresh file; populated stores append
+// exactly one line. Captured outside the IIFE so the write block can
+// reference it without a closure capture.
+let priorIndexContent = ''
 const indexIdSet = (() => {
   const set = new Set()
   try {
-    for (const line of fs.readFileSync(indexFile, 'utf8').split('\n')) {
+    priorIndexContent = fs.readFileSync(indexFile, 'utf8')
+    for (const line of priorIndexContent.split('\n')) {
       if (!line.trim()) continue
       try { const e = JSON.parse(line); if (e && typeof e.id === 'string') set.add(e.id) } catch {}
     }
-  } catch {}
+  } catch { priorIndexContent = '' }
   return set
 })()
 let id
@@ -442,12 +450,33 @@ const frontmatter = fmLines.join('\n')
 const episodeContent = `${frontmatter}\n\n# ${summary}\n\n${body}\n`
 
 // ---------------------------------------------------------------------------
-// Write files
+// Write files — DEFER-3 write-ordering fix (issue #628 follow-up,
+// docs/plans/issue-628-sibling-init-guard.md §17).
+//
+//   OLD order: episode file -> index append.
+//     Any failure between the two writes (mid-flight EISDIR swap,
+//     ENOSPC, EACCES mid-write, etc.) left an orphaned .md on disk
+//     with no index entry — invisible to search/recall until a manual
+//     em-rebuild-index run reconciled the FS scan.
+//
+//   NEW order: atomic index commit -> atomic episode commit.
+//     The index row is durable before the episode file lands. A
+//     failure between the two writes leaves a DANGLING index entry
+//     (row present, .md absent). em-rebuild-index heals that on the
+//     next run because it scans the episodes/ filesystem and drops
+//     index rows whose .md is absent (REQ-1, I3: the index is
+//     rebuilt FROM the filesystem, never the reverse). The inverse
+//     fail shape — orphan .md with no row — was the OLD contract's
+//     default; it had to wait for a heuristic FS scan, and could
+//     silently accumulate across crashes. The new shape decays
+//     deterministically on the next maintenance pass.
+//
+// atomicReplaceFileSync is temp+rename under the existing store-write
+// lock (issue 546); failure leaves priorIndexContent's view of the
+// index intact (no truncation, no half-write). Both index commit
+// (atomic) and episode commit (atomic) survive mid-flight corruption
+// of any unrelated file.
 // ---------------------------------------------------------------------------
-fs.mkdirSync(episodesDir, { recursive: true })
-
-const filePath = path.join(episodesDir, `${id}.md`)
-atomicReplaceFileSync(filePath, episodeContent)
 
 // Activation/T6 index fields — keep this list in LOCKSTEP with
 // em-rebuild-index.mjs's emit object (present-only, same key names) so a
@@ -471,7 +500,23 @@ const indexEntry = JSON.stringify({
   ...(playbookMarker ? { playbook: true } : {}),
   ...(url ? { url, fetched: dateStr } : {})
 })
-fs.appendFileSync(indexFile, indexEntry + '\n', 'utf8')
+
+// (1) Atomic index commit FIRST. priorIndexContent is the exact bytes
+//     read by the indexIdSet pass above; if that read failed
+//     (genuinely-absent store), priorIndexContent is "" and this
+//     creates a fresh file via atomicReplaceFileSync's temp+rename.
+//     A populated store appends exactly one line under the lock.
+atomicReplaceFileSync(indexFile, priorIndexContent + indexEntry + '\n')
+
+// (2) Episode file commit SECOND. mkdirSync(episodesDir, recursive)
+//     is a no-op when episodes/ already exists; a non-directory at
+//     that path THROWS EEXIST and aborts the writer — leaving the
+//     index with a dangling row, but no orphan .md. em-rebuild-index
+//     heals on the next run (see block comment above).
+fs.mkdirSync(episodesDir, { recursive: true })
+
+const filePath = path.join(episodesDir, `${id}.md`)
+atomicReplaceFileSync(filePath, episodeContent)
 
 updateTagsIndex(dataDir, id, tags)
 updateCategoryIndex(dataDir, id, category)

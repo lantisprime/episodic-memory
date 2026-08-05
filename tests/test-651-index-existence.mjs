@@ -575,6 +575,248 @@ for (const shape of ALL_SHAPES) {
 }
 
 // =============================================================================
+// T8 — DEFER-3 write-ordering contract (issue #628 follow-up,
+// docs/plans/issue-628-sibling-init-guard.md §17 DEFER-3).
+//
+// em-store's pre-fix write sequence committed the episode .md FIRST,
+// then the index.jsonl append (legacy line :455). Any failure between
+// those two writes — EISDIR swap after the assertReadableIndex check,
+// ENOSPC mid-rename, EACCES on the index dir mid-tx — left an orphan
+// .md on disk with no index row. Orphans are invisible to search/recall
+// and accumulated until the next em-rebuild-index run reconciled via
+// FS scan (the inverse-fail-shape rebuild heal is non-deterministic
+// across crashes — the user-visible contract was "wait for a sweep").
+//
+// The fix reorders: atomic index commit FIRST, then atomic episode
+// commit. A failure between the two writes now leaves a DANGLING index
+// row (present in index.jsonl, no .md on disk). em-rebuild-index drops
+// dangling rows on the next run (filesystem-scanned rebuild — REQ-1,
+// I3), so the new fail shape is decaying-by-construction, not
+// accumulating. Verified below by:
+//
+//   T8a (control) — healthy store: index and episode are both
+//     present, IDs match. Regression that the reorder did not break
+//     the happy path.
+//
+//   T8b (deterministic failure) — episodes/ replaced with a regular
+//     file. fs.mkdirSync(episodesDir, {recursive:true}) throws EEXIST
+//     AFTER the index commit and BEFORE the episode write. The test
+//     asserts: (i) exit non-zero, (ii) NO episode .md was created
+//     (no orphan), (iii) index.jsonl gained exactly one row (the
+//     dangling entry), (iv) the dangling row references the summary
+//     the caller asked for. This is the verbatim scenario that
+//     pre-fix would have produced an orphan under.
+//
+//   T8c (self-healing) — once T8b's state is on disk (episodes/ as a
+//     file, index has a dangling row), restore episodes/ as an empty
+//     directory. em-rebuild-index scans the filesystem, finds no .md
+//     matching the dangling id, and drops the dangling row — the
+//     healed index has only the original seed row. Verifies the
+//     "self-healing" half of the contract: the fail shape decays
+//     deterministically on the next maintenance pass.
+// =============================================================================
+
+// Helper for T8: count index lines that parse as JSON entries, returning
+// the parsed objects. Used to detect both "row added" and "row dropped"
+// without depending on a specific format of index.jsonl beyond a JSONL
+// line with a string 'id' field (already enforced by em-store writes).
+function readIndexEntries(indexPath) {
+  const raw = fs.readFileSync(indexPath, 'utf8')
+  const out = []
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const e = JSON.parse(line)
+      if (e && typeof e.id === 'string') out.push(e)
+    } catch {}
+  }
+  return out
+}
+
+t('T8a control — em-store healthy store: index row + episode .md both present, IDs match', () => {
+  const world = mkStore()
+  try {
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    const beforeIds = new Set(readIndexEntries(indexPath).map(e => e.id))
+    const episodesDir = path.join(world.localDir, 'episodes')
+    const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+      '--project', 'p651', '--category', 'decision',
+      '--summary', 'write-order-control', '--body', 'control body',
+      '--scope', 'local',
+    ], { cwd: world.proj, home: world.root })
+    assert(r.signal === null, `em-store (T8a): no signal, got ${r.signal}: ${r.stderr}`)
+    assert(r.status === 0, `em-store (T8a): exit 0, got ${r.status} stdout=${r.stdout} stderr=${r.stderr}`)
+    const j = lastJson(r.stdout)
+    assert(j && j.status === 'ok' && typeof j.id === 'string', `em-store (T8a): ok envelope with id, got ${r.stdout}`)
+    const afterEntries = readIndexEntries(indexPath)
+    assert(afterEntries.length === beforeIds.size + 1, `em-store (T8a): index grew by exactly one row, got before=${beforeIds.size} after=${afterEntries.length}`)
+    assert(afterEntries.some(e => e.id === j.id), `em-store (T8a): new index row carries id from stdout, got ids=${afterEntries.map(e => e.id).join(',')}`)
+    const episodePath = path.join(episodesDir, `${j.id}.md`)
+    assert(fs.existsSync(episodePath), `em-store (T8a): episode .md present, missing ${episodePath}`)
+    const epContent = fs.readFileSync(episodePath, 'utf8')
+    assert(epContent.includes('write-order-control'), `em-store (T8a): episode content includes summary, got first 200 chars: ${epContent.slice(0, 200)}`)
+  } finally { cleanup(world) }
+})
+
+t('T8b — em-store with episodes/ as a regular file: index commits first, no orphan .md', () => {
+  const world = mkStore()
+  try {
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    const episodesDir = path.join(world.localDir, 'episodes')
+    const beforeEntries = readIndexEntries(indexPath)
+    const beforeMdFiles = fs.existsSync(episodesDir)
+      ? fs.readdirSync(episodesDir).filter(f => f.endsWith('.md'))
+      : []
+    const beforeMdSet = new Set(beforeMdFiles)
+
+    // Capture pre-run snapshots of every derived-index file so we can
+    // assert each is byte-identical after the abort (the abort path
+    // must NOT touch tags/category/tokens — those are written AFTER
+    // the episode commit which never runs).
+    const tagsFile = path.join(world.localDir, 'tags.json')
+    const catFile = path.join(world.localDir, 'category-index.json')
+    const tokensFile = path.join(world.localDir, 'tokens.json')
+    const beforeTags = fs.existsSync(tagsFile) ? fs.readFileSync(tagsFile, 'utf8') : null
+    const beforeCat = fs.existsSync(catFile) ? fs.readFileSync(catFile, 'utf8') : null
+    const beforeTokens = fs.existsSync(tokensFile) ? fs.readFileSync(tokensFile, 'utf8') : null
+    const beforeIndex = fs.readFileSync(indexPath, 'utf8')
+
+    // Replace episodes/ with a regular file. fs.mkdirSync(recursive:true)
+    // throws EEXIST when the leaf exists as a non-directory, so the
+    // episode commit aborts AFTER the index commit and BEFORE any .md
+    // is written.
+    fs.rmSync(episodesDir, { recursive: true, force: true })
+    fs.writeFileSync(episodesDir, '')
+
+    const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+      '--project', 'p651', '--category', 'decision',
+      '--summary', 'write-order-defer3', '--body', 'defer3 body',
+      '--scope', 'local',
+    ], { cwd: world.proj, home: world.root })
+    assert(r.signal === null, `em-store (T8b): no signal (no hang/timeout), got ${r.signal}: ${r.stderr}`)
+    assert(r.status !== 0, `em-store (T8b): non-zero exit, got status=${r.status} stdout=${(r.stdout || '').slice(0, 200)} stderr=${(r.stderr || '').slice(0, 200)}`)
+
+    // (i) episodes/ is still a regular file (mkdirSync did not promote
+    //     it to a directory) — proves no successful mkdirSync episode-
+    //     write happened.
+    const st = fs.lstatSync(episodesDir)
+    assert(st.isFile(), `em-store (T8b): episodes/ is a regular file (mkdirSync did NOT promote), got mode=${st.mode}`)
+    // (ii) Derived JSON files unchanged — verifies the abort happened
+    //      BEFORE any updateTagsIndex/updateCategoryIndex/updateTokensIndex.
+    if (beforeTags !== null) {
+      const afterTags = fs.readFileSync(tagsFile, 'utf8')
+      assert(afterTags === beforeTags, `em-store (T8b): tags.json unchanged after abort`)
+    } else {
+      assert(!fs.existsSync(tagsFile), `em-store (T8b): tags.json absent (was absent before)`)
+    }
+    if (beforeCat !== null) {
+      const afterCat = fs.readFileSync(catFile, 'utf8')
+      assert(afterCat === beforeCat, `em-store (T8b): category-index.json unchanged after abort`)
+    } else {
+      assert(!fs.existsSync(catFile), `em-store (T8b): category-index.json absent (was absent before)`)
+    }
+    if (beforeTokens !== null) {
+      const afterTokens = fs.readFileSync(tokensFile, 'utf8')
+      assert(afterTokens === beforeTokens, `em-store (T8b): tokens.json unchanged after abort`)
+    } else {
+      assert(!fs.existsSync(tokensFile), `em-store (T8b): tokens.json absent (was absent before)`)
+    }
+    // (iii) Index GROWTH: structurally required for the write-ordering
+    //      fix to make sense — the index commit must succeed BEFORE the
+    //      episode write, otherwise this whole DEFER-3 contract is
+    //      vacuous. We don't pin exact bytes (timestamps vary); we
+    //      pin row count + caller-supplied fields.
+    const afterEntries = readIndexEntries(indexPath)
+    assert(afterEntries.length === beforeEntries.length + 1, `em-store (T8b): index.jsonl gained exactly one row (the dangling entry), got before=${beforeEntries.length} after=${afterEntries.length}`)
+    const dangling = afterEntries.find(e => !beforeEntries.some(b => b.id === e.id))
+    assert(dangling, 'em-store (T8b): dangling row id present in post-fix state')
+    assert(dangling.summary === 'write-order-defer3', `em-store (T8b): dangling row summary matches the caller's --summary, got ${dangling.summary}`)
+    assert(dangling.project === 'p651', `em-store (T8b): dangling row project intact, got ${dangling.project}`)
+    assert(dangling.category === 'decision', `em-store (T8b): dangling row category intact, got ${dangling.category}`)
+    // (iv) No orphan .md created anywhere under the store. Walking the
+    //      tree (which now has episodes/ as a regular file) catches the
+    //      pre-fix orphan shape: a stray .md would appear at
+    //      <dataDir>/episodes/<id>.md IF the pre-fix order ran; here
+    //      episodes/ is a regular file so no .md can exist there, but
+    //      the assertion covers the .md-anywhere invariant generally.
+    function walk(dir) {
+      if (!fs.existsSync(dir)) return []
+      const stDir = fs.lstatSync(dir)
+      if (stDir.isFile()) return [dir]
+      const out = []
+      for (const name of fs.readdirSync(dir)) out.push(...walk(path.join(dir, name)))
+      return out
+    }
+    const newMdFiles = walk(world.localDir).filter(p => p.endsWith('.md')).filter(p => {
+      const base = path.basename(p)
+      // Exclude seeded pre-existing files: anything in the original
+      // beforeMdFiles set is expected. The dangling row's id is NOT in
+      // beforeMdFiles (it was never written) — but that id has no .md
+      // either, because mkdirSync failed. So no orphan.
+      return !beforeMdSet.has(base)
+    })
+    // Filename-only dedup (beforeMdSet may have substrings in paths) —
+    // collapse to unique .md filenames.
+    const newMdFileNames = new Set(newMdFiles.map(p => path.basename(p)))
+    assert(newMdFileNames.size === 0, `em-store (T8b): no orphan .md anywhere under store, got ${[...newMdFileNames].join(', ')}`)
+    // (v) Reference: the prior index.jsonl bytes ARE a prefix of the
+    //     after bytes (atomicReplaceFileSync composed priorIndexContent +
+    //     indexEntry + '\n'). Pin that exact invariant — the index was
+    //     APPENDED to, not replaced wholesale.
+    const afterIndex = fs.readFileSync(indexPath, 'utf8')
+    assert(afterIndex.startsWith(beforeIndex), `em-store (T8b): post-fix index.jsonl begins with the exact pre-run bytes (atomic append), first diff at byte ${beforeIndex.length}`)
+  } finally { cleanup(world) }
+})
+
+t('T8c — em-rebuild-index heals dangling index row left by aborted em-store (self-healing contract)', () => {
+  const world = mkStore()
+  try {
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    const episodesDir = path.join(world.localDir, 'episodes')
+
+    // Establish the dangling-row state via T8b's same construct. The
+    // store starts with a seeded episode and one index row; we run
+    // em-store against the regular-file episodes/, producing one
+    // dangling entry.
+    const seedIds = new Set(readIndexEntries(indexPath).map(e => e.id))
+    fs.rmSync(episodesDir, { recursive: true, force: true })
+    fs.writeFileSync(episodesDir, '')
+    const abort = run(path.join(SCRIPTS, 'em-store.mjs'), [
+      '--project', 'p651', '--category', 'decision',
+      '--summary', 'write-order-defer3-c', '--body', 'defer3c body',
+      '--scope', 'local',
+    ], { cwd: world.proj, home: world.root })
+    assert(abort.status !== 0, `em-store (T8c): non-zero exit, got ${abort.status}`)
+    const afterAbort = readIndexEntries(indexPath)
+    assert(afterAbort.length === seedIds.size + 1, `em-store (T8c): one dangling row, got before=${seedIds.size} after=${afterAbort.length}`)
+    const dangling = afterAbort.find(e => !seedIds.has(e.id))
+    assert(dangling, 'em-store (T8c): dangling row id present in post-fix state')
+
+    // Restore episodes/ as an EMPTY directory (the seed's .md is gone
+    // — we deleted episodes/ wholesale). em-rebuild-index scans the
+    // FS; with no .md matching the seed id OR the dangling id, both
+    // rows are dropped from the rebuilt index.
+    fs.rmSync(episodesDir, { force: true })
+    fs.mkdirSync(episodesDir, { recursive: true })
+
+    const heal = run(path.join(SCRIPTS, 'em-rebuild-index.mjs'), ['--scope', 'local'], { cwd: world.proj, home: world.root })
+    assert(heal.signal === null, `em-rebuild-index (T8c): no signal, got ${heal.signal}: ${heal.stderr}`)
+    assert(heal.status === 0, `em-rebuild-index (T8c): exit 0, got status=${heal.status} stderr=${heal.stderr.slice(0, 500)}`)
+
+    const afterHeal = readIndexEntries(indexPath)
+    const remainingDangling = afterHeal.find(e => e.id === dangling.id)
+    assert(!remainingDangling, `em-rebuild-index (T8c): dangling row DROPPED after heal, still present: ${JSON.stringify(remainingDangling)}`)
+    // The seed's .md is gone (we deleted episodes/), so it should
+    // also be dropped — the index is rebuilt FROM the filesystem.
+    const seedStill = afterHeal.find(e => seedIds.has(e.id))
+    assert(!seedStill, `em-rebuild-index (T8c): seed row also dropped (filesystem-scanned rebuild), still present: ${JSON.stringify(seedStill)}`)
+    // Both rows gone -> index file is now empty (or just whitespace).
+    const rawAfterHeal = fs.readFileSync(indexPath, 'utf8')
+    assert(rawAfterHeal.trim() === '' || afterHeal.length === 0, `em-rebuild-index (T8c): empty index (no FS-backed rows), got raw=${JSON.stringify(rawAfterHeal.slice(0, 200))} entries=${afterHeal.length}`)
+  } finally { cleanup(world) }
+})
+
+// =============================================================================
 // em-restore leg: dry-run never reads the target's index.jsonl (mergeIndexes
 // only runs on --apply), so a "dry/list mode" leg would be vacuous (identical
 // pre-fix/post-fix — nothing to falsify). Substituting an --apply leg against
