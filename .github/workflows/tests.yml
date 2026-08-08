@@ -224,6 +224,12 @@ jobs:
       - name: Run codex env-propagation suite (#636 — CLAUDE_SCHEDULED_TASK marker on codex dispatch)
         run: node tests/test-codex-env-propagation.mjs
 
+      - name: Run gemini env-propagation suite (#516 — CLAUDE_SCHEDULED_TASK marker on gemini dispatch)
+        run: node tests/test-gemini-env-propagation.mjs
+
+      - name: Run opencode env-propagation suite (#516 — CLAUDE_SCHEDULED_TASK marker on opencode dispatch)
+        run: node tests/test-opencode-env-propagation.mjs
+
       - name: Run second-opinion preamble suite (#573 wiring sweep — composer + registry validator)
         run: node tests/test-second-opinion-preamble.mjs
 

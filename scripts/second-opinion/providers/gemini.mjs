@@ -57,6 +57,10 @@ export function dispatch({ prompt, projectRoot, timeout = 600000 }) {
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout,
     maxBuffer: MAX_BUFFER_BYTES,
+    // CLAUDE_SCHEDULED_TASK=1 (#516/#636 class — mirrors codex.mjs): a
+    // project's session-start hooks skip non-interactive routines on this
+    // marker; without it a headless dispatch can hang on a blocking prompt.
+    env: { ...process.env, CLAUDE_SCHEDULED_TASK: '1' },
   })
 
   return {
