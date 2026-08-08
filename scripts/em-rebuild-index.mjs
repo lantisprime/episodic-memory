@@ -19,7 +19,7 @@ import { episodeTokens, DF_DROP_RATIO, TOKENS_DROPPED_KEY } from './lib/relevanc
 import { resolveStoreIdentity } from './lib/store-identity.mjs'
 import { STRUCTURED_FIELDS } from './lib/promotion-sources.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { assertReadableIndex, readIndexFileOrThrow } from './lib/index-state.mjs'
+import { assertReadableIndex, readIndexFileOrThrow, classifyIndexFile } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -68,6 +68,7 @@ function unreadableIndexFailure(indexFile, label, e) {
     status: 'error',
     scope: label,
     message: `em-rebuild-index: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${indexFile})`,
+    code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}`,
     remediation: 'remove the corrupt index.jsonl and re-run em-rebuild-index',
   })
 }
@@ -87,8 +88,14 @@ if (checkMode) {
       let files = []
       try { files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort() } catch { continue }
       for (const file of files) {
+        // #653 (F1c): lstat-classify before read — a FIFO-shaped episode
+        // file must never hang the drift scan; a non-regular shape is not a
+        // parseable episode, so it is silently skipped (this mode reports
+        // drift only, no warnings field).
+        const filePath = path.join(episodesDir, file)
+        if (classifyIndexFile(fs, filePath).state !== 'ok') continue
         let fm
-        try { fm = parseFrontmatter(fs.readFileSync(path.join(episodesDir, file), 'utf8')) } catch (e) {
+        try { fm = parseFrontmatter(fs.readFileSync(filePath, 'utf8')) } catch (e) {
           console.log(JSON.stringify({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null }))
           process.exit(1)
         }
@@ -204,6 +211,7 @@ function rebuildDir(dataDir, label) {
 
   const files = fs.readdirSync(episodesDir).filter(f => f.endsWith('.md')).sort()
   const entries = []
+  const warnings = []
 
   // Null-proto maps: keys come from episode content (tags, tokens, category
   // names), and "constructor" on a plain {} resolves to Object.prototype's
@@ -219,7 +227,18 @@ function rebuildDir(dataDir, label) {
   try { loadCategories() } catch { vocabLoaded = false }
 
   for (const file of files) {
-    const content = fs.readFileSync(path.join(episodesDir, file), 'utf8')
+    // #653 (F1c): lstat-classify before read — em-rebuild-index is the
+    // remediation tool the envelope contract points users at, so it must
+    // never hang on a FIFO-shaped episode file. A non-regular shape is not a
+    // parseable episode: skip it and record a warning instead of aborting
+    // the whole rebuild or opening the file.
+    const filePath = path.join(episodesDir, file)
+    const shape = classifyIndexFile(fs, filePath)
+    if (shape.state !== 'ok') {
+      warnings.push(`skipped ${file}: not a regular file (${shape.state === 'unreadable' ? shape.code : 'vanished'})`)
+      continue
+    }
+    const content = fs.readFileSync(filePath, 'utf8')
     let fm
     try { fm = parseFrontmatter(content) } catch (e) {
       throw new RebuildFailure({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null, scope: label })
@@ -364,7 +383,11 @@ function rebuildDir(dataDir, label) {
     process.stderr.write(`em-rebuild-index: categories.json unloadable; ${label} category-index.json skipped (index.jsonl + tags.json built normally)\n`)
   }
 
-  return { scope: label, count: entries.length, category_drift: { unknown: driftUnknown, deprecated: driftDeprecated } }
+  return {
+    scope: label, count: entries.length,
+    category_drift: { unknown: driftUnknown, deprecated: driftDeprecated },
+    ...(warnings.length ? { warnings } : {}),
+  }
   } finally {
     releaseStoreWriteLocks(lockHandles)
   }

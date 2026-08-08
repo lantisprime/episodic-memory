@@ -17,6 +17,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { resolveLocalDir } from './local-dir.mjs'
 import { STRUCTURED_FIELDS } from './promotion-sources.mjs'
+import { openReadableIndex } from './index-state.mjs'
 export { STRUCTURED_FIELDS } from './promotion-sources.mjs'
 
 // Resolved relative to this file so the path is symmetric in-repo
@@ -309,6 +310,12 @@ export function parseActivationFromFrontmatter(content) {
  * @param {{localDir?:string, globalDir?:string}} [opts] test injection points;
  *   defaults resolve the same way the em-* writers do.
  * @returns {Array<object>}
+ * @throws {IndexUnreadableError} PRE-write linkage-validation caller (see
+ *   FIX-A/#649-653 review): a store's index.jsonl being a defect (FIFO/dir/
+ *   EACCES/...) is never treated as "no rows" here — the em-store/em-revise/
+ *   em-violation callers all invoke this BEFORE any write, so the right
+ *   failure mode is the typed Family-A abort, not silently under-resolving
+ *   linkage and letting a forged/incomplete evidence check through.
  */
 export function loadMergedIndex({ localDir, globalDir } = {}) {
   const dirs = [
@@ -318,12 +325,8 @@ export function loadMergedIndex({ localDir, globalDir } = {}) {
   const rows = []
   for (const dir of dirs) {
     if (!dir) continue
-    let raw
-    try {
-      raw = fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8')
-    } catch {
-      continue
-    }
+    const raw = openReadableIndex(fs, path.join(dir, 'index.jsonl')) // throws IndexUnreadableError; null = absent
+    if (raw === null) continue
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue
       try {

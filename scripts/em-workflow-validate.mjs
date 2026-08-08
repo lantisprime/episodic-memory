@@ -103,8 +103,8 @@ const TERMINAL_FOR_GATE = {
   'push-allowed': 'push-allowed'
 }
 
-function fail(msg, code = 2) {
-  console.log(JSON.stringify({ status: 'error', message: msg }))
+function fail(msg, code = 2, extra) {
+  console.log(JSON.stringify({ status: 'error', message: msg, ...(extra || {}) }))
   process.exit(code)
 }
 
@@ -145,7 +145,7 @@ function loadIndexOrAbort(dataDir, source) {
   try {
     return loadIndex(dataDir, source)
   } catch (e) {
-    fail(`em-workflow-validate: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${path.join(dataDir, 'index.jsonl')})`, 1)
+    fail(`em-workflow-validate: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${path.join(dataDir, 'index.jsonl')})`, 1, e && e.code ? { code: `index-unreadable:${e.code}` } : undefined)
   }
 }
 

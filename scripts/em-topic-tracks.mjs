@@ -33,9 +33,10 @@ const SCRIPT_NAME = 'em-topic-tracks.mjs'
 
 const VALID_VALUE_FLAGS = new Set(['--max-episodes', '--confirm'])
 
-function emitError(errorCode, detail, exitCode) {
+function emitError(errorCode, detail, exitCode, extra) {
   const obj = { status: 'error', error: errorCode }
   if (detail !== undefined) obj.detail = detail
+  if (extra) Object.assign(obj, extra)
   console.log(JSON.stringify(obj))
   process.exit(exitCode)
 }
@@ -173,7 +174,9 @@ try {
   // #651 F4 (revision 3, step 7e): a corrupt index.jsonl is a distinct
   // failure class from a malformed config.json — don't misattribute it.
   if (err instanceof IndexUnreadableError) {
-    emitError('episode-index-unreadable', err.message, 1)
+    // #653 (§2): 'error' stays the legacy field (test-651:989 pins it);
+    // 'code' is additive alongside it.
+    emitError('episode-index-unreadable', err.message, 1, { code: `index-unreadable:${err.code}` })
   }
   emitError('topic-tracks-config-invalid', err && err.message, 1)
 }

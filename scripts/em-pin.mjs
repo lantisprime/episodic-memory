@@ -24,6 +24,7 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { openReadableIndex, IndexUnreadableError, unreadableMessage } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -85,12 +86,18 @@ try {
     const newContent = content.replace(fmMatch[0], `---\n${fmLines.join('\n')}\n---`)
 
     // Read and prepare the index snapshot before the first durable write.
-    // Missing/corrupt index behavior remains unchanged: frontmatter is the
-    // durable source and a later rebuild can regenerate its row.
+    // #653 (FIX-E, review P2-2): fd-based read (openReadableIndex) — a
+    // genuinely ABSENT index keeps the historical best-effort behavior
+    // (frontmatter is the durable source; a later rebuild regenerates the
+    // row), but an UNREADABLE shape (FIFO/dir/EACCES/...) now aborts typed
+    // BEFORE any write (Family A writer rule) instead of silently opening a
+    // FIFO (hang) or swallowing a real defect into "skip the index update".
+    // Malformed per-line CONTENT (not shape) still degrades below, unchanged.
     const indexFile = path.join(dataDir, 'index.jsonl')
     let indexReplacement = null
-    try {
-      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+    const rawIndex = openReadableIndex(fs, indexFile)
+    if (rawIndex !== null) {
+      const lines = rawIndex.trim().split('\n').filter(Boolean)
       const updated = lines.map(line => {
         try {
           const entry = JSON.parse(line)
@@ -102,8 +109,6 @@ try {
         } catch { return line }
       })
       indexReplacement = { indexFile, data: updated.join('\n') + '\n' }
-    } catch {
-      // Keep the historical best-effort index behavior.
     }
 
     atomicReplaceFileSync(filePath, newContent)
@@ -114,7 +119,11 @@ try {
     }
   }
 } catch (e) {
-  result = { status: 'error', message: `Pin write failed: ${e.message}` }
+  if (e instanceof IndexUnreadableError) {
+    result = { status: 'error', message: unreadableMessage('em-pin', 'episode index', e), code: `index-unreadable:${e.code}` }
+  } else {
+    result = { status: 'error', message: `Pin write failed: ${e.message}` }
+  }
   exitCode = 1
 } finally {
   releaseStoreWriteLocks(lockResult.handles)

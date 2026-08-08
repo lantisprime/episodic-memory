@@ -178,7 +178,7 @@ try {
   for (const s of SCOPE_DIRS) allEntries.push(...loadIndex(s.dir, s.source))
 } catch (e) {
   if (e instanceof IndexUnreadableError) {
-    console.log(JSON.stringify({ status: 'error', message: `em-pattern-health: ${e.message}` }))
+    console.log(JSON.stringify({ status: 'error', message: `em-pattern-health: ${e.message}`, code: `index-unreadable:${e.code}` }))
     process.exit(1)
   }
   throw e

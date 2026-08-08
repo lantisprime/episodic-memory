@@ -24,7 +24,7 @@
 import fs from 'fs'
 import path from 'path'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './store-write-lock.mjs'
-import { assertReadableIndex, readIndexFileOrThrow } from './index-state.mjs'
+import { readIndexFileOrThrow, openReadableIndex, readSidecarOrDegrade } from './index-state.mjs'
 
 // Per-token field weights for the multi-term tier. Summary tokens count just
 // under a contiguous summary substring (0.7); tags sit between summary and
@@ -75,20 +75,20 @@ export function nullProtoIndex(parsed) {
   return Object.assign(Object.create(null), parsed)
 }
 
+// #653: fd-based classify-and-read (readSidecarOrDegrade) — never opens a
+// non-regular tags.json (a FIFO would otherwise block a raw readFileSync
+// forever); absent/unreadable/malformed all degrade to null uniformly, same
+// as before.
 export function loadTagsIndex(dataDir) {
-  try {
-    return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'tags.json'), 'utf8')))
-  } catch {
-    return null
-  }
+  const raw = readSidecarOrDegrade(fs, path.join(dataDir, 'tags.json'))
+  if (raw === null) return null
+  try { return nullProtoIndex(JSON.parse(raw)) } catch { return null }
 }
 
 export function loadCategoryIndex(dataDir) {
-  try {
-    return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'category-index.json'), 'utf8')))
-  } catch {
-    return null
-  }
+  const raw = readSidecarOrDegrade(fs, path.join(dataDir, 'category-index.json'))
+  if (raw === null) return null
+  try { return nullProtoIndex(JSON.parse(raw)) } catch { return null }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,24 +128,22 @@ export function loadIndex(dataDir, source) {
 // ---------------------------------------------------------------------------
 export function loadArchivedIndex(dataDir, source) {
   const indexFile = path.join(dataDir, 'archived-index.jsonl')
-  let state
-  try {
-    state = assertReadableIndex(fs, indexFile)
-  } catch {
-    return [] // unreadable (incl. non-regular): classify-before-read, never open, degrade
-  }
-  if (state !== 'ok') return [] // absent
-  try {
-    return fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean).map(line => {
-      try {
-        const entry = JSON.parse(line)
-        entry._source = source
-        entry._dataDir = dataDir
-        entry._archived = true
-        return entry
-      } catch { return null }
-    }).filter(Boolean)
-  } catch { return [] } // read failure (e.g. TOCTOU swap) also degrades
+  // #653: fd-based classify-and-read closes the D1 gap the old two-step
+  // (classify-then-separately-read) shape had here — a regular->FIFO swap in
+  // that gap would have re-opened the hang even though this function
+  // degrades on failure, because the OLD read blocked before its catch could
+  // ever run.
+  const raw = readSidecarOrDegrade(fs, indexFile)
+  if (raw === null) return [] // absent or unreadable (incl. non-regular): degrade
+  return raw.trim().split('\n').filter(Boolean).map(line => {
+    try {
+      const entry = JSON.parse(line)
+      entry._source = source
+      entry._dataDir = dataDir
+      entry._archived = true
+      return entry
+    } catch { return null }
+  }).filter(Boolean)
 }
 
 // ---------------------------------------------------------------------------
@@ -338,11 +336,9 @@ export const DF_DROP_RATIO = 0.4
 export const TOKENS_DROPPED_KEY = '_dropped'
 
 export function loadTokensIndex(dataDir) {
-  try {
-    return nullProtoIndex(JSON.parse(fs.readFileSync(path.join(dataDir, 'tokens.json'), 'utf8')))
-  } catch {
-    return null
-  }
+  const raw = readSidecarOrDegrade(fs, path.join(dataDir, 'tokens.json'))
+  if (raw === null) return null
+  try { return nullProtoIndex(JSON.parse(raw)) } catch { return null }
 }
 
 // Incremental writer, structurally mirroring em-store's updateTagsIndex.
@@ -364,10 +360,18 @@ export function updateTokensIndex(dataDir, episodeId, tokens) {
     // The nested acquire is inherited when em-store/em-revise already hold
     // the canonical store lock. This keeps direct callers safe without
     // introducing a second lock protocol or a self-deadlock.
+    //
+    // #653: fd-based read (openReadableIndex) rather than the degrading
+    // readSidecarOrDegrade — this is a WRITE path under the store lock, so a
+    // post-preflight TOCTOU swap must throw IndexUnreadableError out of this
+    // try (never silently treat a defect as an empty index and keep
+    // writing); the finally below still releases this function's own lock,
+    // and the throw propagates to the caller's F6 abort-inside-lock catch.
     let index = Object.create(null)
-    try {
-      index = nullProtoIndex(JSON.parse(fs.readFileSync(tokensFile, 'utf8')))
-    } catch {}
+    const raw = openReadableIndex(fs, tokensFile)
+    if (raw !== null) {
+      try { index = nullProtoIndex(JSON.parse(raw)) } catch {} // malformed CONTENT still tolerant-degrades
+    }
     const dropped = new Set(Array.isArray(index[TOKENS_DROPPED_KEY]) ? index[TOKENS_DROPPED_KEY] : [])
     for (const tok of tokens) {
       if (dropped.has(tok)) continue

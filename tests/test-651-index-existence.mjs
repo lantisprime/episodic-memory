@@ -9,11 +9,11 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import {
-  classifyIndexFile, assertReadableIndex, readIndexFileOrThrow, IndexUnreadableError,
+  classifyIndexFile, assertReadableIndex, readIndexFileOrThrow, openReadableIndex, IndexUnreadableError,
 } from '../scripts/lib/index-state.mjs'
 
 // EM651_TEST_REPO_OVERRIDE: points spawned scripts at an alternate repo root
@@ -48,6 +48,22 @@ function run(scriptPath, args, { cwd, home }) {
     cwd, encoding: 'utf8', timeout: 10000,
     env: { ...process.env, HOME: home, USERPROFILE: home },
   })
+}
+
+// sleepSync(ms) / waitForFileSync(path, timeoutMs) — issue #653 S7 lock-
+// release leg needs a synchronous wait (the whole suite is spawnSync-based,
+// no async/await): Atomics.wait on a throwaway SharedArrayBuffer blocks the
+// calling thread without special worker setup on Node's main thread.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+function waitForFileSync(p, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (!fs.existsSync(p)) {
+    if (Date.now() > deadline) return false
+    sleepSync(20)
+  }
+  return true
 }
 
 // Most scripts print one compact JSON line; em-restore.mjs pretty-prints
@@ -1052,6 +1068,848 @@ function mkChainStore() {
         assert(fs.existsSync(oldEpisodePath), 'chain-old episode file must still exist — nothing moved before the abort')
         const archivedDir = path.join(world.localDir, 'archived')
         assert(!fs.existsSync(archivedDir), `archived/ must not exist (abort precedes its creation), got present: ${fs.existsSync(archivedDir)}`)
+      } finally {
+        try { fs.rmSync(world.root, { recursive: true, force: true }) } catch {}
+      }
+    })
+  }
+}
+
+// =============================================================================
+// Issue #649/#653 additions (docs/plans/fix-649-653.md §7 S7). Reuses the
+// fixtures/helpers above (mkStore, applyShape, run, lastJson, checkTyped).
+// =============================================================================
+
+// -----------------------------------------------------------------------
+// D1 interleave (§7 S7 bullet 1): classify-ok -> swap-to-FIFO -> the NEW
+// fd-based reader must still typed-abort ENOTREG, never hang. Mirrors the
+// toctou-child.mjs harness used to prove D1 pre-fix: a throwaway child
+// process imports the CURRENT working tree's index-state.mjs, classifies
+// while the file is REGULAR (sanity precondition), swaps it to a FIFO, then
+// calls openReadableIndex — under a spawnSync hard-kill timeout so a
+// regression fails as a timeout-kill, never a stuck test run. Because
+// openReadableIndex does ONE open()+fstat() on a single fd (no separate
+// classify-then-path-read pair), this is strictly harder than the pre-fix
+// race: the swap is already complete before the reader is even called, yet
+// it still resolves instantly.
+// -----------------------------------------------------------------------
+{
+  const name = 'D1 interleave: classify-ok -> swap-FIFO -> openReadableIndex -> typed ENOTREG (not a hang)'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'em653-d1-'))
+      const indexPath = path.join(dir, 'index.jsonl')
+      fs.writeFileSync(indexPath, '{"id":"x"}\n')
+      const indexStatePath = path.join(SCRIPTS, 'lib', 'index-state.mjs')
+      const childPath = path.join(dir, 'child.mjs')
+      fs.writeFileSync(childPath, [
+        `import fs from 'node:fs'`,
+        `import { spawnSync } from 'node:child_process'`,
+        `import { classifyIndexFile, openReadableIndex } from ${JSON.stringify(indexStatePath)}`,
+        `const p = ${JSON.stringify(indexPath)}`,
+        `const cls = classifyIndexFile(fs, p)`,
+        `if (cls.state !== 'ok') { console.log(JSON.stringify({ step: 'abort', reason: 'precondition failed', cls })); process.exit(2) }`,
+        `fs.rmSync(p, { force: true })`,
+        `const mk = spawnSync('mkfifo', [p])`,
+        `if (mk.status !== 0) { console.log(JSON.stringify({ step: 'abort', reason: 'mkfifo failed' })); process.exit(2) }`,
+        `try {`,
+        `  const raw = openReadableIndex(fs, p)`,
+        `  console.log(JSON.stringify({ step: 'unexpected-ok', raw }))`,
+        `} catch (e) {`,
+        `  console.log(JSON.stringify({ step: 'typed-abort', code: e.code, message: e.message }))`,
+        `}`,
+      ].join('\n'))
+      const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' })
+      fs.rmSync(dir, { recursive: true, force: true })
+      assert(r.signal === null, `D1 interleave: no signal (timeout/kill) — got ${r.signal} (this is the falsifiability failure mode against an unfixed two-step classify-then-read)`)
+      assert(r.status === 0, `D1 interleave: child exit 0, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)} stderr=${(r.stderr || '').slice(0, 300)}`)
+      const j = JSON.parse((r.stdout || '').trim().split('\n').pop())
+      assert(j.step === 'typed-abort', `D1 interleave: expected typed-abort, got ${JSON.stringify(j)}`)
+      assert(j.code === 'ENOTREG', `D1 interleave: expected code ENOTREG, got ${JSON.stringify(j)}`)
+    })
+  }
+}
+
+// -----------------------------------------------------------------------
+// Static-FIFO legs (§7 S7 bullet 2 / §5 V2). No race needed — these hang
+// (or misbehave) on unpatched HEAD because the read sites were either fully
+// unguarded (em-store/em-revise's sidecar writers, em-rebuild-index's
+// episode-file reads, em-semantic's embeddings loader) or had the D1
+// classify-then-separately-read gap (relevance.mjs's advisory loaders).
+// -----------------------------------------------------------------------
+
+// em-search x FIFO tags.json/tokens.json/category-index.json -> ok+warning,
+// no hang (advisory degrade surface; #653 S2).
+{
+  const cases = [
+    { file: 'tags.json', args: ['--tag', 'x'] },
+    { file: 'category-index.json', args: ['--category', 'decision'] },
+    { file: 'tokens.json', args: ['--query', 'seed'] },
+  ]
+  for (const { file, args } of cases) {
+    const name = `em-search x FIFO ${file} -> ok+warning, no hang`
+    if (IS_WIN) { skip(name, 'mkfifo unavailable on win32'); continue }
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const sidecarPath = path.join(world.localDir, file)
+        fs.rmSync(sidecarPath, { force: true })
+        const mk = spawnSync('mkfifo', [sidecarPath])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-search.mjs'), ['--scope', 'local', '--no-track', ...args], { cwd: world.proj, home: world.root })
+        assert(r.signal === null, `em-search: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 0, `em-search: exit 0, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)} stderr=${(r.stderr || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'ok', `em-search: status ok, got ${r.stdout}`)
+        assert(typeof j.warning === 'string' && j.warning.length > 0, `em-search: degrade warning present, got ${r.stdout}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// em-store x FIFO tags.json -> typed abort, episode count unchanged (zero
+// partial state — #653 S3 preflight, before lock/any write).
+{
+  const name = 'em-store x FIFO tags.json -> typed abort, zero partial state'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const tagsFile = path.join(world.localDir, 'tags.json')
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        const beforeIndex = fs.readFileSync(indexPath, 'utf8')
+        const beforeEpisodeCount = fs.readdirSync(path.join(world.localDir, 'episodes')).length
+        fs.rmSync(tagsFile, { force: true })
+        const mk = spawnSync('mkfifo', [tagsFile])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'decision', '--summary', 'fifo-tags', '--body', 'body', '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        fs.rmSync(tagsFile, { force: true })
+        assert(r.signal === null, `em-store: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 1, `em-store: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-store: typed envelope, got ${r.stdout}`)
+        assert(/tags index unreadable/.test(r.stdout), `em-store: names tags index, got ${r.stdout.slice(0, 300)}`)
+        assert(j.code === 'index-unreadable:ENOTREG', `em-store: code index-unreadable:ENOTREG, got ${JSON.stringify(j)}`)
+        const afterEpisodeCount = fs.readdirSync(path.join(world.localDir, 'episodes')).length
+        assert(afterEpisodeCount === beforeEpisodeCount, `em-store: no episode file written, before=${beforeEpisodeCount} after=${afterEpisodeCount}`)
+        const afterIndex = fs.readFileSync(indexPath, 'utf8')
+        assert(afterIndex === beforeIndex, 'em-store: index.jsonl byte-unchanged (preflight aborted before lock/any write)')
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// em-revise x FIFO tags.json AND x FIFO index.jsonl -> typed abort, original
+// episode + index untouched (#653 S3R preflight, before lock/any write).
+{
+  const reviseCases = [
+    { label: 'tags.json', file: 'tags.json', roleRe: /tags index unreadable/ },
+    { label: 'index.jsonl', file: 'index.jsonl', roleRe: /episode index unreadable/ },
+  ]
+  for (const { label, file, roleRe } of reviseCases) {
+    const name = `em-revise x FIFO ${label} -> typed abort, original untouched`
+    if (IS_WIN) { skip(name, 'mkfifo unavailable on win32'); continue }
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const target = path.join(world.localDir, file)
+        const episodePath = path.join(world.localDir, 'episodes', `${world.seedId}.md`)
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        const beforeEpisode = fs.readFileSync(episodePath, 'utf8')
+        const beforeIndex = fs.readFileSync(indexPath, 'utf8')
+        fs.rmSync(target, { force: true })
+        const mk = spawnSync('mkfifo', [target])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-revise.mjs'), [
+          '--original', world.seedId, '--project', 'p651', '--summary', 'fifo-revise', '--body', 'body', '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        fs.rmSync(target, { force: true })
+        assert(r.signal === null, `em-revise: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 1, `em-revise: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-revise: typed envelope, got ${r.stdout}`)
+        assert(roleRe.test(r.stdout), `em-revise: names ${label}, got ${r.stdout.slice(0, 300)}`)
+        assert(j.code === 'index-unreadable:ENOTREG', `em-revise: code index-unreadable:ENOTREG, got ${JSON.stringify(j)}`)
+        const afterEpisode = fs.readFileSync(episodePath, 'utf8')
+        assert(afterEpisode === beforeEpisode, `em-revise (${label}): original episode file byte-unchanged`)
+        const afterIndex = file === 'index.jsonl' ? null : fs.readFileSync(indexPath, 'utf8')
+        if (afterIndex !== null) assert(afterIndex === beforeIndex, `em-revise (${label}): index.jsonl byte-unchanged`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// em-rebuild-index x FIFO episodes/*.md -> completes with a warning, never
+// hangs (#653 S4: the remediation tool must never hang on the disease it
+// repairs).
+{
+  const name = 'em-rebuild-index x FIFO episodes/*.md -> completes with warning, no hang'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const fifoEpisode = path.join(world.localDir, 'episodes', 'fifo-episode.md')
+        const mk = spawnSync('mkfifo', [fifoEpisode])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-rebuild-index.mjs'), ['--scope', 'local'], { cwd: world.proj, home: world.root })
+        assert(r.signal === null, `em-rebuild-index: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 0, `em-rebuild-index: exit 0, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)} stderr=${(r.stderr || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'ok', `em-rebuild-index: status ok, got ${r.stdout}`)
+        const localScope = j.rebuilt.find(x => x.scope === 'local')
+        assert(localScope && Array.isArray(localScope.warnings) && localScope.warnings.some(w => w.includes('fifo-episode.md')), `em-rebuild-index: warnings names the skipped FIFO episode, got ${JSON.stringify(localScope)}`)
+        assert(localScope.count === 1, `em-rebuild-index: the FIFO episode is excluded from count (only the seed episode), got ${JSON.stringify(localScope)}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// em-semantic x FIFO embeddings.jsonl -> degrade (advisory sidecar, #653
+// S2), no hang, no index-unreadable envelope — loadEmbeddings treats a
+// non-regular sidecar exactly like an absent one.
+{
+  const name = 'em-semantic x FIFO embeddings.jsonl -> degrade (no sidecar), no hang'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const embed = run(path.join(SCRIPTS, 'em-embed.mjs'), ['--scope', 'local', '--provider', 'hash'], { cwd: world.proj, home: world.root })
+        assert(embed.status === 0, `em-embed seed failed: ${embed.stderr}`)
+        const sidecar = path.join(world.localDir, 'embeddings.jsonl')
+        assert(fs.existsSync(sidecar), 'precondition: embeddings sidecar exists')
+        fs.rmSync(sidecar, { force: true })
+        const mk = spawnSync('mkfifo', [sidecar])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-semantic.mjs'), ['--query', 'seed', '--scope', 'local', '--no-track'], { cwd: world.proj, home: world.root })
+        fs.rmSync(sidecar, { force: true })
+        assert(r.signal === null, `em-semantic: no signal (timeout/kill), got ${r.signal}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-semantic: typed JSON, got ${r.stdout}`)
+        assert(/No embeddings sidecar found/.test(j.message || ''), `em-semantic: degrades to "no sidecar", NOT an index-unreadable abort, got ${r.stdout}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// em-doctor x FIFO installs.json (fake HOME) -> report row, exit != hang
+// (#653 S2: registry readers classify before read; em-doctor never aborts).
+// #649/#653 review FIX-D (P2-1): tightened past "no hang, no crash" — the
+// installs-drift row must be a WARN carrying a typed code, not indistinguishable
+// from a genuinely absent/empty registry ("ok" — the pre-fix defect).
+{
+  const name = 'em-doctor x FIFO installs.json -> warn row with code (not "ok")'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'em653-doctor-'))
+      const proj = path.join(root, 'proj')
+      fs.mkdirSync(proj)
+      const globalDir = path.join(root, '.episodic-memory')
+      fs.mkdirSync(globalDir, { recursive: true })
+      const installsFile = path.join(globalDir, 'installs.json')
+      const mk = spawnSync('mkfifo', [installsFile])
+      assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+      try {
+        // --scope global (not local): checkInstallsDrift, which reads
+        // installs.json, only runs for scope global|all — a local-scope
+        // run would never touch the FIFO at all and pass trivially.
+        const r = run(path.join(SCRIPTS, 'em-doctor.mjs'), ['--scope', 'global'], { cwd: proj, home: root })
+        assert(r.signal === null, `em-doctor: no signal (timeout/kill), got ${r.signal}`)
+        assert([0, 1, 2].includes(r.status), `em-doctor: a real exit code (no crash), got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && Array.isArray(j.checks) && j.summary, `em-doctor: report shape present (never aborts), got ${(r.stdout || '').slice(0, 300)}`)
+        assert(!/at .*\.mjs/.test(r.stderr || ''), `em-doctor: no raw stack frames on stderr, got ${(r.stderr || '').slice(0, 300)}`)
+        const row = j.checks.find(c => c.id === 'installs-drift')
+        assert(row, `em-doctor: installs-drift row present, got ${JSON.stringify(j.checks.map(c => c.id))}`)
+        assert(row.level === 'warn', `em-doctor: installs-drift is warn (a defect, not indistinguishable from an absent/empty registry), got ${JSON.stringify(row)}`)
+        assert(row.code === 'index-unreadable:ENOTREG', `em-doctor: installs-drift carries code index-unreadable:ENOTREG, got ${JSON.stringify(row)}`)
+      } finally {
+        try { fs.rmSync(installsFile, { force: true }) } catch {}
+        try { fs.rmSync(root, { recursive: true, force: true }) } catch {}
+      }
+    })
+  }
+}
+
+// -----------------------------------------------------------------------
+// PARITY leg (§7 S7 bullet 3, audit F3 — end-to-end, not classify-vs-open):
+// for every shape, the OLD contract's outcome (assertReadableIndex classify,
+// then a separate read) and the NEW contract's outcome (openReadableIndex,
+// one fd) agree — both degrade the same way, and both type the same .code.
+// file000 is the probe-pinned case: classify alone says 'ok' there (chmod
+// doesn't change st.isFile()), but BOTH the old separate-read and the new
+// fd-based read must surface EACCES end-to-end.
+// -----------------------------------------------------------------------
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'em653-parity-'))
+
+  function oldStyleRead(filePath) {
+    // Reference "old" contract: classify (lstat-only), then a SEPARATE
+    // path-based read — exactly index-state.mjs's pre-#653 shape.
+    const state = assertReadableIndex(fs, filePath) // throws IndexUnreadableError on 'unreadable'
+    if (state === 'absent') return null
+    try { return fs.readFileSync(filePath, 'utf8') } catch (e) {
+      throw new IndexUnreadableError(filePath, (e && e.code) || 'UNKNOWN', 'read failed')
+    }
+  }
+
+  function outcomeOf(fn, filePath) {
+    try { return { ok: true, value: fn(filePath) } } catch (e) {
+      if (e instanceof IndexUnreadableError) return { ok: false, code: e.code }
+      throw e
+    }
+  }
+
+  const PARITY_SHAPES = [...ALL_SHAPES, 'symlink-to-fifo', 'symlink-to-dir']
+  for (const shape of PARITY_SHAPES) {
+    const skipReason = (shape === 'eaccess' || shape === 'symlink-to-fifo') && IS_ROOT ? 'root bypasses permission checks'
+      : (shape === 'fifo' || shape === 'symlink-to-fifo') && IS_WIN ? 'mkfifo unavailable on win32'
+      : null
+    const name = `PARITY ${shape}: old classify+read outcome === new fd-based outcome`
+    if (skipReason) { skip(name, skipReason); continue }
+    t(name, () => {
+      // Each shape gets its OWN isolated subdirectory — 'parent-dangling'
+      // rmSync's + replaces storeDir itself, which must never be the shared
+      // parity root (that would corrupt every other shape sharing it).
+      const shapeDir = path.join(dir, shape)
+      fs.rmSync(shapeDir, { recursive: true, force: true })
+      fs.mkdirSync(shapeDir, { recursive: true })
+      const p = path.join(shapeDir, 'index.jsonl')
+      const targetDir = path.join(shapeDir, 'target-dir')
+      try {
+        if (shape === 'symlink-to-fifo') {
+          const fifoTarget = path.join(shapeDir, 'fifo-target')
+          const mk = spawnSync('mkfifo', [fifoTarget])
+          assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+          fs.symlinkSync(fifoTarget, p)
+        } else if (shape === 'symlink-to-dir') {
+          fs.mkdirSync(targetDir)
+          fs.symlinkSync(targetDir, p)
+        } else {
+          applyShape(shape, p, shapeDir)
+        }
+        const oldOutcome = outcomeOf(oldStyleRead, p)
+        const newOutcome = outcomeOf((fp) => openReadableIndex(fs, fp), p)
+        assert(oldOutcome.ok === newOutcome.ok, `PARITY ${shape}: ok-ness matches, old=${JSON.stringify(oldOutcome)} new=${JSON.stringify(newOutcome)}`)
+        if (!oldOutcome.ok) {
+          assert(oldOutcome.code === newOutcome.code, `PARITY ${shape}: .code matches, old=${oldOutcome.code} new=${newOutcome.code}`)
+        } else {
+          assert(oldOutcome.value === newOutcome.value, `PARITY ${shape}: content matches`)
+        }
+      } finally {
+        try { restoreShape(shape, p, shapeDir) } catch {}
+        try { fs.chmodSync(p, 0o644) } catch {}
+        try { fs.rmSync(shapeDir, { recursive: true, force: true }) } catch {}
+      }
+    })
+  }
+
+  // file000 probe-pin: classify ALONE says 'ok' (chmod doesn't change
+  // st.isFile()); both end-to-end paths must surface EACCES.
+  t('PARITY file000: classify alone says ok; both end-to-end paths yield EACCES', () => {
+    if (IS_ROOT) { skip('PARITY file000 probe-pin', 'root bypasses permission checks'); return }
+    const p = path.join(dir, 'parity-file000-probe.jsonl')
+    fs.writeFileSync(p, FILE000_FIXTURE_CONTENT)
+    fs.chmodSync(p, 0o000)
+    try {
+      const cls = classifyIndexFile(fs, p)
+      assert(cls.state === 'ok', `classify alone says ok (permission bits are invisible to lstat type checks), got ${JSON.stringify(cls)}`)
+      const oldOutcome = outcomeOf(oldStyleRead, p)
+      const newOutcome = outcomeOf((fp) => openReadableIndex(fs, fp), p)
+      assert(!oldOutcome.ok && oldOutcome.code === 'EACCES', `old end-to-end: EACCES, got ${JSON.stringify(oldOutcome)}`)
+      assert(!newOutcome.ok && newOutcome.code === 'EACCES', `new end-to-end: EACCES, got ${JSON.stringify(newOutcome)}`)
+    } finally {
+      try { fs.chmodSync(p, 0o644) } catch {}
+      try { fs.rmSync(p, { force: true }) } catch {}
+    }
+  })
+
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
+// -----------------------------------------------------------------------
+// Envelope sweep (§7 S7 bullet 4, audit F9): runtime legs — a directory-
+// shaped index.jsonl -> code === 'index-unreadable:EISDIR' + message regex
+// + exit 1, for every reader plus the two writers plus em-rebuild-index.
+// Static grep-pin: every known Family-A emission site's source carries the
+// `code` field.
+// -----------------------------------------------------------------------
+const ENVELOPE_SWEEP_TOOLS = [
+  { name: 'em-search', script: 'em-search.mjs', args: ['--scope', 'local', '--no-track'] },
+  { name: 'em-recall', script: 'em-recall.mjs', args: ['--scope', 'local', '--no-track'] },
+  { name: 'em-list', script: 'em-list.mjs', args: ['--scope', 'local'] },
+  { name: 'em-check-stale', script: 'em-check-stale.mjs', args: ['--scope', 'local'] },
+  { name: 'em-graph', script: 'em-graph.mjs', args: ['--orphans', '--scope', 'local'] },
+  { name: 'em-stats', script: 'em-stats.mjs', args: ['--scope', 'local'] },
+  { name: 'em-rebuild-index', script: 'em-rebuild-index.mjs', args: ['--scope', 'local'] },
+]
+for (const { name, script, args } of ENVELOPE_SWEEP_TOOLS) {
+  t(`envelope sweep: ${name} x EISDIR index -> code index-unreadable:EISDIR`, () => {
+    const world = mkStore()
+    try {
+      const indexPath = path.join(world.localDir, 'index.jsonl')
+      fs.rmSync(indexPath, { force: true })
+      fs.mkdirSync(indexPath)
+      const r = run(path.join(SCRIPTS, script), args, { cwd: world.proj, home: world.root })
+      fs.rmdirSync(indexPath)
+      assert(r.signal === null, `${name}: no signal, got ${r.signal}`)
+      assert(r.status === 1, `${name}: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+      const j = lastJson(r.stdout)
+      assert(j && j.status === 'error', `${name}: typed envelope, got ${r.stdout}`)
+      assert(/unreadable \(EISDIR\)/.test(r.stdout), `${name}: message names EISDIR, got ${r.stdout.slice(0, 300)}`)
+      assert(j.code === 'index-unreadable:EISDIR', `${name}: code index-unreadable:EISDIR, got ${JSON.stringify(j)}`)
+    } finally { cleanup(world) }
+  })
+}
+// em-semantic needs a query + sidecar to reach the index read at all.
+t('envelope sweep: em-semantic x EISDIR index -> code index-unreadable:EISDIR', () => {
+  const world = mkStore()
+  try {
+    const embed = run(path.join(SCRIPTS, 'em-embed.mjs'), ['--scope', 'local', '--provider', 'hash'], { cwd: world.proj, home: world.root })
+    assert(embed.status === 0, `em-embed seed failed: ${embed.stderr}`)
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    fs.rmSync(indexPath, { force: true })
+    fs.mkdirSync(indexPath)
+    const r = run(path.join(SCRIPTS, 'em-semantic.mjs'), ['--query', 'seed', '--scope', 'local', '--no-track'], { cwd: world.proj, home: world.root })
+    fs.rmdirSync(indexPath)
+    assert(r.signal === null, `em-semantic: no signal, got ${r.signal}`)
+    assert(r.status === 1, `em-semantic: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+    const j = lastJson(r.stdout)
+    assert(j && j.status === 'error' && j.code === 'index-unreadable:EISDIR', `em-semantic: code index-unreadable:EISDIR, got ${JSON.stringify(j)}`)
+  } finally { cleanup(world) }
+})
+// em-store / em-revise: EISDIR index -> preflight abort, code carried.
+t('envelope sweep: em-store x EISDIR index -> code index-unreadable:EISDIR', () => {
+  const world = mkStore()
+  try {
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    fs.rmSync(indexPath, { force: true })
+    fs.mkdirSync(indexPath)
+    const r = run(path.join(SCRIPTS, 'em-store.mjs'), ['--project', 'p651', '--category', 'decision', '--summary', 'x', '--body', 'x', '--scope', 'local'], { cwd: world.proj, home: world.root })
+    fs.rmdirSync(indexPath)
+    assert(r.status === 1 && r.signal === null, `em-store: exit 1 no signal, got status=${r.status} signal=${r.signal}`)
+    const j = lastJson(r.stdout)
+    assert(j && j.code === 'index-unreadable:EISDIR', `em-store: code index-unreadable:EISDIR, got ${JSON.stringify(j)}`)
+  } finally { cleanup(world) }
+})
+t('envelope sweep: em-revise x EISDIR index -> code index-unreadable:EISDIR', () => {
+  const world = mkStore()
+  try {
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    fs.rmSync(indexPath, { force: true })
+    fs.mkdirSync(indexPath)
+    const r = run(path.join(SCRIPTS, 'em-revise.mjs'), ['--original', world.seedId, '--project', 'p651', '--summary', 'x', '--body', 'x', '--scope', 'local'], { cwd: world.proj, home: world.root })
+    fs.rmdirSync(indexPath)
+    assert(r.status === 1 && r.signal === null, `em-revise: exit 1 no signal, got status=${r.status} signal=${r.signal}`)
+    const j = lastJson(r.stdout)
+    assert(j && j.code === 'index-unreadable:EISDIR', `em-revise: code index-unreadable:EISDIR, got ${JSON.stringify(j)}`)
+  } finally { cleanup(world) }
+})
+
+// Static grep-pin: every known Family-A emission site's source carries the
+// `code` field (regression guard against a future edit silently dropping
+// it). One occurrence of the literal marker per file is sufficient — this
+// pins the KNOWN S5 sweep set, not a live re-discovery of new sites.
+t('static grep-pin: every known Family-A emission site carries `code`', () => {
+  const CODE_BEARING_FILES = [
+    'em-search.mjs', 'em-recall.mjs', 'em-list.mjs', 'em-check-stale.mjs', 'em-graph.mjs',
+    'em-semantic.mjs', 'em-stats.mjs', 'em-store.mjs', 'em-revise.mjs', 'em-promote.mjs',
+    'em-topic-tracks.mjs', 'em-rebuild-index.mjs', 'em-prune.mjs', 'em-restore.mjs',
+    'em-seed-patterns.mjs', 'em-watch-codex.mjs', 'em-workflow-validate.mjs',
+    'em-review-request.mjs', 'em-pattern-health.mjs', 'em-move.mjs', 'em-feedback.mjs', 'em-doctor.mjs',
+    'em-pin.mjs', 'em-violation.mjs', // FIX-E/FIX-A (fix round 2)
+  ]
+  const missing = []
+  for (const f of CODE_BEARING_FILES) {
+    const src = fs.readFileSync(path.join(SCRIPTS, f), 'utf8')
+    if (!/code:?\s*[=]?\s*`index-unreadable:/.test(src)) missing.push(f)
+  }
+  assert(missing.length === 0, `every Family-A site carries code, missing from: ${missing.join(', ')}`)
+  for (const f of ['em-search.mjs', 'em-list.mjs', 'em-check-stale.mjs']) {
+    const src = fs.readFileSync(path.join(PLUGIN_SCRIPTS, f), 'utf8')
+    assert(/code:\s*`index-unreadable:/.test(src), `vendored ${f} carries code`)
+  }
+})
+
+// -----------------------------------------------------------------------
+// Lock-release leg (§7 S7 bullet 5, audit F6): a TOCTOU swap DURING the
+// held lock (not caught by the preflight, which already passed while the
+// file was still regular) still emits the typed envelope, releases the
+// lock (no stale lock file left behind), and an immediate retry succeeds.
+// Deterministic construction (no real race): a background holder process
+// owns the lock first; em-store is spawned WHILE tags.json is still regular
+// (so its preflight passes and it blocks waiting for the held lock) — ONLY
+// THEN does the test swap tags.json to a FIFO and release the holder, so the
+// swap lands strictly after preflight and strictly before the in-lock read
+// (#649/#653 review FIX-B: the original leg swapped BEFORE spawning em-store,
+// which only re-exercised the pre-lock preflight — a mutation deleting the
+// in-lock catch's explicit lock release survived the whole suite under that
+// ordering; this leg is the fix, see the mutation-kill proof in the report).
+// -----------------------------------------------------------------------
+{
+  const name = 'F6 lock-release: TOCTOU swap of tags.json mid-lock (post-spawn) aborts typed; lock released; immediate retry succeeds'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const dataDir = world.localDir
+        const tagsFile = path.join(dataDir, 'tags.json')
+        fs.writeFileSync(tagsFile, JSON.stringify({}))
+        // store-write-lock.mjs realpaths dataDir before placing the lock
+        // file (canonicalizeAndSort) — macOS's os.tmpdir() is itself a
+        // symlink (/tmp -> /private/tmp), so the lock's actual location can
+        // differ from the literal world.localDir spelling.
+        const lockPath = path.join(fs.realpathSync(dataDir), 'clerk-apply.lock')
+
+        const holderPath = path.join(world.root, 'lock-holder.mjs')
+        const lockLibPath = path.join(SCRIPTS, 'lib', 'store-write-lock.mjs')
+        const readySignal = path.join(world.root, 'ready.signal')
+        const releaseSignal = path.join(world.root, 'release.signal')
+        fs.writeFileSync(holderPath, [
+          `import fs from 'node:fs'`,
+          `import { acquireStoreWriteLocksSync, releaseStoreWriteLocks } from ${JSON.stringify(lockLibPath)}`,
+          `const dataDir = ${JSON.stringify(dataDir)}`,
+          `const r = acquireStoreWriteLocksSync(dataDir)`,
+          `if (!r.ok) { fs.writeFileSync(${JSON.stringify(readySignal)}, 'FAILED'); process.exit(1) }`,
+          `fs.writeFileSync(${JSON.stringify(readySignal)}, 'HELD')`,
+          `const deadline = Date.now() + 10000`,
+          `while (!fs.existsSync(${JSON.stringify(releaseSignal)}) && Date.now() < deadline) {`,
+          `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)`,
+          `}`,
+          `releaseStoreWriteLocks(r.handles)`,
+          `process.exit(0)`,
+        ].join('\n'))
+
+        const holder = spawn(process.execPath, [holderPath], { stdio: 'ignore' })
+        holder.unref()
+        const gotLock = waitForFileSync(readySignal, 5000)
+        assert(gotLock, 'lock holder signaled within 5s')
+        assert(fs.readFileSync(readySignal, 'utf8') === 'HELD', 'lock holder actually acquired the lock (not FAILED)')
+        assert(fs.existsSync(lockPath), 'lock file present while held')
+
+        // Spawn em-store NOW, while tags.json is STILL a regular file — its
+        // preflight (classify index+tags+category+tokens, all still
+        // healthy) passes, and it then blocks inside
+        // acquireStoreWriteLocksSync waiting for the holder above to
+        // release. Run via a shell wrapper that redirects stdout/stderr to
+        // FILES and writes the exit code to a marker file — progress is
+        // polled via fs.existsSync, NOT via 'exit'/'data' event listeners:
+        // sleepSync's Atomics.wait blocks this thread's event loop
+        // synchronously, so an event-driven wait would deadlock (the 'exit'
+        // callback could never fire while we are inside the busy loop
+        // waiting for it).
+        const outPath = path.join(world.root, 'em-store.stdout')
+        const errPath = path.join(world.root, 'em-store.stderr')
+        const exitPath = path.join(world.root, 'em-store.exitcode')
+        const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+        const emStoreArgs = [
+          path.join(SCRIPTS, 'em-store.mjs'), '--project', 'p651', '--category', 'decision',
+          '--summary', 'f6-lock-release', '--body', 'body', '--scope', 'local',
+        ]
+        const shellCmd = `${shQuote(process.execPath)} ${emStoreArgs.map(shQuote).join(' ')} > ${shQuote(outPath)} 2> ${shQuote(errPath)}; echo $? > ${shQuote(exitPath)}`
+        const storeProc = spawn('/bin/sh', ['-c', shellCmd], {
+          cwd: world.proj, env: { ...process.env, HOME: world.root, USERPROFILE: world.root }, stdio: 'ignore',
+        })
+        storeProc.unref()
+
+        // Give em-store a moment to run its (fast, lstat-only) preflight and
+        // reach the lock-wait poll loop — well before the holder's own 10s
+        // deadline, and well before we release it below. Poll-verify it is
+        // actually still alive (still blocked) rather than trusting a fixed
+        // sleep: if it already exited, the ordering assumption failed and
+        // the leg must not silently pass on the WRONG code path.
+        sleepSync(300)
+        function isAlive(pid) { try { process.kill(pid, 0); return true } catch { return false } }
+        assert(isAlive(storeProc.pid), 'em-store is still blocked on the held lock 300ms after spawn (preflight passed, has not aborted yet)')
+        assert(!fs.existsSync(exitPath), 'em-store has not exited yet — still waiting on the lock, not already aborted at the preflight')
+
+        // NOW swap tags.json -> FIFO. This lands strictly after em-store's
+        // preflight (already passed, or it would have exited above) and
+        // strictly before the in-lock read (blocked on the lock, has not
+        // acquired it yet) — the exact interleave F6 exists to cover.
+        fs.rmSync(tagsFile, { force: true })
+        const mk = spawnSync('mkfifo', [tagsFile])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+
+        // Release the holder — em-store acquires the lock immediately after
+        // and hits the FIFO on its in-lock updateTagsIndex read.
+        fs.writeFileSync(releaseSignal, '1')
+
+        const finished = waitForFileSync(exitPath, 10000)
+        assert(finished, `em-store exited within 10s (no signal/timeout-kill)`)
+        const exitCode = Number(fs.readFileSync(exitPath, 'utf8').trim())
+        const stdout = fs.readFileSync(outPath, 'utf8')
+        const stderr = fs.readFileSync(errPath, 'utf8')
+        assert(exitCode === 1, `em-store: exit 1, got ${exitCode}: stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 300)}`)
+        const j = lastJson(stdout)
+        // Post-FIX-C: the in-lock catch derives the role from e.file's
+        // basename, so this now correctly says "tags index unreadable" (not
+        // the byte-frozen-for-index.jsonl "episode index unreadable").
+        assert(j && j.status === 'error' && /tags index unreadable/.test(stdout), `em-store: typed tags-index envelope (in-lock F6 path, role-correct wording), got stdout=${stdout} stderr=${stderr.slice(0, 300)}`)
+        assert(j.code === 'index-unreadable:ENOTREG', `em-store: code index-unreadable:ENOTREG, got ${JSON.stringify(j)}`)
+
+        // The lock must be released — no stale lock file left behind.
+        // Polled (not a single immediate check): em-store's own acquisition
+        // can briefly show a just-recreated lock file at the moment its
+        // process is tearing down; the assertion that matters is "not
+        // leaked forever", not "vanished within the same microsecond".
+        let lockGone = !fs.existsSync(lockPath)
+        const lockDeadline = Date.now() + 2000
+        while (!lockGone && Date.now() < lockDeadline) {
+          sleepSync(20)
+          lockGone = !fs.existsSync(lockPath)
+        }
+        assert(lockGone, 'lock file absent within 2s of the abort (finally/explicit release ran, not leaked)')
+
+        // Restore tags.json (remove the FIFO — a fresh index-write recreates
+        // it) and confirm an immediate retry succeeds.
+        fs.rmSync(tagsFile, { force: true })
+        const retry = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'decision', '--summary', 'f6-retry', '--body', 'body', '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        assert(retry.status === 0, `retry em-store: exit 0, got ${retry.status}: stdout=${(retry.stdout || '').slice(0, 300)} stderr=${(retry.stderr || '').slice(0, 300)}`)
+        const rj = lastJson(retry.stdout)
+        assert(rj && rj.status === 'ok', `retry em-store: status ok, got ${retry.stdout}`)
+      } finally {
+        try { fs.rmSync(path.join(world.localDir, 'tags.json'), { force: true }) } catch {}
+        cleanup(world)
+      }
+    })
+  }
+}
+
+// -----------------------------------------------------------------------
+// Vendored-writer legs (§7 S7 bullet 6, audit F2): vendored em-store/
+// em-revise/em-rebuild-index x FIFO index.jsonl -> typed abort, no hang
+// (T7 pattern, spawn timeout). New behavior — these had NO guard at all
+// pre-#653 (em-store's vendored copy hangs on a FIFO index today).
+// -----------------------------------------------------------------------
+{
+  const vendoredWriterCases = [
+    {
+      name: 'plugin em-store', script: 'em-store.mjs',
+      args: ['--project', 'p651', '--category', 'decision', '--tags', 'x', '--summary', 'v', '--body', 'v', '--scope', 'local'],
+    },
+    {
+      name: 'plugin em-rebuild-index', script: 'em-rebuild-index.mjs', args: ['--scope', 'local'],
+    },
+  ]
+  for (const { name: caseName, script, args } of vendoredWriterCases) {
+    const name = `T7 vendored ${caseName} x FIFO index.jsonl -> typed abort, no hang`
+    if (IS_WIN) { skip(name, 'mkfifo unavailable on win32'); continue }
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        fs.rmSync(indexPath, { force: true })
+        const mk = spawnSync('mkfifo', [indexPath])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(PLUGIN_SCRIPTS, script), args, { cwd: world.proj, home: world.root })
+        fs.rmSync(indexPath, { force: true })
+        checkTyped(r, caseName)
+      } finally { cleanup(world) }
+    })
+  }
+
+  // plugin em-revise needs an existing episode to revise; mkStore's seed
+  // already provides one via the VENDORED em-list contract (id shape is
+  // identical — the vendored writer just wrote it with the real em-store
+  // above in other legs, but here we seed via the real em-store for a
+  // deterministic id and then FIFO the vendored copy's index target).
+  {
+    const name = 'T7 vendored plugin em-revise x FIFO index.jsonl -> typed abort, no hang'
+    if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+      t(name, () => {
+        const world = mkStore()
+        try {
+          const indexPath = path.join(world.localDir, 'index.jsonl')
+          fs.rmSync(indexPath, { force: true })
+          const mk = spawnSync('mkfifo', [indexPath])
+          assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+          const r = run(path.join(PLUGIN_SCRIPTS, 'em-revise.mjs'), [
+            '--original', world.seedId, '--project', 'p651', '--tags', 'x', '--summary', 'v', '--body', 'v', '--scope', 'local',
+          ], { cwd: world.proj, home: world.root })
+          fs.rmSync(indexPath, { force: true })
+          checkTyped(r, 'plugin em-revise')
+        } finally { cleanup(world) }
+      })
+    }
+  }
+}
+
+// -----------------------------------------------------------------------
+// FD hygiene (§5 V7, audit F5): looping openReadableIndex over unreadable
+// shapes must never leak a file descriptor — 1000 iterations over a FIFO
+// and a directory shape, then confirm the process can still open ordinary
+// files (no EMFILE).
+// -----------------------------------------------------------------------
+{
+  const name = 'V7 FD hygiene: 1000x openReadableIndex over unreadable shapes leaks no fd'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'em653-fdhygiene-'))
+      const fifoPath = path.join(dir, 'fifo.jsonl')
+      const dirPath = path.join(dir, 'adir.jsonl')
+      const mk = spawnSync('mkfifo', [fifoPath])
+      assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+      fs.mkdirSync(dirPath)
+      try {
+        for (let i = 0; i < 1000; i++) {
+          try { openReadableIndex(fs, i % 2 === 0 ? fifoPath : dirPath) } catch (e) {
+            assert(e instanceof IndexUnreadableError, `iteration ${i}: throws IndexUnreadableError, got ${e}`)
+          }
+        }
+        // No EMFILE: confirm we can still open a batch of ordinary fds.
+        const probeFiles = []
+        for (let i = 0; i < 50; i++) {
+          const p = path.join(dir, `probe-${i}.txt`)
+          fs.writeFileSync(p, 'x')
+          probeFiles.push(p)
+        }
+        for (const p of probeFiles) {
+          const content = fs.readFileSync(p, 'utf8')
+          assert(content === 'x', `probe file ${p} still readable (no fd exhaustion)`)
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+}
+
+// =============================================================================
+// #649/#653 second-opinion fix round (2026-08-08) — new regression legs for
+// FIX-A, FIX-E, FIX-F. (FIX-B/FIX-C/FIX-D/FIX-H are covered by tightening the
+// existing legs above, in place; FIX-G is docs-only.)
+// =============================================================================
+
+// --- FIX-A: static FIFO hangs inside touched writers (activation.mjs
+// loadMergedIndex, reached from em-store --lesson/--evidence PRE-write
+// validation) now abort typed instead of hanging. ---
+{
+  const name = 'FIX-A: em-store --lesson x FIFO local index (PRE-write linkage validation) -> typed abort'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const seedViol = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'violation', '--summary', 'seed-violation', '--body', 'body', '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        assert(seedViol.status === 0, `seed violation failed: ${seedViol.stderr}`)
+        const violId = (lastJson(seedViol.stdout) || {}).id
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        fs.rmSync(indexPath, { force: true })
+        const mk = spawnSync('mkfifo', [indexPath])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'violation', '--summary', 'x1', '--body', 'body', '--scope', 'local', '--lesson', violId,
+        ], { cwd: world.proj, home: world.root })
+        restoreShape('fifo', indexPath, world.localDir)
+        assert(r.signal === null, `em-store: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 1, `em-store: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-store: typed envelope, got ${r.stdout}`)
+        assert(j.code === 'index-unreadable:ENOTREG', `em-store: code index-unreadable:ENOTREG, got ${JSON.stringify(j)}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// --- FIX-A: POST-durable-write trigger-merge reads (em-trigger-index.mjs)
+// degrade instead of hanging, and the already-successful write surfaces a
+// warning instead of silently misreporting. ---
+{
+  const name = 'FIX-A: em-store --category lesson --trigger x FIFO GLOBAL index (POST-write collision merge) -> ok + warning, no hang, no double-store'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const globalIndexPath = path.join(world.globalDir, 'index.jsonl')
+        fs.rmSync(globalIndexPath, { force: true })
+        const mk = spawnSync('mkfifo', [globalIndexPath])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'lesson', '--summary', 'x2', '--body', 'body', '--scope', 'local', '--trigger', 'a distinctive trigger phrase',
+        ], { cwd: world.proj, home: world.root })
+        restoreShape('fifo', globalIndexPath, world.globalDir)
+        assert(r.signal === null, `em-store: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 0, `em-store: exit 0 (the write already succeeded — a degraded post-write check must never misreport it), got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'ok', `em-store: status ok, got ${r.stdout}`)
+        assert(typeof j.warning === 'string' && /global index unreadable/.test(j.warning), `em-store: warning field names the degraded scope, got ${JSON.stringify(j)}`)
+        const list = run(path.join(SCRIPTS, 'em-list.mjs'), ['--scope', 'local'], { cwd: world.proj, home: world.root })
+        const lj = lastJson(list.stdout)
+        assert(lj.count === 2, `em-store: episode committed exactly once (seed + x2), no double-store, got count=${lj.count}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// --- FIX-E: em-pin's primary-index read now aborts typed on a static FIFO
+// instead of hanging. ---
+{
+  const name = 'FIX-E: em-pin x FIFO local index -> typed abort, no hang'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        fs.rmSync(indexPath, { force: true })
+        const mk = spawnSync('mkfifo', [indexPath])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-pin.mjs'), ['--id', world.seedId], { cwd: world.proj, home: world.root })
+        restoreShape('fifo', indexPath, world.localDir)
+        assert(r.signal === null, `em-pin: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 1, `em-pin: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-pin: typed envelope, got ${r.stdout}`)
+        assert(/episode index unreadable/.test(r.stdout), `em-pin: names the defect, got ${r.stdout.slice(0, 300)}`)
+        assert(j.code === 'index-unreadable:ENOTREG', `em-pin: code index-unreadable:ENOTREG, got ${JSON.stringify(j)}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// --- FIX-F: em-consolidate's clerk-apply-family digest write (tags.json /
+// category-index.json) now fd-guards its sidecar reads instead of hanging.
+// Needs a near-duplicate cluster to reach the digest-write path.
+// -----------------------------------------------------------------------
+function mkConsolidateClusterStore() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'em653-consolidate-'))
+  const proj = path.join(root, 'proj')
+  fs.mkdirSync(proj)
+  const summary = 'duplicate cluster candidate alpha beta gamma delta epsilon'
+  const a = spawnSync(process.execPath, [
+    path.join(SCRIPTS, 'em-store.mjs'), '--project', 'p651', '--category', 'decision',
+    '--tags', 'foo', '--summary', summary, '--body', 'body one detail', '--scope', 'local',
+  ], { cwd: proj, encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } })
+  assert(a.status === 0, `seed member A failed: ${a.stderr}`)
+  const b = spawnSync(process.execPath, [
+    path.join(SCRIPTS, 'em-store.mjs'), '--project', 'p651', '--category', 'decision',
+    '--tags', 'bar', '--summary', summary, '--body', 'body two detail', '--scope', 'local',
+  ], { cwd: proj, encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } })
+  assert(b.status === 0, `seed member B failed: ${b.stderr}`)
+  return { root, proj, localDir: path.join(proj, '.episodic-memory') }
+}
+for (const { name: fileLabel, file } of [{ name: 'tags.json', file: 'tags.json' }, { name: 'category-index.json', file: 'category-index.json' }]) {
+  const name = `FIX-F: em-consolidate --apply x FIFO ${fileLabel} (digest write) -> typed protection-abort, no hang`
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkConsolidateClusterStore()
+      try {
+        const sidecarFile = path.join(world.localDir, file)
+        fs.rmSync(sidecarFile, { force: true })
+        const mk = spawnSync('mkfifo', [sidecarFile])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-consolidate.mjs'), ['--scope', 'local', '--min-cluster', '2', '--apply', '--confirm'], { cwd: world.proj, home: world.root })
+        restoreShape('fifo', sidecarFile, world.localDir)
+        assert(r.signal === null, `em-consolidate: no signal (timeout/kill), got ${r.signal}`)
+        assert(r.status === 1, `em-consolidate: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error' && j.mode === 'consolidate-apply', `em-consolidate: typed protection-abort envelope, got ${r.stdout}`)
+        assert(j.code === 'protection-abort:protection', `em-consolidate: code protection-abort:protection, got ${JSON.stringify(j)}`)
+        assert(r.stdout.includes(sidecarFile), `em-consolidate: names ${fileLabel} by path, got ${r.stdout.slice(0, 300)}`)
       } finally {
         try { fs.rmSync(world.root, { recursive: true, force: true }) } catch {}
       }

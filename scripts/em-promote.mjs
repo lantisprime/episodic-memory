@@ -139,7 +139,7 @@ function loadIndexOrAbort(dataDir, source) {
     return loadIndex(dataDir, source)
   } catch (e) {
     const file = path.join(dataDir, 'index.jsonl')
-    console.log(JSON.stringify({ status: 'error', message: `em-promote: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${file})` }))
+    console.log(JSON.stringify({ status: 'error', message: `em-promote: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${file})`, ...(e && e.code ? { code: `index-unreadable:${e.code}` } : {}) }))
     process.exit(1)
   }
 }

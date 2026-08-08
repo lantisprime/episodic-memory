@@ -91,24 +91,59 @@ default.
    default behavior, including a real `em-prune` pass; if `--help` returns
    anything other than `status: "help"`, refresh the install before probing
    further, and read the flag lists in this guide instead.
-6. Index existence contract (issue #651): `index.jsonl` presence is classified
-   `lstat`-first, not by `existsSync`. **Absent** (no file, and the parent store
-   dir is itself absent or a clean symlink) keeps today's behavior — `[]` /
-   skip / create-on-first-use. **Unreadable** (a symlink loop or dangling
-   symlink, an EACCES/broken parent directory, a FIFO/socket/device, a
-   directory where the index should be, or a file that fails to read) is a
-   defect, never treated as an empty store: every reader aborts with
-   `{"status":"error","message":"...episode index unreadable (<CODE>)
-   (<path>)..."}` and exit 1, instead of fabricating an empty result or (for a
-   FIFO) blocking forever. `em-doctor` is the one non-abort adopter — it
-   REPORTS `index: "unreadable (<CODE>)"` as a problem entry so the health
-   tool never dies on the disease it diagnoses. `em-rebuild-index` classifies
-   before acquiring its store lock and never truncates/replaces a corrupt
-   `index.jsonl`; its abort envelope adds a `remediation` hint (remove the
-   corrupt file and re-run). Recovery for any of the above: remove the
-   offending `index.jsonl` (or fix the symlink/permission) and run
-   `em-rebuild-index`, which rebuilds it from `episodes/*.md` (the source of
-   truth).
+6. Index existence contract (issues #651, #649, #653): `index.jsonl` presence
+   is classified `lstat`-first, not by `existsSync`. **Absent** (no file, and
+   the parent store dir is itself absent or a clean symlink) keeps today's
+   behavior — `[]` / skip / create-on-first-use. **Unreadable** (a symlink
+   loop or dangling symlink, an EACCES/broken parent directory, a
+   FIFO/socket/device, a directory where the index should be, or a file that
+   fails to read) is a defect, never treated as an empty store: every reader
+   aborts with `{"status":"error","message":"...episode index unreadable
+   (<CODE>) (<path>)...","code":"index-unreadable:<CODE>"}` and exit 1,
+   instead of fabricating an empty result or (for a FIFO) blocking forever.
+   `<CODE>` is the classifier's errno-shaped code (`ENOENT`, `EISDIR`,
+   `ENOTREG`, `EACCES`, `ELOOP`, `UNKNOWN`, or a raw errno). The `code` field
+   is additive on top of the pre-existing `message` wording, which stays
+   byte-unchanged for tooling that already parses it. A writer (`em-store`,
+   `em-revise`) that finds a corrupt DERIVED sidecar (`tags.json`,
+   `category-index.json`, `tokens.json`) before it ever writes names that
+   file's role in the message instead of `episode index` (e.g. `"tags index
+   unreadable (<CODE>) (<path>)"`) — same envelope shape, same `code` field.
+   `em-doctor` is the one non-abort adopter — it REPORTS `index: "unreadable
+   (<CODE>)"` (and a matching `code` on the check row) as a problem entry so
+   the health tool never dies on the disease it diagnoses. `em-rebuild-index`
+   classifies before acquiring its store lock and never truncates/replaces a
+   corrupt `index.jsonl`; its abort envelope adds a `remediation` hint (remove
+   the corrupt file and re-run), and a FIFO/socket-shaped `episodes/*.md` file
+   is skipped with a `warnings` entry rather than aborting the whole rebuild.
+   Recovery for any of the above: remove the offending file (or fix the
+   symlink/permission) and run `em-rebuild-index`, which rebuilds the index
+   from `episodes/*.md` (the source of truth).
+
+   Advisory-degrade rule: the derived/optional surfaces — `tags.json`,
+   `category-index.json`, `tokens.json`, `archived-index.jsonl`, the
+   `embeddings.jsonl` sidecar, and the `~/.episodic-memory/installs.json`
+   consumer registry — never abort and never hang on an unreadable shape;
+   they classify first and degrade (empty/`null`, a linear-scan fallback, or
+   an advisory warning) exactly as if the file were absent. `em-doctor` is the
+   one place this degrade is still surfaced as a diagnostic: an unreadable
+   registry or sidecar reports a `warn` row with `code` rather than reading as
+   healthy.
+
+   Implementation note (issue #653, D1): the classifier never opens a file —
+   it only `lstat`s/`stat`s. The reader closes the "classify, then separately
+   open the path" race by doing ONE `open(O_NONBLOCK)` + `fstat` on the
+   resulting file descriptor, reading (only for a confirmed regular file) from
+   that SAME fd. This means the read observes whatever inode the fd was bound
+   to at open time — if the path is atomically replaced *after* the open
+   succeeds, the read still returns the ORIGINAL file's bytes; that stale
+   snapshot is the classified object, by design, not a bug. A regular file
+   swapped to a FIFO *before* the open (e.g. an actively racing writer) is
+   caught: the FIFO's own `open(O_NONBLOCK)` returns immediately (no writer
+   needed) and `fstat` reports it non-regular, so the reader aborts typed
+   instead of blocking. No RFC formalizes this contract; it is bound here and
+   in `docs/plans/fix-649-653.md` (as `docs/plans/issue-651-index-existence-contract.md`
+   bound the original #651 classification table).
 
 ---
 

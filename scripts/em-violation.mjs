@@ -29,6 +29,7 @@ import os from 'os'
 import { execFileSync } from 'child_process'
 import { readBodyFile } from './lib/body-file.mjs'
 import { loadMergedIndex, resolveLinkage } from './lib/activation.mjs'
+import { IndexUnreadableError, unreadableMessage } from './lib/index-state.mjs'
 
 const SCRIPTS_DIR = path.dirname(new URL(import.meta.url).pathname)
 const STORE_SCRIPT = path.join(SCRIPTS_DIR, 'em-store.mjs')
@@ -149,7 +150,19 @@ if (!patterns) {
 // path (§7): fail closed, no partial write.
 // ---------------------------------------------------------------------------
 if (lessons.length) {
-  const lv = resolveLinkage(lessons, { requireCategory: 'lesson', index: loadMergedIndex() })
+  // FIX-A (#649/#653 review P1-1): loadMergedIndex throws IndexUnreadableError
+  // on an unreadable (not absent) store index; this runs BEFORE any write.
+  let mergedIndex
+  try {
+    mergedIndex = loadMergedIndex()
+  } catch (e) {
+    if (e instanceof IndexUnreadableError) {
+      console.log(JSON.stringify({ status: 'error', message: unreadableMessage('em-violation', 'episode index', e), code: `index-unreadable:${e.code}` }))
+      process.exit(1)
+    }
+    throw e
+  }
+  const lv = resolveLinkage(lessons, { requireCategory: 'lesson', index: mergedIndex })
   if (!lv.ok) {
     console.log(JSON.stringify({
       status: 'error',
