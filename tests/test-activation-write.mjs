@@ -364,18 +364,32 @@ t('testNoCollisionNoReport', () => {
   assert.ok(!/collision:/.test(b.stderr), 'disjoint triggers -> no report');
 });
 
-t('testCollisionWriteProceeds', () => {
-  // EC13: the collision READ fails (index.jsonl write-only -> the lazy build
-  // cannot read it) -> NO report, write proceeds, exit unchanged, stdout normal.
+t('testUnreadableIndexAbortsWriteTyped', () => {
+  // EC13 (superseded by issue #653): a write-only (0o200) index.jsonl used
+  // to make ONLY the lazy collision-report read fail (silently, best-effort)
+  // while the write itself "proceeded" — because em-store's OWN prior-index
+  // read (for the atomic index replace) ALSO silently swallowed that same
+  // EACCES into an empty prior-content fallback, which in fact meant the
+  // write would have truncated index.jsonl down to just the new row,
+  // destroying every existing entry (a real bug, not a feature). Issue #653
+  // closes that swallow: em-store's prior-index read is now fd-based
+  // (openReadableIndex) and a read failure throws typed instead of
+  // degrading to "" — so this same fixture now correctly ABORTS the whole
+  // write before anything is touched, rather than silently proceeding.
   const { cwd, home } = mkStore();
   run(EM_STORE, [...LESSON, '--trigger', 'shared phrase'], { cwd, home });
   const idxPath = path.join(storeDir(cwd), 'index.jsonl');
-  fs.chmodSync(idxPath, 0o200); // append still works; reads fail
+  const beforeIndex = fs.readFileSync(idxPath, 'utf8');
+  fs.chmodSync(idxPath, 0o200); // append still worked pre-#653; reads always failed
   try {
     const b = run(EM_STORE, [...LESSON, '--trigger', 'shared phrase'], { cwd, home });
-    assert.equal(b.code, 0, `write proceeds when the collision read fails: ${b.stdout}`);
-    assert.equal(b.json.status, 'ok');
-    assert.ok(!/collision:/.test(b.stderr), 'unreadable index -> no report, never fatal');
+    assert.equal(b.code, 1, `unreadable index.jsonl aborts the write typed: ${b.stdout}`);
+    assert.equal(b.json.status, 'error');
+    assert.match(b.json.message, /episode index unreadable \(EACCES\)/);
+    assert.equal(b.json.code, 'index-unreadable:EACCES');
+    assert.ok(!/collision:/.test(b.stderr), 'aborted before the write — no collision report either');
+    fs.chmodSync(idxPath, 0o644);
+    assert.equal(fs.readFileSync(idxPath, 'utf8'), beforeIndex, 'index.jsonl byte-unchanged — zero partial state');
   } finally {
     fs.chmodSync(idxPath, 0o644);
   }

@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { tryAcquire, release } from './lock.mjs'
+import { classifyIndexFile } from './index-state.mjs'
 
 // §A.5-S1 constants (verbatim)
 export const STORE_IDENTITY_RECORD_TYPE = 'store-identity'
@@ -102,7 +103,15 @@ function listIdentityEpisodes(storeDir) {
   }
   const out = []
   for (const file of files) {
-    const content = fs.readFileSync(path.join(episodesDir, file), 'utf8')
+    // #653 (discovered via em-rebuild-index's S7 FIFO-episode battery leg):
+    // resolveStoreIdentity is called BY em-rebuild-index — the remediation
+    // tool the #649/#653 contract requires to never hang on a FIFO-shaped
+    // episode file — so this scan needs the same lstat-classify-skip guard
+    // as em-rebuild-index's own episode loop, not the deferred query-path
+    // body-read class (§4 D2 is about read-tool --full/--materialize paths).
+    const filePath = path.join(episodesDir, file)
+    if (classifyIndexFile(fs, filePath).state !== 'ok') continue
+    const content = fs.readFileSync(filePath, 'utf8')
     const parsed = parseIdentityFrontmatter(content)
     if (parsed) {
       parsed.filename = file

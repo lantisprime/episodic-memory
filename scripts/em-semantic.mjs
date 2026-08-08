@@ -144,7 +144,7 @@ try {
   for (const [dir, label] of dirs) entries.push(...loadIndex(dir, label))
 } catch (e) {
   if (e instanceof IndexUnreadableError) {
-    console.log(JSON.stringify({ status: 'error', message: `em-semantic: ${e.message}` }))
+    console.log(JSON.stringify({ status: 'error', message: `em-semantic: ${e.message}`, code: `index-unreadable:${e.code}` }))
     process.exit(1)
   }
   throw e

@@ -45,6 +45,7 @@ import { spawnSync } from 'node:child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadActivationClasses, parseTriggerKind } from './lib/activation.mjs'
 import { computeCadence } from './lib/activation-log.mjs'
+import { openReadableIndex, readSidecarOrDegrade, classifyIndexFile } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
@@ -92,21 +93,37 @@ function sha256(buf) {
  * Read a store's index.jsonl with a TOCTOU-safe fingerprint: stat, read,
  * re-stat; on a stat mismatch re-read ONCE and fingerprint the bytes actually
  * read (REQ-14/EC9). A missing index file fingerprints as the empty store.
+ *
+ * #653 (FIX-A): this is a BUILD INPUT for the trigger-index cache, reached
+ * from loadMergedTriggerIndex()'s POST-durable-write collision-report path
+ * (em-store/em-revise call it AFTER the episode + index row are already
+ * committed) as well as this script's own standalone CLI build — neither
+ * context is a validation gate, so a non-regular (FIFO/socket/device/dir)
+ * index.jsonl must DEGRADE to the empty-store fingerprint, never abort and
+ * never hang. `stat` (unlike `open`+read) never blocks on a FIFO, so the
+ * `isFile()` checks below run before either read attempt.
  */
 function readIndexWithFingerprint(storeDir) {
   const indexPath = path.join(storeDir, 'index.jsonl')
+  const empty = { raw: '', fingerprint: { index_mtime_ms: 0, index_size: 0, index_sha256: sha256('') } }
   let st1 = null
   try { st1 = fs.statSync(indexPath) } catch {}
-  if (!st1) {
-    return { raw: '', fingerprint: { index_mtime_ms: 0, index_size: 0, index_sha256: sha256('') } }
+  if (!st1 || !st1.isFile()) {
+    return empty
   }
   let raw = fs.readFileSync(indexPath, 'utf8')
   let st2 = null
   try { st2 = fs.statSync(indexPath) } catch {}
-  if (!st2 || st2.mtimeMs !== st1.mtimeMs || st2.size !== st1.size) {
-    // mid-read rewrite: one re-read, fingerprint what we actually consumed (EC9)
-    try { raw = fs.readFileSync(indexPath, 'utf8') } catch { raw = '' }
-    try { st2 = fs.statSync(indexPath) } catch { st2 = null }
+  if (!st2 || !st2.isFile() || st2.mtimeMs !== st1.mtimeMs || st2.size !== st1.size) {
+    // mid-read rewrite: one re-read, fingerprint what we actually consumed
+    // (EC9) — UNLESS the rewrite swapped it to a non-regular shape, in which
+    // case degrade rather than reopen.
+    if (st2 && st2.isFile()) {
+      try { raw = fs.readFileSync(indexPath, 'utf8') } catch { raw = '' }
+      try { st2 = fs.statSync(indexPath) } catch { st2 = null }
+    } else {
+      return empty
+    }
   }
   const bytes = Buffer.byteLength(raw, 'utf8')
   return {
@@ -648,7 +665,19 @@ export function buildTriggerIndex({ project, scope = 'local', now = new Date(), 
   // invalidate; a cached v2 index mismatches on schema_version and rebuilds (T12).
   let priorPatternHealth = null
   try {
-    const cached = JSON.parse(fs.readFileSync(indexPath, 'utf8'))
+    // #653 (FIX-A): fd-based read (openReadableIndex) — trigger-index.json is
+    // a cache file inside the store dir; a non-regular shape (FIFO/dir) must
+    // never hang the build. null (absent) synthesizes the same ENOENT the
+    // pre-existing catch below already treats as a silent cache miss;
+    // anything else routes through the same "unreadable" stderr note a
+    // malformed cache already got.
+    const cachedRaw = openReadableIndex(fs, indexPath)
+    if (cachedRaw === null) {
+      const absent = new Error('trigger-index cache absent')
+      absent.code = 'ENOENT'
+      throw absent
+    }
+    const cached = JSON.parse(cachedRaw)
     if (scope === 'local' && cached && cached.session_start &&
         typeof cached.session_start.pattern_health === 'object' && cached.session_start.pattern_health !== null) {
       priorPatternHealth = cached.session_start.pattern_health
@@ -923,6 +952,18 @@ export function buildSessionStart(rows, now = new Date()) {
  * rebuilt from the merged rows for the same reason.
  */
 export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
+  // #653 (FIX-A): cheap lstat-only classify (never opens, never hangs) up
+  // front, purely to REPORT which scope(s) are unreadable (distinct from
+  // genuinely absent) — the actual reads below already degrade safely
+  // either way; this is observability for a caller that wants to know its
+  // collision check ran against an incomplete view (e.g. em-store/em-revise's
+  // POST-durable-write R9a report, which must never misreport the write that
+  // already succeeded, but should surface that the check was degraded).
+  const degraded = []
+  for (const scope of ['local', 'global']) {
+    const dir = resolveStoreDir({ project, scope })
+    if (classifyIndexFile(fs, path.join(dir, 'index.jsonl')).state === 'unreadable') degraded.push(scope)
+  }
   let local = null
   let global = null
   try { local = buildTriggerIndex({ project, scope: 'local', now }).index } catch (e) {
@@ -938,11 +979,13 @@ export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
   const mergedRows = []
   const seenRows = new Set()
   for (const scope of ['local', 'global']) {
-    let raw = ''
-    try {
-      const dir = resolveStoreDir({ project, scope })
-      raw = fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8')
-    } catch { continue }
+    // #653 (FIX-A): fd-based degrade (readSidecarOrDegrade) — this merge runs
+    // from the same POST-durable-write collision-report path as
+    // readIndexWithFingerprint above; a non-regular index.jsonl must degrade
+    // to "skip this scope", never hang, never abort.
+    const dir = resolveStoreDir({ project, scope })
+    const raw = readSidecarOrDegrade(fs, path.join(dir, 'index.jsonl'))
+    if (raw === null) continue
     for (const row of parseRows(raw)) {
       if (!row || typeof row.id !== 'string' || seenRows.has(row.id)) continue
       seenRows.add(row.id)
@@ -998,7 +1041,7 @@ export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
   if (lp && Object.prototype.hasOwnProperty.call(lp, 'cadence')) {
     session_start.cadence = lp.cadence
   }
-  return { entries, session_start, local, global }
+  return { entries, session_start, local, global, ...(degraded.length ? { degraded } : {}) }
 }
 
 // ---------------------------------------------------------------------------

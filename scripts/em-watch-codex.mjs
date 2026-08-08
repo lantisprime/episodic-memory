@@ -51,8 +51,8 @@ function flag(name) {
   return v
 }
 
-function fail(message, code = 2) {
-  console.log(JSON.stringify({ status: 'error', message }))
+function fail(message, code = 2, extra) {
+  console.log(JSON.stringify({ status: 'error', message, ...(extra || {}) }))
   process.exit(code)
 }
 
@@ -98,7 +98,7 @@ function findLocalStore(startDir) {
     try {
       state = assertReadableIndex(fs, candidate)
     } catch (e) {
-      fail(`em-watch-codex: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${candidate})`, 1)
+      fail(`em-watch-codex: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${candidate})`, 1, { code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}` })
     }
     if (state === 'ok') return path.join(dir, '.episodic-memory')
     const parent = path.dirname(dir)
@@ -285,7 +285,7 @@ try {
   }
 } catch (e) {
   if (e instanceof IndexUnreadableError) {
-    fail(`em-watch-codex: ${e.message}`, 1)
+    fail(`em-watch-codex: ${e.message}`, 1, { code: `index-unreadable:${e.code}` })
   }
   throw e
 }

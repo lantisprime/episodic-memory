@@ -41,7 +41,7 @@ import { nullProtoIndex } from './lib/relevance.mjs'
 // derived-index merge so two restore targets cannot diverge before both
 // locks are held.
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { readIndexFileOrThrow } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2630,6 +2630,7 @@ try {
   // surface which files made it so the user has a clear inventory rather
   // than discovering the partial state via filesystem walk.
   const errPayload = { status: 'error', message: String(e.message || e), stack: e.stack }
+  if (e instanceof IndexUnreadableError) errPayload.code = `index-unreadable:${e.code}`
   if (Array.isArray(e.applied_before_failure)) errPayload.applied_before_failure = e.applied_before_failure
   if (e.staging_dir) errPayload.staging_dir = e.staging_dir
   out(errPayload)
