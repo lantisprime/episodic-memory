@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://episodic-memory/schemas/activation-log.schema.json",
+  "title": "One row of <project>/.episodic-memory/activation-log.jsonl (RFC-009 P4-S1 R6)",
+  "description": "activation-log.jsonl is JSONL — one JSON object per line, newline-delimited, NOT a JSON array. This schema validates a single PARSED line/instance, not the whole file. The sole writer is appendActivationLine (scripts/lib/activation-log.mjs), called from exactly one call site (plugins/claude-code-activation/hooks/activation-hook-run.mjs, ~:640-654) which always passes event:'inject' literally. Required = every field the writer always emits (writer-regression pinning, not cross-writer symmetry — there is one writer). `surface` and `entries[].rendered` enums mirror this module's own exported INJECTION_SURFACES / RENDERED_FORMS constants (activation-log.mjs:8-9).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "ts", "project", "event", "surface", "entries"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "LOG_FORMAT_VERSION (activation-log.mjs:5), stamped by appendActivationLine on every line. The reader (loadInjectState) discards any row whose v does not match its own constant (activation-log.mjs:159) — the version dimension cannot drift between writer and reader by construction."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "new Date().toISOString() at injection time (the call site's `ts` field)."
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "description": "identity.slug. resolveIdentity() guarantees a non-empty string before this call site is ever reached."
+    },
+    "event": {
+      "type": "string",
+      "const": "inject",
+      "description": "The sole writer call site passes event:'inject' literally; no other event value is ever written."
+    },
+    "surface": {
+      "enum": ["session_start", "per_prompt", "tool", "dispatcher"],
+      "description": "Mirrors INJECTION_SURFACES. The writer's EVENT_NAME ternary currently only ever emits 'tool' | 'session_start' | 'per_prompt'; 'dispatcher' is a reserved value from the same domain constant, not yet emitted by any call site."
+    },
+    "entries": {
+      "type": "array",
+      "description": "One entry per rendered injection line (REQ-16: entries[] cannot diverge from the rendered lines[]). May be empty in principle; in practice the writer is only reached after a non-empty lines[] check.",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "effective_priority", "rendered", "source_scope", "access_count_at_inject"],
+      "description": "The call site rebuilds each entry as exactly these 5 keys (activation-hook-run.mjs's entries.map), discarding anything else matchActivation's entry carried.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Episode id of the injected entry."
+        },
+        "effective_priority": {
+          "type": ["integer", "null"],
+          "description": "Tier-1 / playbook entries carry an integer (playbooks default 0 via `?? 0`); tier-2 (static-blend) entries carry null by REQ-18/§8.2 — plain-only, no priority (activation-match.mjs)."
+        },
+        "rendered": {
+          "enum": ["imperative", "plain"],
+          "description": "Mirrors RENDERED_FORMS."
+        },
+        "source_scope": {
+          "type": ["string", "null"],
+          "description": "Stamped by mergeIndexes in the hook (typically 'local' or 'global'); null when the upstream entry carried none (`?? null`)."
+        },
+        "access_count_at_inject": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Defaults to 0 via `?? 0` when the upstream row carried no integer access_count."
+        }
+      }
+    }
+  }
+}

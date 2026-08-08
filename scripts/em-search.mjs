@@ -6,9 +6,12 @@
  *   node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>]
  *                      [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>]
  *                      [--scope local|global|all] [--include-superseded]
- *                      [--read <id>] [--history <id>] [--full]
+ *                      [--read <id>] [--history <id>] [--full] [--materialize]
  *                      [--no-score] [--no-track]
- *                      (if both --read and --history are passed, --read wins)
+ *                      (if both --read and --history are passed, --read wins;
+ *                      --materialize composes with --read (never ambiguous), or
+ *                      with a filter query iff the pre-limit match count is 1 —
+ *                      otherwise a materialize-ambiguous error)
  *                      [--warn-time-ms <n>] [--warn-count <n>]
  *
  * By default, searches local then global (scope=all), hides superseded episodes,
@@ -37,7 +40,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-search.mjs', usage: 'node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>] [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] [--include-superseded] [--read <id>] [--history <id>] [--full] [--no-score] [--no-track] (if both --read and --history are passed, --read wins) [--warn-time-ms <n>] [--warn-count <n>]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-search.mjs', usage: 'node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>] [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] [--include-superseded] [--read <id>] [--history <id>] [--full] [--materialize] [--no-score] [--no-track] (if both --read and --history are passed, --read wins; --materialize composes with --read (never ambiguous), or with a filter query iff the pre-limit match count is 1 — otherwise a materialize-ambiguous error) [--warn-time-ms <n>] [--warn-count <n>]' }))
   process.exit(0)
 }
 
@@ -58,6 +61,7 @@ const full = argv.includes('--full')
 const includeSuperseded = argv.includes('--include-superseded')
 const historyId = flag('--history')
 const readId = flag('--read')
+const materialize = argv.includes('--materialize')
 const noScore = argv.includes('--no-score')
 const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
@@ -104,6 +108,80 @@ results = results.filter(e => {
   seen.add(e.id)
   return true
 })
+
+// Preserved BEFORE any mode branch/filter narrows `results`: --history and
+// --materialize's backward chain walk need EVERY live row, including ones the
+// search filters below (e.g. `status !== 'superseded'`) would exclude — an
+// ancestor revision is superseded by definition and would otherwise vanish
+// from `results` before the walk could ever reach it.
+const allLiveResults = results.slice()
+
+// Shared by --history and --materialize: live rows (already scope-filtered +
+// deduped) plus archived rows for the active scope(s) — em-prune and
+// em-consolidate --fold-superseded move an episode's file to archived/ and its
+// row to archived-index.jsonl, so a chain with archived members would
+// otherwise silently truncate. Live rows win on id collision (`seenIds`
+// already carries every live id from the dedup above); archived rows carry
+// `_archived: true` (stamped by loadArchivedIndex).
+function collectChainEntries(baseResults, seenIds) {
+  const allEntries = [...baseResults]
+  for (const [dir, label] of [[LOCAL_DIR, 'local'], [GLOBAL_DIR, 'global']]) {
+    if (scope !== 'all' && scope !== label) continue
+    for (const row of loadArchivedIndex(dir, label)) {
+      if (seenIds.has(row.id)) continue
+      seenIds.add(row.id)
+      allEntries.push(row)
+    }
+  }
+  return allEntries
+}
+
+// --materialize (#634a): walk backward via the scalar `supersedes` edge from the
+// anchor to root (archived-aware via collectChainEntries — same live+archived
+// merge as --history), reverse to root->terminal order, and concatenate full
+// bodies with a provenance delimiter. A `consolidates`-bearing root terminates
+// the walk naturally: `consolidates` is a forward-only successor edge this
+// backward walk never follows.
+function materializeChain(anchorRow) {
+  const allEntries = collectChainEntries(allLiveResults, seen)
+  const byId = new Map(allEntries.map(e => [e.id, e]))
+  const spine = []
+  const spineVisited = new Set()
+  let node = byId.get(anchorRow.id) || anchorRow
+  while (node) {
+    if (spineVisited.has(node.id)) break // cyclic supersedes: truncate, do not loop forever
+    spineVisited.add(node.id)
+    spine.push(node)
+    if (!node.supersedes) break
+    const parent = byId.get(node.supersedes)
+    if (!parent) break
+    node = parent
+  }
+  spine.reverse() // root -> anchor (terminal)
+  const members = spine.map(e => {
+    const archived = !!e._archived
+    const filePath = path.join(e._dataDir, archived ? 'archived' : 'episodes', `${e.id}.md`)
+    let bodyText = ''
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf8')
+      const parts = content.split('---')
+      bodyText = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
+    }
+    const meta = { id: e.id, date: e.date, summary: e.summary, body_len: bodyText.length }
+    if (archived) meta.archived = true
+    return { meta, bodyText }
+  })
+  // Delimiter escaping is deliberately DEFERRED (audit F6) — id/summary are
+  // store-controlled strings, not yet exposed to a structured `body` consumer.
+  const body = members.map(m => `<!-- ${m.meta.id} | ${m.meta.summary} -->\n${m.bodyText}`).join('\n\n')
+  return {
+    status: 'ok',
+    terminal_id: anchorRow.id,
+    count: members.length,
+    members: members.map(m => m.meta),
+    body,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Read mode (RFC-011 R7 / REQ-14 — amended): fetch exactly ONE episode by exact
@@ -152,6 +230,18 @@ if (readId !== undefined) {
     const out = JSON.stringify({ status: 'error', message: `Episode "${readId}" not found` })
     await new Promise((resolve) => process.stdout.write(out + '\n', resolve))
     process.exit(1)
+  }
+
+  // --materialize composes with --read (#634a): the anchor is already resolved
+  // unambiguously by exact id, so no ambiguity check is needed here (that check
+  // is filter-query-only, below). Short-circuits before the single-episode read
+  // path (frontmatter merge, coercions, tracking) — materialize is a chain-wide
+  // retrieval, not a single-episode read. No access tracking, mirroring
+  // --history's investigative-query posture.
+  if (materialize) {
+    const out = materializeChain(row)
+    await new Promise((resolve) => process.stdout.write(JSON.stringify(out) + '\n', resolve))
+    process.exit(0)
   }
 
   // Episode file path (episodes/ for active rows, archived/ for archived rows —
@@ -276,46 +366,60 @@ if (readId !== undefined) {
 // History mode: show full revision chain for an episode
 // ---------------------------------------------------------------------------
 if (historyId) {
-  const chain = []
   // Find all episodes in the revision chain
   let currentId = historyId
 
-  // Walk backwards: find what this episode supersedes
-  //
-  // The walk sees index rows PLUS archived metadata: em-prune and
-  // em-consolidate --fold-superseded move an episode's file to archived/ and
-  // its row to archived-index.jsonl, so a chain with archived members would
-  // otherwise silently truncate (runtime-probed: archiving one intermediate
-  // cut a 4-link chain to 2 from the terminal and 1 from the root). Live
-  // rows win on id collision; archived rows are marked `archived: true` in
+  // The walk sees index rows PLUS archived metadata (collectChainEntries): em-prune and
+  // em-consolidate --fold-superseded move an episode's file to archived/ and its row to
+  // archived-index.jsonl, so a chain with archived members would otherwise silently truncate
+  // (runtime-probed: archiving one intermediate cut a 4-link chain to 2 from the terminal and 1
+  // from the root). Live rows win on id collision; archived rows are marked `archived: true` in
   // the output and their bodies resolve from archived/.
-  const allEntries = [...results]
-  for (const [dir, label] of [[LOCAL_DIR, 'local'], [GLOBAL_DIR, 'global']]) {
-    if (scope !== 'all' && scope !== label) continue
-    for (const row of loadArchivedIndex(dir, label)) {
-      if (seen.has(row.id)) continue
-      seen.add(row.id)
-      allEntries.push(row)
-    }
-  }
+  const allEntries = collectChainEntries(allLiveResults, seen)
   const byId = new Map(allEntries.map(e => [e.id, e]))
 
-  // Find the root of the chain
-  let root = byId.get(currentId)
-  while (root && root.supersedes) {
-    const parent = byId.get(root.supersedes)
+  // Walk backward via the scalar `supersedes` edge, collecting the SPINE
+  // [requested id ... root] as we go (#634b anchor fix). The requested id is
+  // ALWAYS spine[0], so it is guaranteed present in its own history — previously
+  // only `root` was kept and the forward walk resumed FROM root, so a supersedes
+  // FORK between root and the requested id could walk past it entirely (§17-E:
+  // `bySupersedes` below is last-writer-wins by Map insertion order, so the
+  // fork's OTHER branch could be the one forward-from-root actually surfaced,
+  // silently dropping the requested id from its own --history output).
+  const spine = []
+  const spineVisited = new Set()
+  let node = byId.get(currentId)
+  while (node) {
+    if (spineVisited.has(node.id)) break // cyclic supersedes: truncate, do not loop forever
+    spineVisited.add(node.id)
+    spine.push(node)
+    if (!node.supersedes) break
+    const parent = byId.get(node.supersedes)
     if (!parent) break
-    root = parent
+    node = parent
   }
 
-  // Walk forward from root along the many-to-one edges R9 (P4) will write (REQ-14):
-  //   1. inverted supersedes (existing behavior — kept first so single-supersedes chains are
-  //      byte-identical; a supersedes FORK stays last-writer-wins, characterized not fixed, §17-E),
-  //   2. the scalar superseded_by edge,
-  //   3. a consolidates successor (an active episode whose consolidates array names current).
-  // A visited Set makes a cyclic consolidates/superseded_by fixture terminate (EC7).
-  if (root) {
-    chain.push(root)
+  let chain = []
+  if (spine.length) {
+    chain = [...spine].reverse() // root -> requested
+
+    // Walk forward from the REQUESTED id (not root — the anchor fix above) along
+    // the many-to-one edges R9 (P4) will write (REQ-14):
+    //   1. inverted supersedes (existing behavior — kept first so single-supersedes chains are
+    //      byte-identical),
+    //   2. the scalar superseded_by edge,
+    //   3. a consolidates successor (an active episode whose consolidates array names current).
+    // The requested id is now the walk's anchor: §17-E fork loss is FIXED at the anchor spine
+    // (querying any spine member is guaranteed to see itself in its own history). Fork selection
+    // BEYOND the anchor (what supersedes/succeeds a node forward of the requested id) is
+    // UNCHANGED — still last-writer-wins by Map insertion order, characterized not fixed,
+    // tiebreak-by-id deferred (relates #621).
+    //
+    // The visited Set is seeded with the ENTIRE spine, not just root (audit F1): seeding only
+    // root left every OTHER spine member free to be re-discovered and re-pushed by the forward
+    // walk (a contradictory/cyclic superseded_by or consolidates edge pointing back into the
+    // spine would duplicate it in `chain`); seeding the whole spine also bounds a cyclic fixture
+    // to a single pass (EC7).
     const bySupersedes = new Map()
     const byConsolidates = new Map()
     for (const e of allEntries) {
@@ -324,8 +428,8 @@ if (historyId) {
         for (const cid of e.consolidates) byConsolidates.set(cid, e)
       }
     }
-    const visited = new Set([root.id])
-    let current = root
+    const visited = new Set(spine.map(e => e.id))
+    let current = spine[0] // the requested episode
     while (true) {
       let next = null
       if (bySupersedes.has(current.id)) next = bySupersedes.get(current.id)
@@ -537,6 +641,28 @@ if (query) {
   }
 
   results = [...matched, ...partials]
+}
+
+// ---------------------------------------------------------------------------
+// --materialize (filter-anchored, #634a): only reached when --read was not
+// given (the --read branch above already exited). Requires the PRE-`--limit`
+// filtered result set to have EXACTLY ONE member (audit F3) — `--limit` masks
+// multiplicity (the real store's 2-tombstone-plus-terminal case is exactly why
+// the D3 loader fallback is a two-step: resolve-id-then-materialize, not a
+// single filtered read), so this check runs BEFORE the `--limit` slice below
+// ever narrows `results`. A count other than 1 (0 or many) is reported the
+// same way — the caller re-runs with an explicit id via --read.
+// ---------------------------------------------------------------------------
+if (materialize) {
+  if (results.length !== 1) {
+    const matches = results.map(e => ({ id: e.id, summary: e.summary }))
+    const out = JSON.stringify({ status: 'error', code: 'materialize-ambiguous', matches })
+    await new Promise((resolve) => process.stdout.write(out + '\n', resolve))
+    process.exit(1)
+  }
+  const out = materializeChain(results[0])
+  await new Promise((resolve) => process.stdout.write(JSON.stringify(out) + '\n', resolve))
+  process.exit(0)
 }
 
 // ---------------------------------------------------------------------------
