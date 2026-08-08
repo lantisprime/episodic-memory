@@ -332,6 +332,9 @@ jobs:
       - name: Run RFC-009 P4-S1 telemetry suite (#505 / REQ-22)
         run: node tests/test-rfc-009-p4-telemetry.mjs
 
+      - name: Run activation-log schema suite (#632 residual 2)
+        run: node tests/test-activation-log-schema.mjs
+
       - name: Run RFC-009 P4-S3 clerk report suite (REQ-1,2,3,4,5,21,23)
         run: node tests/test-rfc-009-p4-report.mjs
 
@@ -382,6 +385,9 @@ jobs:
 
       - name: Run RFC-009 P1a --history multi-parent walk tests
         run: node tests/test-history-walk.mjs
+
+      - name: Run em-search --materialize suite (#634a)
+        run: node tests/test-materialize.mjs
 
       - name: Run RFC-009 P1a per-category prune lifecycle tests
         run: node tests/test-prune-lifecycle.mjs

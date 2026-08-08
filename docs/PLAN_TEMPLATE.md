@@ -161,7 +161,10 @@ only by a skippable smoke is tagged **`UNGUARDED-IN-CI`** with the covering manu
 **Dispatch the canonical planner first (do not self-walk).** For any schema / validator /
 security / multi-actor change, dispatch `negative-scenario-planner` on the design **before**
 writing this section — it walks the 8-axis attack matrix and reliably surfaces the level-2
-(one-branch-only) gaps a solo walk misses. Self-walk is the fallback when no agent matches.
+(one-branch-only) gaps a solo walk misses. Self-walk is the fallback when no agent matches. The
+orchestrator materializes (`em-search --read <terminal-id> --materialize`) and inlines the
+canonical prompt with a provenance-stamped `<canonical-prompt source-episode="<id>">` block at
+dispatch; the in-agent loader is fallback-only (#633/#634).
 
 **Path-authority predicates** (`realpath`, `pwd -P`, `resolveRepoRoot`, `lstat`,
 `O_NOFOLLOW`, `import.meta.url`/isMain, "is this repo/safe-class"): enumerate the **8-axis
