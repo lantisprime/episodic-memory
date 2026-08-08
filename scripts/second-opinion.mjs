@@ -189,6 +189,11 @@ function checkRegistryFreshness() {
 }
 
 async function cmdRequest() {
+  // #512 residual: providers default their internal timeout to 600000ms when
+  // the harness omits `timeout`; naming that same value here lets the
+  // provider-timeout message/envelope report the real effective timeout
+  // instead of "undefinedms" when --timeout is not passed.
+  const DEFAULT_DISPATCH_TIMEOUT_MS = 600000
   const provider = flag('--provider')
   if (!provider) emitErr('missing-flag', '--provider is required')
 
@@ -383,9 +388,10 @@ async function cmdRequest() {
   }
 
   function runDispatch(promptText, roundN = 1, requestId = null) {
+    const effectiveTimeoutMs = timeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS
     let r
     try {
-      r = providerModule.dispatch({ prompt: promptText, projectRoot, ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) })
+      r = providerModule.dispatch({ prompt: promptText, projectRoot, timeout: effectiveTimeoutMs })
     } catch (e) {
       emitErr('provider-dispatch-failed',
         `Provider ${provider} dispatch threw: ${e.message}`, { provider })
@@ -401,8 +407,8 @@ async function cmdRequest() {
         } catch { forensicsPath = null }
       }
       emitErr('provider-timeout',
-        `Provider ${provider} timed out after ${timeoutMs}ms (round ${roundN})`,
-        { provider, round: roundN, timeoutMs, forensics: forensicsPath })
+        `Provider ${provider} timed out after ${effectiveTimeoutMs}ms (round ${roundN})`,
+        { provider, round: roundN, timeoutMs: effectiveTimeoutMs, forensics: forensicsPath })
     }
     if (!r.ok) {
       emitErr('provider-dispatch-nonzero',
