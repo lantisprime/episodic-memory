@@ -249,7 +249,7 @@ try {
   } catch (e) {
     if (e instanceof IndexUnreadableError) {
       releaseStoreWriteLocks(lockResult.handles)
-      console.log(JSON.stringify({ status: 'error', message: `em-seed-patterns: ${e.message}` }))
+      console.log(JSON.stringify({ status: 'error', message: `em-seed-patterns: ${e.message}`, code: `index-unreadable:${e.code}` }))
       process.exit(1)
     }
     throw e

@@ -1228,23 +1228,41 @@ async function testReviseCrossScopeStaleOriginalSnapshotDrift() {
   const otherStoreDir = canonical[1]
   const markerFile = path.join(fixture.root, 'prelock-marker')
 
-  // CJS preload: intercept the first fs.readFileSync of the successor-store
-  // index (dataDir), write a marker, and patch the builtin ESM exports so
-  // the em-revise ESM import sees the wrapped function.
+  // CJS preload: intercept the first read of the successor-store index
+  // (dataDir), write a marker, and patch the builtin ESM exports so the
+  // em-revise ESM import sees the wrapped functions.
+  //
+  // #653: em-revise's pre-lock snapshot now reads index.jsonl via the
+  // fd-based openReadableIndex (scripts/lib/index-state.mjs) — ONE
+  // openSync(path) + fstat + readFileSync(fd), never a path-based
+  // readFileSync(path) — closing the exact D1 TOCTOU window this test
+  // injects a race into. The marker must therefore fire on the openSync
+  // syscall boundary (args[0] === targetIndex, a path string), not on
+  // readFileSync (which the new code calls with a numeric fd, never
+  // matching a path-string comparison). Both are intercepted for
+  // resilience against either read shape.
   const preloadPath = path.join(fixture.root, 'snapshot-drift-preload.cjs')
   fs.writeFileSync(preloadPath, `
     const fs = require('fs');
     const moduleObj = require('module');
     const origReadFileSync = fs.readFileSync;
+    const origOpenSync = fs.openSync;
     const markerFile = ${JSON.stringify(markerFile)};
     const targetIndex = ${JSON.stringify(path.join(dataDir, 'index.jsonl'))};
     let marked = false;
+    function markOnce() {
+      if (marked) return;
+      fs.writeFileSync(markerFile, 'prelock-complete');
+      marked = true;
+    }
     fs.readFileSync = function (...args) {
       const result = origReadFileSync.apply(fs, args);
-      if (!marked && args[0] === targetIndex) {
-        fs.writeFileSync(markerFile, 'prelock-complete');
-        marked = true;
-      }
+      if (args[0] === targetIndex) markOnce();
+      return result;
+    };
+    fs.openSync = function (...args) {
+      const result = origOpenSync.apply(fs, args);
+      if (args[0] === targetIndex) markOnce();
       return result;
     };
     moduleObj.syncBuiltinESMExports();

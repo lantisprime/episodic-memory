@@ -83,8 +83,8 @@ function flagAll(name) {
 }
 function hasFlag(name) { return argv.includes(name) }
 
-function fail(code, message, errors = []) {
-  console.log(JSON.stringify({ status: 'error', message, errors }))
+function fail(code, message, errors = [], extra) {
+  console.log(JSON.stringify({ status: 'error', message, errors, ...(extra || {}) }))
   process.exit(code)
 }
 
@@ -218,7 +218,7 @@ function loadIndexOrAbort(dataDir, source) {
   try {
     return loadIndex(dataDir, source)
   } catch (e) {
-    fail(1, `em-review-request: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${path.join(dataDir, 'index.jsonl')})`)
+    fail(1, `em-review-request: episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${path.join(dataDir, 'index.jsonl')})`, [], e && e.code ? { code: `index-unreadable:${e.code}` } : undefined)
   }
 }
 
@@ -517,7 +517,7 @@ try {
       // fail() calls process.exit, which skips this try's finally — release
       // the lock explicitly first (mirrors em-consolidate's emitProtectionAbort).
       releaseStoreWriteLocks(lockResult.handles)
-      fail(1, `em-review-request: ${e.message}`)
+      fail(1, `em-review-request: ${e.message}`, [], { code: `index-unreadable:${e.code}` })
     }
     throw e
   }

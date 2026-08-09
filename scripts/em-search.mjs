@@ -93,7 +93,7 @@ try {
   }
 } catch (e) {
   if (e instanceof IndexUnreadableError) {
-    console.log(JSON.stringify({ status: 'error', message: `em-search: ${e.message}` }))
+    console.log(JSON.stringify({ status: 'error', message: `em-search: ${e.message}`, code: `index-unreadable:${e.code}` }))
     process.exit(1)
   }
   throw e

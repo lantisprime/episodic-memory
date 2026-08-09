@@ -37,6 +37,7 @@ import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { assertReadableIndex, openReadableIndex, IndexUnreadableError, unreadableMessage, roleForFile } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -285,7 +286,19 @@ let promotionSources
   // verbatim (a linked violation may have been legitimately retracted since;
   // the band derivation, not the write gate, is what discounts it).
   if (evidence.length) {
-    const lv = resolveLinkage(evidence, { requireCategory: 'violation', index: loadMergedIndex() })
+    // FIX-A (#649/#653 review P1-1): loadMergedIndex throws IndexUnreadableError
+    // on an unreadable (not absent) store index; this runs BEFORE any write.
+    let mergedIndex
+    try {
+      mergedIndex = loadMergedIndex()
+    } catch (e) {
+      if (e instanceof IndexUnreadableError) {
+        console.log(JSON.stringify({ status: 'error', message: unreadableMessage('em-revise', 'episode index', e), code: `index-unreadable:${e.code}` }))
+        process.exit(1)
+      }
+      throw e
+    }
+    const lv = resolveLinkage(evidence, { requireCategory: 'violation', index: mergedIndex })
     if (!lv.ok) {
       console.log(JSON.stringify({
         status: 'error',
@@ -324,6 +337,34 @@ if (hasRegisterPlaybookFlag && dataDir === GLOBAL_DIR) {
 }
 
 // ---------------------------------------------------------------------------
+// #653 S3R: classify index.jsonl AND every derived sidecar (tags/category/
+// tokens) for BOTH store dirs this revision touches — original.dir (the
+// supersession target) and dataDir (the successor target; may be the same
+// dir) — BEFORE any read, lock, or write. Mirrors em-store's S3(a) preflight;
+// placed strictly before the pre-lock snapshot below (which itself reads
+// index.jsonl) and before acquireStoreWriteLocksSync.
+// ---------------------------------------------------------------------------
+const preflightDirs = original.dir === dataDir ? [original.dir] : [original.dir, dataDir]
+for (const dir of preflightDirs) {
+  for (const [role, file] of [
+    ['episode index', path.join(dir, 'index.jsonl')],
+    ['tags index', path.join(dir, 'tags.json')],
+    ['category index', path.join(dir, 'category-index.json')],
+    ['token index', path.join(dir, 'tokens.json')],
+  ]) {
+    try {
+      assertReadableIndex(fs, file)
+    } catch (e) {
+      if (e instanceof IndexUnreadableError) {
+        console.log(JSON.stringify({ status: 'error', message: unreadableMessage('em-revise', role, e), code: `index-unreadable:${e.code}` }))
+        process.exit(1)
+      }
+      throw e
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PR-562 snapshot helper (§8.2 in-lock reread, file/index coherence, and the
 // direct-successor set): captures (fileStatus, indexStatus, successors) so
 // the in-lock state can be compared to the pre-lock snapshot. A change in
@@ -333,6 +374,12 @@ if (hasRegisterPlaybookFlag && dataDir === GLOBAL_DIR) {
 // accepted clerk merge-Revive path) while still serializing an actually
 // concurrent revision. The helper tolerates missing files and missing index
 // rows (status=null in both cases) so the snapshot shape is stable.
+//
+// fileStatus reads the episode BODY file — out of #653 scope (§4 D2 DEFER,
+// the query-path body-read class); indexStatus/successors read index.jsonl
+// and use the fd-based openReadableIndex (#653), which THROWS
+// IndexUnreadableError on a defect instead of existsSync's silent
+// false-negative (which would misreport "no index row" instead of aborting).
 // ---------------------------------------------------------------------------
 function snapshotOriginalState(filePath, statusDir, successorDirs, id) {
   let fileStatus = null
@@ -343,8 +390,9 @@ function snapshotOriginalState(filePath, statusDir, successorDirs, id) {
   } catch { /* missing file → null status */ }
   let indexStatus = null
   const statusIndexPath = path.join(statusDir, 'index.jsonl')
-  if (fs.existsSync(statusIndexPath)) {
-    for (const line of fs.readFileSync(statusIndexPath, 'utf8').split('\n')) {
+  const statusIndexRaw = openReadableIndex(fs, statusIndexPath)
+  if (statusIndexRaw !== null) {
+    for (const line of statusIndexRaw.split('\n')) {
       if (!line.trim()) continue
       try {
         const entry = JSON.parse(line)
@@ -355,8 +403,9 @@ function snapshotOriginalState(filePath, statusDir, successorDirs, id) {
   const successors = []
   for (const storeDir of successorDirs) {
     const indexFilePath = path.join(storeDir, 'index.jsonl')
-    if (!fs.existsSync(indexFilePath)) continue
-    for (const line of fs.readFileSync(indexFilePath, 'utf8').split('\n')) {
+    const raw = openReadableIndex(fs, indexFilePath)
+    if (raw === null) continue
+    for (const line of raw.split('\n')) {
       if (!line.trim()) continue
       try {
         const entry = JSON.parse(line)
@@ -374,7 +423,19 @@ function snapshotOriginalState(filePath, statusDir, successorDirs, id) {
 // direct-successor set is unioned across both locked stores
 // ([original.dir, dataDir]) so a cross-scope revision detects a successor
 // appended in either the original's store or the successor's store.
-const preLock = snapshotOriginalState(original.filePath, original.dir, [original.dir, dataDir], originalId)
+// No lock is held yet, so a TOCTOU-raced IndexUnreadableError here (the
+// preflight above already passed) gets its own catch rather than the F6
+// in-lock mechanism below.
+let preLock
+try {
+  preLock = snapshotOriginalState(original.filePath, original.dir, [original.dir, dataDir], originalId)
+} catch (e) {
+  if (e instanceof IndexUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-revise: ${e.message}`, code: `index-unreadable:${e.code}` }))
+    process.exit(1)
+  }
+  throw e
+}
 
 const lockResult = acquireStoreWriteLocksSync([original.dir, dataDir])
 if (!lockResult.ok) {
@@ -436,10 +497,12 @@ try {
   atomicReplaceFileSync(original.filePath, supersededContent)
 
   // Update the index entry for the original + capture origTags in one pass
+  // #653 S3R: fd-based read (openReadableIndex) — a TOCTOU throw propagates
+  // out of this locked try (F6) instead of a raw readFileSync crash.
   let origTagsFromIndex = []
   let origPinned = false
   let origPlaybook = false
-  const lines = fs.readFileSync(originalIndexFile, 'utf8').trim().split('\n').filter(Boolean)
+  const lines = (openReadableIndex(fs, originalIndexFile) || '').trim().split('\n').filter(Boolean)
   const updated = lines.map(line => {
     try {
       const entry = JSON.parse(line)
@@ -499,10 +562,13 @@ try {
   function updateTagsIndex(dataDir, episodeId, tags) {
     const tagsFile = path.join(dataDir, 'tags.json')
     // Null-proto: a tag named "constructor" must not resolve to Object.prototype (issue #469)
+    // #653 S3R: fd-based read; a TOCTOU throw propagates out of this locked
+    // try (F6) instead of being swallowed. Malformed CONTENT still degrades.
     let index = Object.create(null)
-    try {
-      index = nullProtoIndex(JSON.parse(fs.readFileSync(tagsFile, 'utf8')))
-    } catch {}
+    const raw = openReadableIndex(fs, tagsFile)
+    if (raw !== null) {
+      try { index = nullProtoIndex(JSON.parse(raw)) } catch {}
+    }
     for (const tag of tags) {
       if (!index[tag]) index[tag] = []
       if (!index[tag].includes(episodeId)) index[tag].push(episodeId)
@@ -516,10 +582,13 @@ try {
     const catFile = path.join(dataDir, 'category-index.json')
     // Null-proto: unknown categories index under their literal key, which could
     // collide with Object.prototype names (issue #469)
+    // #653 S3R: fd-based read; a TOCTOU throw propagates (F6) instead of
+    // being swallowed. Malformed CONTENT still degrades.
     let index = Object.create(null)
-    try {
-      index = nullProtoIndex(JSON.parse(fs.readFileSync(catFile, 'utf8')))
-    } catch {}
+    const raw = openReadableIndex(fs, catFile)
+    if (raw !== null) {
+      try { index = nullProtoIndex(JSON.parse(raw)) } catch {}
+    }
     const key = canonicalCategory(category)
     if (!index[key]) index[key] = []
     if (!index[key].includes(episodeId)) index[key].push(episodeId)
@@ -675,6 +744,27 @@ try {
       }
     }
   }
+} catch (e) {
+  // ABORT-INSIDE-LOCK (audit F6): a post-preflight TOCTOU swap throws
+  // IndexUnreadableError OUT of this locked try, straight into this catch —
+  // NEVER process.exit inside the TRY itself. But process.exit() called
+  // from HERE, in the catch, ALSO skips the paired finally below (it is not
+  // a normal JS return/throw — Node exits immediately without unwinding
+  // pending finally blocks), so both locks are released EXPLICITLY right
+  // here before exiting; the finally's own release is a no-op repeat for
+  // this path (releaseStoreWriteLocks is idempotent) and the only one that
+  // runs for the `throw e` (unexpected-error) path below.
+  if (e instanceof IndexUnreadableError) {
+    // FIX-C (#649/#653 review P3-1): this catch funnels throws from EVERY
+    // in-lock read (index.jsonl in either store dir, tags.json,
+    // category-index.json, tokens.json) — e.message is byte-frozen to
+    // "episode index unreadable" regardless of which file failed; derive
+    // the role from e.file's basename instead.
+    console.log(JSON.stringify({ status: 'error', message: unreadableMessage('em-revise', roleForFile(e.file), e), code: `index-unreadable:${e.code}` }))
+    releaseStoreWriteLocks(lockHandles)
+    process.exit(1)
+  }
+  throw e
 } finally {
   releaseStoreWriteLocks(lockHandles)
 }
@@ -694,6 +784,14 @@ if (result.status === 'ok' && activation && Array.isArray(activation.triggers) &
       if (reported.has(key)) continue
       reported.add(key)
       process.stderr.write(`collision: trigger "${e.value}" also on ${e.episode_id}: ${e.summary}\n`)
+    }
+    // FIX-A (#649/#653 review P1-1): the write already succeeded (this block
+    // runs post-lock-release) — an unreadable local/global index must never
+    // misreport that as a failure. loadMergedTriggerIndex degrades instead of
+    // throwing; surface the degrade on the (already-successful) stdout
+    // payload so the caller knows the collision check was incomplete.
+    if (merged.degraded && merged.degraded.length && result.status === 'ok') {
+      result.warning = `trigger collision check incomplete: ${merged.degraded.join(', ')} index unreadable`
     }
   } catch {}
 }

@@ -47,6 +47,7 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { execFileSync } from 'child_process'
+import { openReadableIndex } from './index-state.mjs'
 import {
   HOOK_SPECS, SESSION_END_SCRIPT,
   enforcementHookLibBasenames, enforcementEntryScripts, enforcementBundleLibs,
@@ -334,10 +335,19 @@ export function normalizeProjectPath(p) {
 }
 
 // Degrade-not-throw: malformed/alien registry shape → rebuild from scratch
-// with a stderr note; never block the install.
+// with a stderr note; never block the install. #653 (F1e): classify before
+// read (openReadableIndex) so a FIFO/dir-shaped installs.json can never hang
+// a raw readFileSync — an unreadable SHAPE degrades the same way unparseable
+// CONTENT already did below (rebuilt from scratch, old content ignored).
 export function readRegistry(regPath) {
   let raw
-  try { raw = fs.readFileSync(regPath, 'utf8') } catch { return { entries: [], rebuilt: false } }
+  try {
+    raw = openReadableIndex(fs, regPath)
+  } catch {
+    console.error(`episodic-memory: consumer registry at ${regPath} is unreadable; rebuilding from scratch (old content ignored).`)
+    return { entries: [], rebuilt: true }
+  }
+  if (raw === null) return { entries: [], rebuilt: false } // genuinely absent
   let parsed
   try { parsed = JSON.parse(raw) } catch { parsed = null }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.entries)) {

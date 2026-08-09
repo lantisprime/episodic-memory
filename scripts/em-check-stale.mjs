@@ -56,7 +56,7 @@ try {
   if (scope === 'global' || scope === 'all') results.push(...loadIndex(GLOBAL_DIR, 'global'))
 } catch (e) {
   if (e instanceof IndexUnreadableError) {
-    console.log(JSON.stringify({ status: 'error', message: `em-check-stale: ${e.message}` }))
+    console.log(JSON.stringify({ status: 'error', message: `em-check-stale: ${e.message}`, code: `index-unreadable:${e.code}` }))
     process.exit(1)
   }
   throw e

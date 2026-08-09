@@ -475,7 +475,16 @@ if (foldSuperseded) {
 
       // index.jsonl: keep only non-folded rows (atomic rewrite); folded rows
       // move to archived-index.jsonl with reader-internal fields stripped.
-      const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+      // #653 S4: this read was fully unguarded (raw fs.readFileSync, no
+      // classify at all) — the widest D1 window in foldStore. Same
+      // protection-abort pattern as the archived-index preflight above.
+      let rawPrimaryIndex
+      try {
+        rawPrimaryIndex = readIndexFileOrThrow(fs, indexFile) || ''
+      } catch (e) {
+        emitProtectionAbort(indexUnreadableAbort(dataDir, e), 'fold-superseded')
+      }
+      const lines = rawPrimaryIndex.trim().split('\n').filter(Boolean)
       const keptLines = []
       const archivedLines = []
       for (const line of lines) {
@@ -1412,8 +1421,26 @@ try {
     // 4. tags.json: read, append digest id to each tag's posting, atomic-replace.
     // Null-proto (#469/#470): a tag literally named "constructor"/"__proto__"
     // must not resolve to an inherited Object.prototype member.
+    // #653 (FIX-F, review P2-2 + same-pattern extension): unlike index.jsonl
+    // (classified once via loadIndex above — TOCTOU-only from here), tags.json
+    // has NO upstream classify anywhere in this flow — a static FIFO/dir shape
+    // would hang. fd-guard it, matching this flow's existing protection-abort
+    // idiom (indexUnreadableAbort + emitProtectionAbort, mode 'consolidate-
+    // apply' — same as the index-load site above and --fold-superseded's
+    // sidecar preflight); emitProtectionAbort exits, which skips any pending
+    // finally, so the held lock is released explicitly first.
+    let tagsRaw
+    try {
+      tagsRaw = readIndexFileOrThrow(fs, tagsFile)
+    } catch (e) {
+      releaseStoreWriteLocks(_csLockHandles)
+      _csLockHandles = null
+      emitProtectionAbort(indexUnreadableAbort(DATA_DIR, e, tagsFile), 'consolidate-apply')
+    }
     let tagsIndex = Object.create(null)
-    try { tagsIndex = JSON.parse(fs.readFileSync(tagsFile, 'utf8')) } catch {}
+    if (tagsRaw !== null) {
+      try { tagsIndex = JSON.parse(tagsRaw) } catch {}
+    }
     if (Object.getPrototypeOf(tagsIndex) !== null) tagsIndex = Object.assign(Object.create(null), tagsIndex)
     for (const tag of tags) {
       if (!tagsIndex[tag]) tagsIndex[tag] = []
@@ -1422,8 +1449,20 @@ try {
     atomicReplaceFileSync(tagsFile, JSON.stringify(tagsIndex, null, 2))
 
     // 5. category-index.json: read, append digest id under canonical category.
+    // #653 (FIX-F, review P2-2): same guard as tags.json above — no upstream
+    // classify, static FIFO hang reachable.
+    let catRaw
+    try {
+      catRaw = readIndexFileOrThrow(fs, categoryIndexFile)
+    } catch (e) {
+      releaseStoreWriteLocks(_csLockHandles)
+      _csLockHandles = null
+      emitProtectionAbort(indexUnreadableAbort(DATA_DIR, e, categoryIndexFile), 'consolidate-apply')
+    }
     let catIndex = Object.create(null)
-    try { catIndex = JSON.parse(fs.readFileSync(categoryIndexFile, 'utf8')) } catch {}
+    if (catRaw !== null) {
+      try { catIndex = JSON.parse(catRaw) } catch {}
+    }
     if (Object.getPrototypeOf(catIndex) !== null) catIndex = Object.assign(Object.create(null), catIndex)
     if (!catIndex[category]) catIndex[category] = []
     if (!catIndex[category].includes(digestId)) catIndex[category].push(digestId)

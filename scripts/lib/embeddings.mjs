@@ -28,6 +28,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { tokenizeQuery, TOKENS_DROPPED_KEY } from './relevance.mjs'
+import { readSidecarOrDegrade } from './index-state.mjs'
 
 export const HASH_DIM = 256
 export const HASH_MODEL = `hash-v1-${HASH_DIM}`
@@ -150,10 +151,14 @@ export function cmdEmbed(cmd, items) {
 // ---------------------------------------------------------------------------
 export function loadEmbeddings(dataDir) {
   const p = path.join(dataDir, 'embeddings.jsonl')
-  if (!fs.existsSync(p)) return null
+  // #653: fd-based classify-and-read — a FIFO-shaped embeddings.jsonl must
+  // degrade (F1d), never open/hang. existsSync's own false-negative on a
+  // broken shape is moot here since readSidecarOrDegrade classifies first.
+  const raw = readSidecarOrDegrade(fs, p)
+  if (raw === null) return null
   const rows = new Map()
   let model = null
-  for (const line of fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean)) {
+  for (const line of raw.trim().split('\n').filter(Boolean)) {
     try {
       const row = JSON.parse(line)
       if (typeof row.id === 'string' && Array.isArray(row.v)) {

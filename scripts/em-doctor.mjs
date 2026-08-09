@@ -61,7 +61,7 @@ import { loadIndex, TOKENS_DROPPED_KEY } from './lib/relevance.mjs'
 import { findContradictionCandidates, SUMMARY_JACCARD_MIN } from './lib/contradiction.mjs'
 import { resolveRegisteredStores, realpathSafe } from './lib/registered-stores.mjs'
 import { parsePlaybooksConfig, terminalOf, buildChainMaps, mergeIndexRowsForChain } from './em-trigger-index.mjs'
-import { assertReadableIndex } from './lib/index-state.mjs'
+import { assertReadableIndex, readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -163,7 +163,7 @@ function checkStore(dataDir, scopeName) {
     report('archived-index', scopeName, 'ok', archivedState === 'ok' ? 'archived-index.jsonl readable' : 'archived-index.jsonl absent')
   } catch (e) {
     report('archived-index', scopeName, 'error', `archived-index.jsonl unreadable (${(e && e.code) || 'UNKNOWN'})`,
-      { fix: 'remove the corrupt archived-index.jsonl and re-run em-rebuild-index' })
+      { fix: 'remove the corrupt archived-index.jsonl and re-run em-rebuild-index', code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}` })
   }
 
   if (!hasIndex && !indexUnreadableCode && episodeIds.size === 0) {
@@ -181,21 +181,37 @@ function checkStore(dataDir, scopeName) {
     // unindexed"), so they are skipped. tmp-litter/stale-locks are
     // directory-level and still run below.
     report('index-parse', scopeName, 'error', `index.jsonl unreadable (${indexUnreadableCode})`,
-      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index', code: `index-unreadable:${indexUnreadableCode}` })
   } else {
     // --- index-parse: count rows that fail to parse -------------------------
+    // #653: readIndexFileOrThrow (fd-based) instead of a raw fs.readFileSync
+    // — hasIndex was classified 'ok' above, but a TOCTOU swap between that
+    // classify and this read must never crash em-doctor. On a hit, skip
+    // silently: the loadIndex() call just below reads the same file and is
+    // the single site that reports the defect (never double-report).
     let rawLines = []
     let badLines = 0
+    let indexReadFailed = false
     if (hasIndex) {
-      rawLines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
-      for (const line of rawLines) {
-        try { JSON.parse(line) } catch { badLines++ }
+      let rawIndexContent
+      try {
+        rawIndexContent = readIndexFileOrThrow(fs, indexFile)
+      } catch {
+        indexReadFailed = true
+      }
+      if (!indexReadFailed) {
+        rawLines = (rawIndexContent || '').trim().split('\n').filter(Boolean)
+        for (const line of rawLines) {
+          try { JSON.parse(line) } catch { badLines++ }
+        }
       }
     }
-    if (badLines > 0) {
-      report('index-parse', scopeName, 'error', `${badLines} malformed line(s) in index.jsonl`, { fix: 'em-rebuild-index' })
-    } else {
-      report('index-parse', scopeName, 'ok', hasIndex ? `index.jsonl: ${rawLines.length} row(s), all parse` : 'index.jsonl absent')
+    if (!indexReadFailed) {
+      if (badLines > 0) {
+        report('index-parse', scopeName, 'error', `${badLines} malformed line(s) in index.jsonl`, { fix: 'em-rebuild-index' })
+      } else {
+        report('index-parse', scopeName, 'ok', hasIndex ? `index.jsonl: ${rawLines.length} row(s), all parse` : 'index.jsonl absent')
+      }
     }
 
     // --- row-shape: schema-deviant rows (#448 class) -------------------------
@@ -209,7 +225,7 @@ function checkStore(dataDir, scopeName) {
     } catch (e) {
       // TOCTOU: readable at classify time, swapped to unreadable by read time.
       report('index-parse', scopeName, 'error', `index.jsonl unreadable (${(e && e.code) || 'UNKNOWN'})`,
-        { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+        { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index', code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}` })
       entriesForShape = []
       indexUnreadableCode = (e && e.code) || 'UNKNOWN'
     }
@@ -569,19 +585,43 @@ function checkGateFriction() {
 // section touched.
 // ---------------------------------------------------------------------------
 function checkInstallsDrift() {
-  const readJson = (p) => {
+  // #653 (F1e / review FIX-D, P2-1): classify before read (readIndexFileOrThrow)
+  // so a FIFO-shaped installs.json/install-manifest.json/.episodic-memory-
+  // install.json can never hang a raw readFileSync — em-doctor never aborts.
+  // BUT an unreadable SHAPE (FIFO/dir/EACCES/...) is a real defect and must
+  // stay DISTINGUISHABLE from "genuinely absent" (which legitimately degrades
+  // to "nothing recorded yet, ok"): the caller-supplied `onUnreadable`
+  // callback fires only for IndexUnreadableError, carrying the .code, so the
+  // two global-registry files can be reported as warn rows instead of being
+  // silently indistinguishable from an empty/absent registry.
+  const readJson = (p, onUnreadable) => {
+    let raw
     try {
-      const v = JSON.parse(fs.readFileSync(p, 'utf8'))
+      raw = readIndexFileOrThrow(fs, p)
+    } catch (e) {
+      if (e instanceof IndexUnreadableError && onUnreadable) onUnreadable(e.code)
+      return null
+    }
+    if (raw === null) return null
+    try {
+      const v = JSON.parse(raw)
       return v && typeof v === 'object' && !Array.isArray(v) ? v : null
     } catch { return null }
   }
-  const registry = readJson(path.join(GLOBAL_DIR, 'installs.json'))
+  let installsUnreadableCode = null
+  let manifestUnreadableCode = null
+  const registry = readJson(path.join(GLOBAL_DIR, 'installs.json'), (code) => { installsUnreadableCode = code })
+  if (installsUnreadableCode) {
+    report('installs-drift', 'global', 'warn', `installs.json unreadable (${installsUnreadableCode}) — consumer registry cannot be read`,
+      { code: `index-unreadable:${installsUnreadableCode}` })
+    return
+  }
   const entries = registry && Array.isArray(registry.entries) ? registry.entries : []
   if (entries.length === 0) {
     report('installs-drift', 'global', 'ok', 'no consumer registry entries (no per-project installs recorded yet)')
     return
   }
-  const globalManifest = readJson(path.join(GLOBAL_DIR, 'install-manifest.json'))
+  const globalManifest = readJson(path.join(GLOBAL_DIR, 'install-manifest.json'), (code) => { manifestUnreadableCode = code })
   const globalVersion = globalManifest && typeof globalManifest.source_version === 'string'
     ? globalManifest.source_version : null
   const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')
@@ -621,7 +661,14 @@ function checkInstallsDrift() {
       details.push(`${projectPath}: ${isBehind ? `behind global (${String(m.source_version).slice(0, 12)} vs ${globalVersion.slice(0, 12)})` : 'at global version'}${modified > 0 ? `, ${modified} locally modified artifact(s)` : ''}`)
     }
   }
-  if (behind + withModified + vanished + noManifest === 0) {
+  if (manifestUnreadableCode) {
+    // install-manifest.json unreadable degrades globalVersion to null (every
+    // project reads as "not behind" — a real defect, not a healthy "current"
+    // state), so this can never reach the ok branch below.
+    report('installs-drift', 'global', 'warn',
+      `install-manifest.json unreadable (${manifestUnreadableCode}) — cannot compare ${projects.length} consumer project(s) against the global version`,
+      { code: `index-unreadable:${manifestUnreadableCode}` })
+  } else if (behind + withModified + vanished + noManifest === 0) {
     report('installs-drift', 'global', 'ok', `${projects.length} consumer project(s) current with global${globalVersion ? ` (${globalVersion.slice(0, 12)})` : ''}`)
   } else {
     report('installs-drift', 'global', 'warn',
@@ -727,7 +774,7 @@ function checkPlaybookRegistration(dataDir, scopeName) {
     scannedRows = loadIndex(dataDir, scopeName)
   } catch (e) {
     report('playbook-registration', scopeName, 'error', `index.jsonl unreadable (${(e && e.code) || 'UNKNOWN'}) — cannot check playbook registration`,
-      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index', code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}` })
     return
   }
   // NF4 (review r2): merge = (scanned store rows) + GLOBAL_DIR rows.
@@ -741,7 +788,7 @@ function checkPlaybookRegistration(dataDir, scopeName) {
     mergedRows = mergeIndexRowsForChain(loadIndex(dataDir, scopeName), loadIndex(GLOBAL_DIR, 'global'))
   } catch (e) {
     report('playbook-registration', scopeName, 'error', `index unreadable (${(e && e.code) || 'UNKNOWN'}) — cannot check playbook registration`,
-      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index' })
+      { fix: 'remove the corrupt index.jsonl and re-run em-rebuild-index', code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}` })
     return
   }
   const { byId, successorOf } = buildChainMaps(mergedRows)

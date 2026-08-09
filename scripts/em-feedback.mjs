@@ -50,7 +50,7 @@ function filterReadableStoreDirs(dirs) {
     try {
       state = assertReadableIndex(fs, indexFile)
     } catch (e) {
-      console.log(JSON.stringify({ status: 'error', message: `em-feedback: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${indexFile})` }))
+      console.log(JSON.stringify({ status: 'error', message: `em-feedback: episode index unreadable (${(e && e.code) || 'UNKNOWN'}) (${indexFile})`, code: `index-unreadable:${(e && e.code) || 'UNKNOWN'}` }))
       process.exit(1)
     }
     if (state === 'ok') kept.push(dir)
@@ -165,7 +165,7 @@ if (scanTextFile !== undefined) {
       ({ resolved, skipped } = resolveIds())
     } catch (e) {
       if (e instanceof IndexUnreadableError) {
-        console.log(JSON.stringify({ status: 'error', message: `em-feedback: ${e.message}` }))
+        console.log(JSON.stringify({ status: 'error', message: `em-feedback: ${e.message}`, code: `index-unreadable:${e.code}` }))
         process.exit(1)
       }
       throw e
@@ -188,7 +188,11 @@ if (scanTextFile !== undefined) {
         const targetIds = idsByDir.get(name)
         if (targetIds.size === 0) continue
         const indexFile = path.join(dir, 'index.jsonl')
-        const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+        // #653 S4: fd-based read (readIndexFileOrThrow) instead of a raw
+        // readFileSync — never opens a FIFO. Current failure semantics
+        // preserved: any thrown error (incl. IndexUnreadableError) is
+        // caught by the surrounding try/catch below exactly as before.
+        const lines = (readIndexFileOrThrow(fs, indexFile) || '').trim().split('\n').filter(Boolean)
         const updated = lines.map(line => {
           try {
             const entry = JSON.parse(line)
@@ -257,7 +261,10 @@ try {
   // command began, especially when several useful/noise votes overlap.
   for (const dir of candidateDirs) {
     const indexFile = path.join(dir, 'index.jsonl')
-    const lines = fs.readFileSync(indexFile, 'utf8').trim().split('\n').filter(Boolean)
+    // #653 S4: fd-based read; current failure semantics preserved (any
+    // thrown error, incl. IndexUnreadableError, is caught below at the
+    // existing generic writeError handler).
+    const lines = (readIndexFileOrThrow(fs, indexFile) || '').trim().split('\n').filter(Boolean)
     let found = false
     const updated = lines.map(line => {
       try {
