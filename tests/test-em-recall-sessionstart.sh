@@ -305,7 +305,10 @@ E2E_HOME=$(mktemp -d)
 E2E_REPO=$(mktemp -d)
 mkdir -p "$E2E_HOME/.episodic-memory/scripts/lib"
 cp "$REPO_ROOT/scripts/enforce-contract.mjs" "$E2E_HOME/.episodic-memory/scripts/enforce-contract.mjs"
-for lib in local-dir marker-paths marker-state session-id bp001-advisory json-instance-validate effective-tier; do
+# index-state: bp001-advisory imports readSidecarOrDegrade for its #666 S4
+# SessionStart-hang fix; index-state.mjs itself imports only node:path, so
+# staging it is closure-complete.
+for lib in local-dir marker-paths marker-state session-id bp001-advisory json-instance-validate effective-tier index-state; do
   cp "$REPO_ROOT/scripts/lib/$lib.mjs" "$E2E_HOME/.episodic-memory/scripts/lib/$lib.mjs"
 done
 ( cd "$E2E_REPO" && git init -q -b main && git config user.email t@t && git config user.name t && echo x > README.md && git add . && git commit -q -m init ) >/dev/null 2>&1

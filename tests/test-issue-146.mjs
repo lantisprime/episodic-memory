@@ -554,9 +554,12 @@ function mkE2EHome() {
   //   session-id (2026-05-18 concurrent-session fix)
   //   effective-tier + json-instance-validate (P3b-2 tier/clamp layer)
   //   bp001-advisory (P3d, relocated bp-001 advisory)
+  //   index-state (#666 S4: bp001-advisory imports readSidecarOrDegrade for
+  //   its SessionStart-hang fix; index-state.mjs itself imports only
+  //   node:path, so staging it is closure-complete)
   // Omit any and enforce-contract fails to load → hook falls back to loud-fail.
   fs.copyFileSync(ENFORCE, path.join(scripts, 'enforce-contract.mjs'))
-  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs', 'effective-tier.mjs', 'json-instance-validate.mjs', 'bp001-advisory.mjs']) {
+  for (const lib of ['local-dir.mjs', 'marker-paths.mjs', 'marker-state.mjs', 'session-id.mjs', 'effective-tier.mjs', 'json-instance-validate.mjs', 'bp001-advisory.mjs', 'index-state.mjs']) {
     const libSrc = path.join(REPO_ROOT, 'scripts', 'lib', lib)
     fs.copyFileSync(libSrc, path.join(scripts, 'lib', lib))
   }
