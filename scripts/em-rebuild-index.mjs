@@ -79,6 +79,7 @@ if (checkMode) {
   let vocabLoaded = true
   try { loadCategories() } catch { vocabLoaded = false }
   const drift = []
+  const warnings = []
   if (vocabLoaded) {
     const dirs = []
     if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
@@ -90,10 +91,19 @@ if (checkMode) {
       for (const file of files) {
         // #653 (F1c): lstat-classify before read — a FIFO-shaped episode
         // file must never hang the drift scan; a non-regular shape is not a
-        // parseable episode, so it is silently skipped (this mode reports
-        // drift only, no warnings field).
+        // parseable episode, so it is skipped. #653's original F1c decision
+        // was "drift only, no warnings field" — #666 SUPERSEDES that: a
+        // skip now surfaces via the warnings array below (same string
+        // convention as the rebuild path, :238-243), so a --check run
+        // silently losing FIFO/dir episodes to the classify gate is
+        // visible, not invisible. Drift semantics (the `drift` array + its
+        // exit-code contract) are UNCHANGED.
         const filePath = path.join(episodesDir, file)
-        if (classifyIndexFile(fs, filePath).state !== 'ok') continue
+        const shape = classifyIndexFile(fs, filePath)
+        if (shape.state !== 'ok') {
+          warnings.push(`skipped ${file}: not a regular file (${shape.state === 'unreadable' ? shape.code : 'vanished'})`)
+          continue
+        }
         let fm
         try { fm = parseFrontmatter(fs.readFileSync(filePath, 'utf8')) } catch (e) {
           console.log(JSON.stringify({ status: 'error', error: 'structured-frontmatter-invalid', field: e.field, id: e.id || null }))
@@ -109,7 +119,7 @@ if (checkMode) {
     // reader surface must never be fatal (B1): degrade to an empty, clean report + a stderr warn
     process.stderr.write('em-rebuild-index --check: categories.json unloadable; drift not classified\n')
   }
-  console.log(JSON.stringify({ status: 'ok', drift }))
+  console.log(JSON.stringify({ status: 'ok', drift, ...(warnings.length ? { warnings } : {}) }))
   process.exit(drift.length ? 1 : 0)
 }
 

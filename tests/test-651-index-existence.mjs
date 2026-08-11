@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   classifyIndexFile, assertReadableIndex, readIndexFileOrThrow, openReadableIndex, IndexUnreadableError,
+  readBodyOrSkip, openReadableBody, BodyUnreadableError,
 } from '../scripts/lib/index-state.mjs'
 
 // EM651_TEST_REPO_OVERRIDE: points spawned scripts at an alternate repo root
@@ -327,6 +328,132 @@ function cleanup(world) {
     assert(readIndexFileOrThrow(fs, okPath) === 'hello\n', 'ok -> content')
     fs.unlinkSync(okPath)
   })
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})()
+
+// =============================================================================
+// S1 — body-read helper unit legs (issues #666/#667): readBodyOrSkip /
+// openReadableBody against FIFO/dir/absent shapes.
+//
+// Review fix-round item 1 (both lenses, mutation-proven): the FIFO legs are
+// spawned into a CHILD process with a hard timeout, NOT called in-process.
+// A same-process call is safe TODAY because O_NONBLOCK makes open() return
+// immediately — but that is exactly the property a regression could break
+// (e.g. a mutant that drops O_NONBLOCK or swaps in a blocking read). Called
+// in-process, that mutant would FREEZE this entire suite forever (no
+// external alarm to kill it), violating spec §5's fail-not-freeze
+// requirement — the suite must observe the regression as a FAILURE, not
+// hang until an operator notices. Dir/absent shapes stay in-process: no
+// blocking-read mutant can hang an lstat/fstat-only path, so a spawn there
+// buys nothing and only adds process overhead.
+// =============================================================================
+;(function S1_bodyHelpers() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'em666-s1-'))
+  const INDEX_STATE_PATH = path.join(SCRIPTS, 'lib', 'index-state.mjs')
+
+  // spawnBodyHelperChild(childSrcLines) — writes a throwaway .mjs file that
+  // imports index-state.mjs fresh (same pattern as the D1 interleave child
+  // below) and spawns it with timeout:10000 + SIGKILL. A regression that
+  // reintroduces a blocking read is killed and reported as a signal, not a
+  // frozen suite.
+  function spawnBodyHelperChild(name, childSrcLines) {
+    const childPath = path.join(dir, `child-${name}.mjs`)
+    fs.writeFileSync(childPath, childSrcLines.join('\n'))
+    const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' })
+    fs.rmSync(childPath, { force: true })
+    return r
+  }
+
+  t('S1 readBodyOrSkip — absent (ENOENT), never throws', () => {
+    const p = path.join(dir, 'absent.md')
+    const r = readBodyOrSkip(fs, p)
+    assert(r.ok === false && r.code === 'ENOENT', JSON.stringify(r))
+  })
+
+  t('S1 readBodyOrSkip — directory (EISDIR)', () => {
+    const p = path.join(dir, 'adir.md')
+    fs.mkdirSync(p)
+    const r = readBodyOrSkip(fs, p)
+    assert(r.ok === false && r.code === 'EISDIR', JSON.stringify(r))
+    fs.rmdirSync(p)
+  })
+
+  t('S1 readBodyOrSkip — ok on a regular file, returns raw content', () => {
+    const p = path.join(dir, 'ok.md')
+    fs.writeFileSync(p, 'hello body\n')
+    const r = readBodyOrSkip(fs, p)
+    assert(r.ok === true && r.raw === 'hello body\n', JSON.stringify(r))
+    fs.unlinkSync(p)
+  })
+
+  if (!IS_WIN) {
+    t('S1 readBodyOrSkip — FIFO (ENOTREG), no hang (spawned, alarm-wrapped)', () => {
+      const p = path.join(dir, 'fifo.md')
+      const mk = spawnSync('mkfifo', [p])
+      assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+      const r = spawnBodyHelperChild('readBodyOrSkip-fifo', [
+        `import fs from 'node:fs'`,
+        `import { readBodyOrSkip } from ${JSON.stringify(INDEX_STATE_PATH)}`,
+        `const r = readBodyOrSkip(fs, ${JSON.stringify(p)})`,
+        `console.log(JSON.stringify(r))`,
+      ])
+      fs.unlinkSync(p)
+      assert(r.signal === null, `S1 readBodyOrSkip FIFO: no signal (timeout/kill) — got ${r.signal} (this is the fail-not-freeze regression signature)`)
+      assert(r.status === 0, `S1 readBodyOrSkip FIFO: child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+      const j = JSON.parse((r.stdout || '').trim())
+      assert(j.ok === false && j.code === 'ENOTREG', JSON.stringify(j))
+    })
+  } else {
+    skip('S1 readBodyOrSkip — FIFO (ENOTREG)', 'mkfifo unavailable on win32')
+  }
+
+  t('S1 openReadableBody — absent returns null', () => {
+    const p = path.join(dir, 'absent2.md')
+    assert(openReadableBody(fs, p) === null, 'absent -> null')
+  })
+
+  t('S1 openReadableBody — ok returns content', () => {
+    const p = path.join(dir, 'ok2.md')
+    fs.writeFileSync(p, 'content\n')
+    assert(openReadableBody(fs, p) === 'content\n', 'ok -> content')
+    fs.unlinkSync(p)
+  })
+
+  t('S1 openReadableBody — directory throws BodyUnreadableError(EISDIR)', () => {
+    const p = path.join(dir, 'adir2.md')
+    fs.mkdirSync(p)
+    let threw = null
+    try { openReadableBody(fs, p) } catch (e) { threw = e }
+    assert(threw instanceof BodyUnreadableError && threw.code === 'EISDIR', JSON.stringify(threw))
+    assert(/episode body unreadable \(EISDIR\)/.test(threw.message), threw.message)
+    fs.rmdirSync(p)
+  })
+
+  if (!IS_WIN) {
+    t('S1 openReadableBody — FIFO throws BodyUnreadableError(ENOTREG), no hang (spawned, alarm-wrapped)', () => {
+      const p = path.join(dir, 'fifo2.md')
+      const mk = spawnSync('mkfifo', [p])
+      assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+      const r = spawnBodyHelperChild('openReadableBody-fifo', [
+        `import fs from 'node:fs'`,
+        `import { openReadableBody, BodyUnreadableError } from ${JSON.stringify(INDEX_STATE_PATH)}`,
+        `try {`,
+        `  const raw = openReadableBody(fs, ${JSON.stringify(p)})`,
+        `  console.log(JSON.stringify({ step: 'unexpected-ok', raw }))`,
+        `} catch (e) {`,
+        `  console.log(JSON.stringify({ step: 'typed-abort', isBodyUnreadable: e instanceof BodyUnreadableError, code: e.code, message: e.message }))`,
+        `}`,
+      ])
+      fs.unlinkSync(p)
+      assert(r.signal === null, `S1 openReadableBody FIFO: no signal (timeout/kill) — got ${r.signal} (this is the fail-not-freeze regression signature)`)
+      assert(r.status === 0, `S1 openReadableBody FIFO: child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+      const j = JSON.parse((r.stdout || '').trim())
+      assert(j.step === 'typed-abort' && j.isBodyUnreadable && j.code === 'ENOTREG', JSON.stringify(j))
+    })
+  } else {
+    skip('S1 openReadableBody — FIFO (ENOTREG)', 'mkfifo unavailable on win32')
+  }
 
   fs.rmSync(dir, { recursive: true, force: true })
 })()
@@ -830,6 +957,192 @@ t('T8c — em-rebuild-index heals dangling index row left by aborted em-store (s
     const rawAfterHeal = fs.readFileSync(indexPath, 'utf8')
     assert(rawAfterHeal.trim() === '' || afterHeal.length === 0, `em-rebuild-index (T8c): empty index (no FS-backed rows), got raw=${JSON.stringify(rawAfterHeal.slice(0, 200))} entries=${afterHeal.length}`)
   } finally { cleanup(world) }
+})
+
+// =============================================================================
+// T8d/T8e/T8f (issues #666/#667 S5, audit Q6): em-store's write-block
+// envelope class. T8d/T8e reuse T8b's fixture shapes (episodes/ as a regular
+// file / chmod 0000) but assert the NEW typed episode-write-failed envelope
+// on top of T8b's untouched side-effect invariants. T8f exercises the
+// lock-acquire branch (store-lock-failed) via a chmod 0555 data dir.
+// =============================================================================
+
+t('T8d — em-store with episodes/ as a regular file: typed episode-write-failed:EEXIST envelope, T8b invariants hold', () => {
+  const world = mkStore()
+  try {
+    const indexPath = path.join(world.localDir, 'index.jsonl')
+    const episodesDir = path.join(world.localDir, 'episodes')
+    const beforeEntries = readIndexEntries(indexPath)
+    const tagsFile = path.join(world.localDir, 'tags.json')
+    const beforeTags = fs.existsSync(tagsFile) ? fs.readFileSync(tagsFile, 'utf8') : null
+    fs.rmSync(episodesDir, { recursive: true, force: true })
+    fs.writeFileSync(episodesDir, '')
+
+    const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+      '--project', 'p651', '--category', 'decision',
+      '--summary', 'write-order-t8d', '--body', 'defer3 t8d body',
+      '--scope', 'local',
+    ], { cwd: world.proj, home: world.root })
+
+    assert(r.signal === null, `em-store (T8d): no signal, got ${r.signal}: ${r.stderr}`)
+    // Q6 (audit): explicit non-zero-status assert kills the "envelope + exit 0" mutation (T8b precedent).
+    assert(r.status !== 0, `em-store (T8d): non-zero exit, got status=${r.status} stdout=${(r.stdout || '').slice(0, 200)}`)
+    const j = lastJson(r.stdout)
+    assert(j && j.status === 'error', `em-store (T8d): typed envelope, got ${r.stdout}`)
+    assert(j.code === 'episode-write-failed:EEXIST', `em-store (T8d): code episode-write-failed:EEXIST, got ${JSON.stringify(j)}`)
+    assert(/episodes-dir/.test(r.stdout), `em-store (T8d): leg name in message, got ${r.stdout.slice(0, 300)}`)
+    assert(/EEXIST/.test(r.stdout), `em-store (T8d): CODE in message, got ${r.stdout.slice(0, 300)}`)
+
+    // T8b invariants, re-checked: episodes/ still the regular file (no
+    // promotion), dangling row (exactly one new row), no orphan .md, derived
+    // JSONs untouched.
+    const st = fs.lstatSync(episodesDir)
+    assert(st.isFile(), 'em-store (T8d): episodes/ still a regular file (mkdirSync did NOT promote)')
+    const afterEntries = readIndexEntries(indexPath)
+    assert(afterEntries.length === beforeEntries.length + 1, `em-store (T8d): index gained exactly one dangling row, before=${beforeEntries.length} after=${afterEntries.length}`)
+    const dangling = afterEntries.find(e => !beforeEntries.some(b => b.id === e.id))
+    assert(dangling && dangling.summary === 'write-order-t8d', `em-store (T8d): dangling row summary matches, got ${JSON.stringify(dangling)}`)
+    const afterTags = fs.existsSync(tagsFile) ? fs.readFileSync(tagsFile, 'utf8') : null
+    assert(afterTags === beforeTags, `em-store (T8d): tags.json unchanged (derived indexes never reached), before=${beforeTags} after=${afterTags}`)
+  } finally { cleanup(world) }
+})
+
+{
+  const name = 'T8e — em-store with episodes/ chmod 0000: typed episode-write-failed:EACCES envelope'
+  if (IS_ROOT) { skip(name, 'root bypasses permission checks') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        const episodesDir = path.join(world.localDir, 'episodes')
+        const beforeEntries = readIndexEntries(indexPath)
+        fs.chmodSync(episodesDir, 0o000)
+        const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'decision',
+          '--summary', 'write-order-t8e', '--body', 'defer3 t8e body',
+          '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        fs.chmodSync(episodesDir, 0o755)
+        assert(r.signal === null, `em-store (T8e): no signal, got ${r.signal}: ${r.stderr}`)
+        assert(r.status !== 0, `em-store (T8e): non-zero exit, got status=${r.status} stdout=${(r.stdout || '').slice(0, 200)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-store (T8e): typed envelope, got ${r.stdout}`)
+        assert(j.code === 'episode-write-failed:EACCES', `em-store (T8e): code episode-write-failed:EACCES, got ${JSON.stringify(j)}`)
+        assert(/episode-file/.test(r.stdout), `em-store (T8e): leg name in message, got ${r.stdout.slice(0, 300)}`)
+        const afterEntries = readIndexEntries(indexPath)
+        assert(afterEntries.length === beforeEntries.length + 1, `em-store (T8e): index gained exactly one dangling row, before=${beforeEntries.length} after=${afterEntries.length}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+{
+  const name = 'T8f — em-store with data dir chmod 0555: typed store-lock-failed:EACCES envelope, index byte-unchanged'
+  if (IS_ROOT) { skip(name, 'root bypasses permission checks') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        const beforeIndex = fs.readFileSync(indexPath, 'utf8')
+        fs.chmodSync(world.localDir, 0o555)
+        const r = run(path.join(SCRIPTS, 'em-store.mjs'), [
+          '--project', 'p651', '--category', 'decision',
+          '--summary', 'write-order-t8f', '--body', 'defer3 t8f body',
+          '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        fs.chmodSync(world.localDir, 0o755)
+        assert(r.signal === null, `em-store (T8f): no signal, got ${r.signal}: ${r.stderr}`)
+        assert(r.status !== 0, `em-store (T8f): non-zero exit, got status=${r.status} stdout=${(r.stdout || '').slice(0, 200)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-store (T8f): typed envelope, got ${r.stdout}`)
+        assert(j.code === 'store-lock-failed:EACCES', `em-store (T8f): code store-lock-failed:EACCES, got ${JSON.stringify(j)}`)
+        const afterIndex = fs.readFileSync(indexPath, 'utf8')
+        assert(afterIndex === beforeIndex, 'em-store (T8f): index.jsonl byte-unchanged (aborted before lock/any write)')
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// --- em-revise typed-abort leg (FIFO original body) ---
+{
+  const name = 'em-revise x FIFO original body -> typed episode-unreadable abort, no supersede written, follow-up revise succeeds'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const episodePath = path.join(world.localDir, 'episodes', `${world.seedId}.md`)
+        const indexPath = path.join(world.localDir, 'index.jsonl')
+        const beforeIndex = fs.readFileSync(indexPath, 'utf8')
+        fs.renameSync(episodePath, `${episodePath}.bak`)
+        const mk = spawnSync('mkfifo', [episodePath])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-revise.mjs'), [
+          '--original', world.seedId, '--project', 'p651', '--summary', 'fifo-original-revise', '--body', 'body', '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        fs.unlinkSync(episodePath)
+        fs.renameSync(`${episodePath}.bak`, episodePath)
+        assert(r.signal === null, `em-revise: no signal, got ${r.signal}: ${r.stderr}`)
+        assert(r.status === 1, `em-revise: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'error', `em-revise: typed envelope, got ${r.stdout}`)
+        assert(/^episode-unreadable:/.test(j.code || ''), `em-revise: code episode-unreadable:<CODE>, got ${JSON.stringify(j)}`)
+        const afterIndex = fs.readFileSync(indexPath, 'utf8')
+        assert(afterIndex === beforeIndex, 'em-revise: index.jsonl byte-unchanged (no supersede written)')
+        // Follow-up healthy revise succeeds — no lock leak, no lingering damage.
+        const retry = run(path.join(SCRIPTS, 'em-revise.mjs'), [
+          '--original', world.seedId, '--project', 'p651', '--summary', 'follow-up-revise', '--body', 'body', '--scope', 'local',
+        ], { cwd: world.proj, home: world.root })
+        assert(retry.status === 0, `em-revise retry: exit 0, got ${retry.status}: stdout=${(retry.stdout || '').slice(0, 300)}`)
+        const rj = lastJson(retry.stdout)
+        assert(rj && rj.status === 'ok', `em-revise retry: status ok, got ${retry.stdout}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// --- em-rebuild-index --check warnings leg (P3-iii) ---
+{
+  const name = 'em-rebuild-index --check x FIFO episode -> warnings entry present, drift semantics unchanged'
+  if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
+    t(name, () => {
+      const world = mkStore()
+      try {
+        const fifoEpisode = path.join(world.localDir, 'episodes', 'fifo-check-episode.md')
+        const mk = spawnSync('mkfifo', [fifoEpisode])
+        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+        const r = run(path.join(SCRIPTS, 'em-rebuild-index.mjs'), ['--check', '--scope', 'local'], { cwd: world.proj, home: world.root })
+        fs.rmSync(fifoEpisode, { force: true })
+        assert(r.signal === null, `em-rebuild-index --check: no signal, got ${r.signal}`)
+        assert(r.status === 0, `em-rebuild-index --check: exit 0 (seed episode has no drift), got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+        const j = lastJson(r.stdout)
+        assert(j && j.status === 'ok', `em-rebuild-index --check: status ok, got ${r.stdout}`)
+        assert(Array.isArray(j.drift) && j.drift.length === 0, `em-rebuild-index --check: drift semantics unchanged (empty), got ${JSON.stringify(j.drift)}`)
+        // Exactly one warning (the FIFO episode) — kills a warn-on-every-file
+        // mutation; the fixture's ONLY other file is the healthy seed episode.
+        assert(Array.isArray(j.warnings) && j.warnings.length === 1, `em-rebuild-index --check: exactly one warning, got ${JSON.stringify(j.warnings)}`)
+        assert(j.warnings.some(w => w.includes('fifo-check-episode.md')), `em-rebuild-index --check: warnings names the skipped FIFO episode, got ${JSON.stringify(j.warnings)}`)
+      } finally { cleanup(world) }
+    })
+  }
+}
+
+// --- em-restore stack-field regression leg (review fix-round item 6) ---
+// Cheap construction: a nonexistent --from backup dir fails preflight()
+// (plain Error, not IndexUnreadableError) BEFORE any store touch — dry-run
+// is the default mode, no --apply/fixture backup needed.
+t('em-restore error envelope: nonexistent --from backup dir -> message present, no stack key', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'em651-restore-nostack-'))
+  try {
+    const r = run(path.join(SCRIPTS, 'em-restore.mjs'), ['--from', path.join(root, 'does-not-exist')], { cwd: root, home: root })
+    assert(r.signal === null, `em-restore: no signal, got ${r.signal}`)
+    assert(r.status === 1, `em-restore: exit 1, got ${r.status}: stdout=${(r.stdout || '').slice(0, 300)}`)
+    const j = lastJson(r.stdout)
+    assert(j && j.status === 'error', `em-restore: typed envelope, got ${r.stdout}`)
+    assert(typeof j.message === 'string' && j.message.length > 0, `em-restore: message present, got ${JSON.stringify(j)}`)
+    assert(!('stack' in j), `em-restore: no stack key on the error payload (S6 Family A), got keys=${JSON.stringify(Object.keys(j))}`)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 // =============================================================================

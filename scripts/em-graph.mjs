@@ -46,7 +46,7 @@ import os from 'os'
 import { resolveLocalDir, resolveRepoRoot } from './lib/local-dir.mjs'
 import { loadIndex } from './lib/relevance.mjs'
 import { resolveRuleDir, scanRuleNodes, scanRfcNodes, slugify } from './lib/rule-nodes.mjs'
-import { IndexUnreadableError } from './lib/index-state.mjs'
+import { IndexUnreadableError, readBodyOrSkip } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -173,6 +173,13 @@ if (nodeTypes.includes('rfc')) {
 const nodeDiag = () => (nodesRaw === undefined ? {} : { skipped_nodes: skippedNodes })
 const danglingOut = () => (edgeTypes.some(e => RULE_EDGE_TYPES.includes(e)) ? { dangling } : {})
 
+// #666 S2: body-read skip warnings for bodyCitations/ruleBody below (F5:
+// non-ENOENT codes only — ENOENT/absent stays silent, zero cites edges from
+// that row, same as today). Spread conditionally into every output shape,
+// mirroring nodeDiag/danglingOut's additive-field convention.
+const bodyWarnings = []
+const bodyWarningsOut = () => (bodyWarnings.length ? { body_warnings: bodyWarnings } : {})
+
 // ---------------------------------------------------------------------------
 // Edge projection. adjacency: id -> [{from,to,type}] (edge listed under BOTH
 // endpoints for undirected traversal; emitted once via a key set).
@@ -207,16 +214,21 @@ const strings = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : 
 // example ids in code samples don't fabricate lineage (RFC-007 cites rule).
 const ID_RE = /\d{8}-\d{6}-[a-z0-9-]+-[a-f0-9]{4}/g
 function bodyCitations(row, dataDir) {
-  try {
-    const content = fs.readFileSync(path.join(dataDir, 'episodes', `${row.id}.md`), 'utf8')
-    // BODY only: frontmatter ids (supersedes:, superseded_by:, consolidates:)
-    // are already first-class edges — rescanning them as cites would emit
-    // duplicate parallel edges for every chain link.
-    const parts = content.split('---')
-    const body = parts.length >= 3 ? parts.slice(2).join('---') : content
-    const cleaned = body.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '')
-    return [...new Set(cleaned.match(ID_RE) || [])].filter(id => id !== row.id && byId.has(id))
-  } catch { return [] }
+  // #666 S2 :211: readBodyOrSkip replaces the swallowing try/catch — a
+  // FIFO-shaped body skips (zero cites edges, unchanged) and, for a
+  // non-ENOENT defect, warns (F5); an absent body stays silent.
+  const r = readBodyOrSkip(fs, path.join(dataDir, 'episodes', `${row.id}.md`))
+  if (!r.ok) {
+    if (r.code !== 'ENOENT') bodyWarnings.push(`episode body skipped ${row.id}: unreadable (${r.code})`)
+    return []
+  }
+  // BODY only: frontmatter ids (supersedes:, superseded_by:, consolidates:)
+  // are already first-class edges — rescanning them as cites would emit
+  // duplicate parallel edges for every chain link.
+  const parts = r.raw.split('---')
+  const body = parts.length >= 3 ? parts.slice(2).join('---') : r.raw
+  const cleaned = body.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '')
+  return [...new Set(cleaned.match(ID_RE) || [])].filter(id => id !== row.id && byId.has(id))
 }
 
 // --- Phase 3: rule-body edge extraction (RFC-007 wiki-link + composes-with) ---
@@ -232,11 +244,18 @@ const stripFenced = s => s.replace(/```[\s\S]*?```/g, '').replace(/~~~[\s\S]*?~~
 const stripInline = s => s.replace(/`[^`\n]*`/g, '')
 
 function ruleBody(file) {
-  try {
-    const content = fs.readFileSync(file, 'utf8')
-    const parts = content.split('---')
-    return parts.length >= 3 ? parts.slice(2).join('---') : content
-  } catch { return '' }
+  // #666 S2 :236: readBodyOrSkip replaces the swallowing try/catch — same
+  // skip+warn contract as bodyCitations above, applied to a rule/RFC file
+  // instead of an episode body (the fd-based primitive is body-shape
+  // agnostic; only the message wording differs, since there is no episode
+  // id to name here).
+  const r = readBodyOrSkip(fs, file)
+  if (!r.ok) {
+    if (r.code !== 'ENOENT') bodyWarnings.push(`rule body skipped ${path.basename(file)}: unreadable (${r.code})`)
+    return ''
+  }
+  const parts = r.raw.split('---')
+  return parts.length >= 3 ? parts.slice(2).join('---') : r.raw
 }
 
 // Secondary index for TARGET resolution only. Node ids stay frontmatter-name
@@ -396,12 +415,12 @@ if (orphans || hubs) {
     // otherwise, so the default result set is unchanged (REQ-8).
     for (const id of ruleById.keys()) if ((degree.get(id) || 0) === 0) out.push(nodeOut(id, 0))
     for (const id of rfcById.keys()) out.push(nodeOut(id, 0))
-    console.log(JSON.stringify({ status: 'ok', mode: 'orphans', count: out.length, nodes: out, ...nodeDiag(), ...danglingOut() }))
+    console.log(JSON.stringify({ status: 'ok', mode: 'orphans', count: out.length, nodes: out, ...nodeDiag(), ...danglingOut(), ...bodyWarningsOut() }))
   } else {
     const ranked = [...degree.entries()].filter(([id, d]) => d > 0 && reportable(byId.get(id)))
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, top)
       .map(([id, d]) => ({ ...nodeOut(id, 0), degree: d }))
-    console.log(JSON.stringify({ status: 'ok', mode: 'hubs', count: ranked.length, nodes: ranked }))
+    console.log(JSON.stringify({ status: 'ok', mode: 'hubs', count: ranked.length, nodes: ranked, ...bodyWarningsOut() }))
   }
   process.exit(0)
 }
@@ -423,6 +442,7 @@ if (!byId.has(from)) {
         edges: [],
         ...nodeDiag(),
         ...danglingOut(),
+        ...bodyWarningsOut(),
       }))
       process.exit(0)
     }
@@ -482,4 +502,5 @@ console.log(JSON.stringify({
   ...(truncated ? { truncated: true } : {}),
   ...nodeDiag(),
   ...danglingOut(),
+  ...bodyWarningsOut(),
 }))

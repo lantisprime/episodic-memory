@@ -210,3 +210,71 @@ const FILE_ROLE_BY_BASENAME = {
 export function roleForFile(filePath) {
   return FILE_ROLE_BY_BASENAME[path.basename(filePath)] || 'episode index'
 }
+
+// ---------------------------------------------------------------------------
+// Episode-body fd-based read helpers (issues #666/#667). Same fd-based
+// classify-and-read pattern as openReadableIndex above (ONE open(O_RDONLY|
+// O_NONBLOCK) + fstat(fd) + read from that SAME fd) — store-identity.mjs:114
+// already proves the pattern generalizes to any store-dir file, not just
+// index.jsonl. Body files get their OWN error class (BodyUnreadableError)
+// and their own wire-code family (`episode-unreadable:<CODE>`) rather than
+// reusing IndexUnreadableError/roleForFile: roleForFile's basename map does
+// not generalize to `<id>.md` filenames, and the two families are
+// semantically distinct (an unreadable BODY is not an unreadable INDEX).
+// ---------------------------------------------------------------------------
+
+// BodyUnreadableError — typed abort for a single-target body read
+// (openReadableBody). Fields mirror IndexUnreadableError: .code/.file.
+export class BodyUnreadableError extends Error {
+  constructor(filePath, code) {
+    super(`episode body unreadable (${code}) (${filePath})`)
+    this.code = code
+    this.file = filePath
+  }
+}
+
+// readBodyOrSkip(fsMod, filePath) -> { ok:true, raw } | { ok:false, code } —
+// never throws, never blocks. For per-row iteration in query tools and
+// advisory reads: 'absent' and 'unreadable' both collapse to ok:false with
+// the classify code (ENOENT | EISDIR | ENOTREG | ...); the CALLER decides
+// warn-vs-silent per code (F5 rule: non-ENOENT warns, ENOENT stays silent).
+export function readBodyOrSkip(fsMod, filePath) {
+  const O_NONBLOCK_READ = fsMod.constants.O_RDONLY | fsMod.constants.O_NONBLOCK
+  let fd
+  try {
+    fd = fsMod.openSync(filePath, O_NONBLOCK_READ)
+  } catch (e) {
+    return { ok: false, code: (e && e.code) || 'UNKNOWN' }
+  }
+  try {
+    let st
+    try {
+      st = fsMod.fstatSync(fd)
+    } catch (e) {
+      return { ok: false, code: (e && e.code) || 'UNKNOWN' }
+    }
+    if (st.isDirectory()) return { ok: false, code: 'EISDIR' }
+    if (!st.isFile()) return { ok: false, code: 'ENOTREG' }
+    try {
+      return { ok: true, raw: fsMod.readFileSync(fd, 'utf8') }
+    } catch (e) {
+      return { ok: false, code: (e && e.code) || 'UNKNOWN' }
+    }
+  } finally {
+    fsMod.closeSync(fd)
+  }
+}
+
+// openReadableBody(fsMod, filePath) -> raw string | null on absent (mirrors
+// openReadableIndex's absent contract); throws BodyUnreadableError on
+// unreadable. For single-target reads where the caller asked for THAT
+// episode. Callers MUST handle the null return explicitly. Built on top of
+// readBodyOrSkip rather than duplicating the fd-based pattern — the two
+// helpers share ONE primitive, differing only in how they surface a defect
+// (return vs throw).
+export function openReadableBody(fsMod, filePath) {
+  const r = readBodyOrSkip(fsMod, filePath)
+  if (r.ok) return r.raw
+  if (r.code === 'ENOENT') return null
+  throw new BodyUnreadableError(filePath, r.code)
+}

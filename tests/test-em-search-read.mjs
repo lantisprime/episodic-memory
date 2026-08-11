@@ -137,9 +137,11 @@ function writeEpisode(cwd, opts) {
   return id;
 }
 
+const IS_WIN = process.platform === 'win32';
+
 function run(cwd, home, args) {
   const r = spawnSync('node', [EM_SEARCH, ...args], {
-    cwd, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
+    cwd, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: 10000,
     env: { ...process.env, HOME: home, USERPROFILE: home },
   });
   let json = null;
@@ -597,6 +599,98 @@ t('readLockstepCoercesPriorityPinnedTypesViaRealEmStore', () => {
   assert.equal(ep.priority, 5, 'priority value preserved (5)');
   assert.equal(ep.pinned, true, 'pinned is boolean true (LOCKSTEP coercion, not string "true")');
 });
+
+// ===========================================================================
+// Issue #666/#667 S2 additions: FIFO-shaped episode bodies in the query
+// tier. --read is a single-target authoritative read (typed abort); --full
+// query and --materialize are per-row skip+warning (F5: non-ENOENT codes
+// only — ENOENT/absent preserves each site's existing silent behavior).
+// ===========================================================================
+
+if (!IS_WIN) {
+  t('readFifoBodyReturnsTypedAbort', () => {
+    const { cwd, home } = mkStore();
+    const id = writeEpisode(cwd, { id: 'ep-fifo', summary: 'fifo target', body: 'b' });
+    const filePath = path.join(storeDir(cwd), 'episodes', `${id}.md`);
+    fs.unlinkSync(filePath);
+    const mk = spawnSync('mkfifo', [filePath]);
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+    const r = readOne(cwd, home, id);
+    fs.unlinkSync(filePath);
+    assert.equal(r.code, 1, `exit 1; stdout=${r.stdout}`);
+    assert.equal(r.json.status, 'error');
+    assert.equal(r.json.code, 'episode-unreadable:ENOTREG', `typed code, got ${JSON.stringify(r.json)}`);
+    assert.ok(/episode body unreadable/.test(r.json.message || ''), `message names the defect, got ${JSON.stringify(r.json)}`);
+  });
+
+  t('searchFullWithFifoBodySkipsRowWithWarning', () => {
+    const { cwd, home } = mkStore();
+    writeEpisode(cwd, { id: 'ep-healthy', summary: 'healthy episode', body: 'healthy body text' });
+    const fifoId = writeEpisode(cwd, { id: 'ep-fifobody', summary: 'fifo episode', body: 'will be replaced' });
+    const fifoPath = path.join(storeDir(cwd), 'episodes', `${fifoId}.md`);
+    fs.unlinkSync(fifoPath);
+    const mk = spawnSync('mkfifo', [fifoPath]);
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+    const r = run(cwd, home, ['--full', '--scope', 'local', '--no-track']);
+    fs.unlinkSync(fifoPath);
+    assert.equal(r.code, 0, `exit 0; stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.equal(r.json.status, 'ok');
+    const healthy = r.json.episodes.find((e) => e.id === 'ep-healthy');
+    const fifoEp = r.json.episodes.find((e) => e.id === fifoId);
+    assert.ok(healthy && healthy.body, 'healthy episode body present');
+    assert.ok(fifoEp, 'FIFO-shaped episode row still present (skip, not drop)');
+    assert.equal(fifoEp.body, undefined, 'FIFO-shaped episode row emitted WITHOUT body');
+    assert.ok(
+      typeof r.json.warning === 'string' && r.json.warning.includes('ep-fifobody') && r.json.warning.includes('ENOTREG'),
+      `warning names the skipped episode + code, got ${JSON.stringify(r.json.warning)}`
+    );
+  });
+
+  // Review fix-round item 3 (§8 matrix control): a dangling row (ENOENT —
+  // absent, not a shape defect) must stay silent per F5 — no warning field
+  // at all, not even an empty one. Kills removal of the ENOENT guard in
+  // em-search's noteBodySkip.
+  t('searchFullWithDanglingRowStaysSilentControl', () => {
+    const { cwd, home } = mkStore();
+    fs.appendFileSync(indexPath(cwd), JSON.stringify({
+      id: 'ep-dangle-full', date: '2026-07-10', time: '00:00', project: 't',
+      category: 'lesson', status: 'active', supersedes: null, tags: [],
+      summary: 'dangle full', access_count: 0, last_accessed: null,
+    }) + '\n');
+    const r = run(cwd, home, ['--full', '--scope', 'local', '--no-track']);
+    assert.equal(r.code, 0, `exit 0; stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.equal(r.json.status, 'ok');
+    const row = r.json.episodes.find((e) => e.id === 'ep-dangle-full');
+    assert.ok(row, 'dangling row still present in results');
+    assert.equal(row.body, undefined, 'dangling row emitted WITHOUT body');
+    assert.equal(r.json.warning, undefined, 'ENOENT (dangling row) stays silent — no warning field (F5)');
+  });
+
+  t('materializeChainWithFifoMemberSkipsWithWarning', () => {
+    const { cwd, home } = mkStore();
+    writeEpisode(cwd, { id: 'mat-root', summary: 'materialize root', body: 'root body text' });
+    const midId = writeEpisode(cwd, { id: 'mat-mid', summary: 'materialize mid', body: 'to be fifo', supersedes: 'mat-root' });
+    const midPath = path.join(storeDir(cwd), 'episodes', `${midId}.md`);
+    fs.unlinkSync(midPath);
+    const mk = spawnSync('mkfifo', [midPath]);
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+    const r = run(cwd, home, ['--read', 'mat-mid', '--materialize', '--scope', 'local']);
+    fs.unlinkSync(midPath);
+    assert.equal(r.code, 0, `exit 0; stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.equal(r.json.status, 'ok');
+    assert.equal(r.json.terminal_id, 'mat-mid');
+    assert.equal(r.json.count, 2, 'both chain members present (skip, not drop)');
+    const midMember = r.json.members.find((m) => m.id === 'mat-mid');
+    assert.equal(midMember.body_len, 0, 'FIFO member contributes zero-length body');
+    assert.ok(!r.json.body.includes('to be fifo'), 'skipped body text absent from the concatenated materialize body');
+    assert.ok(
+      typeof r.json.warning === 'string' && r.json.warning.includes('mat-mid') && r.json.warning.includes('ENOTREG'),
+      `warning names the skipped member + code, got ${JSON.stringify(r.json.warning)}`
+    );
+  });
+} else {
+  console.log('  skip  FIFO legs (mkfifo unavailable on win32)');
+}
 
 console.log(`\n${pass}/${pass + fail} pass`);
 process.exit(fail ? 1 : 0);

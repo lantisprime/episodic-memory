@@ -37,7 +37,7 @@ import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalizePromotionSources, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { assertReadableIndex, openReadableIndex, IndexUnreadableError, unreadableMessage, roleForFile } from './lib/index-state.mjs'
+import { assertReadableIndex, openReadableIndex, IndexUnreadableError, unreadableMessage, roleForFile, readBodyOrSkip, openReadableBody, BodyUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -198,6 +198,18 @@ if (!original) {
   process.exit(1)
 }
 
+// S3 (#666): shared typed-abort emitter for em-revise's two AUTHORITATIVE
+// body reads (:211 preflight below, :495 in-lock supersede — see the role
+// table in docs/plans/fix-666-667.md §3). Absent (openReadableBody's null
+// return) gets the SAME typed abort as unreadable, built via
+// `new BodyUnreadableError(path, 'ENOENT')` even though nothing threw —
+// today this is a raw ENOENT crash (TOCTOU-only: findEpisode's existsSync
+// already confirmed the file moments earlier), so the envelope is additive.
+function abortBodyUnreadable(err) {
+  console.log(JSON.stringify({ status: 'error', message: `em-revise: ${err.message}`, code: `episode-unreadable:${err.code}` }))
+  process.exit(1)
+}
+
 // ---------------------------------------------------------------------------
 // Validate the inherited category BEFORE any write (I4 / EC6 — a rejected revise
 // must leave the store byte-unchanged; the original is marked superseded just below,
@@ -208,7 +220,16 @@ let inheritedLessons = [] // violation-side forward-links, inherited verbatim (F
 let inheritedViolatedPattern // T6 typed scalar, inherited verbatim (F3)
 let promotionSources
 {
-  const origRaw = fs.readFileSync(original.filePath, 'utf8')
+  // #666 S3 :211 — AUTHORITATIVE preflight read: openReadableBody aborts
+  // typed on unreadable; null (absent) aborts typed too (see helper above).
+  let origRaw
+  try {
+    origRaw = openReadableBody(fs, original.filePath)
+  } catch (e) {
+    if (e instanceof BodyUnreadableError) abortBodyUnreadable(e)
+    throw e
+  }
+  if (origRaw === null) abortBodyUnreadable(new BodyUnreadableError(original.filePath, 'ENOENT'))
   const fm = origRaw.match(/^---\n([\s\S]*?)\n---/)
   let cat = 'decision'
   if (fm) {
@@ -383,11 +404,15 @@ for (const dir of preflightDirs) {
 // ---------------------------------------------------------------------------
 function snapshotOriginalState(filePath, statusDir, successorDirs, id) {
   let fileStatus = null
-  try {
-    const content = fs.readFileSync(filePath, 'utf8')
-    const m = content.match(/^status:\s*(\S+)$/m)
+  // #666 S3 :387 — ADVISORY TOCTOU snapshot: readBodyOrSkip never throws, so
+  // ANY unreadable/absent shape degrades to fileStatus=null exactly like the
+  // old catch-all did. NO abort here — a FIFO original cannot reach a write
+  // through this path: :211 above gates before it, :495 below gates after.
+  const bodyRead = readBodyOrSkip(fs, filePath)
+  if (bodyRead.ok) {
+    const m = bodyRead.raw.match(/^status:\s*(\S+)$/m)
     if (m) fileStatus = m[1]
-  } catch { /* missing file → null status */ }
+  }
   let indexStatus = null
   const statusIndexPath = path.join(statusDir, 'index.jsonl')
   const statusIndexRaw = openReadableIndex(fs, statusIndexPath)
@@ -492,7 +517,13 @@ try {
   // ---------------------------------------------------------------------------
   // Mark original as superseded
   // ---------------------------------------------------------------------------
-  const currentOriginalContent = fs.readFileSync(original.filePath, 'utf8')
+  // #666 S3 :495 — AUTHORITATIVE in-lock read: openReadableBody throws
+  // BodyUnreadableError OUT of this locked try on unreadable, straight into
+  // the catch below (mirrors every openReadableIndex call in this same try —
+  // F6 discipline). null (absent) is thrown explicitly here so it reaches
+  // the SAME typed-abort branch as :211 above.
+  const currentOriginalContent = openReadableBody(fs, original.filePath)
+  if (currentOriginalContent === null) throw new BodyUnreadableError(original.filePath, 'ENOENT')
   const supersededContent = currentOriginalContent.replace(/^status: active$/m, 'status: superseded')
   atomicReplaceFileSync(original.filePath, supersededContent)
 
@@ -761,6 +792,15 @@ try {
     // "episode index unreadable" regardless of which file failed; derive
     // the role from e.file's basename instead.
     console.log(JSON.stringify({ status: 'error', message: unreadableMessage('em-revise', roleForFile(e.file), e), code: `index-unreadable:${e.code}` }))
+    releaseStoreWriteLocks(lockHandles)
+    process.exit(1)
+  }
+  // S3 (#666): the :495 in-lock supersede-rewrite branch (BodyUnreadableError,
+  // beside IndexUnreadableError above) — roleForFile/unreadableMessage do NOT
+  // apply here (roleForFile's basename map does not generalize to `<id>.md`;
+  // the body family carries its own message text, no role lookup).
+  if (e instanceof BodyUnreadableError) {
+    console.log(JSON.stringify({ status: 'error', message: `em-revise: ${e.message}`, code: `episode-unreadable:${e.code}` }))
     releaseStoreWriteLocks(lockHandles)
     process.exit(1)
   }

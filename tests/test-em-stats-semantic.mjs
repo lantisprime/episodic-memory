@@ -35,9 +35,9 @@ function t(name, fn) {
 }
 
 function run(script, args, cwd, env) {
-  const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
+  const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd, encoding: 'utf8', timeout: 10000, env: { ...process.env, ...env } });
   let json = null; try { json = JSON.parse(r.stdout.trim()); } catch {}
-  return { code: r.status, json, stdout: r.stdout };
+  return { code: r.status, json, stdout: r.stdout, signal: r.signal };
 }
 
 function snapshot(dir) {
@@ -300,6 +300,123 @@ print(json.dumps({'order': list(reversed(ids))}))
   assert.equal(rr.reranked, true, JSON.stringify(rr));
   assert.deepEqual(rr.episodes.map(e => e.id), [...base.episodes.map(e => e.id)].reverse());
 });
+
+// ---------------------------------------------------------------------------
+// Issue #666/#667 S2: FIFO-shaped episode bodies in em-embed / em-semantic
+// --full. Isolated fixtures (own cwd/home) so the FIFO swap cannot bleed
+// into the shared fixture above.
+// ---------------------------------------------------------------------------
+const IS_WIN = process.platform === 'win32';
+
+if (!IS_WIN) {
+  t('embed: episode body FIFO -> skipped (no embedding row for that id), warning present, no hang', () => {
+    const ecwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emembed-fifo-')));
+    const ehome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emembed-fifo-home-')));
+    const eenv = { HOME: ehome };
+    const healthyId = run('em-store.mjs', ['--project', 'fx', '--scope', 'local', '--category', 'decision', '--summary', 'healthy embed target', '--body', 'plain body text'], ecwd, eenv).json.id;
+    const fifoId = run('em-store.mjs', ['--project', 'fx', '--scope', 'local', '--category', 'decision', '--summary', 'fifo embed target', '--body', 'will become fifo'], ecwd, eenv).json.id;
+    const estore = path.join(ecwd, '.episodic-memory');
+    const fifoEpisodePath = path.join(estore, 'episodes', `${fifoId}.md`);
+    fs.unlinkSync(fifoEpisodePath);
+    const mk = spawnSync('mkfifo', [fifoEpisodePath]);
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+    const r = run('em-embed.mjs', ['--scope', 'local'], ecwd, eenv);
+    fs.unlinkSync(fifoEpisodePath);
+    assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`);
+    assert.equal(r.code, 0, `exit 0, got ${r.code}: ${r.stdout}`);
+    assert.equal(r.json.status, 'ok');
+    const scopeResult = r.json.scopes.find((s) => s.scope === 'local');
+    assert.ok(scopeResult, 'local scope present');
+    assert.ok(
+      Array.isArray(scopeResult.warnings) && scopeResult.warnings.some((w) => w.includes(fifoId) && w.includes('ENOTREG')),
+      `warnings names the skipped episode + code, got ${JSON.stringify(scopeResult.warnings)}`
+    );
+    const side = fs.readFileSync(path.join(estore, 'embeddings.jsonl'), 'utf8');
+    assert.ok(side.includes(healthyId), 'healthy episode got an embedding row');
+    assert.ok(!side.includes(fifoId), 'FIFO-shaped episode got NO embedding row (skipped, re-embeddable after heal)');
+    fs.rmSync(ecwd, { recursive: true, force: true });
+    fs.rmSync(ehome, { recursive: true, force: true });
+  });
+
+  // Review fix-round item 2: proves em-embed.mjs's `warnings.length > 0`
+  // write trigger is load-bearing (kills the mutation "delete
+  // `|| warnings.length > 0` from em-embed.mjs's write condition"). Both
+  // episodes embed cleanly on the FIRST run; the second run's content hashes
+  // are unchanged for BOTH ids (victim now unreadable, healthy untouched),
+  // so todo=0/dropped=0/rebuild=false — ONLY the warnings-triggered write
+  // can evict the victim's now-stale sidecar row.
+  t('embed: second run after a body FIFO-swap evicts the stale row (warnings.length triggers the write with zero todo/dropped/rebuild)', () => {
+    const vcwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emembed-evict-')));
+    const vhome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emembed-evict-home-')));
+    const venv = { HOME: vhome };
+    const healthyId = run('em-store.mjs', ['--project', 'fx', '--scope', 'local', '--category', 'decision', '--summary', 'healthy evict target', '--body', 'plain body text'], vcwd, venv).json.id;
+    const victimId = run('em-store.mjs', ['--project', 'fx', '--scope', 'local', '--category', 'decision', '--summary', 'victim evict target', '--body', 'will become fifo after first embed'], vcwd, venv).json.id;
+    const vstore = path.join(vcwd, '.episodic-memory');
+
+    const first = run('em-embed.mjs', ['--scope', 'local'], vcwd, venv);
+    assert.equal(first.code, 0, `first embed exit 0, got ${first.code}: ${first.stdout}`);
+    assert.equal(first.json.scopes[0].embedded, 2, 'both episodes embedded on the first run');
+    let side = fs.readFileSync(path.join(vstore, 'embeddings.jsonl'), 'utf8');
+    assert.ok(side.includes(healthyId) && side.includes(victimId), 'both rows present after the first embed');
+
+    const victimPath = path.join(vstore, 'episodes', `${victimId}.md`);
+    fs.unlinkSync(victimPath);
+    const mk = spawnSync('mkfifo', [victimPath]);
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+
+    const second = run('em-embed.mjs', ['--scope', 'local'], vcwd, venv);
+    fs.unlinkSync(victimPath);
+    assert.equal(second.signal, null, `no signal (hang), got ${second.signal}`);
+    assert.equal(second.code, 0, `second embed exit 0, got ${second.code}: ${second.stdout}`);
+    assert.equal(second.json.status, 'ok');
+    const scopeResult = second.json.scopes.find((s) => s.scope === 'local');
+    assert.ok(scopeResult, 'local scope present');
+    assert.equal(scopeResult.embedded, 0, 'nothing NEW to embed (healthy row reused unchanged, victim skipped)');
+    assert.ok(
+      Array.isArray(scopeResult.warnings) && scopeResult.warnings.some((w) => w.includes(victimId) && w.includes('ENOTREG')),
+      `warnings names the victim id + code, got ${JSON.stringify(scopeResult.warnings)}`
+    );
+    side = fs.readFileSync(path.join(vstore, 'embeddings.jsonl'), 'utf8');
+    assert.ok(!side.includes(victimId), 'victim row EVICTED from the sidecar after the second (warnings-only) run');
+    assert.ok(side.includes(healthyId), 'healthy row still present');
+
+    fs.rmSync(vcwd, { recursive: true, force: true });
+    fs.rmSync(vhome, { recursive: true, force: true });
+  });
+
+  t('semantic --full: episode body FIFO -> skipped (no body field), warning present, no hang', () => {
+    const scwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emsem-fifo-')));
+    const shome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emsem-fifo-home-')));
+    const senv = { HOME: shome };
+    const healthyId = run('em-store.mjs', ['--project', 'fx', '--scope', 'local', '--category', 'decision', '--summary', 'healthy semantic target', '--body', 'shared vocabulary term alpha'], scwd, senv).json.id;
+    const fifoId = run('em-store.mjs', ['--project', 'fx', '--scope', 'local', '--category', 'decision', '--summary', 'fifo semantic target', '--body', 'shared vocabulary term alpha too'], scwd, senv).json.id;
+    const embedR = run('em-embed.mjs', ['--scope', 'local'], scwd, senv);
+    assert.equal(embedR.code, 0, `embed seed exit 0, got ${embedR.code}: ${embedR.stdout}`);
+    const sstore = path.join(scwd, '.episodic-memory');
+    const fifoEpisodePath = path.join(sstore, 'episodes', `${fifoId}.md`);
+    fs.unlinkSync(fifoEpisodePath);
+    const mk = spawnSync('mkfifo', [fifoEpisodePath]);
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+    const r = run('em-semantic.mjs', ['--query', 'shared vocabulary term', '--scope', 'local', '--no-track', '--full', '--min-sim', '0'], scwd, senv);
+    fs.unlinkSync(fifoEpisodePath);
+    assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`);
+    assert.equal(r.code, 0, `exit 0, got ${r.code}: ${r.stdout}`);
+    assert.equal(r.json.status, 'ok');
+    const healthyEp = r.json.episodes.find((e) => e.id === healthyId);
+    const fifoEp = r.json.episodes.find((e) => e.id === fifoId);
+    assert.ok(healthyEp && healthyEp.body, `healthy episode body present, got ${JSON.stringify(healthyEp)}`);
+    assert.ok(fifoEp, 'FIFO episode still present in results (skip, not drop)');
+    assert.equal(fifoEp.body, undefined, 'FIFO episode emitted WITHOUT body');
+    assert.ok(
+      typeof r.json.warning === 'string' && r.json.warning.includes(fifoId) && r.json.warning.includes('ENOTREG'),
+      `warning names the skipped episode + code, got ${JSON.stringify(r.json.warning)}`
+    );
+    fs.rmSync(scwd, { recursive: true, force: true });
+    fs.rmSync(shome, { recursive: true, force: true });
+  });
+} else {
+  console.log('  skip  FIFO legs (mkfifo unavailable on win32)');
+}
 
 fs.rmSync(cwd, { recursive: true, force: true });
 fs.rmSync(home, { recursive: true, force: true });
