@@ -41,7 +41,7 @@ import { nullProtoIndex } from './lib/relevance.mjs'
 // derived-index merge so two restore targets cannot diverge before both
 // locks are held.
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip, readBodyBufferOrSkip } from './lib/index-state.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -918,34 +918,15 @@ function applyEpisodeWrites(plan) {
 // probe: SIGKILL required to recover). fd-guarded RAW-BYTE read closes that:
 // O_NONBLOCK open (never blocks) + fstat().isFile() guard (rejects any
 // non-regular file BEFORE the read) + readFileSync(fd) with NO encoding
-// (byte-faithful — a doc copy must never decode/re-encode). Local to
-// em-restore.mjs, mirroring em-move.mjs's readEpisodeBodyRawOrThrow — no
-// shared-helper API change (plan §4 stands).
+// (byte-faithful — a doc copy must never decode/re-encode).
+//
+// #670 S1: thin adapter over the shared readBodyBufferOrSkip primitive
+// (same contract this local function already had — {ok:true,raw:Buffer} |
+// {ok:false,code}) — consolidates the fd logic that was previously
+// duplicated here and in em-move.mjs's readEpisodeBodyRawOrThrow into one
+// implementation.
 function readDocBytesOrSkip(filePath) {
-  const O_NONBLOCK_READ = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
-  let fd
-  try {
-    fd = fs.openSync(filePath, O_NONBLOCK_READ)
-  } catch (e) {
-    return { ok: false, code: (e && e.code) || 'UNKNOWN' }
-  }
-  try {
-    let st
-    try {
-      st = fs.fstatSync(fd)
-    } catch (e) {
-      return { ok: false, code: (e && e.code) || 'UNKNOWN' }
-    }
-    if (st.isDirectory()) return { ok: false, code: 'EISDIR' }
-    if (!st.isFile()) return { ok: false, code: 'ENOTREG' }
-    try {
-      return { ok: true, raw: fs.readFileSync(fd) }
-    } catch (e) {
-      return { ok: false, code: (e && e.code) || 'UNKNOWN' }
-    }
-  } finally {
-    fs.closeSync(fd)
-  }
+  return readBodyBufferOrSkip(fs, filePath)
 }
 
 function applyDocWrites(plan, sourceMap) {

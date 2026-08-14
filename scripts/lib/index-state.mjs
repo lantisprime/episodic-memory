@@ -233,12 +233,13 @@ export class BodyUnreadableError extends Error {
   }
 }
 
-// readBodyOrSkip(fsMod, filePath) -> { ok:true, raw } | { ok:false, code } —
-// never throws, never blocks. For per-row iteration in query tools and
-// advisory reads: 'absent' and 'unreadable' both collapse to ok:false with
-// the classify code (ENOENT | EISDIR | ENOTREG | ...); the CALLER decides
-// warn-vs-silent per code (F5 rule: non-ENOENT warns, ENOENT stays silent).
-export function readBodyOrSkip(fsMod, filePath) {
+// readBodyFd(fsMod, filePath, encoding) — internal fd-based classify-and-read
+// body reader shared by readBodyOrSkip (utf8 string) and readBodyBufferOrSkip
+// (raw Buffer, issue #670 S1). Same discipline as openReadableIndex: ONE
+// open(O_RDONLY|O_NONBLOCK) + fstat(fd), and — only when fstat confirms a
+// regular file — a read from that SAME fd. `encoding` is the only difference
+// between the two public exports below.
+function readBodyFd(fsMod, filePath, encoding) {
   const O_NONBLOCK_READ = fsMod.constants.O_RDONLY | fsMod.constants.O_NONBLOCK
   let fd
   try {
@@ -256,13 +257,38 @@ export function readBodyOrSkip(fsMod, filePath) {
     if (st.isDirectory()) return { ok: false, code: 'EISDIR' }
     if (!st.isFile()) return { ok: false, code: 'ENOTREG' }
     try {
-      return { ok: true, raw: fsMod.readFileSync(fd, 'utf8') }
+      return { ok: true, raw: encoding ? fsMod.readFileSync(fd, encoding) : fsMod.readFileSync(fd) }
     } catch (e) {
       return { ok: false, code: (e && e.code) || 'UNKNOWN' }
     }
   } finally {
-    fsMod.closeSync(fd)
+    // #670 review round MINOR-1: closeSync can itself throw (e.g. synthetic/
+    // real EIO on close) — this is a never-throw helper (its contract is the
+    // tagged {ok,...} return), so a close failure must not override that
+    // contract by escaping the finally block. Best-effort close; the fd leak
+    // on a close failure is an OS-level anomaly outside this helper's control.
+    try { fsMod.closeSync(fd) } catch { /* best-effort; never-throw contract */ }
   }
+}
+
+// readBodyOrSkip(fsMod, filePath) -> { ok:true, raw } | { ok:false, code } —
+// never throws, never blocks. For per-row iteration in query tools and
+// advisory reads: 'absent' and 'unreadable' both collapse to ok:false with
+// the classify code (ENOENT | EISDIR | ENOTREG | ...); the CALLER decides
+// warn-vs-silent per code (F5 rule: non-ENOENT warns, ENOENT stays silent).
+export function readBodyOrSkip(fsMod, filePath) {
+  return readBodyFd(fsMod, filePath, 'utf8')
+}
+
+// readBodyBufferOrSkip(fsMod, filePath) -> { ok:true, raw:Buffer } |
+// { ok:false, code } — same contract and fd discipline as readBodyOrSkip,
+// but returns raw BYTES (no encoding) instead of a decoded string. Issue
+// #670 S1: BP-1 call sites feed the result straight into parseBp1Frontmatter,
+// whose STRICT fatal UTF-8 decode (STRICT_UTF8_DECODER) only runs on Buffer
+// input — decoding here first would silently normalize invalid UTF-8 to
+// U+FFFD and defeat that fail-closed check.
+export function readBodyBufferOrSkip(fsMod, filePath) {
+  return readBodyFd(fsMod, filePath, null)
 }
 
 // openReadableBody(fsMod, filePath) -> raw string | null on absent (mirrors

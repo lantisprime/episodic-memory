@@ -24,6 +24,7 @@ import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 
 const writerMod = await import(new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href)
 const { writeBp1Episode } = writerMod
@@ -314,6 +315,60 @@ tap('V15 parent signed by foreign key + claimed under our run → parent-hmac-in
   })
   assert.equal(r.ok, false)
   assert.ok(r.errors.includes('parent-hmac-invalid'))
+})
+
+// =============================================================================
+// V16: FIFO-shaped parent episode file → ok:false + parent-unreadable: entry,
+// no hang (issue #670). Spawned into a CHILD process with a hard timeout — a
+// same-process call against unfixed code (raw fs.readFileSync on a FIFO)
+// blocks forever with no external alarm.
+// =============================================================================
+tap('V16 FIFO-shaped parent file → parent-unreadable, no hang (spawned, alarm-wrapped)', () => {
+  const root = mkTmpProject()
+  const p = writeParent(root)
+  fs.unlinkSync(p.episodePath)
+  const mk = spawnSync('mkfifo', [p.episodePath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const VERIFY_PATH = new URL('../scripts/lib/bp1-episode-verify.mjs', import.meta.url).href
+  const childPath = path.join(root, 'child-probe.mjs')
+  fs.writeFileSync(childPath, [
+    `import { verifyEpisodeOnDisk } from ${JSON.stringify(VERIFY_PATH)}`,
+    `const r = verifyEpisodeOnDisk({`,
+    `  projectRoot: ${JSON.stringify(root)}, episodeId: ${JSON.stringify(p.episodeId)}, runKey32B: Buffer.from(${JSON.stringify(KEY.toString('hex'))}, 'hex'),`,
+    `  expectedType: 'state-transition', expectedState: 'rfc-detected', expectedRunId: ${JSON.stringify(RUN_ID)},`,
+    `})`,
+    `console.log(JSON.stringify(r))`,
+  ].join('\n'))
+  const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' })
+  fs.rmSync(childPath, { force: true })
+  fs.unlinkSync(p.episodePath)
+  assert.ok(r.signal === null, `V16: no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature)`)
+  assert.equal(r.status, 0, `V16: child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+  const j = JSON.parse((r.stdout || '').trim())
+  assert.equal(j.ok, false, JSON.stringify(j))
+  assert.ok(j.errors.some(e => e.startsWith('parent-unreadable:')), JSON.stringify(j))
+})
+
+// =============================================================================
+// V17: strict-decode regression leg (round-1 MINOR-3) — invalid UTF-8 bytes
+// in the parent file must still die in STRICT_UTF8_DECODER -> parent-parse-
+// failed. Guards that the #670 refactor to readBodyBufferOrSkip keeps
+// passing RAW BYTES into parseBp1Frontmatter (not a pre-decoded string,
+// which would silently normalize invalid UTF-8 to U+FFFD).
+// =============================================================================
+tap('V17 invalid-UTF-8 bytes in parent file → parent-parse-failed (Buffer passthrough survives the #670 refactor)', () => {
+  const root = mkTmpProject()
+  const p = writeParent(root)
+  const text = fs.readFileSync(p.episodePath, 'utf8')
+  const bytes = Buffer.concat([Buffer.from(text, 'utf8'), Buffer.from([0xff])])
+  fs.writeFileSync(p.episodePath, bytes)
+  const r = verifyEpisodeOnDisk({
+    projectRoot: root, episodeId: p.episodeId, runKey32B: KEY,
+    expectedType: 'state-transition', expectedState: 'rfc-detected',
+    expectedRunId: RUN_ID,
+  })
+  assert.equal(r.ok, false)
+  assert.ok(r.errors.some(e => e.startsWith('parent-parse-failed')))
 })
 
 console.log(`\n# ${pass} passed, ${fail} failed`)

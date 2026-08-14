@@ -52,6 +52,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { parseBp1Frontmatter } from './bp1-frontmatter.mjs'
+import { readBodyBufferOrSkip } from './index-state.mjs'
 import { canonicalize } from './bp1-canonicalize.mjs'
 import { verifyCanonical } from './bp1-hmac.mjs'
 import {
@@ -110,13 +111,12 @@ export function findSignedStateEpisode(projectRoot, runId, state, runKey32B, exp
     if (!m) continue
     const episodeId = m[1]
     const episodePath = path.join(episodesDir, name)
-    let buf
-    try {
-      buf = fs.readFileSync(episodePath)
-    } catch (_e) {
-      // File vanished between readdir and read (e.g. concurrent sweep). Skip.
-      continue
-    }
+    // #670 S2: guarded fd-based read — a FIFO/dir/unreadable episode (or one
+    // that vanished between readdir and read, e.g. concurrent sweep) is
+    // skipped instead of hanging or throwing.
+    const r = readBodyBufferOrSkip(fs, episodePath)
+    if (!r.ok) continue
+    const buf = r.raw
     let parsed
     try {
       parsed = parseBp1Frontmatter(buf)
