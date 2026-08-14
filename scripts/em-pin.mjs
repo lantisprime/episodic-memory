@@ -24,7 +24,7 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { openReadableIndex, IndexUnreadableError, unreadableMessage } from './lib/index-state.mjs'
+import { openReadableIndex, IndexUnreadableError, unreadableMessage, readBodyOrSkip } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -75,7 +75,18 @@ let result
 let exitCode = 0
 try {
   // --- frontmatter: insert or remove the `pinned: true` line -------------
-  const content = fs.readFileSync(filePath, 'utf8')
+  // #669 R-C exception: readBodyOrSkip (not openReadableBody) — a thrown
+  // BodyUnreadableError would be swallowed by the generic catch below into
+  // a code-less message, losing the typed envelope. Set result/exitCode
+  // here and fall through (NEVER process.exit inside the try) so `finally`
+  // still releases the write lock. This read precedes the first write
+  // (atomicReplaceFileSync below): a failed pin changes nothing on disk.
+  const bodyRead = readBodyOrSkip(fs, filePath)
+  if (!bodyRead.ok) {
+    result = { status: 'error', message: `episode body unreadable (${bodyRead.code}) (${filePath})`, code: `episode-unreadable:${bodyRead.code}` }
+    exitCode = 1
+  } else {
+  const content = bodyRead.raw
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
   if (!fmMatch) {
     result = { status: 'error', message: `Episode "${id}" has no parseable frontmatter.` }
@@ -117,6 +128,7 @@ try {
       status: 'ok', id, pinned: !unpin,
       scope: dataDir === GLOBAL_DIR ? 'global' : 'local'
     }
+  }
   }
 } catch (e) {
   if (e instanceof IndexUnreadableError) {

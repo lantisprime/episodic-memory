@@ -20,6 +20,8 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { execSync, execFileSync } from 'child_process'
+import { fileURLToPath } from 'url'
+import { readBodyOrSkip } from './lib/index-state.mjs'
 
 const HOME = os.homedir()
 
@@ -347,10 +349,18 @@ function classifyFileBytes(filePath) {
   // Fast-path: known text extensions skip the probe and are always text.
   if (KNOWN_TEXT_EXTENSIONS.has(ext)) return 'text'
   // Probe the head of the file for binary markers.
+  // #669: fd-based non-blocking classify (same-class sibling of the
+  // index-state.mjs helper family) — a blocking openSync('r') on a FIFO
+  // with no writer would hang forever; O_NONBLOCK + fstat rejects any
+  // non-regular file before ever attempting the read. Pinned (round-2
+  // MINOR-R2-2): any classify failure — open error, non-regular fstat, or
+  // read error — keeps today's catch mapping to 'binary', unchanged.
   let buf
   try {
-    const fd = fs.openSync(filePath, 'r')
+    const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)
     try {
+      const st = fs.fstatSync(fd)
+      if (!st.isFile()) return 'binary' // non-regular (FIFO/dir/device/...) → unreadable-as-text
       const probe = Buffer.alloc(BINARY_PROBE_BYTES)
       const n = fs.readSync(fd, probe, 0, BINARY_PROBE_BYTES, 0)
       buf = probe.subarray(0, n)
@@ -528,7 +538,7 @@ function redactConfigForDisplay(cfg) {
 function auditSources({ sample = 0 } = {}) {
   const report = {
     sources: [],
-    totals: { files: 0, text_files: 0, binary_files: 0, oversized_skipped: 0, redaction_findings: 0 },
+    totals: { files: 0, text_files: 0, binary_files: 0, oversized_skipped: 0, unreadable_skipped: 0, redaction_findings: 0 },
     samples: [],
     findings_by_pattern: {},
   }
@@ -536,7 +546,7 @@ function auditSources({ sample = 0 } = {}) {
     const exists = fs.existsSync(s.src)
     // Codex PR-#137 round-1: `src` leaks raw source paths.
     // Codex PR-#137 round-2 F1: `label` also leaks. Apply redaction to both.
-    const entry = { label: redactArtifactString(s.label), src: redactArtifactString(s.src), exists, files: 0, text_files: 0, binary_files: 0, oversized_skipped: 0, redactions: 0 }
+    const entry = { label: redactArtifactString(s.label), src: redactArtifactString(s.src), exists, files: 0, text_files: 0, binary_files: 0, oversized_skipped: 0, unreadable_skipped: 0, redactions: 0 }
     if (!exists) { report.sources.push(entry); continue }
     const files = walk(s.src)
     for (const f of files) {
@@ -545,8 +555,16 @@ function auditSources({ sample = 0 } = {}) {
       entry.files++
       report.totals.files++
       if (classifyFileBytes(f) === 'binary') { entry.binary_files++; report.totals.binary_files++; continue }
+      // #669: readBodyOrSkip — a race-window non-regular file (at-rest FIFOs
+      // never reach here; walk() only pushes isFile() dirents, see §0)
+      // becomes a counted skip instead of a hang. F5: ENOENT stays silent.
+      const bodyRead = readBodyOrSkip(fs, f)
+      if (!bodyRead.ok) {
+        if (bodyRead.code !== 'ENOENT') { entry.unreadable_skipped++; report.totals.unreadable_skipped++ }
+        continue
+      }
       entry.text_files++; report.totals.text_files++
-      const content = fs.readFileSync(f, 'utf8')
+      const content = bodyRead.raw
       const { redacted, findings } = applyRedactions(content)
       if (findings.length > 0) {
         const totalForFile = findings.reduce((a, b) => a + b.count, 0)
@@ -592,6 +610,7 @@ function syncToBackup({ verbose = false } = {}) {
   const skippedOversized = []
   const skippedBinary = [] // Codex F3: track skipped binaries explicitly.
   const skippedDerived = [] // #495: derived indexes excluded from backup.
+  const skippedUnreadable = [] // #669: race-window/non-regular reads at write time.
   for (const s of SOURCES) {
     if (!fs.existsSync(s.src)) continue
     // Codex round-3: use the pre-validated absDest from resolveConfig. This
@@ -647,9 +666,18 @@ function syncToBackup({ verbose = false } = {}) {
         skippedBinary.push({ source: safeLabel, path: redactArtifactString(p.source), size: p.size })
         continue
       }
+      // #669: readBodyOrSkip — a classify-then-read TOCTOU (source raced
+      // from regular to non-regular between the pre-walk classify above and
+      // this write pass) is accepted residual (DEFER-A, plan §4); the FIX
+      // here is only to never hang on it. Skipped body is counted and does
+      // NOT abort the run.
+      const bodyRead = readBodyOrSkip(fs, p.source)
+      if (!bodyRead.ok) {
+        if (bodyRead.code !== 'ENOENT') skippedUnreadable.push({ source: safeLabel, path: redactArtifactString(p.source) })
+        continue
+      }
       ensureDir(path.dirname(p.destPath))
-      const content = fs.readFileSync(p.source, 'utf8')
-      const { redacted, findings } = applyRedactions(content)
+      const { redacted, findings } = applyRedactions(bodyRead.raw)
       fs.writeFileSync(p.destPath, redacted)
       totalRedacted += findings.reduce((a, b) => a + b.count, 0)
       totalCopied++
@@ -668,6 +696,7 @@ function syncToBackup({ verbose = false } = {}) {
     skipped_oversized: skippedOversized.map(x => ({ ...x, max_bytes: MAX_FILE_BYTES })),
     skipped_binary: skippedBinary,
     skipped_derived_index: skippedDerived, // #495
+    skipped_unreadable: skippedUnreadable, // #669
   }
   fs.writeFileSync(path.join(BACKUP_DIR, '.skipped-files.json'), JSON.stringify(manifest, null, 2) + '\n')
   return {
@@ -677,6 +706,11 @@ function syncToBackup({ verbose = false } = {}) {
     skippedOversized: skippedOversized.length,
     skippedBinary: skippedBinary.length,
     skippedDerived: skippedDerived.length,
+    // #669 review-round lens-2 MINOR-2: camelCase to match every sibling in
+    // THIS return object (skippedSymlinks/skippedOversized/skippedBinary/
+    // skippedDerived) — the manifest's OWN skipped_unreadable key (snake,
+    // matching ITS snake-case siblings) is unaffected.
+    skippedUnreadable: skippedUnreadable.length,
   }
 }
 
@@ -1479,10 +1513,13 @@ function selfTest() {
     for (const bf of backupFiles) {
       const relInBackup = path.relative(tmpBackup, bf)
       if (relInBackup.includes(literal)) backupPathMatches++
-      try {
-        const content = fs.readFileSync(bf, 'utf8')
-        if (content.includes(literal)) backupContentMatches++
-      } catch { /* binary or unreadable */ }
+      // #669: readBodyOrSkip — the existing try/catch already treats any
+      // failure as "binary or unreadable" (silent skip); a raw readFileSync
+      // could still HANG on a non-regular file even inside try/catch (a
+      // blocking syscall never throws), so the guard is needed even though
+      // the disposition itself is unchanged.
+      const bodyRead = readBodyOrSkip(fs, bf)
+      if (bodyRead.ok && bodyRead.raw.includes(literal)) backupContentMatches++
     }
 
     // Grep captured outputs for literal + collision pair
@@ -1780,6 +1817,49 @@ function selfTest() {
     results.push({ name: 'issue495_derived_indexes_excluded_from_backup', pass: false, why: `test infrastructure error: ${e.message}` })
   }
 
+  // #669 review-round lens-2 MINOR-2: syncToBackup's RETURN object renamed
+  // unreadable_skipped -> skippedUnreadable (matches camelCase siblings
+  // skippedSymlinks/skippedOversized/skippedBinary/skippedDerived in THIS
+  // SAME object). Plant a genuinely-unreadable-but-present regular file
+  // (chmod 0o000) so the count is non-zero and deterministic (no race).
+  try {
+    if (process.getuid && process.getuid() === 0) {
+      results.push({ name: 'issue669_sync_result_skipped_unreadable_camel_key', skipped: true, why: 'running as root, chmod 0o000 does not block reads' })
+    } else {
+      const tmpBackup = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-unreadable-'))
+      execFileSync('git', ['init', '-b', 'main'], { cwd: tmpBackup, stdio: ['ignore', 'pipe', 'pipe'] })
+      const tmpSrc = fs.mkdtempSync(path.join(os.tmpdir(), 'em-backup-unreadable-src-'))
+      fs.writeFileSync(path.join(tmpSrc, 'ok.txt'), 'readable\n')
+      const blockedPath = path.join(tmpSrc, 'blocked.txt')
+      fs.writeFileSync(blockedPath, 'unreadable\n')
+      fs.chmodSync(blockedPath, 0o000)
+
+      const savedBackupDir = BACKUP_DIR
+      const savedSources = [...SOURCES]
+      BACKUP_DIR = tmpBackup
+      SOURCES.length = 0
+      SOURCES.push({ src: tmpSrc, dest: 'u', absDest: path.join(tmpBackup, 'u'), label: 'u' })
+
+      const res = syncToBackup({})
+
+      BACKUP_DIR = savedBackupDir
+      SOURCES.length = 0
+      for (const s of savedSources) SOURCES.push(s)
+      fs.chmodSync(blockedPath, 0o644)
+      fs.rmSync(tmpBackup, { recursive: true, force: true })
+      fs.rmSync(tmpSrc, { recursive: true, force: true })
+
+      const hasCamelKey = res && res.skippedUnreadable === 1
+      const noSnakeKey = res && !('unreadable_skipped' in res)
+      const ok669 = hasCamelKey && noSnakeKey
+      if (ok669) pass++; else fail++
+      results.push({ name: 'issue669_sync_result_skipped_unreadable_camel_key', pass: ok669, ...(ok669 ? {} : { why: `hasCamelKey=${hasCamelKey} noSnakeKey=${noSnakeKey} res=${JSON.stringify(res)}` }) })
+    }
+  } catch (e) {
+    fail++
+    results.push({ name: 'issue669_sync_result_skipped_unreadable_camel_key', pass: false, why: `test infrastructure error: ${e.message}` })
+  }
+
   // #495 review finding (GLM lens): a store whose episodes/ is a SYMLINK must
   // NOT end up with a silently-EMPTY backup. walk() rejects the symlinked
   // episodes/ (no episodes copied); if isDerivedIndexPath followed the symlink
@@ -1834,12 +1914,12 @@ function selfTest() {
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
-const argv = process.argv.slice(2)
-
-if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-backup.mjs', usage: 'node em-backup.mjs (--audit | --init | --sync | --self-test | --show-config) [--sample <n>]' }))
-  process.exit(0)
-}
+// #669: exported for tests/test-em-backup-body-read.mjs's direct-unit calls
+// on classifyFileBytes/auditSources (plan §3 — an at-rest-FIFO end-to-end
+// CLI probe is VACUOUS, since walk() already excludes non-regular dirents
+// before either function runs; the real exposure is a race-window, tested
+// by direct call instead).
+export { classifyFileBytes, auditSources, SOURCES }
 
 // Codex PR-#137 round-5: every CLI JSON output (success OR error) must pass
 // through artifact redaction at the output boundary. Patching individual
@@ -1912,6 +1992,36 @@ function runInit() {
   return { init, sync, commit }
 }
 
+// #669: entry-point guard. Every branch below ends in process.exit(), so
+// importing this module unconditionally would exit as a side effect of the
+// import (breaking the exports above for a test-file consumer). Running the
+// script normally (`node em-backup.mjs ...`) is unaffected — import.meta.url
+// equals the invoked file's path in that case. Function declarations above
+// this point (out, applyConfig, runSync, runInit, ...) stay unguarded since
+// selfTest() calls them directly.
+// review-round A2 (MAJOR, convergent — silent no-op CLI): a plain
+// `import.meta.url === file://${argv[1]}` string compare FAILS when the
+// invocation path has a symlink component or contains a space (the file://
+// URL percent-encodes spaces; argv[1] doesn't) — the CLI would then exit 0
+// with NO output instead of running (FU #390 regression class). Realpath-
+// both idiom (scripts/lib/structured-alert-probe.mjs:65-72 / N2): resolve
+// BOTH sides to their real filesystem path before comparing.
+const isMain = (() => {
+  if (!process.argv[1]) return false
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+})()
+if (isMain) {
+const argv = process.argv.slice(2)
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(JSON.stringify({ status: 'help', script: 'em-backup.mjs', usage: 'node em-backup.mjs (--audit | --init | --sync | --self-test | --show-config) [--sample <n>]' }))
+  process.exit(0)
+}
+
 try {
   if (argv.includes('--self-test')) {
     // Self-test runs without config; uses isolated tmp dirs.
@@ -1963,3 +2073,4 @@ try {
   out({ status: 'error', message: String(e.message || e), stack: e.stack })
   process.exit(1)
 }
+} // #669 entry-point guard close

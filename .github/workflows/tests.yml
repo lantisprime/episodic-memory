@@ -413,6 +413,15 @@ jobs:
       - name: Run em-move suite (RFC-005)
         run: node tests/test-em-move.mjs
 
+      - name: Run em-pin body-read suite (#669)
+        run: node tests/test-em-pin-body-read.mjs
+
+      - name: Run em-backup body-read suite (#669)
+        run: node tests/test-em-backup-body-read.mjs
+
+      - name: Run em-review-request body-read suite (#669)
+        run: node tests/test-em-review-request-body-read.mjs
+
       - name: Run em-stats + semantic recall suite
         run: node tests/test-em-stats-semantic.mjs
 

@@ -31,7 +31,7 @@ import path from 'path'
 import os from 'os'
 import { execFileSync } from 'child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { readIndexFileOrThrow } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, readBodyOrSkip } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -191,7 +191,13 @@ function frontmatterScalar(text, key) {
 // JSON contracts and exit codes are preserved.
 // ---------------------------------------------------------------------------
 function extractPayload(filePath) {
-  const text = fs.readFileSync(filePath, 'utf8')
+  // #669 R-D: the existing failure mode is throw → caught at the call site
+  // → errors.push (fail-closed gate) — preserve that shape by rethrowing a
+  // typed error on ANY read failure (readBodyOrSkip never blocks, so a
+  // planted FIFO can no longer dodge this gate by hanging it instead).
+  const bodyRead = readBodyOrSkip(fs, filePath)
+  if (!bodyRead.ok) throw new Error(`episode body unreadable (${bodyRead.code}) (${filePath})`)
+  const text = bodyRead.raw
   const t = frontmatterScalar(text, 'type')
   if (t !== null && NON_WORKFLOW_EVENT_TYPES.has(t)) {
     return { kind: 'non-event', payload: null }
@@ -566,8 +572,18 @@ function validatePayload(payload, entry, errors, warnings, indexById) {
             errors.push(`${fp}: triggered_by ${tbR.error}`)
           } else {
             const tbFilePath = path.join(tbR.entry._dataDir, 'episodes', `${tbR.entry.id}.md`)
-            if (fs.existsSync(tbFilePath)) {
-              const tbText = fs.readFileSync(tbFilePath, 'utf8')
+            // #669 R-D: ONE guarded read replaces the existsSync+read TOCTOU
+            // pair. A planted FIFO must not dodge this cross-task provenance
+            // check — non-ENOENT unreadable is a GATE FAILURE via errors[].
+            // Absent (ENOENT) keeps this site's existing absent semantics:
+            // silent, provenance-only (no `else` branch existed before).
+            const tbRead = readBodyOrSkip(fs, tbFilePath)
+            if (!tbRead.ok) {
+              if (tbRead.code !== 'ENOENT') {
+                errors.push(`${fp}: triggered_by episode:${tbR.entry.id} body unreadable (${tbRead.code}); cannot verify cross-task provenance`)
+              }
+            } else {
+              const tbText = tbRead.raw
               const tbM = tbText.match(/```json\s*\n([\s\S]*?)\n```/)
               if (tbM) {
                 try {

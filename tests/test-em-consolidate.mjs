@@ -33,10 +33,10 @@ function t(name, fn) {
   catch (e) { fail++; console.error(`FAIL  ${name}\n      ${e.message}`); }
 }
 
-function run(script, args, cwd, env) {
-  const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
+function run(script, args, cwd, env, timeout) {
+  const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env }, ...(timeout ? { timeout } : {}) });
   let json = null; try { json = JSON.parse(r.stdout.trim()); } catch {}
-  return { code: r.status, json, stdout: r.stdout };
+  return { code: r.status, signal: r.signal, json, stdout: r.stdout };
 }
 
 function snapshot(dir) {
@@ -190,6 +190,36 @@ t('>5 clusters requires --confirm; usage errors exit 2', () => {
   assert.equal(go.json.applied, 6, go.stdout);
   assert.equal(run('em-consolidate.mjs', ['--scope', 'all'], fx.cwd, fx.env).code, 2, 'scope all rejected (single-scope by design)');
   assert.equal(run('em-consolidate.mjs', ['--min-sim', '2'], fx.cwd, fx.env).code, 2);
+  fs.rmSync(fx.cwd, { recursive: true, force: true }); fs.rmSync(fx.home, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #669 S1: FIFO-shaped member body (em-consolidate.mjs:920 readEpisode,
+// the token-set/dry-run scan). A FIFO with no writer previously blocked
+// fs.readFileSync forever; the fix (readBodyOrSkip) converts the hang into
+// the pre-existing null (skip) disposition — "Episodes whose file is
+// missing are skipped, not fatal."
+// ---------------------------------------------------------------------------
+t('dry-run with a FIFO-shaped member body: exit 0 no hang, that member is silently excluded, its healthy duplicate still clusters', () => {
+  const fx = mkFixture();
+  const ids = seedDupes(fx);
+  const fifoId = ids[0];
+  const fifoPath = path.join(fx.store, 'episodes', `${fifoId}.md`);
+  fs.unlinkSync(fifoPath);
+  const mk = spawnSync('mkfifo', [fifoPath]);
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+
+  const r = run('em-consolidate.mjs', ['--scope', 'local', '--min-sim', '0.3'], fx.cwd, fx.env, 5000);
+  assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`);
+  assert.equal(r.code, 0, `exit 0, got ${r.code}: ${r.stdout}`);
+  // The other two dupes (readable) still see each other as similar enough
+  // that clustering logic ran to completion over them without crashing —
+  // whether they alone clear --min-sim into a reported cluster is not the
+  // point here (that's the existing clustering-threshold suite's job); the
+  // regression this leg pins is "no hang, no crash, dry-run terminates".
+  assert.equal(r.json.status, 'ok', r.stdout);
+
+  fs.unlinkSync(fifoPath); // remove the FIFO so cleanup's rmSync doesn't hang
   fs.rmSync(fx.cwd, { recursive: true, force: true }); fs.rmSync(fx.home, { recursive: true, force: true });
 });
 

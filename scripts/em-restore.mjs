@@ -41,7 +41,7 @@ import { nullProtoIndex } from './lib/relevance.mjs'
 // derived-index merge so two restore targets cannot diverge before both
 // locks are held.
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip } from './lib/index-state.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -318,21 +318,35 @@ function expandSupersedesChain(selected, byId) {
 // Conflict classification (P1-8: 4 buckets, normalized-equal as 3rd)
 // ---------------------------------------------------------------------------
 function normalizeText(buf) {
-  let s = buf.toString('utf8')
+  let s = typeof buf === 'string' ? buf : buf.toString('utf8')
   if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1) // strip BOM
   s = s.replace(/\r\n/g, '\n') // CRLF → LF
   s = s.replace(/\n+$/, '') + '\n' // single trailing newline
   return s
 }
 
+// #669 round-1 MAJOR-1 (probe-confirmed dry-run hang): both reads guarded
+// via readBodyOrSkip — planning-time, so classifyConflict must never block
+// on a target-store FIFO. Pinned (round-2 MINOR-R2-1) per-code mapping:
+//   - dst-side ENOENT here means the file vanished between the :fs.existsSync
+//     check above and this read (TOCTOU) — absent = no conflict → 'clean'.
+//   - src-side ENOENT means there is nothing to restore from → 'source-missing'
+//     (distinct from 'unreadable' for report clarity; both default-skip via
+//     decideAction's fallthrough, under EVERY conflictMode including --force
+//     — restore never writes through an unclassifiable source/target).
+//   - any other code (either side) → 'unreadable'.
 function classifyConflict(srcPath, dstPath) {
   if (!fs.existsSync(dstPath)) return 'clean'
   // P1-7: lstat dst; if symlink, special-case so we never write through it.
   const lst = fs.lstatSync(dstPath)
   if (lst.isSymbolicLink()) return 'target-symlink'
-  const a = fs.readFileSync(srcPath)
-  const b = fs.readFileSync(dstPath)
-  if (a.equals(b)) return 'identical'
+  const srcRead = readBodyOrSkip(fs, srcPath)
+  if (!srcRead.ok) return srcRead.code === 'ENOENT' ? 'source-missing' : 'unreadable'
+  const dstRead = readBodyOrSkip(fs, dstPath)
+  if (!dstRead.ok) return dstRead.code === 'ENOENT' ? 'clean' : 'unreadable'
+  const a = srcRead.raw
+  const b = dstRead.raw
+  if (a === b) return 'identical'
   if (normalizeText(a) === normalizeText(b)) return 'normalized-equal'
   return 'overwrite'
 }
@@ -592,7 +606,16 @@ function discoverEpisodes(backupDir, sourceLabels, sourceMap, sourceFilter) {
     let hadEpisodeForLabel = false
     for (const f of files) {
       if (!f.endsWith('.md')) continue
-      const content = fs.readFileSync(f, 'utf8')
+      // #669: readBodyOrSkip + skip-and-report — never import a half-read
+      // body. F5: ENOENT stays silent; non-ENOENT reuses the existing
+      // symlinkRejects report channel (already reused for "unsafe-id:" —
+      // see below).
+      const bodyRead = readBodyOrSkip(fs, f)
+      if (!bodyRead.ok) {
+        if (bodyRead.code !== 'ENOENT') symlinkRejects.push(`unreadable:${bodyRead.code}:${f}`)
+        continue
+      }
+      const content = bodyRead.raw
       const fm = parseFrontmatter(content)
       if (!fm || !fm.id) continue
       hadEpisodeForLabel = true
@@ -889,6 +912,42 @@ function applyEpisodeWrites(plan) {
 }
 
 // --include-docs atomic write via staging dir + per-file rename (P1-10)
+// #669 review-round A3(b) (codex MAJOR): a doc regular at planning time can
+// still race to non-regular (FIFO) before this staging copy runs — a raw
+// fs.copyFileSync blocks forever opening a FIFO with no writer (reviewer
+// probe: SIGKILL required to recover). fd-guarded RAW-BYTE read closes that:
+// O_NONBLOCK open (never blocks) + fstat().isFile() guard (rejects any
+// non-regular file BEFORE the read) + readFileSync(fd) with NO encoding
+// (byte-faithful — a doc copy must never decode/re-encode). Local to
+// em-restore.mjs, mirroring em-move.mjs's readEpisodeBodyRawOrThrow — no
+// shared-helper API change (plan §4 stands).
+function readDocBytesOrSkip(filePath) {
+  const O_NONBLOCK_READ = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
+  let fd
+  try {
+    fd = fs.openSync(filePath, O_NONBLOCK_READ)
+  } catch (e) {
+    return { ok: false, code: (e && e.code) || 'UNKNOWN' }
+  }
+  try {
+    let st
+    try {
+      st = fs.fstatSync(fd)
+    } catch (e) {
+      return { ok: false, code: (e && e.code) || 'UNKNOWN' }
+    }
+    if (st.isDirectory()) return { ok: false, code: 'EISDIR' }
+    if (!st.isFile()) return { ok: false, code: 'ENOTREG' }
+    try {
+      return { ok: true, raw: fs.readFileSync(fd) }
+    } catch (e) {
+      return { ok: false, code: (e && e.code) || 'UNKNOWN' }
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 function applyDocWrites(plan, sourceMap) {
   const written = []
   const skipped = []
@@ -920,8 +979,16 @@ function applyDocWrites(plan, sourceMap) {
       for (const w of writes) {
         const rel = path.relative(targetDir, w.targetPath)
         const stagePath = path.join(stagingDir, rel)
+        // #669 review-round A3(b): guarded byte-faithful read replaces the
+        // raw copyFileSync — ok:false (incl. a race to non-regular since
+        // planning) is a per-item TERMINAL skip, never a hang.
+        const bodyRead = readDocBytesOrSkip(w.sourcePath)
+        if (!bodyRead.ok) {
+          skipped.push({ ...w, action: 'skip', apply_skip_reason: 'unreadable', code: bodyRead.code })
+          continue
+        }
         fs.mkdirSync(path.dirname(stagePath), { recursive: true })
-        fs.copyFileSync(w.sourcePath, stagePath)
+        fs.writeFileSync(stagePath, bodyRead.raw)
         staged.push({ w, stagePath })
       }
       // Rename phase: per-file atomic moves into final position.
@@ -974,7 +1041,28 @@ function buildRefIntegrityReport(plan, sourceMap, docs) {
   for (const [label, mems] of docsByLabel) {
     const targetDir = sourceMap.get(label)
     for (const mem of mems) {
-      const content = fs.readFileSync(mem.sourcePath, 'utf8')
+      // #669 (F1-class double-read — this same sourcePath is already read
+      // once by classifyConflict during buildWritePlan): the two phases are
+      // structurally separate (buildWritePlan iterates plan.docWrites,
+      // buildRefIntegrityReport iterates the raw `docs` list independently),
+      // so the smaller diff is to guard THIS re-read rather than thread the
+      // planning-phase content through; flagged in the PR body per plan §1.
+      const bodyRead = readBodyOrSkip(fs, mem.sourcePath)
+      if (!bodyRead.ok) {
+        if (bodyRead.code !== 'ENOENT') {
+          reports.push({ label, relPath: mem.relPath, present: true, unreadable: true, code: bodyRead.code, refs: [], dangling: [] })
+          // #669 review-round A3(a): a doc found unreadable HERE (before
+          // apply) must not carry a live action into apply — force the
+          // matching docWrites entry to a TERMINAL skip so applyDocWrites
+          // never attempts to stage/copy it. The ref_integrity entry above
+          // is the per-item report; this just stops the write.
+          for (const w of plan.docWrites) {
+            if (w.label === label && w.relPath === mem.relPath) w.action = 'skip'
+          }
+        }
+        continue
+      }
+      const content = bodyRead.raw
       // Build set of basenames in the restore set for THIS label
       const restoreBasenames = new Set()
       for (const w of plan.docWrites) if (w.label === label && w.action !== 'skip') restoreBasenames.add(path.basename(w.relPath))
@@ -1271,7 +1359,11 @@ function readSkipManifest(backupDir) {
       counts: {
         symlinks: (m.skipped_symlinks || []).length,
         oversized: (m.skipped_oversized || []).length,
-        binary: (m.skipped_binary || []).length
+        binary: (m.skipped_binary || []).length,
+        // #669 review-round lens-2 MINOR-1: em-backup's manifest gained a
+        // skipped_unreadable class (round-1 R-B); restore's summary of that
+        // SAME manifest silently omitted it — surface the count here too.
+        unreadable: (m.skipped_unreadable || []).length
       }
     }
   } catch (e) {
@@ -1466,6 +1558,175 @@ function selfTest() {
     assert('target_symlink_detected', classifyConflict(src, linkDst) === 'target-symlink')
     fs.rmSync(tmp, { recursive: true, force: true })
   } catch (e) { bad('target_symlink_detect', e.message) }
+
+  // T669: issue #669 round-1 MAJOR-1 (probe-confirmed dry-run hang) — a
+  // FIFO-shaped TARGET-store episode body previously hung classifyConflict
+  // forever (fs.readFileSync on both srcPath/dstPath, unguarded). The fix
+  // (readBodyOrSkip on both reads) must terminate the classify call itself,
+  // AND both --dry-run and --apply run() paths must terminate with the new
+  // 'unreadable' conflict class (round-2 MINOR-R2-1 pin), never a hang.
+  try {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'em-restore-t669-'))
+    const src = path.join(tmp, 'src.md')
+    const dstFifo = path.join(tmp, 'dst-fifo.md')
+    const srcFifo = path.join(tmp, 'src-fifo.md')
+    const dst = path.join(tmp, 'dst.md')
+    fs.writeFileSync(src, 'content\n')
+    fs.writeFileSync(dst, 'content\n')
+    execFileSync('mkfifo', [dstFifo])
+    execFileSync('mkfifo', [srcFifo])
+    assert('t669_dst_fifo_unreadable', classifyConflict(src, dstFifo) === 'unreadable',
+      `got ${classifyConflict(src, dstFifo)}`)
+    assert('t669_src_fifo_unreadable', classifyConflict(srcFifo, dst) === 'unreadable',
+      `got ${classifyConflict(srcFifo, dst)}`)
+    // Pinned (round-2 MINOR-R2-1): src-side ENOENT (vanished, not a FIFO) is
+    // its own class, distinct from 'unreadable' — decideAction still
+    // default-skips it, but the report distinguishes source-missing from a
+    // genuinely broken target/source.
+    assert('t669_src_enoent_is_source_missing', classifyConflict(path.join(tmp, 'does-not-exist.md'), dst) === 'source-missing')
+    // Pinned: 'unreadable'/'source-missing' stay default-skip under EVERY
+    // conflictMode, INCLUDING 'force' — decideAction's force branch is
+    // scoped to conflict==='overwrite' only; restore never writes through
+    // an unclassifiable target even with --force.
+    assert('t669_unreadable_stays_skip_under_force', decideAction('unreadable', 'force') === 'skip')
+    assert('t669_source_missing_stays_skip_under_force', decideAction('source-missing', 'force') === 'skip')
+    assert('t669_unreadable_stays_skip_under_sidecar', decideAction('unreadable', 'sidecar') === 'skip')
+    fs.unlinkSync(dstFifo); fs.unlinkSync(srcFifo)
+    fs.rmSync(tmp, { recursive: true, force: true })
+  } catch (e) { bad('t669_classify_conflict_fifo', e.message) }
+
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const epId = 'id-669'
+    const ep = makeEpisode(epId, { id: epId, date: '2026-05-01', time: '"10:00"', project: 't', category: 'decision', status: 'active', tags: [], summary: 'fifo target' })
+    const epDir = path.join(backupDir, 'lab', 'episodes')
+    fs.mkdirSync(epDir, { recursive: true })
+    fs.writeFileSync(path.join(epDir, `${epId}.md`), ep)
+    commitBackup(backupDir)
+
+    const target = path.join(root, 'target')
+    fs.mkdirSync(path.join(target, 'episodes'), { recursive: true })
+    const targetEpPath = path.join(target, 'episodes', `${epId}.md`)
+    execFileSync('mkfifo', [targetEpPath])
+
+    const dryOpts = {
+      backupDir, sourceMap: new Map([['lab', target]]),
+      fromDate: undefined, toDate: undefined, tags: [], categories: [], sources: [],
+      apply: false, conflictMode: 'skip', force: false, includeDocs: false,
+      restoreClaudeMd: false, skipMemoryMd: false, allowSymlinkOverwrite: false,
+      allowDuplicateId: false, rebuildIndex: false
+    }
+    const dryStart = Date.now()
+    const dry = run(dryOpts)
+    assert('t669_dry_run_terminates', Date.now() - dryStart < 5000, `took ${Date.now() - dryStart}ms`)
+    assert('t669_dry_run_ok', dry.status === 'ok', JSON.stringify(dry))
+    assert('t669_dry_run_unreadable_class', dry.summary.conflicts.unreadable === 1, JSON.stringify(dry.summary.conflicts))
+    assert('t669_dry_run_target_untouched', fs.lstatSync(targetEpPath).isFIFO(), 'dry-run must never touch the target FIFO')
+
+    const applyStart = Date.now()
+    const applied = run({ ...dryOpts, apply: true, rebuildIndex: true })
+    assert('t669_apply_terminates', Date.now() - applyStart < 5000, `took ${Date.now() - applyStart}ms`)
+    assert('t669_apply_ok', applied.status === 'ok', JSON.stringify(applied))
+    assert('t669_apply_conflicts_unreadable', applied.summary.conflicts.unreadable === 1, JSON.stringify(applied.summary.conflicts))
+    assert('t669_apply_skipped_episode', applied.skipped.episodes === 1 && applied.written.episodes === 0,
+      `expected the unreadable target skipped (never written through), got written=${JSON.stringify(applied.written)} skipped=${JSON.stringify(applied.skipped)}`)
+    assert('t669_apply_never_wrote_through_fifo', fs.lstatSync(targetEpPath).isFIFO(), 'apply must never write through the unclassifiable target')
+
+    fs.unlinkSync(targetEpPath)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('t669_run_dry_and_apply_terminate', e.message) }
+
+  // T669-A3: review-round codex MAJOR — a DOC (not episode) regular at
+  // planning-time but raced to a FIFO before apply used to hang forever at
+  // the raw copyFileSync in applyDocWrites' staging loop (reviewer probe:
+  // SIGKILL required). Uses a non-MEMORY.md doc so buildRefIntegrityReport
+  // (A3(a)'s flip-to-skip) never even looks at it — isolating A3(b)'s
+  // apply-time fd-guarded read as the ONLY thing standing between this and
+  // a hang.
+  //
+  // The real CLI's preflight() re-validates `git status --porcelain` clean
+  // on EVERY invocation (run() is called once per process) — a FIFO in the
+  // working tree is always untracked, so a genuine two-invocation
+  // (dry-run, swap, apply) sequence would be rejected by preflight before
+  // ever reaching the code this test targets; the actual hang window is
+  // WITHIN one run() call, between the planning read and the apply-time
+  // copy. Calling the pipeline's internal functions directly (same
+  // technique as the em-backup classify-then-read race test) reproduces
+  // that intra-call window deterministically: plan built while the doc is
+  // still regular (confirms a LIVE 'create' action), THEN the file is
+  // swapped to a FIFO, THEN applyDocWrites runs — exactly the sequence a
+  // single `--apply` call performs internally.
+  try {
+    const { root, backupDir } = makeFakeBackup()
+    const docPath = path.join(backupDir, 'lab', 'notes.md')
+    fs.mkdirSync(path.dirname(docPath), { recursive: true })
+    fs.writeFileSync(docPath, 'regular doc content\n')
+    commitBackup(backupDir)
+
+    const target = path.join(root, 'target')
+    fs.mkdirSync(target, { recursive: true })
+    const sourceMap = new Map([['lab', target]])
+    const sourceLabels = discoverSourceLabels(backupDir)
+    const { docs } = discoverDocFiles(backupDir, sourceLabels, sourceMap, [])
+
+    const plan = buildWritePlan({
+      selected: new Map(), extraEntries: [], sourceMap, sourceLabelByEpisode: new Map(),
+      conflictMode: 'skip', allowSymlinkOverwrite: false, allowDuplicateId: false,
+      includeDocs: true, docs, restoreClaudeMd: false, skipMemoryMd: false, sidecarRefuseExisting: true
+    })
+    const docWritePlanned = plan.docWrites.find(w => w.relPath === 'notes.md')
+    assert('t669a3_plan_doc_is_live_create', docWritePlanned && docWritePlanned.action === 'create' && docWritePlanned.conflict === 'clean',
+      `doc must be planned as a live 'create' action while regular: ${JSON.stringify(docWritePlanned)}`)
+    buildRefIntegrityReport(plan, sourceMap, docs) // mirrors run()'s call order; no-op for a non-MEMORY.md doc
+
+    // Race: swap the regular doc for a FIFO — mid-call, between plan-build
+    // and apply, exactly the window the reviewer probed.
+    fs.unlinkSync(docPath)
+    execFileSync('mkfifo', [docPath])
+
+    preflightTargetDirs(plan, sourceMap)
+    const applyStart = Date.now()
+    const docResult = applyDocWrites(plan, sourceMap)
+    const elapsed = Date.now() - applyStart
+    assert('t669a3_apply_terminates', elapsed < 5000, `took ${elapsed}ms`)
+    assert('t669a3_apply_skipped_doc', docResult.skipped.length === 1 && docResult.written.length === 0,
+      `expected the raced doc skipped (never written through), got written=${JSON.stringify(docResult.written)} skipped=${JSON.stringify(docResult.skipped)}`)
+    assert('t669a3_skip_entry_names_reason', docResult.skipped[0].apply_skip_reason === 'unreadable' && docResult.skipped[0].code === 'ENOTREG',
+      `skip entry must carry the reason/code, got: ${JSON.stringify(docResult.skipped[0])}`)
+    assert('t669a3_nothing_written_to_target', !fs.existsSync(path.join(target, 'notes.md')),
+      'apply must never write through the raced-to-FIFO doc')
+
+    fs.unlinkSync(docPath)
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch (e) { bad('t669a3_docwrites_apply_race_no_hang', e.message) }
+
+  // T669-item5 (review-round lens-2 MINOR-1): readSkipManifest must surface
+  // the unreadable count em-backup's manifest carries (skipped_unreadable,
+  // manifest key stays snake_case per item 6's naming split).
+  try {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'em-restore-t669item5-'))
+    fs.writeFileSync(path.join(tmp, '.skipped-files.json'), JSON.stringify({
+      generated_at: '2026-08-14T00:00:00Z',
+      skipped_symlinks: [{ source: 'a', path: 'x' }],
+      skipped_oversized: [],
+      skipped_binary: [{ source: 'a', path: 'y' }, { source: 'a', path: 'z' }],
+      skipped_unreadable: [{ source: 'a', path: 'w' }],
+    }))
+    const m = readSkipManifest(tmp)
+    assert('t669item5_manifest_present', m.present === true)
+    assert('t669item5_unreadable_count', m.counts.unreadable === 1, JSON.stringify(m.counts))
+    assert('t669item5_other_counts_unaffected', m.counts.symlinks === 1 && m.counts.binary === 2, JSON.stringify(m.counts))
+    fs.rmSync(tmp, { recursive: true, force: true })
+  } catch (e) { bad('t669item5_readskipmanifest_unreadable_count', e.message) }
+
+  // T669-item5: --help documents the 'unreadable' conflict class and its
+  // default-skip-under---force behavior (the §1 pin's documentation leg the
+  // original build missed).
+  try {
+    const helpText = usage()
+    assert('t669item5_help_mentions_unreadable_class', /\bunreadable\b/.test(helpText), helpText)
+    assert('t669item5_help_mentions_force_default_skip', /--force/.test(helpText) && /default-skip/.test(helpText), helpText)
+  } catch (e) { bad('t669item5_help_documents_unreadable', e.message) }
 
   // T8: backup-side symlink rejection
   try {
@@ -2570,7 +2831,13 @@ function usage() {
                  [--self-test]
 
 Default mode is --dry-run. --apply required for any disk write.
-Lossy-data note: backup is content+path-redacted; restore CANNOT undo redaction.`
+Lossy-data note: backup is content+path-redacted; restore CANNOT undo redaction.
+Conflict classes (summary.conflicts): clean, identical, normalized-equal,
+overwrite, target-symlink, source-missing (source file vanished — nothing to
+restore), unreadable (source or target is present but not a regular file —
+e.g. a FIFO or a permission defect). 'unreadable' ALWAYS default-skips,
+under EVERY --conflict-mode INCLUDING --force: restore never writes through
+an unclassifiable source or target. Remove the poison manually and re-run.`
 }
 
 try {

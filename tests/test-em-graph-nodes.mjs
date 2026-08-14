@@ -122,6 +122,76 @@ t('t_malformed_frontmatter_skipped', () => {
   assert.equal(r.skipped, 1)
 })
 
+// Issue #669 S2: a FIFO named MEMORY.md previously blocked the raw
+// fs.readFileSync inside scanRuleNodes forever (confirmed hang, plan §0).
+// readBodyOrSkip converts it into the EXISTING skipped-counter disposition
+// (same shape as t_malformed_frontmatter_skipped above), no wire-shape
+// change, no hang.
+t('t_669_fifo_rule_file_skipped_no_hang', () => {
+  resetRuleDir()
+  const fifoPath = path.join(RULE_DIR, 'MEMORY.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const start = Date.now()
+  const r = scanRuleNodes(RULE_DIR)
+  const elapsed = Date.now() - start
+  assert.ok(elapsed < 5000, `scanRuleNodes must not hang on a FIFO, took ${elapsed}ms`)
+  assert.equal(r.ruleById.size, 0)
+  assert.equal(r.skipped, 1)
+  fs.unlinkSync(fifoPath)
+})
+
+t('t_669_fifo_rule_file_via_cli_no_hang', () => {
+  resetRuleDir()
+  const fifoPath = path.join(RULE_DIR, 'MEMORY.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const r = spawnSync('node', [path.join(SCRIPTS, 'em-graph.mjs'), '--orphans', '--nodes', 'rule', '--scope', 'local'], {
+    cwd, encoding: 'utf8', env: { ...process.env, ...env }, timeout: 5000,
+  })
+  assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`)
+  assert.equal(r.status, 0, `exit 0, got ${r.status}: ${r.stdout}`)
+  const json = JSON.parse(r.stdout.trim())
+  assert.equal(json.status, 'ok')
+  assert.equal(json.skipped_nodes, 1)
+  fs.unlinkSync(fifoPath)
+})
+
+// #669 review-round codex MINOR-2 (test-strength gap): scanRfcNodes shares
+// the exact same read-guard fix as scanRuleNodes above but had ZERO FIFO
+// coverage of its own — a regression isolated to scanRfcNodes (e.g. a
+// future refactor that de-shares the two functions) would not be caught by
+// the rule-node legs alone.
+t('t_669_fifo_rfc_file_skipped_no_hang', () => {
+  resetRfcDir()
+  const fifoPath = path.join(RFC_DIR, 'RFC-669-fifo.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const start = Date.now()
+  const r = scanRfcNodes(RFC_DIR)
+  const elapsed = Date.now() - start
+  assert.ok(elapsed < 5000, `scanRfcNodes must not hang on a FIFO, took ${elapsed}ms`)
+  assert.equal(r.rfcById.size, 0)
+  assert.equal(r.skipped, 1)
+  fs.unlinkSync(fifoPath)
+})
+
+t('t_669_fifo_rfc_file_via_cli_no_hang', () => {
+  resetRfcDir()
+  const fifoPath = path.join(RFC_DIR, 'RFC-669-fifo.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const r = spawnSync('node', [path.join(SCRIPTS, 'em-graph.mjs'), '--orphans', '--nodes', 'rfc', '--scope', 'local'], {
+    cwd, encoding: 'utf8', env: { ...process.env, ...env }, timeout: 5000,
+  })
+  assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`)
+  assert.equal(r.status, 0, `exit 0, got ${r.status}: ${r.stdout}`)
+  const json = JSON.parse(r.stdout.trim())
+  assert.equal(json.status, 'ok')
+  assert.equal(json.skipped_nodes, 1)
+  fs.unlinkSync(fifoPath)
+})
+
 t('t_proto_key_rule_name', () => {
   resetRuleDir()
   writeRule('feedback_proto.md', 'name: __proto__')

@@ -54,6 +54,7 @@ import { illegalScalarChar } from './lib/activation.mjs'
 import { resolveRegisteredStores } from './lib/registered-stores.mjs'
 import { canonicalizePromotionSources, computeContentSha256, resolveSourceRefs, serializePromotionSources, validatePromotionSources } from './lib/promotion-sources.mjs'
 import { tryAcquire, release } from './lib/lock.mjs'
+import { readBodyOrSkip } from './lib/index-state.mjs'
 
 export const PROMOTE_RUN_RECORD_TYPE = 'promote-run'
 import { RUN_RECORD_CATEGORY } from './lib/activation-log.mjs'
@@ -157,11 +158,12 @@ for (const st of stores) {
     if (r.status === 'superseded') continue
     if (typeof r.id !== 'string' || typeof r.summary !== 'string') continue
     if (canonicalCategory(r.category) !== 'lesson') continue
-    let content
-    try { content = fs.readFileSync(path.join(st.data_dir, 'episodes', `${r.id}.md`)) } catch {
+    const bodyRead = readBodyOrSkip(fs, path.join(st.data_dir, 'episodes', `${r.id}.md`))
+    if (!bodyRead.ok) {
       warnings.push({ episode: r.id, store: st.label, problem: 'episode file missing' })
       continue
     }
+    const content = bodyRead.raw
     const contentSha256 = computeContentSha256(content)
     const key = `${r.id}#${contentSha256}`
     const source = { store_id: st.store_id, episode_id: r.id, content_sha256: contentSha256 }
@@ -274,7 +276,8 @@ for (const r of globalRows) {
   }
   if (hashTags.length === 0) warnings.push({ episode: r.id, problem: 'promoted-lesson episode without a promoted:<sha8> tag' })
   let content = null
-  try { content = fs.readFileSync(path.join(GLOBAL_DIR, 'episodes', `${r.id}.md`), 'utf8') } catch {}
+  const bodyReadA = readBodyOrSkip(fs, path.join(GLOBAL_DIR, 'episodes', `${r.id}.md`))
+  if (bodyReadA.ok) content = bodyReadA.raw
   if (content === null) {
     warnings.push({ episode: r.id, problem: 'episode file missing' })
     continue
@@ -363,8 +366,9 @@ function recomputeSources(c) {
     const store = byStore.get(ref.store_id)
     if (!store) return null
     const file = path.join(store.data_dir, 'episodes', `${ref.episode_id}.md`)
-    let content
-    try { content = fs.readFileSync(file) } catch { return null }
+    const bodyReadB = readBodyOrSkip(fs, file)
+    if (!bodyReadB.ok) return null
+    const content = bodyReadB.raw
     const hash = computeContentSha256(content)
     if (hash !== ref.content_sha256) return null
     refs.push({ store_id: ref.store_id, episode_id: ref.episode_id, content_sha256: hash })
@@ -454,15 +458,34 @@ export function selectMigrationCandidates(rows) {
     if (row.status !== 'active') { skipped.push({ hash: row.id, reason: 'superseded' }); continue }
     // (6) parseable `## Sources` — state B. Only reached for global+active
     // legacy-shaped rows.
+    // #669 review-round A4 (codex MAJOR — fail-open provenance): the prior
+    // shape accumulated `sources` incrementally and let a mid-loop
+    // per-source hash-read failure fall into an EMPTY outer catch, so
+    // entries pushed by EARLIER-successful matches survived — a candidate
+    // could reach `candidates.push` with PARTIAL provenance (silently
+    // dropped evidence) instead of being skipped whole. Frozen disposition:
+    // ANY source-read ok:false (the row's own Sources-listing read, or any
+    // referenced episode's hash read) discards the row's `sources` entirely
+    // — explicit `sourceUnreadable` flag replaces throw-into-empty-catch so
+    // no partial array can escape this block.
+    const bodyReadC = readBodyOrSkip(fs, path.join(GLOBAL_DIR, 'episodes', `${row.id}.md`))
+    if (!bodyReadC.ok) { skipped.push({ hash: row.id, reason: 'source-unreadable' }); continue }
+    const text = bodyReadC.raw
+    if (!text.includes('## Sources')) { skipped.push({ hash: row.id, reason: 'no-parseable-sources' }); continue }
     let sources = []
-    try {
-      const text = fs.readFileSync(path.join(GLOBAL_DIR, 'episodes', `${row.id}.md`), 'utf8')
-      if (!text.includes('## Sources')) { skipped.push({ hash: row.id, reason: 'no-parseable-sources' }); continue }
-      for (const match of text.matchAll(/^- (\S+) \(([^,]+),/gm)) {
-        const source = stores.flatMap(st => loadIndexOrAbort(st.data_dir, st.label).filter(r => r.id === match[1]).map(r => ({ store_id: st.store_id, episode_id: r.id, content_sha256: computeContentSha256(fs.readFileSync(path.join(st.data_dir, 'episodes', `${r.id}.md`))) })))
-        sources.push(...source)
+    let sourceUnreadable = false
+    outer:
+    for (const match of text.matchAll(/^- (\S+) \(([^,]+),/gm)) {
+      for (const st of stores) {
+        for (const r of loadIndexOrAbort(st.data_dir, st.label)) {
+          if (r.id !== match[1]) continue
+          const hashRead = readBodyOrSkip(fs, path.join(st.data_dir, 'episodes', `${r.id}.md`))
+          if (!hashRead.ok) { sourceUnreadable = true; break outer }
+          sources.push({ store_id: st.store_id, episode_id: r.id, content_sha256: computeContentSha256(hashRead.raw) })
+        }
       }
-    } catch {}
+    }
+    if (sourceUnreadable) { skipped.push({ hash: row.id, reason: 'source-unreadable' }); continue }
     if (sources.length === 0) { skipped.push({ hash: row.id, reason: 'no-parseable-sources' }); continue }
     // (7) §12 state A: full match.
     candidates.push({ row, promotion_sources: canonicalizePromotionSources(sources), fingerprint: computeSourceFingerprint(sources) })
@@ -639,12 +662,28 @@ if (migrate) {
       // search hides superseded predecessors, so a sentinel-preserved body
       // here is the active-recall surface.
       const bodyFileMig = path.join(tmpDirMig, `${cand.row.id}.md`)
+      // #669 round-3 (codex MAJOR-2 residual, runtime-confirmed): this read
+      // previously ignored ok:false and silently substituted a placeholder
+      // body — the successor would still be written (with a
+      // "(no legacy body available)" placeholder) and the legacy row
+      // superseded, even though the source was genuinely unreadable at
+      // apply time (probe: targeted EACCES on exactly this read → exit 0,
+      // successor written with placeholder, legacy superseded). Plan §6 A4:
+      // ANY source-read ok:false skips the WHOLE row — no placeholder
+      // successor, no supersede, no em-revise spawn. Terminal skip via the
+      // SAME migSkipped array selectMigrationCandidates' state B/C/D
+      // skips already use; the post-loop sweep below converts it into the
+      // unified migItems list automatically.
+      const bodyReadD = readBodyOrSkip(fs, path.join(GLOBAL_DIR, 'episodes', `${cand.row.id}.md`))
+      if (!bodyReadD.ok) {
+        migSkipped.push({ hash: cand.row.id, reason: 'source-unreadable' })
+        continue
+      }
       let legacyBodyMig = ''
-      try {
-        const legacyText = fs.readFileSync(path.join(GLOBAL_DIR, 'episodes', `${cand.row.id}.md`), 'utf8')
-        const parts = legacyText.split('---')
+      {
+        const parts = bodyReadD.raw.split('---')
         if (parts.length >= 3) legacyBodyMig = parts.slice(2).join('---').trim()
-      } catch {}
+      }
       const successorBodyMig = [
         `Migration successor: typed promotion_sources + corrected project for ${cand.row.id}.`,
         '',

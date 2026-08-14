@@ -46,7 +46,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { normalizeTags, episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip, openReadableBody, BodyUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -141,15 +141,70 @@ function addToInverted(dataDir, fileName, id, keys, pretty) {
   atomicReplaceFileSync(p, JSON.stringify(idx, ...(pretty ? [null, 2] : [])))
 }
 
+// #669: readEpisodeBodyOrThrow — fd-based guarded read for the pre-lock/
+// post-lock frontmatter-id content reads below (text use: regex + later
+// tokenization, not byte-identity — see readEpisodeBodyRawOrThrow below for
+// sha256's separate raw-Buffer need, review-round A1). openReadableBody
+// never blocks on a non-regular file (FIFO/dir/EACCES/...); a genuinely-
+// vanished (ENOENT) file is also converted to a throw here (plain Error, so
+// the existing catch(e) => errors.push(e.message) shape needs no new
+// branch) since every caller of this helper already confirmed presence
+// moments earlier and a race-vanish is exceptional either way.
+function readEpisodeBodyOrThrow(filePath) {
+  const body = openReadableBody(fs, filePath)
+  if (body === null) throw new Error(`Episode file vanished: ${filePath}`)
+  return body
+}
+
+// #669 review-round A1 (MAJOR, convergent — data loss): sha256() must hash
+// RAW BYTES, not the utf8-DECODED string readEpisodeBodyOrThrow returns.
+// Two byte-divergent invalid-UTF-8 bodies (e.g. a trailing 0xFF vs 0xFE) both
+// decode to the same string (lone surrogates become U+FFFD), so hashing the
+// decoded text collapsed them to "identical" — the found-in-both-scopes
+// divergence check then unlinked one copy as a false duplicate (data loss,
+// reviewer-confirmed: exit 0, moved, local deleted). LOCAL fd-based
+// raw-Buffer read — NOT a shared-helper change (plan §4 stands): open
+// O_NONBLOCK so a FIFO/no-writer never blocks, fstat rejects any
+// non-regular file BEFORE the read, readFileSync(fd) with NO encoding
+// returns the exact bytes. Reuses the already-exported BodyUnreadableError
+// class (index-state.mjs) purely for typed-error shape parity with
+// readEpisodeBodyOrThrow's callers — not a helper-contract change.
+function readEpisodeBodyRawOrThrow(filePath) {
+  const O_NONBLOCK_READ = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
+  let fd
+  try {
+    fd = fs.openSync(filePath, O_NONBLOCK_READ)
+  } catch (e) {
+    throw new BodyUnreadableError(filePath, (e && e.code) || 'UNKNOWN')
+  }
+  try {
+    let st
+    try {
+      st = fs.fstatSync(fd)
+    } catch (e) {
+      throw new BodyUnreadableError(filePath, (e && e.code) || 'UNKNOWN')
+    }
+    if (st.isDirectory()) throw new BodyUnreadableError(filePath, 'EISDIR')
+    if (!st.isFile()) throw new BodyUnreadableError(filePath, 'ENOTREG')
+    try {
+      return fs.readFileSync(fd)
+    } catch (e) {
+      throw new BodyUnreadableError(filePath, (e && e.code) || 'UNKNOWN')
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 function sha256(p) {
-  return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')
+  return crypto.createHash('sha256').update(readEpisodeBodyRawOrThrow(p)).digest('hex')
 }
 
 // ---------------------------------------------------------------------------
 // Anchor pre-flight (RFC-005 F6): IDs hardcoded in MEMORY.md files have a
 // documented-anchor semantic role; moving them silently invalidates the path.
 // ---------------------------------------------------------------------------
-function findAnchoredIds(ids) {
+function findAnchoredIds(ids, warnings) {
   const anchored = new Map()
   const projectsDir = path.join(os.homedir(), '.claude', 'projects')
   let memoryFiles = []
@@ -160,8 +215,15 @@ function findAnchoredIds(ids) {
     }
   } catch {}
   for (const mf of memoryFiles) {
-    let content = ''
-    try { content = fs.readFileSync(mf, 'utf8') } catch { continue }
+    // #669: readBodyOrSkip — converts a FIFO/non-regular MEMORY.md from a
+    // hang into a skip. F5: ENOENT stays silent; non-ENOENT reports through
+    // this file's existing warnings channel (surfaced in the final JSON).
+    const r = readBodyOrSkip(fs, mf)
+    if (!r.ok) {
+      if (r.code !== 'ENOENT') warnings.push(`MEMORY.md anchor scan: ${mf} unreadable (${r.code}) — skipped`)
+      continue
+    }
+    const content = r.raw
     for (const id of ids) {
       if (content.includes(`episodes/${id}.md`)) {
         if (!anchored.has(id)) anchored.set(id, [])
@@ -211,7 +273,11 @@ if (ids.length > 10 && !confirm && !dryRun) {
   usageError(`${ids.length} episodes selected (> 10). Re-run with --confirm (or --dry-run to preview).`)
 }
 
-const anchoredIds = findAnchoredIds(ids)
+// warnings declared before findAnchoredIds (#669) so its MEMORY.md
+// unreadable-scan reports use the SAME channel the move loop below appends
+// to (single warnings surface in the final JSON).
+const warnings = []
+const anchoredIds = findAnchoredIds(ids, warnings)
 
 // ---------------------------------------------------------------------------
 // Per-episode move
@@ -219,7 +285,6 @@ const anchoredIds = findAnchoredIds(ids)
 const moved = []
 const noop = []
 const errors = []
-const warnings = []
 
 for (const id of ids) {
   if (!/^\d{8}-\d{6}-/.test(id)) {
@@ -239,8 +304,21 @@ for (const id of ids) {
   if (inLocal && inGlobal) {
     // F3 recovery: identical → an earlier move copied but never unlinked;
     // finish the cleanup. Different → hard error, touch nothing.
-    const hLocal = sha256(path.join(LOCAL_DIR, 'episodes', `${id}.md`))
-    const hGlobal = sha256(path.join(GLOBAL_DIR, 'episodes', `${id}.md`))
+    // #669: PRE-lock, outside any try — sha256() now reads via the guarded
+    // helper and can throw; wrap locally so an unreadable body becomes a
+    // per-id error + continue instead of crashing the whole run.
+    let hLocal, hGlobal
+    try {
+      hLocal = sha256(path.join(LOCAL_DIR, 'episodes', `${id}.md`))
+      hGlobal = sha256(path.join(GLOBAL_DIR, 'episodes', `${id}.md`))
+    } catch (e) {
+      errors.push({
+        id,
+        error: e instanceof BodyUnreadableError ? `episode body unreadable (${e.code}) (${e.file})` : e.message,
+        ...(e instanceof BodyUnreadableError ? { code: `episode-unreadable:${e.code}` } : {}),
+      })
+      continue
+    }
     if (hLocal !== hGlobal) {
       errors.push({ id, error: 'Present in BOTH scopes with DIFFERENT content — manual reconciliation required (compare the two files, delete the stale one, run em-rebuild-index --scope all).' })
       continue
@@ -263,7 +341,21 @@ for (const id of ids) {
   let srcFile = path.join(srcDir, 'episodes', `${id}.md`)
 
   // Defensive: frontmatter id must match the filename.
-  let content = fs.readFileSync(srcFile, 'utf8')
+  // #669: PRE-lock (this runs before acquireStoreWriteLocksSync below) and
+  // outside any try today — a bare throw here would crash the whole run.
+  // Wrap locally, matching the :292 errors.push pattern, so an unreadable
+  // body becomes a per-id error + continue instead of a hang or a crash.
+  let content
+  try {
+    content = readEpisodeBodyOrThrow(srcFile)
+  } catch (e) {
+    errors.push({
+      id,
+      error: e instanceof BodyUnreadableError ? `episode body unreadable (${e.code}) (${e.file})` : e.message,
+      ...(e instanceof BodyUnreadableError ? { code: `episode-unreadable:${e.code}` } : {}),
+    })
+    continue
+  }
   let fmId = (content.match(/^id:\s*(.+)$/m) || [])[1]
   if (fmId && fmId.trim() !== id) {
     errors.push({ id, error: `Frontmatter id "${fmId.trim()}" does not match filename — refusing to move.` })
@@ -313,7 +405,10 @@ for (const id of ids) {
     const currentFrom = SRC_SCOPE_OF(srcDir)
     srcFile = path.join(srcDir, 'episodes', `${id}.md`)
     const dstFile = path.join(DEST_DIR, 'episodes', `${id}.md`)
-    content = fs.readFileSync(srcFile, 'utf8')
+    // #669: already inside the lock-held try (catch below now carries
+    // e.code for a BodyUnreadableError) — a natural throw here is caught,
+    // reported per-id, and the finally still releases both locks.
+    content = readEpisodeBodyOrThrow(srcFile)
     fmId = (content.match(/^id:\s*(.+)$/m) || [])[1]
     if (fmId && fmId.trim() !== id) {
       errors.push({ id, error: `Frontmatter id "${fmId.trim()}" does not match filename — refusing to move.` })
@@ -397,7 +492,16 @@ for (const id of ids) {
 
     moved.push({ id, from: currentFrom, to, ...(auditId ? { audit_id: auditId } : {}) })
   } catch (e) {
-    errors.push({ id, error: e.message, ...(steps ? { steps_succeeded: steps } : {}), recovery: 'run em-rebuild-index --scope all after resolving the reported paths' })
+    // #669: e.code was previously dropped for a BodyUnreadableError thrown
+    // from the guarded reads above (sha256 / readEpisodeBodyOrThrow) —
+    // carry it so the per-id error entry names the typed wire code.
+    errors.push({
+      id,
+      error: e instanceof BodyUnreadableError ? `episode body unreadable (${e.code}) (${e.file})` : e.message,
+      ...(e instanceof BodyUnreadableError ? { code: `episode-unreadable:${e.code}` } : {}),
+      ...(steps ? { steps_succeeded: steps } : {}),
+      recovery: 'run em-rebuild-index --scope all after resolving the reported paths',
+    })
     continue
   } finally {
     releaseStoreWriteLocks(lockResult.handles)

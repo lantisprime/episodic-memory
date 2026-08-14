@@ -49,7 +49,7 @@ import { execFileSync } from 'child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { nullProtoIndex, episodeTokens, updateTokensIndex } from './lib/relevance.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -321,7 +321,16 @@ function checkChainRef(label, value, expectedEvent) {
     errors.push(`${label}: episode:${r.entry.id} indexed but file missing at ${filePath}; cannot verify event/task for chain link`)
     return null
   }
-  const text = fs.readFileSync(filePath, 'utf8')
+  // #669 R-D: this gate's existing absent (missing-file) semantics is
+  // already an errors.push above, not a silent skip — so ANY read failure
+  // here (including a post-existsSync ENOENT race) is a GATE FAILURE via
+  // the same errors channel; a planted FIFO must not dodge this check.
+  const bodyRead = readBodyOrSkip(fs, filePath)
+  if (!bodyRead.ok) {
+    errors.push(`${label}: episode:${r.entry.id} body unreadable (${bodyRead.code}); cannot verify event/task for chain link`)
+    return null
+  }
+  const text = bodyRead.raw
   const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
   if (!m) {
     errors.push(`${label}: episode:${r.entry.id} body has no \`\`\`json fenced block; cannot verify event/task for chain link`)
@@ -367,8 +376,18 @@ if (triggeredBy) {
     // Read body to extract task field. Non-lifecycle episodes have no task in
     // body → null/undefined → provenance-only (no task assertion).
     const filePath = path.join(triggeredByEntry._dataDir, 'episodes', `${triggeredByEntry.id}.md`)
-    if (fs.existsSync(filePath)) {
-      const text = fs.readFileSync(filePath, 'utf8')
+    // #669 R-D: ONE guarded read replaces the existsSync+read TOCTOU pair.
+    // A planted FIFO must not dodge this cross-task provenance check — a
+    // non-ENOENT unreadable body is a GATE FAILURE via the errors channel.
+    // Absent (ENOENT) keeps this site's existing absent semantics: silent,
+    // provenance-only (no `else` branch existed here before either).
+    const bodyRead = readBodyOrSkip(fs, filePath)
+    if (!bodyRead.ok) {
+      if (bodyRead.code !== 'ENOENT') {
+        errors.push(`--triggered-by: episode:${triggeredByEntry.id} body unreadable (${bodyRead.code}); cannot verify cross-task provenance`)
+      }
+    } else {
+      const text = bodyRead.raw
       const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
       if (m) {
         try {

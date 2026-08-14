@@ -17,6 +17,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { resolveRepoRoot } from './local-dir.mjs'
+import { readBodyOrSkip } from './index-state.mjs'
 
 const RULE_GLOB_RE = /^(feedback_.+\.md|reference_.+\.md|MEMORY\.md|MEMORY_.+\.md)$/
 const RFC_FILE_RE = /^RFC-.+\.md$/
@@ -106,13 +107,15 @@ export function scanRuleNodes(dir) {
   for (const entry of entries.slice().sort()) {
     if (!RULE_GLOB_RE.test(entry)) continue
     const full = path.join(dir, entry)
-    let text = ''
-    try {
-      text = fs.readFileSync(full, 'utf8')
-    } catch {
+    // #669 S2: readBodyOrSkip — a FIFO named MEMORY.md hung this scan
+    // (Family C, plan §0). ok:false increments the EXISTING skipped
+    // counter; return shape unchanged (no em-graph wire-shape change).
+    const bodyRead = readBodyOrSkip(fs, full)
+    if (!bodyRead.ok) {
       skipped += 1
       continue
     }
+    const text = bodyRead.raw
     const fm = parseFlatFrontmatter(text)
     const slug = slugify(typeof fm.name === 'string' ? fm.name : '')
     if (!slug) {
@@ -161,13 +164,13 @@ export function scanRfcNodes(dir) {
   for (const entry of entries.slice().sort()) {
     if (!RFC_FILE_RE.test(entry)) continue
     const full = path.join(dir, entry)
-    let text = ''
-    try {
-      text = fs.readFileSync(full, 'utf8')
-    } catch {
+    // #669 S2: readBodyOrSkip, same pattern as scanRuleNodes above.
+    const bodyRead = readBodyOrSkip(fs, full)
+    if (!bodyRead.ok) {
       skipped += 1
       continue
     }
+    const text = bodyRead.raw
     const fm = parseFlatFrontmatter(text)
     if (typeof fm.rfc_id !== 'string' || !RFC_ID_RE.test(fm.rfc_id)) {
       skipped += 1
