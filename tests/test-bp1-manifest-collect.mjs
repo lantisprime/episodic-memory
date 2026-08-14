@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   collectEpisodeRecords,
   verifyOnDiskEqualsManifest,
@@ -271,6 +271,76 @@ t('throws on invalid runId shape', () => {
 
 t('throws on relative projectRoot', () => {
   assert.throws(() => collectEpisodeRecords('rfc-004-001', 'relative/path'), /absolute path/)
+})
+
+// ---------------------------------------------------------------------------
+// FIFO regression leg (issue #670): collectEpisodeRecords is a fail-closed
+// enumerator by design — an unreadable file (incl. a FIFO) must RE-THROW a
+// typed Error instead of hanging (unfixed: raw fs.readFileSync blocks
+// forever opening a FIFO with no writer) or silently skipping (would violate
+// "a run's records must be enumerable"). Spawned into a CHILD process with a
+// hard timeout so a regression fails as a timeout-kill, never a stuck suite.
+// ---------------------------------------------------------------------------
+t('FIFO episode file → typed THROW, no hang (spawned, alarm-wrapped)', () => {
+  const project = mkTempProject()
+  const home = mkHomeSandbox()
+  const localDir = path.join(project, '.episodic-memory', 'episodes')
+  const fifoPath = path.join(localDir, 'poison.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const MANIFEST_PATH = new URL('../scripts/lib/bp1-manifest.mjs', import.meta.url).href
+  const childPath = path.join(project, 'child-probe.mjs')
+  fs.writeFileSync(childPath, [
+    `import { collectEpisodeRecords } from ${JSON.stringify(MANIFEST_PATH)}`,
+    `try {`,
+    `  collectEpisodeRecords('rfc-004-001', ${JSON.stringify(project)})`,
+    `  console.log(JSON.stringify({ step: 'unexpected-ok' }))`,
+    `} catch (e) {`,
+    `  console.log(JSON.stringify({ step: 'threw', message: e.message }))`,
+    `}`,
+  ].join('\n'))
+  const r = spawnSync(process.execPath, [childPath], {
+    encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL',
+    env: { ...process.env, HOME: home },
+  })
+  fs.rmSync(childPath, { force: true })
+  fs.unlinkSync(fifoPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature); stderr=${(r.stderr || '').slice(0, 300)}`)
+  assert.equal(r.status, 0, `child exit 0 (it catches internally), got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+  const j = JSON.parse((r.stdout || '').trim())
+  assert.equal(j.step, 'threw', JSON.stringify(j))
+  assert.match(j.message, /unreadable episode file/)
+})
+
+// ---------------------------------------------------------------------------
+// Strict-decode regression leg (round-1 MINOR-3): the refactor to the shared
+// readBodyBufferOrSkip primitive must keep passing RAW BYTES into
+// parseBp1Frontmatter, not a pre-decoded string — otherwise invalid UTF-8
+// would silently normalize to U+FFFD instead of dying in
+// STRICT_UTF8_DECODER. Fixture bytes MUST contain `run_id: <runId>` so
+// looksLikeBp1Run admits it (bp1-manifest.mjs:508) — otherwise the parse
+// failure is silently skipped and this leg is vacuous.
+// ---------------------------------------------------------------------------
+t('invalid-UTF-8 bytes in a run-tagged episode still die in STRICT_UTF8_DECODER (Buffer passthrough survives the #670 refactor)', () => {
+  const project = mkTempProject()
+  const home = mkHomeSandbox()
+  withHome(home, () => {
+    const localDir = path.join(project, '.episodic-memory', 'episodes')
+    // Valid-looking frontmatter block that mentions the target run_id (so
+    // looksLikeBp1Run admits it) but embeds a raw invalid-UTF-8 byte (lone
+    // 0xFF) inside a quoted value — this must hard-fail strict parse, not
+    // decode to U+FFFD and pass.
+    const bytes = Buffer.concat([
+      Buffer.from('---\nid: bad-utf8-id\nrun_id: rfc-004-001\ntags: [bp1-run-started]\nsummary: "', 'utf8'),
+      Buffer.from([0xff]),
+      Buffer.from('"\n---\nbody\n', 'utf8'),
+    ])
+    fs.writeFileSync(path.join(localDir, 'invalid-utf8.md'), bytes)
+    assert.throws(
+      () => collectEpisodeRecords('rfc-004-001', project),
+      /BP-1-tagged episode .* failed strict parse/,
+    )
+  })
 })
 
 // ---------------------------------------------------------------------------

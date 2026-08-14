@@ -107,9 +107,13 @@ function setupActiveProject() {
 
 function spawnOrchestrator(sub, args, opts) {
   const argv = [sub, ...args]
+  // #670: explicit timeout + hard kill so a FIFO-hang regression fails this
+  // suite loud (signal !== null) instead of freezing the test run forever.
   return spawnSync('node', [ORCHESTRATOR, ...argv], {
     cwd: opts.callerCwd,
     encoding: 'utf8',
+    timeout: 15000,
+    killSignal: 'SIGKILL',
     env: { ...process.env, HOME: opts.homeDir, ...(opts.env || {}) },
   })
 }
@@ -436,6 +440,76 @@ for (const tc of G3_CASES) {
 }
 
 // =============================================================================
+// Issue #670 review round MINOR-2 (converges with lens-2 F2): committed
+// CLI-level legs for the mandated finalize path (not just the loader), with
+// diagnostic count/location assertions — matching the codex probe shapes
+// verbatim.
+// =============================================================================
+
+tap('G3-670a finalize-run step-0 gate: run.key FIFO at mode 0600 → exit 4, unsigned run-key-unreadable diagnostic, target-only artifacts, no hang', () => {
+  const { project, home } = setupActiveProject()
+  const caller = makeNonGitCaller()
+  const runId = initRun(project, home, project)
+  // Replace the real run.key with a FIFO at mode 0600 — this PASSES the old
+  // statSync-based mode-0600 gate (a FIFO has no distinct "mode" from a
+  // regular file under statSync); the fd-based fix must reject it as
+  // non-regular (fstat(fd).isFile() === false) BEFORE the mode check, not
+  // block on a path-based readFileSync.
+  const keyPath = runKeyPath(project, runId)
+  fs.unlinkSync(keyPath)
+  const mk = spawnSync('mkfifo', ['-m', '600', keyPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const r = spawnOrchestrator('finalize-run', ['--project', project, '--run-id', runId], { callerCwd: caller, homeDir: home })
+  fs.unlinkSync(keyPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal}; stderr=${(r.stderr || '').slice(0, 300)}`)
+  assert.equal(r.status, 4, `expected exit 4, got ${r.status}: stderr=${r.stderr}`)
+  assert.match(r.stderr, /bp1-finalize-run: run\.key unreadable/)
+  const diag = findEpisodeByTag(project, runId, 'bp1-finalize-diagnostic')
+  assert.ok(diag, 'unsigned diagnostic required')
+  assert.match(diag.body, /\*\*Reason:\*\* `run-key-unreadable`/, `diagnostic body must cite reason run-key-unreadable; got: ${diag.body}`)
+  assert.equal(diag.frontmatter.hmac_signature, undefined, 'diagnostic must NOT have hmac_signature (unsigned — no usable key to sign with)')
+  // Location: target gets the diagnostic; caller and HOME receive nothing.
+  assert.equal(listLocalEpisodes(project).filter(f => f.includes('-diagnostic-')).length, 1, 'exactly one diagnostic episode under target')
+  assert.equal(fs.existsSync(path.join(caller, '.episodic-memory')), false, 'caller must receive zero artifacts')
+  const homeEpisodesDir = path.join(home, '.episodic-memory', 'episodes')
+  assert.equal(fs.existsSync(homeEpisodesDir) ? fs.readdirSync(homeEpisodesDir).length : 0, 0, 'HOME must receive zero new episode artifacts')
+})
+
+tap('G3-670b decisionLogFence FIFO-traversal leg: FIFO in episodes dir → fence skips it (loop-guard), collect re-throws → exactly one signed fence-fail episode, target-only artifacts, no hang', () => {
+  const { project, home } = setupActiveProject()
+  const caller = makeNonGitCaller()
+  const runId = initRun(project, home, project)
+  const key = readRunKey(project, runId)
+  seedPrePost(project, runId, key)
+  // Plant a FIFO in the SAME local episodes dir the fence scans. decisionLogFence's
+  // loop-scan is guarded (readBodyBufferOrSkip; ok:false -> continue) so the
+  // fence itself does not hang or fail on it — but collectEpisodeRecords
+  // (step 2) is a fail-closed enumerator that RE-THROWS on ANY unreadable
+  // file regardless of content, so finalize-run still fails downstream.
+  const localStore = path.join(project, '.episodic-memory', 'episodes')
+  const fifoPath = path.join(localStore, 'poison.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const r = spawnOrchestrator('finalize-run', ['--project', project, '--run-id', runId], { callerCwd: caller, homeDir: home })
+  fs.unlinkSync(fifoPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal}; stderr=${(r.stderr || '').slice(0, 300)}`)
+  assert.equal(r.status, 4, `expected exit 4, got ${r.status}: stderr=${r.stderr}`)
+  assert.match(r.stderr, /collectEpisodeRecords failed/, `stderr must show the fence PASSED and collect FAILED; got: ${r.stderr}`)
+  assert.equal(findEpisodeByTag(project, runId, 'bp1-run-manifest'), null, 'no manifest')
+  assert.equal(readRunState(project, runId).state, 'active', 'state must stay active')
+  const fence = findEpisodeByTag(project, runId, 'bp1-finalize-fence-fail')
+  assert.ok(fence, 'exactly one signed fence-fail evidence episode required')
+  assert.ok(typeof fence.frontmatter.hmac_signature === 'string' && fence.frontmatter.hmac_signature !== '', 'fence-fail must be signed')
+  // "exactly one": count every episode this run wrote total — init-run's
+  // run-started (1) + seedPrePost's pre+post (2) + this ONE fence-fail
+  // evidence episode = 4, no more (no duplicate fence-fail, no stray writes).
+  assert.equal(listLocalEpisodes(project).length, 4, `expected exactly run-started+pre+post+fence-fail (4) episodes; got: ${listLocalEpisodes(project).join(', ')}`)
+  assert.equal(fs.existsSync(path.join(caller, '.episodic-memory')), false, 'caller must receive zero artifacts')
+  const homeEpisodesDir = path.join(home, '.episodic-memory', 'episodes')
+  assert.equal(fs.existsSync(homeEpisodesDir) ? fs.readdirSync(homeEpisodesDir).length : 0, 0, 'HOME must receive zero new episode artifacts')
+})
+
+// =============================================================================
 // G4 — finalize-recover state machine (7 variants)
 // =============================================================================
 
@@ -545,6 +619,54 @@ tap('G4 State C variant 2 (disk-mismatch): valid sig + mutated covered episode �
   assert.match(r.stderr, /on-disk records do not match manifest/)
   assert.doesNotMatch(r.stderr, /signature invalid/)
   assert.equal(readRunState(project, runId).state, 'active')
+})
+
+// =============================================================================
+// Issue #670 — finalize-recover CLI FIFO legs, pinned exit codes (§3).
+// =============================================================================
+
+tap('G4-670 finalize-recover + episodes-dir FIFO + NO manifest → State C, exit 4, no hang', () => {
+  const { project, home } = setupActiveProject()
+  const runId = initRun(project, home)
+  // No finalize-run call: no manifest exists. findManifestEpisode must skip
+  // the FIFO (not hang) and report "no manifest" → State C.
+  const epDir = path.join(project, '.episodic-memory', 'episodes')
+  fs.mkdirSync(epDir, { recursive: true })
+  const fifoPath = path.join(epDir, 'poison.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const r = spawnOrchestrator('finalize-recover', ['--project', project, '--run-id', runId], { callerCwd: project, homeDir: home })
+  fs.unlinkSync(fifoPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature); stderr=${(r.stderr || '').slice(0, 500)}`)
+  assert.equal(r.status, 4, `expected exit 4 (State C), got ${r.status}: stderr=${r.stderr}`)
+  assert.match(r.stderr, /State C/)
+  assert.equal(readRunState(project, runId).state, 'active', 'state stays active')
+})
+
+tap('G4-670 finalize-recover + episodes-dir FIFO + VALID manifest → collect re-throw propagates UNCAUGHT, exit 1, no hang', () => {
+  const { project, home, runId } = setupRunWithManifest()
+  const idxPath = path.join(project, '.episodic-memory', 'runs', '_index.json')
+  const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'))
+  idx.runs[runId].state = 'active'
+  idx.runs[runId].terminal_at = null
+  fs.writeFileSync(idxPath, JSON.stringify(idx, null, 2) + '\n')
+  // Manifest is valid (from setupRunWithManifest's finalize-run). Plant a
+  // FIFO ALONGSIDE the real signed episodes — collectEpisodeRecords (called
+  // from verifyOnDiskEqualsManifest) is a fail-closed enumerator: it
+  // RE-THROWS typed on the FIFO regardless of that file's content/run_id.
+  // finalize-recover has no try/catch around this call, so the throw
+  // propagates uncaught — pinned as acceptable (fail-closed, same shape as
+  // today's EACCES class).
+  const epDir = path.join(project, '.episodic-memory', 'episodes')
+  const fifoPath = path.join(epDir, 'poison.md')
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const r = spawnOrchestrator('finalize-recover', ['--project', project, '--run-id', runId], { callerCwd: project, homeDir: home })
+  fs.unlinkSync(fifoPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature); stderr=${(r.stderr || '').slice(0, 500)}`)
+  assert.equal(r.status, 1, `expected exit 1 (uncaught re-throw), got ${r.status}: stderr=${r.stderr}`)
+  assert.match(r.stderr, /unreadable episode file/)
+  assert.equal(readRunState(project, runId).state, 'active', 'not terminal — no signed evidence emitted')
 })
 
 tap('G4 State D happy: damaged key (mode 0o000) → unlinked + terminal', () => {
