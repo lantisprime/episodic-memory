@@ -85,8 +85,18 @@ function embedDir(dataDir, label) {
 
   const keep = new Map()
   const todo = []
+  const warnings = []
   for (const row of rows) {
-    const text = episodeEmbedText(row, dataDir)
+    // #666 S2 lib/embeddings.mjs:185: a body-read skip (non-ENOENT — F5)
+    // means episodeEmbedText could not compute a trustworthy content hash;
+    // skip the WHOLE episode this run (no keep, no todo) rather than
+    // embedding from impoverished text. No row for this id until the shape
+    // heals and a re-run picks it back up.
+    const { text, skipped, skipCode } = episodeEmbedText(row, dataDir)
+    if (skipped) {
+      warnings.push(`episode body skipped ${row.id}: unreadable (${skipCode})`)
+      continue
+    }
     const h = contentHash(text)
     const prior = existing.rows.get(row.id)
     if (prior && prior.h === h && prior.model === model) {
@@ -112,9 +122,16 @@ function embedDir(dataDir, label) {
     }
   }
 
-  if (todo.length > 0 || dropped > 0 || rebuild) writeEmbeddings(dataDir, keep)
+  // warnings.length joins the write-trigger set: a body-skip can drop a
+  // previously-embedded id from `keep` (unreadable now, was fine before) —
+  // that must be persisted even when todo/dropped/rebuild are all otherwise
+  // empty, or the sidecar would keep a stale row for a since-corrupted body.
+  if (todo.length > 0 || dropped > 0 || rebuild || warnings.length > 0) writeEmbeddings(dataDir, keep)
 
-  return { scope: label, embedded: todo.length, reused: keep.size - todo.length, dropped, total: keep.size, model }
+  return {
+    scope: label, embedded: todo.length, reused: keep.size - todo.length, dropped, total: keep.size, model,
+    ...(warnings.length ? { warnings } : {}),
+  }
 }
 
 const scopes = []

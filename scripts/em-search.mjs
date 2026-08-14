@@ -29,7 +29,7 @@ import {
   computeScore, writeBackAccessTracking, scoreTextMatch,
   tokenizeQuery, loadTokensIndex, tokenCandidates, scorePartialMatch
 } from './lib/relevance.mjs'
-import { IndexUnreadableError } from './lib/index-state.mjs'
+import { IndexUnreadableError, readBodyOrSkip, openReadableBody, BodyUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -136,6 +136,25 @@ function collectChainEntries(baseResults, seenIds) {
   return allEntries
 }
 
+// F5 rule (issues #666/#667, every body-read site in this file): non-ENOENT
+// codes (EISDIR/ENOTREG/EACCES/...) are a shape defect — skip + warn.
+// ENOENT (absent body / dangling row) preserves each site's CURRENT silent
+// behavior exactly — a dangling-row store must not start spamming warnings
+// on every search. Deduped per id:code so a body that fails BOTH the
+// scoring read and the --full output re-read warns only once. Returns
+// nothing; the caller passes the array its own output shape will surface
+// the joined warning through (materializeChain/--history have their own
+// output objects; the default search path shares the bottom `warnings`
+// array via searchBodyWarnings).
+const bodyWarnSeen = new Set()
+function noteBodySkip(target, id, code) {
+  if (code === 'ENOENT') return
+  const key = `${id}:${code}`
+  if (bodyWarnSeen.has(key)) return
+  bodyWarnSeen.add(key)
+  target.push(`episode body skipped ${id}: unreadable (${code})`)
+}
+
 // --materialize (#634a): walk backward via the scalar `supersedes` edge from the
 // anchor to root (archived-aware via collectChainEntries — same live+archived
 // merge as --history), reverse to root->terminal order, and concatenate full
@@ -158,14 +177,19 @@ function materializeChain(anchorRow) {
     node = parent
   }
   spine.reverse() // root -> anchor (terminal)
+  const chainWarnings = []
   const members = spine.map(e => {
     const archived = !!e._archived
     const filePath = path.join(e._dataDir, archived ? 'archived' : 'episodes', `${e.id}.md`)
     let bodyText = ''
-    if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, 'utf8')
-      const parts = content.split('---')
+    // #666 S2 :166: readBodyOrSkip replaces existsSync+readFileSync — a
+    // FIFO-shaped member must skip+warn (F5), not hang the whole chain.
+    const bodyRead = readBodyOrSkip(fs, filePath)
+    if (bodyRead.ok) {
+      const parts = bodyRead.raw.split('---')
       bodyText = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
+    } else {
+      noteBodySkip(chainWarnings, e.id, bodyRead.code)
     }
     const meta = { id: e.id, date: e.date, summary: e.summary, body_len: bodyText.length }
     if (archived) meta.archived = true
@@ -180,6 +204,7 @@ function materializeChain(anchorRow) {
     count: members.length,
     members: members.map(m => m.meta),
     body,
+    ...(chainWarnings.length ? { warning: chainWarnings.join(' | ') } : {}),
   }
 }
 
@@ -248,7 +273,21 @@ if (readId !== undefined) {
   // mirrors --history body resolution).
   const subDir = archived ? 'archived' : 'episodes'
   const filePath = path.join(row._dataDir, subDir, `${row.id}.md`)
-  const fileExists = fs.existsSync(filePath)
+  // #666 S2 --read row: single-target AUTHORITATIVE read — openReadableBody
+  // reads the file ONCE (audit F1: this used to be TWO separate readFileSync
+  // calls, here and again at the body-extraction site below); unreadable
+  // (non-absent) aborts typed, absent (null) preserves the existing
+  // load-bearing body_missing exit-0 path UNCHANGED.
+  let fileContent
+  try {
+    fileContent = openReadableBody(fs, filePath)
+  } catch (e) {
+    if (!(e instanceof BodyUnreadableError)) throw e
+    const out = JSON.stringify({ status: 'error', message: `em-search: ${e.message}`, code: `episode-unreadable:${e.code}` })
+    await new Promise((resolve) => process.stdout.write(out + '\n', resolve))
+    process.exit(1)
+  }
+  const fileExists = fileContent !== null
 
   // F-codex: parse the episode FILE's frontmatter and merge OVER the index row
   // (file wins for frontmatter fields). The index row supplies the operational
@@ -258,8 +297,7 @@ if (readId !== undefined) {
   // inline arrays, quoted scalars) — keeps custom/foreign frontmatter keys.
   const entry = {}
   if (fileExists) {
-    const content = fs.readFileSync(filePath, 'utf8')
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
+    const fmMatch = fileContent.match(/^---\n([\s\S]*?)\n---/)
     if (fmMatch) {
       for (const line of fmMatch[1].split('\n')) {
         const m = line.match(/^(\w+):\s*(.*)$/)
@@ -331,9 +369,9 @@ if (readId !== undefined) {
     process.exit(0)
   }
 
-  // Body is everything after the second `---`.
-  const content = fs.readFileSync(filePath, 'utf8')
-  const parts = content.split('---')
+  // Body is everything after the second `---`. Reuses fileContent read ONCE
+  // above (F1: no second readFileSync).
+  const parts = fileContent.split('---')
   const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
 
   // The body is returned IN FULL. There is deliberately no size bound here.
@@ -442,18 +480,22 @@ if (historyId) {
     }
   }
 
-  // Include full body if requested (archived members read from archived/)
+  // Include full body if requested (archived members read from archived/).
+  // #666 S2 :452: readBodyOrSkip replaces existsSync+readFileSync — a
+  // FIFO-shaped member skips+warns (F5) instead of hanging the whole walk.
+  const historyWarnings = []
   const output = chain.map(e => {
     const { _dataDir, _archived, ...rest } = e
     const row = _archived ? { ...rest, archived: true } : rest
     if (full) {
       const filePath = path.join(_dataDir, _archived ? 'archived' : 'episodes', `${e.id}.md`)
-      if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf8')
-        const parts = content.split('---')
+      const bodyRead = readBodyOrSkip(fs, filePath)
+      if (bodyRead.ok) {
+        const parts = bodyRead.raw.split('---')
         const body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
         return { ...row, body }
       }
+      noteBodySkip(historyWarnings, e.id, bodyRead.code)
     }
     return row
   })
@@ -463,7 +505,10 @@ if (historyId) {
   // buffer, and process.exit() discards unflushed writes — piped consumers
   // (em-console, execFile callers) received exactly 65536 truncated bytes.
   await new Promise((resolve) => process.stdout.write(
-    JSON.stringify({ status: 'ok', count: output.length, chain: output }) + '\n', resolve))
+    JSON.stringify({
+      status: 'ok', count: output.length, chain: output,
+      ...(historyWarnings.length ? { warning: historyWarnings.join(' | ') } : {}),
+    }) + '\n', resolve))
   process.exit(0)
 }
 
@@ -477,6 +522,9 @@ if (project) {
   results = results.filter(e => e.project === project)
 }
 let searchWarning = null
+// #666 S2 :583/:621/:712: per-row body-read skip warnings for the scoring +
+// --full output sites below, joined into the final `warnings` array (F5).
+const searchBodyWarnings = []
 if (tag) {
   const normalizedTag = normalizeTags(tag)[0]
   if (normalizedTag) {
@@ -578,9 +626,15 @@ if (query) {
     ? results.filter(e => candidateInfo.all.has(e.id) || !candidateInfo.covered.has(e.id))
     : results
   const matched = pool.filter(e => {
+    // #666 S2 :583: readBodyOrSkip replaces the swallowing try/catch —
+    // scoreTextMatch's readBody contract (string|null) is unchanged, so this
+    // is transparent to lib/relevance.mjs; a non-ENOENT skip now warns (F5).
     const readBody = () => {
       const filePath = path.join(e._dataDir, 'episodes', `${e.id}.md`)
-      try { return fs.readFileSync(filePath, 'utf8') } catch { return null }
+      const r = readBodyOrSkip(fs, filePath)
+      if (r.ok) return r.raw
+      noteBodySkip(searchBodyWarnings, e.id, r.code)
+      return null
     }
     const { matched: isMatch, textMatch, body } = scoreTextMatch(e, query, readBody)
     if (!isMatch) return false
@@ -615,11 +669,16 @@ if (query) {
       .filter(e => !matchedIds.has(e.id))
     for (const e of partialPool) {
       let bodyLower // lazy, read at most once per episode
+      // #666 S2 :621: readBodyOrSkip replaces the swallowing try/catch.
       const readBodyLower = () => {
         if (bodyLower === undefined) {
-          try {
-            bodyLower = fs.readFileSync(path.join(e._dataDir, 'episodes', `${e.id}.md`), 'utf8').toLowerCase()
-          } catch { bodyLower = null }
+          const r = readBodyOrSkip(fs, path.join(e._dataDir, 'episodes', `${e.id}.md`))
+          if (r.ok) {
+            bodyLower = r.raw.toLowerCase()
+          } else {
+            noteBodySkip(searchBodyWarnings, e.id, r.code)
+            bodyLower = null
+          }
         }
         return bodyLower
       }
@@ -707,9 +766,15 @@ const output = results.map(e => {
     entry.score = Math.round(_score * 1000) / 1000
   }
   if (full) {
+    // #666 S2 :712: readBodyOrSkip replaces the swallowing try/catch — a
+    // non-ENOENT skip warns (F5); ENOENT stays silent (row emitted without
+    // a body field, exactly as an absent file did before).
     const content = _body || (() => {
       const filePath = path.join(_dataDir, 'episodes', `${e.id}.md`)
-      try { return fs.readFileSync(filePath, 'utf8') } catch { return null }
+      const r = readBodyOrSkip(fs, filePath)
+      if (r.ok) return r.raw
+      noteBodySkip(searchBodyWarnings, e.id, r.code)
+      return null
     })()
     if (content) {
       const parts = content.split('---')
@@ -726,6 +791,7 @@ const result = { status: 'ok', count: output.length, episodes: output }
 const elapsed = Date.now() - searchStart
 const warnings = []
 if (searchWarning) warnings.push(searchWarning)
+for (const w of searchBodyWarnings) warnings.push(w)
 if (elapsed > warnTimeMs) {
   warnings.push(`Search took ${elapsed}ms across ${totalEpisodeCount} episodes. Consider running em-prune.mjs to archive stale episodes.`)
 }

@@ -28,7 +28,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import { tokenizeQuery, TOKENS_DROPPED_KEY } from './relevance.mjs'
-import { readSidecarOrDegrade } from './index-state.mjs'
+import { readSidecarOrDegrade, readBodyOrSkip } from './index-state.mjs'
 
 export const HASH_DIM = 256
 export const HASH_MODEL = `hash-v1-${HASH_DIM}`
@@ -179,13 +179,28 @@ export function writeEmbeddings(dataDir, rows) {
 
 // Text an episode is embedded from: summary + tags + body (file content
 // after frontmatter; falls back to full content when unparseable).
+//
+// #666 S2 :185: readBodyOrSkip replaces the swallowing try/catch. ENOENT
+// (absent body) preserves the prior behavior exactly — body stays '', the
+// episode still embeds from summary+tags alone. A non-ENOENT defect
+// (EISDIR/ENOTREG/EACCES/...) is a shape defect, not an absent body: the
+// caller (em-embed.mjs's embedDir) cannot compute a trustworthy content hash
+// without the body text, so it skips the WHOLE episode this run rather than
+// embedding from impoverished text — { skipped:true, skipCode } tells it to
+// do that and warn (F5), leaving the episode with no embedding row until the
+// shape heals.
 export function episodeEmbedText(row, dataDir) {
+  const r = readBodyOrSkip(fs, path.join(dataDir, 'episodes', `${row.id}.md`))
   let body = ''
-  try {
-    const content = fs.readFileSync(path.join(dataDir, 'episodes', `${row.id}.md`), 'utf8')
-    const parts = content.split('---')
-    body = parts.length >= 3 ? parts.slice(2).join('---') : content
-  } catch {}
+  let skipped = false
+  let skipCode = null
+  if (r.ok) {
+    const parts = r.raw.split('---')
+    body = parts.length >= 3 ? parts.slice(2).join('---') : r.raw
+  } else if (r.code !== 'ENOENT') {
+    skipped = true
+    skipCode = r.code
+  }
   const tags = Array.isArray(row.tags) ? row.tags.join(' ') : ''
-  return `${row.summary || ''}\n${tags}\n${body}`.trim()
+  return { text: `${row.summary || ''}\n${tags}\n${body}`.trim(), skipped, skipCode }
 }

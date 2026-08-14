@@ -23,6 +23,7 @@ import fs from 'fs'
 import path from 'node:path'
 import os from 'node:os'
 import { resolveLocalDir } from './local-dir.mjs'
+import { readSidecarOrDegrade } from './index-state.mjs'
 
 export const BP1_ADVISORY_MESSAGE =
   '__BP1_ADVISORY__ A recent bp-001-implementation-workflow violation exists in this project. ' +
@@ -66,8 +67,14 @@ function loadActiveEntries() {
   const all = []
   for (const dir of dirs) {
     const indexFile = path.join(dir, 'index.jsonl')
-    let raw
-    try { raw = fs.readFileSync(indexFile, 'utf8') } catch { continue }
+    // S4 (#666): a raw fs.readFileSync BLOCKS on a FIFO-shaped index.jsonl —
+    // this is the first-and-only touch of index.jsonl in the SessionStart
+    // hook's call chain, no try/catch can stop a hang mid-read.
+    // readSidecarOrDegrade is fd-based (open O_NONBLOCK + fstat + read from
+    // the same fd) and collapses absent/unreadable to null uniformly —
+    // advisory degrades, never blocks SessionStart.
+    const raw = readSidecarOrDegrade(fs, indexFile)
+    if (raw === null) continue
     for (const line of raw.trim().split('\n')) {
       if (!line) continue
       try { all.push(JSON.parse(line)) } catch {}

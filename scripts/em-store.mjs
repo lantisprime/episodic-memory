@@ -368,7 +368,23 @@ for (const [role, file] of [
 // persistence and every derived-index update. Validation above stays before
 // the first durable write; the collision report and final JSON emit only
 // after the lock is released.
-const lockResult = acquireStoreWriteLocksSync(dataDir)
+//
+// S5.1 (#667): lock-acquire raw fs errors. lib/lock.mjs:28 rethrows any
+// non-EEXIST errno (e.g. EACCES creating clerk-apply.lock under a
+// write-protected data dir); canonicalizeAndSort's own mkdirSync/realpathSync
+// can also throw raw. F3 predicate (pinned): real fs errors carry a numeric
+// .errno; a programming error has a string .code but errno:undefined and
+// must keep its raw stack — rethrown bare.
+let lockResult
+try {
+  lockResult = acquireStoreWriteLocksSync(dataDir)
+} catch (e) {
+  if (typeof e.errno === 'number' && typeof e.code === 'string') {
+    console.log(JSON.stringify({ status: 'error', message: `em-store: lock acquire failed (${e.code}) (${dataDir})`, code: `store-lock-failed:${e.code}` }))
+    process.exit(1)
+  }
+  throw e
+}
 if (!lockResult.ok) {
   console.log(JSON.stringify({ status: 'error', code: lockResult.code, heldBy: lockResult.heldBy }))
   process.exit(1)
@@ -376,6 +392,12 @@ if (!lockResult.ok) {
 const lockHandles = lockResult.handles
 let successPayload
 let storedId
+// S5.2 leg sentinel (#667): assigned immediately before each of em-store's
+// FOUR write legs so the catch below can (a) name the failing leg in its
+// envelope and (b) gate the fs-error branch to fire only when a leg was
+// actually in flight (leg !== null) — anything else rethrows bare.
+let leg = null
+let legPath = null
 try {
 // Issue 546 (S3c ID-collision retry): under the lock, re-read the index
 // ids and generate an ID absent from both the index and episode path.
@@ -541,6 +563,7 @@ const indexEntry = JSON.stringify({
 //     (genuinely-absent store), priorIndexContent is "" and this
 //     creates a fresh file via atomicReplaceFileSync's temp+rename.
 //     A populated store appends exactly one line under the lock.
+leg = 'index-commit'; legPath = indexFile
 atomicReplaceFileSync(indexFile, priorIndexContent + indexEntry + '\n')
 
 // (2) Episode file commit SECOND. mkdirSync(episodesDir, recursive)
@@ -548,16 +571,24 @@ atomicReplaceFileSync(indexFile, priorIndexContent + indexEntry + '\n')
 //     that path THROWS EEXIST and aborts the writer — leaving the
 //     index with a dangling row, but no orphan .md. em-rebuild-index
 //     heals on the next run (see block comment above).
+leg = 'episodes-dir'; legPath = episodesDir
 fs.mkdirSync(episodesDir, { recursive: true })
 
 const filePath = path.join(episodesDir, `${id}.md`)
+leg = 'episode-file'; legPath = filePath
 atomicReplaceFileSync(filePath, episodeContent)
 
+leg = 'derived-index'; legPath = dataDir
 updateTagsIndex(dataDir, id, tags)
 updateCategoryIndex(dataDir, id, category)
 // Token source is the FULL FILE content (frontmatter + body): the search
 // body tier greps the whole file, so pruning must see the same text.
 updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeContent }))
+// S5.2 leg sentinel: past the raw-fs-risk window. The playbook import/
+// registration code below has its own self-contained try/catch (never lets
+// an exception escape this outer try) and must never be misattributed to a
+// write leg if that assumption ever changes.
+leg = null
 
   storedId = id
   successPayload = { status: 'ok', id, file: filePath, scope }
@@ -644,6 +675,18 @@ updateTokensIndex(dataDir, id, episodeTokens({ summary, tags, body: episodeConte
     // — e.message is byte-frozen to "episode index unreadable" regardless of
     // which file failed; derive the role from e.file's basename instead.
     console.log(JSON.stringify({ status: 'error', message: unreadableMessage('em-store', roleForFile(e.file), e), code: `index-unreadable:${e.code}` }))
+    releaseStoreWriteLocks(lockHandles)
+    process.exit(1)
+  }
+  // S5.2 (#667): a raw fs errno from one of the FOUR write legs (leg
+  // sentinel above). F3 predicate, pinned: real fs errors carry a numeric
+  // .errno; a programming error has a string .code but errno:undefined and
+  // must keep its raw stack — IndexUnreadableError has no .errno at all, so
+  // this predicate excludes it order-independently even if branch order ever
+  // changes. leg !== null gates the branch to only fire when the throw
+  // genuinely originated inside a leg; anything else rethrows bare.
+  if (leg !== null && typeof e.errno === 'number' && typeof e.code === 'string') {
+    console.log(JSON.stringify({ status: 'error', message: `em-store: episode write failed (${e.code}) at ${leg} (${legPath})`, code: `episode-write-failed:${e.code}` }))
     releaseStoreWriteLocks(lockHandles)
     process.exit(1)
   }

@@ -323,7 +323,10 @@ function armedRepo() {
 function stageModule(scriptsDir) {
   fs.mkdirSync(path.join(scriptsDir, 'lib'), { recursive: true })
   fs.copyFileSync(path.join(REPO, 'scripts', 'enforce-contract.mjs'), path.join(scriptsDir, 'enforce-contract.mjs'))
-  for (const lib of ['local-dir', 'marker-paths', 'marker-state', 'session-id', 'json-instance-validate', 'effective-tier', 'bp001-advisory']) {
+  // index-state: bp001-advisory imports readSidecarOrDegrade for its #666 S4
+  // SessionStart-hang fix; index-state.mjs itself imports only node:path, so
+  // staging it is closure-complete.
+  for (const lib of ['local-dir', 'marker-paths', 'marker-state', 'session-id', 'json-instance-validate', 'effective-tier', 'bp001-advisory', 'index-state']) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', `${lib}.mjs`), path.join(scriptsDir, 'lib', `${lib}.mjs`))
   }
 }

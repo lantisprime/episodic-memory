@@ -34,7 +34,7 @@ import {
   HASH_MODEL, hashEmbed, buildIdf, cmdEmbed, cosine, loadEmbeddings, contentHash,
   loadEmbedConfig, resolveEmbedSettings
 } from './lib/embeddings.mjs'
-import { IndexUnreadableError } from './lib/index-state.mjs'
+import { IndexUnreadableError, readBodyOrSkip } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -205,6 +205,9 @@ if (!noTrack && results.length > 0) {
   writeBackAccessTracking(results.map(r => r.entry))
 }
 
+// #666 S2 :218: per-row body-read skip warnings, same F5 rule + same joined-
+// string convention as em-search (non-ENOENT codes only).
+const semanticBodyWarnings = []
 const episodes = results.map(({ entry, similarity, score }) => {
   const { _dataDir, _source, ...rest } = entry
   const out = {
@@ -214,20 +217,26 @@ const episodes = results.map(({ entry, similarity, score }) => {
     score: Math.round(score * 1000) / 1000,
   }
   if (full) {
-    try {
-      const content = fs.readFileSync(path.join(_dataDir, 'episodes', `${entry.id}.md`), 'utf8')
-      const parts = content.split('---')
+    const r = readBodyOrSkip(fs, path.join(_dataDir, 'episodes', `${entry.id}.md`))
+    if (r.ok) {
+      const parts = r.raw.split('---')
       out.body = parts.length >= 3 ? parts.slice(2).join('---').trim() : ''
-    } catch {}
+    } else if (r.code !== 'ENOENT') {
+      semanticBodyWarnings.push(`episode body skipped ${entry.id}: unreadable (${r.code})`)
+    }
   }
   return out
 })
+
+const semanticWarnings = []
+if (rerankWarning) semanticWarnings.push(rerankWarning)
+for (const w of semanticBodyWarnings) semanticWarnings.push(w)
 
 console.log(JSON.stringify({
   status: 'ok',
   count: episodes.length,
   model: queryModel,
   ...(reranked ? { reranked: true } : {}),
-  ...(rerankWarning ? { warning: rerankWarning } : {}),
+  ...(semanticWarnings.length ? { warning: semanticWarnings.join(' | ') } : {}),
   episodes,
 }))

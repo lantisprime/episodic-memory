@@ -438,7 +438,9 @@ test('T10: direct --session-start from nested cwd writes artifacts at repo root,
 // out of em-recall). Per feedback_fixture_transitive_imports.md, stage
 // enforce-contract.mjs PLUS its full transitive lib closure:
 //   local-dir, marker-paths, marker-state, session-id, bp001-advisory,
-//   json-instance-validate, effective-tier.
+//   json-instance-validate, effective-tier, index-state (#666 S4: bp001-advisory
+//   imports readSidecarOrDegrade for its SessionStart-hang fix; index-state.mjs
+//   itself imports only node:path, so staging it is closure-complete).
 // (--session-start needs no patterns/ files — contract/tier loading is the
 // --gate stop path; the advisory reads the episode index, the sweeps/baseline
 // read only the marker libs.)
@@ -457,6 +459,7 @@ function buildTempHome(homeRoot) {
     'bp001-advisory.mjs',
     'json-instance-validate.mjs',
     'effective-tier.mjs',
+    'index-state.mjs',
   ]) {
     fs.copyFileSync(path.join(SCRIPTS, 'lib', lib), path.join(installedLib, lib))
   }

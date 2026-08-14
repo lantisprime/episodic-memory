@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { tryAcquire, release } from './lock.mjs'
-import { classifyIndexFile } from './index-state.mjs'
+import { readBodyOrSkip } from './index-state.mjs'
 
 // §A.5-S1 constants (verbatim)
 export const STORE_IDENTITY_RECORD_TYPE = 'store-identity'
@@ -106,13 +106,18 @@ function listIdentityEpisodes(storeDir) {
     // #653 (discovered via em-rebuild-index's S7 FIFO-episode battery leg):
     // resolveStoreIdentity is called BY em-rebuild-index — the remediation
     // tool the #649/#653 contract requires to never hang on a FIFO-shaped
-    // episode file — so this scan needs the same lstat-classify-skip guard
+    // episode file — so this scan needs the same skip-on-unreadable guard
     // as em-rebuild-index's own episode loop, not the deferred query-path
     // body-read class (§4 D2 is about read-tool --full/--materialize paths).
+    // #666 S6: switched from a separate classify-then-read pair (a TOCTOU
+    // window between the lstat-classify and the readFileSync) to the
+    // fd-based readBodyOrSkip — ONE open()+fstat()+read(), same fd
+    // throughout, closing that window. Skip-on-unreadable behavior
+    // (including absent) is unchanged.
     const filePath = path.join(episodesDir, file)
-    if (classifyIndexFile(fs, filePath).state !== 'ok') continue
-    const content = fs.readFileSync(filePath, 'utf8')
-    const parsed = parseIdentityFrontmatter(content)
+    const bodyRead = readBodyOrSkip(fs, filePath)
+    if (!bodyRead.ok) continue
+    const parsed = parseIdentityFrontmatter(bodyRead.raw)
     if (parsed) {
       parsed.filename = file
       out.push(parsed)

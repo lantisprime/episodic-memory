@@ -145,6 +145,31 @@ default.
    in `docs/plans/fix-649-653.md` (as `docs/plans/issue-651-index-existence-contract.md`
    bound the original #651 classification table).
 
+   Body/write-block envelope families (issues #666, #667): three additive
+   `code` families beside `index-unreadable:<CODE>` above, same envelope
+   shape (`{"status":"error","message":"...","code":"<family>:<CODE>"}`,
+   exit 1, stdout-only, never a raw stack). `episode-unreadable:<CODE>` — an
+   AUTHORITATIVE single-target episode-body read (`em-search --read`,
+   `em-revise`'s category-inherit preflight and in-lock supersede rewrite)
+   found the body unreadable or absent; message `"<tool>: episode body
+   unreadable (<CODE>) (<path>)"` (`<tool>` is `em-search` or `em-revise` —
+   the message is NOT byte-frozen the way `index-unreadable`'s is, since
+   both emitters prefix their own tool name). Query-tier per-row body reads
+   (`em-search`, `em-graph`, `em-semantic`, `em-embed`) never abort this way
+   — an unreadable body is skipped with a warning (absent bodies stay
+   silent, matching the existing dangling-row convention) and the
+   row/episode is simply excluded from that field. `episode-write-failed:<CODE>`
+   — `em-store` hit a raw filesystem error on one of its four write legs
+   (`index-commit`, `episodes-dir`, `episode-file`, `derived-index`) after
+   its lock was already held; message names the failing leg: `"em-store:
+   episode write failed (<CODE>) at <leg> (<path>)"`; the lock is released
+   explicitly before exiting, exactly like the `index-unreadable` in-lock
+   branch above. `store-lock-failed:<CODE>` — `em-store` could not even
+   ACQUIRE its store-write lock in the first place (e.g. an EACCES data
+   directory); message `"em-store: lock acquire failed (<CODE>) (<path>)"`.
+   There is no lock to release on this path — the failure happens before
+   `acquireStoreWriteLocksSync` ever returns a handle.
+
 ---
 
 ## Read-only manifest (checkpoint-gate integration, E4)

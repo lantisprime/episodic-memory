@@ -107,6 +107,10 @@ mk_fake_home() {
   # (the relocated --session-start bp-001 advisory). Load-time dep regardless of
   # whether the stop gate calls it; omit it and the module fails to load.
   cp "$REPO_ROOT/scripts/lib/bp001-advisory.mjs" "$fake_home/.episodic-memory/scripts/lib/bp001-advisory.mjs"
+  # #666 S4: bp001-advisory.mjs imports readSidecarOrDegrade from index-state.mjs
+  # for its SessionStart-hang fix. index-state.mjs itself imports only
+  # node:path, so staging it is closure-complete.
+  cp "$REPO_ROOT/scripts/lib/index-state.mjs" "$fake_home/.episodic-memory/scripts/lib/index-state.mjs"
 }
 
 TMP_ROOT="$(mktemp -d -t em-stopgate-XXXXXX)"

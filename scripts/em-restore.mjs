@@ -2629,7 +2629,9 @@ try {
   // F3 (code review): if applyDocWrites partially applied before failing,
   // surface which files made it so the user has a clear inventory rather
   // than discovering the partial state via filesystem walk.
-  const errPayload = { status: 'error', message: String(e.message || e), stack: e.stack }
+  // S6 (#666 carried P3): never a stack — Family A envelope contract (keeps
+  // message + conditional code, drops the raw stack).
+  const errPayload = { status: 'error', message: String(e.message || e) }
   if (e instanceof IndexUnreadableError) errPayload.code = `index-unreadable:${e.code}`
   if (Array.isArray(e.applied_before_failure)) errPayload.applied_before_failure = e.applied_before_failure
   if (e.staging_dir) errPayload.staging_dir = e.staging_dir

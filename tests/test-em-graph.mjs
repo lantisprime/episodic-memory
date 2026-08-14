@@ -164,6 +164,83 @@ t('non-numeric / out-of-range bounds are rejected with exit 2 (RFC-007 depth/cap
   assert.equal(d0.json.count, 1, 'depth 0 = root only');
 });
 
+// ---------------------------------------------------------------------------
+// Issue #666/#667 S2: FIFO-shaped episode body in the cites-edge read
+// (bodyCitations, em-graph.mjs body-citation scan). Isolated fixture (own
+// cwd/home) so the FIFO swap cannot bleed into the shared fixture above.
+// ---------------------------------------------------------------------------
+t('--hubs with a FIFO-shaped episode body: exit 0, cites edge from the skipped body never materializes, diagnostics entry present', () => {
+  const gcwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emgraph-fifo-')));
+  const ghome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emgraph-fifo-home-')));
+  function grun(script, args) {
+    const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd: gcwd, encoding: 'utf8', timeout: 10000, env: { ...process.env, HOME: ghome } });
+    let json = null; try { json = JSON.parse(r.stdout.trim()); } catch {}
+    return { code: r.status, json, stdout: r.stdout, signal: r.signal };
+  }
+  function gst(args) {
+    const r = grun('em-store.mjs', ['--project', 'fx', '--scope', 'local', ...args]);
+    assert.equal(r.json.status, 'ok', r.stdout);
+    return r.json.id;
+  }
+  const Y = gst(['--category', 'decision', '--summary', 'fifo target Y', '--body', 'plain body']);
+  const X = gst(['--category', 'lesson', '--summary', 'fifo citer X', '--body', `cites ${Y} in its body`]);
+
+  // Healthy control: before any corruption, X's cite of Y makes Y a degree-1 hub.
+  const before = grun('em-graph.mjs', ['--hubs', '--scope', 'local', '--top', '5']);
+  assert.equal(before.code, 0, `healthy control exit 0, got ${before.code}: ${before.stdout}`);
+  assert.ok(before.json.nodes.some((n) => n.id === Y && n.degree === 1), `healthy control: cites edge makes Y a hub, got ${before.stdout}`);
+  assert.equal(before.json.body_warnings, undefined, 'healthy control: no diagnostics entry');
+
+  const xPath = path.join(gcwd, '.episodic-memory', 'episodes', `${X}.md`);
+  fs.unlinkSync(xPath);
+  const mk = spawnSync('mkfifo', [xPath]);
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+  const r = grun('em-graph.mjs', ['--hubs', '--scope', 'local', '--top', '5']);
+  fs.unlinkSync(xPath);
+  assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`);
+  assert.equal(r.code, 0, `exit 0, got ${r.code}: ${r.stdout}`);
+  assert.equal(r.json.status, 'ok');
+  assert.ok(!r.json.nodes.some((n) => n.id === Y), 'cites edge from the skipped body never materialized (Y no longer a hub)');
+  assert.ok(
+    Array.isArray(r.json.body_warnings) && r.json.body_warnings.some((w) => w.includes(X) && w.includes('ENOTREG')),
+    `diagnostics entry present, got ${JSON.stringify(r.json.body_warnings)}`
+  );
+
+  fs.rmSync(gcwd, { recursive: true, force: true });
+  fs.rmSync(ghome, { recursive: true, force: true });
+});
+
+// Review fix-round item 3 (§8 matrix control): a dangling row (ENOENT —
+// absent, not a shape defect) must stay silent per F5 — no body_warnings
+// field at all. Kills removal of the ENOENT guard in bodyCitations.
+t('--hubs with a dangling row (body file absent): NO body_warnings field (ENOENT stays silent, F5)', () => {
+  const dcwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emgraph-dangle-')));
+  const dhome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'emgraph-dangle-home-')));
+  function drun(script, args) {
+    const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd: dcwd, encoding: 'utf8', timeout: 10000, env: { ...process.env, HOME: dhome } });
+    let json = null; try { json = JSON.parse(r.stdout.trim()); } catch {}
+    return { code: r.status, json, stdout: r.stdout, signal: r.signal };
+  }
+  function dst(args) {
+    const r = drun('em-store.mjs', ['--project', 'fx', '--scope', 'local', ...args]);
+    assert.equal(r.json.status, 'ok', r.stdout);
+    return r.json.id;
+  }
+  const Y = dst(['--category', 'decision', '--summary', 'dangle target Y', '--body', 'plain body']);
+  const X = dst(['--category', 'lesson', '--summary', 'dangle citer X', '--body', `cites ${Y} in its body`]);
+  const xPath = path.join(dcwd, '.episodic-memory', 'episodes', `${X}.md`);
+  fs.unlinkSync(xPath); // dangling row: index still has X, the body file is gone entirely (ENOENT)
+
+  const r = drun('em-graph.mjs', ['--hubs', '--scope', 'local', '--top', '5']);
+  assert.equal(r.signal, null, `no signal, got ${r.signal}`);
+  assert.equal(r.code, 0, `exit 0, got ${r.code}: ${r.stdout}`);
+  assert.equal(r.json.status, 'ok');
+  assert.equal(r.json.body_warnings, undefined, 'ENOENT (dangling row) stays silent — no body_warnings field (F5)');
+
+  fs.rmSync(dcwd, { recursive: true, force: true });
+  fs.rmSync(dhome, { recursive: true, force: true });
+});
+
 fs.rmSync(cwd, { recursive: true, force: true });
 fs.rmSync(home, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
