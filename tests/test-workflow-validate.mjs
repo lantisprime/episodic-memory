@@ -12,7 +12,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { execFileSync } from 'child_process'
+import { execFileSync, spawnSync } from 'child_process'
 import assert from 'assert'
 
 const SCRIPTS = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts')
@@ -121,19 +121,21 @@ function mkWitness({ category = 'discovery', summary = 'witness', status = 'acti
   return id
 }
 
-function runValidate(args) {
+function runValidate(args, opts = {}) {
   try {
     const out = execFileSync('node', [VALIDATE, ...args], {
       env: { ...process.env, HOME: tmpHome },
       cwd: tmpCwd,
       encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...(opts.timeout ? { timeout: opts.timeout } : {})
     })
-    return { exit: 0, json: JSON.parse(out) }
+    return { exit: 0, signal: null, json: JSON.parse(out) }
   } catch (e) {
     if (e.stdout) {
-      try { return { exit: e.status, json: JSON.parse(e.stdout) } } catch {}
+      try { return { exit: e.status, signal: e.signal || null, json: JSON.parse(e.stdout) } } catch {}
     }
+    if (e.signal) return { exit: e.status, signal: e.signal, json: null } // timeout kill (#669 FIFO legs)
     throw e
   }
 }
@@ -2243,6 +2245,71 @@ test('T102-21 semantic-flip vs T58: chain-walk picks DIFFERENT rr than latest-by
   // The newer rr (differenthead) is out-of-chain.
   const newer = r.json.episodes.find(e => e.id === newerId)
   assert.strictEqual(newer.in_chain, false, 'newer rr at differenthead should NOT be terminal under --head=abc1234')
+})
+
+// ---------------------------------------------------------------------------
+// Issue #669 S1: FIFO-shaped workflow.lifecycle episode body. em-workflow-
+// validate.mjs:194 (extractPayload) and :570 (triggered_by cross-task
+// check) are validation-gate sites (R-D): a planted FIFO must fail closed
+// through the existing errors[] channel, never hang and never silently pass.
+// ---------------------------------------------------------------------------
+test('T669a extractPayload: a FIFO-shaped lifecycle episode body fails the gate closed (errors[], not a hang)', () => {
+  const planId = mkEpisode({ event: 'plan-approved', extra: { plan_ref: 'docs/plan.md', classification: 'full' } })
+  mkEpisode({ event: 'pre-checkpoint', extra: { plan_ref: 'docs/plan.md', approval_ref: `episode:${planId}` } })
+  const fifoPath = path.join(episodesDir, `${planId}.md`)
+  fs.unlinkSync(fifoPath)
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.strictEqual(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+
+  const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint'], { timeout: 5000 })
+  assert.strictEqual(r.signal, null, `no signal (hang), got ${r.signal}`)
+  // exit 1 is the validator's normal "ran fine, verdict is invalid" contract
+  // (process.exit(valid ? 0 : 1)) — NOT a usage/crash exit (that's exit 2,
+  // asserted absent by the JSON parsing successfully at all).
+  assert.strictEqual(r.exit, 1, `extractPayload failures must reach the normal valid:false contract, not a usage/crash exit: ${JSON.stringify(r.json)}`)
+  assert.strictEqual(r.json.valid, false, 'gate must fail closed when a chain member is unreadable')
+  // The raw "unreadable" message lands in errors[] (caught at the call site
+  // per R-D) UNLESS the #102 terminal-anchored migration demotes it to
+  // warnings[] because the affected episode ends up out-of-chain (a real,
+  // pre-existing, orthogonal feature — not something #669 changes). Either
+  // way it must be VISIBLE somewhere and the gate must still fail closed.
+  const allMessages = [...r.json.errors, ...(r.json.warnings || [])]
+  assert.ok(allMessages.some(e => e.includes(planId) && /unreadable/.test(e)),
+    `the unreadable episode must be named somewhere (errors[] or warnings[]), got errors=${JSON.stringify(r.json.errors)} warnings=${JSON.stringify(r.json.warnings)}`)
+  fs.unlinkSync(fifoPath)
+})
+
+// triggered_by is only validated inside the 'review-request' case of
+// validatePayload's event switch — use the mkBaseChainForReview/
+// mkReviewRequest fixture builders (defined below, #118 PR-D section) via a
+// forward-reference deferred to first call (function declarations from that
+// section are hoisted, so this is safe despite lexical ordering in the file).
+test('T669b triggered_by: a FIFO-shaped referenced body is a gate failure, not silently provenance-only', () => {
+  const chain = mkBaseChainForReview()
+  const trigId = mkWitness({ category: 'discovery', summary: 'trigger source' })
+  mkReviewRequest({ chain, extra: { triggered_by: `episode:${trigId}` } })
+  const fifoPath = path.join(episodesDir, `${trigId}.md`)
+  fs.unlinkSync(fifoPath)
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.strictEqual(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'], { timeout: 5000 })
+  assert.strictEqual(r.signal, null, `no signal (hang), got ${r.signal}`)
+  assert.strictEqual(r.json.valid, false, 'gate must fail closed on an unreadable triggered_by body')
+  assert.ok(r.json.errors.some(e => e.includes('triggered_by') && /unreadable/.test(e)),
+    `errors[] must name the unreadable triggered_by body, got: ${JSON.stringify(r.json.errors)}`)
+  fs.unlinkSync(fifoPath)
+})
+
+test('T669c triggered_by F5 control: a vanished (ENOENT) referenced body stays provenance-only, no error', () => {
+  const chain = mkBaseChainForReview()
+  const trigId = mkWitness({ category: 'discovery', summary: 'trigger source vanished' })
+  mkReviewRequest({ chain, extra: { triggered_by: `episode:${trigId}` } })
+  fs.unlinkSync(path.join(episodesDir, `${trigId}.md`)) // absent, not a FIFO — F5 stays silent
+
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'], { timeout: 5000 })
+  assert.strictEqual(r.signal, null, `no signal (hang), got ${r.signal}`)
+  assert.strictEqual(r.json.valid, true, `absent triggered_by body must stay provenance-only, errors: ${JSON.stringify(r.json.errors)}`)
 })
 
 // ---------------------------------------------------------------------------

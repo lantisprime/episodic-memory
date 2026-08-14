@@ -176,7 +176,7 @@ test('apply: revalidation observes global and registered locks; releases both', 
   const globalDir = path.join(sandbox.home, '.episodic-memory')
   const regDir = path.join(sandbox.root, 'project', '.episodic-memory')
   const savedHome = process.env.HOME
-  const savedReadFileSync = fs.readFileSync
+  const savedOpenSync = fs.openSync
   let observed = false
   try {
     writeFixtureStore(globalDir, 'global', [
@@ -211,11 +211,16 @@ test('apply: revalidation observes global and registered locks; releases both', 
     ])
     const gLock = storeWriteLockPath(globalDir)
     const rLock = storeWriteLockPath(regDir)
-    fs.readFileSync = function(p, ...rest) {
+    // #669: engine.mjs's episode-body read now goes through readBodyOrSkip
+    // (fd-based openSync + readFileSync(fd)), not a path-based
+    // fs.readFileSync(path) call — patch openSync (still the same
+    // instrumentation point, immediately before the read) so this
+    // observation isn't blind to the new call shape.
+    fs.openSync = function(p, ...rest) {
       if (episodePaths.has(p) && fs.existsSync(gLock) && fs.existsSync(rLock)) {
         observed = true
       }
-      return savedReadFileSync.call(this, p, ...rest)
+      return savedOpenSync.call(this, p, ...rest)
     }
     const out = applyTopicTracks({
       globalDir, registeredStores, config: cfg,
@@ -227,13 +232,13 @@ test('apply: revalidation observes global and registered locks; releases both', 
     assert.strictEqual(out.written.length, 1,
       `expected one written; got ${out.written.length}`)
     assert.strictEqual(observed, true,
-      'revalidation readFileSync patches must have observed both locks held')
+      'revalidation openSync patches must have observed both locks held')
     assert.strictEqual(fs.existsSync(gLock), false,
       `expected global lock absent; ${gLock} exists=${fs.existsSync(gLock)}`)
     assert.strictEqual(fs.existsSync(rLock), false,
       `expected registered lock absent; ${rLock} exists=${fs.existsSync(rLock)}`)
   } finally {
-    fs.readFileSync = savedReadFileSync
+    fs.openSync = savedOpenSync
     if (savedHome === undefined) delete process.env.HOME
     else process.env.HOME = savedHome
     sandbox.cleanup()
@@ -244,7 +249,7 @@ test('apply: registered source mutation during locked revalidation is stale; rel
   const globalDir = path.join(sandbox.home, '.episodic-memory')
   const regDir = path.join(sandbox.root, 'project', '.episodic-memory')
   const savedHome = process.env.HOME
-  const savedReadFileSync = fs.readFileSync
+  const savedOpenSync = fs.openSync
   const r1Path = path.join(regDir, 'episodes', 'r1.md')
   let mutated = false
   try {
@@ -275,12 +280,16 @@ test('apply: registered source mutation during locked revalidation is stale; rel
     process.env.HOME = sandbox.home
     const gLock = storeWriteLockPath(globalDir)
     const rLock = storeWriteLockPath(regDir)
-    fs.readFileSync = function(p, ...rest) {
+    // #669: patch openSync, not readFileSync — see the sibling test above
+    // for why (engine.mjs now reads via the fd-based readBodyOrSkip). The
+    // mutation still lands before the fd's own readFileSync(fd) call runs,
+    // since it happens synchronously inside openSync before returning.
+    fs.openSync = function(p, ...rest) {
       if (p === r1Path && fs.existsSync(gLock) && fs.existsSync(rLock) && !mutated) {
         fs.appendFileSync(r1Path, '\nmuta-line-during-revalidation\n')
         mutated = true
       }
-      return savedReadFileSync.call(this, p, ...rest)
+      return savedOpenSync.call(this, p, ...rest)
     }
     const out = applyTopicTracks({
       globalDir, registeredStores, config: cfg,
@@ -298,7 +307,7 @@ test('apply: registered source mutation during locked revalidation is stale; rel
     assert.strictEqual(fs.existsSync(rLock), false,
       `expected registered lock absent; ${rLock} exists=${fs.existsSync(rLock)}`)
   } finally {
-    fs.readFileSync = savedReadFileSync
+    fs.openSync = savedOpenSync
     if (savedHome === undefined) delete process.env.HOME
     else process.env.HOME = savedHome
     sandbox.cleanup()
@@ -635,6 +644,36 @@ test('collect: missing episode file yields missing_sources row and no member', (
     assert.deepStrictEqual(result.missing_sources,
       [{ store_id: 'global', episode_id: 'missing1' }])
     assert.deepStrictEqual(result.warnings, [])
+  } finally { sandbox.cleanup() }
+})
+
+// Issue #669 S1 (round-1 MINOR-5, settled): engine.mjs:245 read the episode
+// body with a raw fs.readFileSync inside try/catch — the catch already
+// treats ANY failure as missing_sources (no member), but a FIFO with no
+// writer blocks the read forever REGARDLESS of the surrounding try/catch (a
+// blocking syscall never throws). readBodyOrSkip fixes the hang while
+// preserving the EXACT SAME missing_sources disposition.
+test('collect: FIFO-shaped episode body yields missing_sources row and no member, no hang (issue #669)', () => {
+  const sandbox = makeSandbox('tt-collect-fifo')
+  try {
+    const globalDir = path.join(sandbox.root, 'global')
+    writeFixtureStore(globalDir, 'global', [
+      { id: 'fifo1', category: 'decision', summary: 'fifo-shaped body row', tags: ['a'] },
+    ])
+    const fifoPath = path.join(globalDir, 'episodes', 'fifo1.md')
+    fs.unlinkSync(fifoPath)
+    const mk = spawnSync('mkfifo', [fifoPath])
+    assert.strictEqual(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+    const cfg = readCommittedConfig()
+
+    const start = Date.now()
+    const result = collectTopicMembers({ globalDir, registeredStores: [], config: cfg })
+    const elapsed = Date.now() - start
+    assert.ok(elapsed < 5000, `collectTopicMembers must not hang on a FIFO body, took ${elapsed}ms`)
+    assert.deepStrictEqual(result.members, [])
+    assert.deepStrictEqual(result.missing_sources, [{ store_id: 'global', episode_id: 'fifo1' }])
+    assert.deepStrictEqual(result.warnings, [])
+    fs.unlinkSync(fifoPath)
   } finally { sandbox.cleanup() }
 })
 

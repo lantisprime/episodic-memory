@@ -24,7 +24,7 @@ import {
   acquireStoreWriteLocksSync,
   releaseStoreWriteLocks,
 } from '../lib/store-write-lock.mjs'
-import { readIndexFileOrThrow } from '../lib/index-state.mjs'
+import { readIndexFileOrThrow, readBodyOrSkip } from '../lib/index-state.mjs'
 
 // --- §A.5 frozen constants ---
 export const TOPIC_TRACK_TAG = 'topic-track'
@@ -239,14 +239,17 @@ export function collectTopicMembers({ globalDir, registeredStores, config }) {
     if (Array.isArray(row.promotion_sources) && row.promotion_sources.length > 0) return
 
     // Episode file required (REQ-3 missing-file).
+    // #669 round-1 MINOR-5 (settled): no genuine Buffer dependency — bodyOf
+    // decodes and computeContentSha256 utf8-normalizes, so readBodyOrSkip's
+    // string return is digest-provably unchanged. ok:false (any code) keeps
+    // today's uniform "missing source" disposition.
     const epFile = path.join(storeDir, 'episodes', `${row.id}.md`)
-    let buf
-    try {
-      buf = fs.readFileSync(epFile)
-    } catch (err) {
+    const bodyRead = readBodyOrSkip(fs, epFile)
+    if (!bodyRead.ok) {
       missing_sources.push({ store_id: storeId, episode_id: row.id })
       return
     }
+    const buf = bodyRead.raw
     const sha = computeContentSha256(buf)
     // Replica identity: episode id + normalized content hash (no store_id so
     // byte-identical replicas across stores collapse; §12 REQ-4).

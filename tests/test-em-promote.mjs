@@ -54,9 +54,9 @@ function mkWorld(name) {
       if (out.status !== 'ok') throw new Error(`seed lesson failed: ${r.stdout}${r.stderr}`)
       return out.id
     },
-    promote(args = []) {
+    promote(args = [], timeout) {
       return spawnSync(process.execPath, [PROMOTE, ...args],
-        { cwd: root, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' })
+        { cwd: root, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', ...(timeout ? { timeout } : {}) })
     },
     globalIndexRows() {
       const p = path.join(home, '.episodic-memory', 'index.jsonl')
@@ -152,6 +152,39 @@ t('testPromoteSkipsReplicaMembers', () => {
   const out = parse(w.promote())
   assert(out.candidates.length === 0, `replica must not count as recurrence: ${JSON.stringify(out.candidates)}`)
   assert(id, 'seed id must exist')
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #669 S1: FIFO-shaped episode body in the cross-store recurrence scan
+// (em-promote.mjs:161). A FIFO with no writer previously blocked the raw
+// fs.readFileSync forever; the fix (readBodyOrSkip) converts the hang into
+// the existing skip-row-plus-warning disposition — the broken member drops
+// out, surviving healthy members still cluster.
+// ---------------------------------------------------------------------------
+t('testPromoteFifoBodyDoesNotHangSkipsThatMemberOnly', () => {
+  const w = mkWorld('fifobody')
+  const a = w.project('projA')
+  const b = w.project('projB')
+  const brokenId = w.lesson(a, 'always quote hook command paths broken copy', RECUR_BODY)
+  w.lesson(a, 'always quote hook command paths healthy copy', RECUR_BODY)
+  w.lesson(b, 'always quote hook command paths in hooks', RECUR_BODY)
+  const brokenPath = path.join(a, '.episodic-memory', 'episodes', `${brokenId}.md`)
+  fs.unlinkSync(brokenPath)
+  const mk = spawnSync('mkfifo', [brokenPath])
+  assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+
+  const r = w.promote([], 5000)
+  assert(r.signal === null, `no signal (hang), got ${r.signal}`)
+  const out = parse(r)
+  assert(out.dry_run === true, 'dry-run must still complete')
+  assert(out.candidates.length === 1, `surviving healthy members still cluster: ${JSON.stringify(out.candidates)}`)
+  assert(out.candidates[0].stores.length === 2, `candidate spans the 2 stores with readable members: ${JSON.stringify(out.candidates[0])}`)
+  assert(!JSON.stringify(out.candidates).includes(brokenId), `broken member must not appear in any candidate: ${JSON.stringify(out.candidates)}`)
+  assert(Array.isArray(out.warnings) && out.warnings.some(wa => wa.episode === brokenId),
+    `broken member must surface in warnings: ${JSON.stringify(out.warnings)}`)
+
+  fs.unlinkSync(brokenPath) // remove the FIFO so cleanup's rmSync doesn't hang
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 

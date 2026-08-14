@@ -32,10 +32,10 @@ function t(name, fn) {
   catch (e) { fail++; console.error(`FAIL  ${name}\n      ${e.message}`); }
 }
 
-function run(script, args, cwd, env) {
-  const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
+function run(script, args, cwd, env, timeout) {
+  const r = spawnSync('node', [path.join(SCRIPTS, script), ...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env }, ...(timeout ? { timeout } : {}) });
   let json = null; try { json = JSON.parse(r.stdout.trim()); } catch {}
-  return { code: r.status, json, stdout: r.stdout };
+  return { code: r.status, signal: r.signal, json, stdout: r.stdout };
 }
 
 // Recursive byte-level snapshot of both stores (path → sha or content).
@@ -269,6 +269,70 @@ t('found-in-both, DIFFERENT content: hard error, both files untouched', () => {
   assert.ok(r.json.errors[0].error.includes('DIFFERENT content'), r.stdout);
   assertUnchanged(before, snapshot([fx6.local, fx6.global]), 'divergent recovery');
   fs.rmSync(fx6.cwd, { recursive: true, force: true }); fs.rmSync(fx6.home, { recursive: true, force: true });
+});
+
+// Issue #669 review-round A1 (MAJOR, convergent — data loss): sha256() must
+// hash RAW BYTES, not a utf8-DECODED string. Two bodies that differ ONLY in
+// a trailing invalid-UTF-8 byte (0xFF vs 0xFE) both decode to the SAME
+// string (the invalid tail becomes U+FFFD either way), so a string-based
+// hash collapses them to "identical" — the found-in-both-scopes divergence
+// check would then treat this as an interrupted-move resume and UNLINK the
+// local copy, losing genuinely different bytes. This leg plants exactly
+// that byte-divergent-but-string-identical pair and asserts the EXISTING
+// hard-error path fires (never the false-identical resume path), with both
+// files byte-for-byte untouched.
+t('found-in-both, byte-divergent invalid-UTF-8 tail (0xFF vs 0xFE) that DECODES identically: still a hard error, both files intact', () => {
+  const fx6b = mkFixture();
+  const id = store(fx6b, ['--category', 'decision', '--summary', 'invalid utf8 tail', '--tags', 'dv', '--scope', 'local']);
+  const localPath = path.join(fx6b.local, 'episodes', `${id}.md`);
+  const base = fs.readFileSync(localPath);
+  fs.mkdirSync(path.join(fx6b.global, 'episodes'), { recursive: true });
+  const globalPath = path.join(fx6b.global, 'episodes', `${id}.md`);
+  const localBytes = Buffer.concat([base, Buffer.from([0xff])]);
+  const globalBytes = Buffer.concat([base, Buffer.from([0xfe])]);
+  // Sanity: the two byte sequences differ, but decode to the SAME string —
+  // proves this fixture actually exercises the string-collapse bug class.
+  assert.ok(!localBytes.equals(globalBytes), 'fixture bug: bytes must differ');
+  assert.equal(localBytes.toString('utf8'), globalBytes.toString('utf8'), 'fixture bug: must decode identically to exercise the collapse');
+  fs.writeFileSync(localPath, localBytes);
+  fs.writeFileSync(globalPath, globalBytes);
+
+  const r = run('em-move.mjs', ['--id', id, '--to', 'global', '--no-audit'], fx6b.cwd, fx6b.env);
+  assert.equal(r.code, 1, `expected hard error, got ${r.code}: ${r.stdout}`);
+  assert.ok(r.json.errors[0].error.includes('DIFFERENT content'), r.stdout);
+  assert.ok(fs.readFileSync(localPath).equals(localBytes), 'local file must be byte-for-byte untouched');
+  assert.ok(fs.readFileSync(globalPath).equals(globalBytes), 'global file must be byte-for-byte untouched');
+  fs.rmSync(fx6b.cwd, { recursive: true, force: true }); fs.rmSync(fx6b.home, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #669 S1: FIFO-shaped episode body (em-move.mjs:266/:316, the
+// frontmatter-id-match content read). Pre-lock (:266) and outside any try
+// today — a bare throw there would crash the whole run; the fix wraps it
+// locally, converting hang into a per-id error + continue. A second,
+// readable id in the same --ids batch must still move successfully
+// (row-level isolation).
+// ---------------------------------------------------------------------------
+t('--ids with one FIFO-shaped body: that id gets a typed per-id error, the other id in the same batch still moves, no hang', () => {
+  const fx7 = mkFixture();
+  const brokenId = store(fx7, ['--category', 'decision', '--summary', 'broken body', '--tags', 'b', '--scope', 'local']);
+  const okId = store(fx7, ['--category', 'decision', '--summary', 'healthy body', '--tags', 'h', '--scope', 'local']);
+  const brokenPath = path.join(fx7.local, 'episodes', `${brokenId}.md`);
+  fs.unlinkSync(brokenPath);
+  const mk = spawnSync('mkfifo', [brokenPath]);
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`);
+
+  const r = run('em-move.mjs', ['--ids', `${brokenId},${okId}`, '--to', 'global', '--no-audit'], fx7.cwd, fx7.env, 5000);
+  assert.equal(r.signal, null, `no signal (hang), got ${r.signal}`);
+  assert.equal(r.code, 1, `exit 1 (one per-id error), got ${r.code}: ${r.stdout}`);
+  const brokenErr = r.json.errors.find(e => e.id === brokenId);
+  assert.ok(brokenErr, `broken id must have a per-id error entry: ${r.stdout}`);
+  assert.ok(/^episode-unreadable:/.test(brokenErr.code || ''), `typed episode-unreadable code, got ${JSON.stringify(brokenErr)}`);
+  assert.ok(r.json.moved.some(m => m.id === okId), `healthy id must still move: ${r.stdout}`);
+  assertIndexInvariant(okId, fx7.global, fx7.local);
+
+  fs.unlinkSync(brokenPath); // remove the FIFO so cleanup's rmSync doesn't hang
+  fs.rmSync(fx7.cwd, { recursive: true, force: true }); fs.rmSync(fx7.home, { recursive: true, force: true });
 });
 
 for (const fx of [fx1, fx2]) {

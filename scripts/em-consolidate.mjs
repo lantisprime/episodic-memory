@@ -63,7 +63,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex, tokenizeQuery } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
-import { assertReadableIndex, readIndexFileOrThrow } from './lib/index-state.mjs'
+import { assertReadableIndex, readIndexFileOrThrow, readBodyOrSkip } from './lib/index-state.mjs'
 import {
   buildConsolidationAdvisory,
   PLAYBOOK_PROTECTION_CLASS,
@@ -829,7 +829,14 @@ if (clerk && !apply && !enrich) {
         .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.id || '').localeCompare(String(a.id || '')))
       for (const rr of rrRows) {
         let payload = null
-        try { payload = JSON.parse((fs.readFileSync(path.join(EPISODES_DIR, `${rr.id}.md`), 'utf8').split('\n\n').slice(1).join('\n\n') || '{}').replace(/^[^{]*/, '').match(/\{[\s\S]*\}/)?.[0] || 'null') } catch {}
+        // #669: readBodyOrSkip — a run-record body can be a race-window
+        // non-regular file; ok:false falls through to the existing
+        // "malformed/missing → skip" disposition below, same as a parse
+        // failure always has.
+        const bodyRead = readBodyOrSkip(fs, path.join(EPISODES_DIR, `${rr.id}.md`))
+        if (bodyRead.ok) {
+          try { payload = JSON.parse((bodyRead.raw.split('\n\n').slice(1).join('\n\n') || '{}').replace(/^[^{]*/, '').match(/\{[\s\S]*\}/)?.[0] || 'null') } catch {}
+        }
         if (!payload || !payload.conversion || !Array.isArray(payload.conversion.per_lesson)) continue
         for (const le of payload.conversion.per_lesson) {
           if (!le || typeof le.id !== 'string') continue
@@ -917,7 +924,11 @@ const rows = loadIndexOrAbort(DATA_DIR, scope, apply ? 'consolidate-apply' : 'co
 )
 
 function readEpisode(id) {
-  try { return fs.readFileSync(path.join(EPISODES_DIR, `${id}.md`), 'utf8') } catch { return null }
+  // #669: readBodyOrSkip — converts a FIFO/non-regular member body from a
+  // hang into the existing null (skip) disposition every caller already
+  // handles ("Episodes whose file is missing are skipped, not fatal").
+  const r = readBodyOrSkip(fs, path.join(EPISODES_DIR, `${id}.md`))
+  return r.ok ? r.raw : null
 }
 
 function bodyOf(content) {
@@ -1606,7 +1617,9 @@ function clerkWrite(kind, frontmatter, dataDir) {
     // Flip the episode file frontmatter too so a rebuild stays consistent.
     try {
       const fp = path.join(episodesDir, `${memberId}.md`)
-      const content = fs.readFileSync(fp, 'utf8')
+      const bodyRead = readBodyOrSkip(fs, fp)
+      if (!bodyRead.ok) throw new Error(`unreadable (${bodyRead.code})`)
+      const content = bodyRead.raw
       let updated = content.replace(/^status: active$/m, `status: superseded\nsuperseded_by: ${supersededBy}`)
       if (updated === content) updated = content.replace(/^---\n/, `---\nsuperseded_by: ${supersededBy}\n`)
       const ftmp = fp + '.tmp'
@@ -1673,7 +1686,9 @@ function clerkReadIndexRows(dataDir) {
 // Parse a run-record episode's JSON payload (stored as the last {-line of body).
 function clerkReadRunRecordPayload(dataDir, id) {
   try {
-    const content = fs.readFileSync(path.join(dataDir, 'episodes', `${id}.md`), 'utf8')
+    const bodyRead = readBodyOrSkip(fs, path.join(dataDir, 'episodes', `${id}.md`))
+    if (!bodyRead.ok) return null
+    const content = bodyRead.raw
     const lines = content.split('\n')
     for (let i = lines.length - 1; i >= 0; i--) {
       const s = lines[i].trim()
@@ -1818,7 +1833,13 @@ function clerkBuildMergeFrontmatter(members) {
   const reviewBys = members.map(m => m.review_by).filter(r => typeof r === 'string')
   const bodySections = members.map(m => {
     let body = ''
-    try { body = bodyOf(fs.readFileSync(path.join(EPISODES_DIR, `${m.id}.md`), 'utf8')) } catch {}
+    // #669 round-1 MINOR-4: consolidates[] above (memberIds) already lists
+    // every member regardless of body readability, so skip-the-member here
+    // would desync consolidates[] from the sections that actually landed —
+    // not cheap through a .map(). Existing empty-body-proceed fallback kept
+    // (residual named in the PR's follow-up issue, plan §4).
+    const bodyRead = readBodyOrSkip(fs, path.join(EPISODES_DIR, `${m.id}.md`))
+    if (bodyRead.ok) body = bodyOf(bodyRead.raw)
     return `## ${m.summary}\n\n(id: \`${m.id}\`, ${m.date})\n\n${body}`
   })
   const digestBody = [`Digest of ${members.length} related episodes (clerk merge, ${dateStr}).`, '', ...bodySections].join('\n\n')
@@ -2467,8 +2488,13 @@ async function clerkEnrichMain() {
       const row = activeRaw.find(r => r.id === p.id)
       if (!row) continue
       // Read the original body from the episode file.
-      let body = ''
-      try { body = bodyOf(fs.readFileSync(path.join(EPISODES_DIR, `${p.id}.md`), 'utf8')) } catch {}
+      // #669 round-1 MINOR-4: skip-the-member is cheap here (a real
+      // for-loop with continue) — reuse the existing reject channel so an
+      // unreadable body surfaces in the run's own report shape rather than
+      // silently proceeding with an empty body.
+      const bodyRead = readBodyOrSkip(fs, path.join(EPISODES_DIR, `${p.id}.md`))
+      if (!bodyRead.ok) { rejectedThisRun.push(p.id); continue }
+      const body = bodyOf(bodyRead.raw)
       // Build em-revise args (REQ-14: provenance-only triggers/applies).
       const args = [
         _revisePath,

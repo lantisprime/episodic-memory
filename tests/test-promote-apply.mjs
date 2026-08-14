@@ -507,6 +507,126 @@ t('testMigrationSuccessors', () => {
   fs.rmSync(w.root, { recursive: true, force: true })
 })
 
+// #669 review-round A4 (codex MAJOR — fail-open provenance): a legacy row
+// with TWO Sources entries where ONE is unreadable (FIFO) previously still
+// produced a candidate carrying only the ONE healthy source (partial
+// provenance silently dropped) — and --migrate --apply would write a
+// successor from that partial set. Frozen disposition: skip the WHOLE row.
+// This leg plants exactly that two-source (healthy A + FIFO B) shape and
+// asserts BOTH ends: preview sees zero candidates + a skipped entry naming
+// reason 'source-unreadable', and apply writes no successor and leaves the
+// legacy row untouched (still just the one row, not superseded).
+t('testMigrationPartialSourceUnreadableSkipsWholeRow', () => {
+  const w = pair('migration-partial-unreadable')
+  const { legacyId, idB } = seedLegacyGlobal(w)
+  const bEpisodePath = path.join(w.root, 'projB', '.episodic-memory', 'episodes', `${idB}.md`)
+  fs.unlinkSync(bEpisodePath)
+  const mk = spawnSync('mkfifo', [bEpisodePath])
+  assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+
+  const preview = parse(w.promote(['--migrate']))
+  assert(preview.dry_run === true, `expected dry-run, got ${JSON.stringify(preview)}`)
+  assert(preview.candidates.length === 0, `no candidate may be emitted with partial provenance, got ${JSON.stringify(preview.candidates)}`)
+  const skip = preview.skipped.find(s => s.hash === legacyId)
+  assert(skip, `legacy row must appear in skipped[], got ${JSON.stringify(preview.skipped)}`)
+  assert(skip.reason === 'source-unreadable', `expected reason source-unreadable, got ${JSON.stringify(skip)}`)
+
+  // Apply mode re-runs selectMigrationCandidates too (migCands) — since the
+  // row never becomes a candidate, apply must not attempt anything for it:
+  // no successor written, legacy row not superseded, exit code reflects a
+  // clean run (no confirm target exists to even pass).
+  const applyResult = parse(w.promote(['--migrate']))
+  assert(applyResult.candidates.length === 0, `apply-mode preview must also show zero candidates: ${JSON.stringify(applyResult.candidates)}`)
+  const rowsAfter = w.globalIndexAll()
+  const legacyRow = rowsAfter.find(r => r.id === legacyId)
+  assert(legacyRow && legacyRow.status !== 'superseded', `legacy row must remain un-superseded (no successor written), got ${JSON.stringify(legacyRow)}`)
+  assert(!rowsAfter.some(r => r.supersedes === legacyId), `no successor may reference the legacy row as supersedes: ${JSON.stringify(rowsAfter)}`)
+
+  fs.unlinkSync(bEpisodePath)
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
+// #669 round-3 (codex MAJOR-2 residual, runtime-confirmed): a DIFFERENT
+// defect from the round-2 leg above — here BOTH sources are healthy
+// (selectMigrationCandidates succeeds and produces a valid, CONFIRMABLE
+// candidate), but the SEPARATE re-read of the legacy body for the
+// successor's preserved-body text (the same file, read a SECOND time,
+// em-promote.mjs's former ~:667) fails at confirmed-apply time. Pre-fix,
+// ok:false on that specific read was silently ignored: a successor was
+// still written with a placeholder body and the legacy row superseded
+// anyway (codex probe: targeted EACCES on exactly that read → apply exit
+// 0, successor written with placeholder, legacy superseded).
+//
+// Reproducing "the EARLIER reads of this path (candidate selection) and
+// any read after (the em-revise subprocess, a separate OS process) all
+// succeed, only the successor-body read fails" needs a fault that targets
+// ONE specific occurrence of openSync(legacyPath) — a persistent
+// filesystem-level fault (chmod/FIFO) would ALSO break the earlier reads
+// and prevent the candidate from ever being selected/confirmable in this
+// same process, testing the WRONG code path entirely (round-2's fix, not
+// round-3's). A confirmed `--migrate --confirm` run reads legacyPath FOUR
+// times before any write: (1) the top-level duplicate-lesson scan every
+// invocation runs regardless of mode, (2) the confirm-set-validation
+// block's own selectMigrationCandidates call, (3) the migrate block's
+// selectMigrationCandidates call, (4) THIS fix's successor-body read —
+// empirically confirmed by counting under an unfaulted preload before
+// picking the fault target. A Node --import preload installed only for
+// this ONE spawn counts openSync(targetPath) calls and fails exactly the
+// 4th occurrence within the em-promote.mjs process; it never touches the
+// em-revise child (a separate OS process with its own unpatched fs),
+// matching codex's "original left readable for the em-revise subprocess"
+// probe note.
+t('testMigrationConfirmedApplySuccessorReadFailureSkipsWholeRow', () => {
+  const w = pair('migration-confirmed-apply-unreadable')
+  const { legacyId } = seedLegacyGlobal(w)
+  const legacyPath = path.join(w.home, '.episodic-memory', 'episodes', `${legacyId}.md`)
+
+  // Preview (fully readable, no fault installed): candidate selection +
+  // fingerprint capture — the genuine confirmed-apply entry point per the
+  // frozen test-leg shape (preview → capture fingerprint → confirmed apply).
+  const preview = parse(w.promote(['--migrate']))
+  assert(preview.dry_run === true, `expected dry-run, got ${JSON.stringify(preview)}`)
+  const cand = preview.candidates.find(c => c.id === legacyId)
+  assert(cand, `legacy row must be a genuine, confirmable candidate before the fault, got ${JSON.stringify(preview.candidates)}`)
+  const migFp = cand.fingerprint
+
+  const preloadPath = path.join(w.root, 'fault-preload.mjs')
+  fs.writeFileSync(preloadPath, [
+    "import fs from 'node:fs'",
+    'const target = process.env.EM_PROMOTE_FAULT_PATH',
+    'let count = 0',
+    'const orig = fs.openSync',
+    'fs.openSync = function (p, ...rest) {',
+    '  if (p === target) {',
+    '    count++',
+    "    if (count === 4) { const e = new Error(`EACCES: permission denied, open '${p}'`); e.code = 'EACCES'; throw e }",
+    '  }',
+    '  return orig.call(this, p, ...rest)',
+    '}',
+  ].join('\n'))
+
+  // Confirmed apply, in a SEPARATE disposable child process (the preload
+  // hook and its process.exit() must never touch this test runner).
+  const r = spawnSync(process.execPath, ['--import', preloadPath, PROMOTE, '--migrate', '--confirm', migFp], {
+    cwd: w.root,
+    env: { ...env(w.home), EM_PROMOTE_FAULT_PATH: legacyPath },
+    encoding: 'utf8',
+  })
+  const applied = parse(r)
+  assert(applied.status === 'ok', `existing skip semantics keep status/exit clean (no OTHER failure in this run), got status=${applied.status} exit=${r.status}: ${JSON.stringify(applied)}`)
+  assert(!applied.migrated.some(m => m.original === legacyId && m.successor), `no successor may be written for ${legacyId}, got ${JSON.stringify(applied.migrated)}`)
+  const skip = applied.skipped.find(s => s.hash === legacyId)
+  assert(skip, `legacy row must appear in skipped[], got ${JSON.stringify(applied.skipped)}`)
+  assert(skip.reason === 'source-unreadable', `expected reason source-unreadable, got ${JSON.stringify(skip)}`)
+
+  const rowsAfter = w.globalIndexAll()
+  const legacyRow = rowsAfter.find(x => x.id === legacyId)
+  assert(legacyRow && legacyRow.status !== 'superseded', `legacy row must remain active (no supersede/no em-revise spawn), got ${JSON.stringify(legacyRow)}`)
+  assert(!rowsAfter.some(x => x.supersedes === legacyId), `no successor may reference the legacy row as supersedes: ${JSON.stringify(rowsAfter)}`)
+
+  fs.rmSync(w.root, { recursive: true, force: true })
+})
+
 t('testMigrationTypedSuccessorNotReselected', () => {
   const w = pair('migration-idempotent')
   const { legacyId } = seedLegacyGlobal(w)
