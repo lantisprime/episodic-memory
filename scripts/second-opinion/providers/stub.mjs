@@ -73,12 +73,14 @@ export function dispatch({ prompt, projectRoot, timeout }) {
   // SO_STUB_RAW_BODY (#538): return an arbitrary body verbatim with ok:true so
   // tests can drive the reply-sanity gate with a bootstrap-shaped reply. When
   // unset, the deterministic template path below is unchanged.
+  // SO_STUB_RAW_STDERR (#359): optional stderr to pair with it, so tests can
+  // assert the stderrTail of a provider-empty-output envelope.
   if (process.env.SO_STUB_RAW_BODY !== undefined) {
     return {
       ok: true,
       exitCode: 0,
       stdout: process.env.SO_STUB_RAW_BODY,
-      stderr: '',
+      stderr: process.env.SO_STUB_RAW_STDERR || '',
       timedOut: false,
     }
   }
