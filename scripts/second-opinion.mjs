@@ -415,6 +415,18 @@ async function cmdRequest() {
         `Provider ${provider} exited non-zero (${r.exitCode})`,
         { provider, dispatchResult: r })
     }
+    // #359: exit 0 with empty/whitespace stdout is a provider-side failure
+    // (rate-limit, empty model turn, transient), not a malformed review. Give
+    // it its own code ahead of the generic #538 gate so the caller knows the
+    // remedy is retry / switch provider; nothing reaches storage.
+    if (typeof r.stdout === 'string' && r.stdout.trim() === '') {
+      emitErr('provider-empty-output',
+        `Provider ${provider} exited 0 with empty stdout (round ${roundN}); likely rate-limit or transient; retry or switch provider`,
+        {
+          provider, round: roundN, exitCode: r.exitCode,
+          stderrTail: typeof r.stderr === 'string' ? r.stderr.slice(-500) : '',
+        })
+    }
     // #538: a provider can exit 0 while emitting its own interactive bootstrap
     // prompt. Exit status alone is not evidence of a review, so gate the body
     // before it reaches storage — otherwise the garbage persists as status ok
