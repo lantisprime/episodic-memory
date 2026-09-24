@@ -39,6 +39,9 @@ export function available() {
  *     to the synthetic finding (P1/P2/P3, default P2).
  *   SO_STUB_FINDING_STATUS — synthetic finding status (ACCEPT-OK, NEEDS-MORE-WORK,
  *     NEW-CONCERN, DEFERRED-AS-FU). Default NEEDS-MORE-WORK.
+ *   SO_STUB_FU_SEVERITY — for ACCEPT-with-FU only, the severity of the
+ *     synthetic DEFERRED-AS-FU finding (default P3). Setting P1 drives the
+ *     I-21 accept-with-fu-malformed guard end-to-end (#576).
  *   SO_STUB_SPEC_CYCLE — '1' to emit spec_cycle_signal: 'trigger-met'.
  */
 
@@ -93,13 +96,14 @@ export function dispatch({ prompt, projectRoot, timeout }) {
 
   const severity = process.env.SO_STUB_FINDING_SEVERITY || 'P2'
   const status = process.env.SO_STUB_FINDING_STATUS || 'NEEDS-MORE-WORK'
+  const fuSeverity = process.env.SO_STUB_FU_SEVERITY || 'P3'
   const specCycle = process.env.SO_STUB_SPEC_CYCLE === '1'
 
   let findings = []
   if (verdict === 'HOLD' || verdict === 'REJECT') {
     findings = [{ id: 'F1', class: 'safety', severity, status }]
   } else if (verdict === 'ACCEPT-with-FU') {
-    findings = [{ id: 'F1', class: 'doc', severity: 'P3', status: 'DEFERRED-AS-FU' }]
+    findings = [{ id: 'F1', class: 'doc', severity: fuSeverity, status: 'DEFERRED-AS-FU' }]
   }
 
   const summary = {
