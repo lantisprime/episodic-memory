@@ -38,6 +38,13 @@ function sleepSync(ms) {
 }
 
 function withStoreLockSync(storeDir, fn, { timeoutS = LOCK_TIMEOUT_S } = {}) {
+  // #548: a non-finite timeout (e.g. 'abc' → NaN deadline, or Infinity) never
+  // satisfies `Date.now() >= deadlineMs`, so the retry loop below would spin
+  // forever under a held lock. Reject up front with a typed error, matching
+  // mint's `reserved-id-invalid` contract; undefined still takes the default.
+  if (typeof timeoutS !== 'number' || !Number.isFinite(timeoutS) || timeoutS < 0) {
+    return { error: 'lock-timeout-invalid' }
+  }
   const lockFile = path.join(storeDir, LOCK_BASENAME)
   const deadlineMs = Date.now() + timeoutS * 1000
   let handle = null
