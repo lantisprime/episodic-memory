@@ -98,6 +98,9 @@ const T = {
   scope3: { kind: 'enum', values: ['local', 'global', 'all'] },
   scope2: { kind: 'enum', values: ['local', 'global'] },
   taskType: { kind: 'enum', values: ['implementation', 'push', 'rule', 'general'] },
+  // em-graph --nodes / --edges: comma list over a closed vocabulary, or "all".
+  graphNodes: { kind: 'list', values: ['episode', 'rule', 'rfc'] },
+  graphEdges: { kind: 'list', values: ['supersedes', 'consolidates', 'evidence', 'cites', 'tags', 'wiki-link', 'composes-with'] },
 }
 
 const COMMANDS = {
@@ -111,7 +114,7 @@ const COMMANDS = {
   history: { script: 'em-search.mjs', fixed: ['--full', '--no-track'], flags: { history: T.id }, required: ['history'] },
   list: { script: 'em-list.mjs', flags: { project: T.str, limit: T.int, scope: T.scope3, 'include-superseded': T.bool } },
   recall: { script: 'em-recall.mjs', fixed: ['--no-track'], flags: { project: T.str, scope: T.scope3, limit: T.int, days: T.int, 'task-type': T.taskType } },
-  graph: { script: 'em-graph.mjs', flags: { from: T.id, depth: T.int, orphans: T.bool, hubs: T.bool, top: T.int, scope: T.scope3, limit: T.int } },
+  graph: { script: 'em-graph.mjs', flags: { from: T.id, depth: T.int, orphans: T.bool, hubs: T.bool, top: T.int, scope: T.scope3, limit: T.int, nodes: T.graphNodes, edges: T.graphEdges } },
   semantic: { script: 'em-semantic.mjs', fixed: ['--no-track'], flags: { query: T.text, scope: T.scope3, limit: T.int, project: T.str, full: T.bool }, required: ['query'] },
   'capture-list': { script: 'em-capture.mjs', fixed: ['list'], flags: {} },
   'fold-preview': { script: 'em-consolidate.mjs', fixed: ['--fold-superseded', '--dry-run'], flags: { scope: T.scope2, 'min-chain': T.int, 'all-projects': T.bool } },
@@ -165,6 +168,10 @@ function buildArgs(entry, flags) {
       if (!/^\d+$/.test(s) || parseInt(s, 10) > spec.max) return { error: `flag "${name}" must be an integer 0-${spec.max}` }
     } else if (spec.kind === 'enum') {
       if (!spec.values.includes(s)) return { error: `flag "${name}" must be one of: ${spec.values.join(', ')}` }
+    } else if (spec.kind === 'list') {
+      if (s !== 'all' && !s.split(',').every((item) => spec.values.includes(item))) {
+        return { error: `flag "${name}" must be "all" or a comma list of: ${spec.values.join(', ')}` }
+      }
     } else if (spec.kind === 'id') {
       if (!/^[0-9]{8}-[0-9]{6}-[A-Za-z0-9-]{1,200}$/.test(s)) return { error: `flag "${name}" is not an episode id` }
     } else { // str
