@@ -204,7 +204,24 @@ function extractPayload(filePath) {
   }
   const m = text.match(/```json\s*\n([\s\S]*?)\n```/)
   if (!m) throw new Error(`No \`\`\`json fenced block found in ${filePath}`)
-  return { kind: 'event', payload: JSON.parse(m[1]) }
+  const payload = JSON.parse(m[1])
+  // Issue 560: valid JSON that is not an object (null, array, number,
+  // string, boolean) cannot carry a lifecycle payload — reject it through
+  // the same throw → errors.push path instead of crashing on payload.task.
+  if (!isPlainObject(payload)) {
+    throw new Error(`\`\`\`json fenced block must be a JSON object, got ${jsonKind(payload)} (${filePath})`)
+  }
+  return { kind: 'event', payload }
+}
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+function jsonKind(v) {
+  if (v === null) return 'null'
+  if (Array.isArray(v)) return 'array'
+  return typeof v
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +605,8 @@ function validatePayload(payload, entry, errors, warnings, indexById) {
               if (tbM) {
                 try {
                   const tbP = JSON.parse(tbM[1])
-                  if (tbP.task != null && tbP.task !== payload.task) {
+                  // Issue 560: a non-object payload carries no task → provenance-only.
+                  if (isPlainObject(tbP) && tbP.task != null && tbP.task !== payload.task) {
                     errors.push(`${fp}: triggered_by episode:${tbR.entry.id} has task "${tbP.task}" which differs from current task "${payload.task}" (cross-task pollution rejected)`)
                   }
                   // task null/undefined: provenance-only, no assertion.
