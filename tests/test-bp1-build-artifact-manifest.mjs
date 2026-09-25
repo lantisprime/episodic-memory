@@ -33,7 +33,12 @@ const SCRIPT = path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs')
 
 // Lib + transitive imports required by bp1-build-artifact-manifest.mjs.
 // Copied wholesale into proj/scripts/ for cross-cwd fixtures (A12c-g).
-const FIXTURE_LIB_FILES = ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']
+// DERIVED (Rule 14) via computeLibClosure instead of a hand-maintained list —
+// matches the em-search closure below (installRuntimeIntoProj): a new
+// transitive import inside bp1-manifest.mjs (e.g. #670's index-state.mjs)
+// can no longer drift past this fixture and crash the copied tree with
+// ERR_MODULE_NOT_FOUND.
+const FIXTURE_LIB_FILES = [...computeLibClosure(REPO, ['bp1-build-artifact-manifest.mjs'])]
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -261,10 +266,11 @@ tap('Codex round-3: em-search subprocess malformed-output error propagates', () 
   fs.writeFileSync(path.join(proj, '.claude', 'agents', 'bp1-fake.md'),
     'Canonical prompt episode 20260506-100000-fake-slug-abcd.\n')
   // Copy the real lib + builder + a stubbed em-search into proj/scripts/.
-  // bp1-manifest.mjs transitively imports bp1-frontmatter.mjs + bp1-canonicalize.mjs
-  // (added in PR-1c-B Slice 2 commits 1/5 + 2/5); fixture must mirror that.
+  // FIXTURE_LIB_FILES is the DERIVED (Rule 14) transitive closure of
+  // bp1-build-artifact-manifest.mjs (bp1-manifest.mjs -> bp1-frontmatter.mjs,
+  // bp1-canonicalize.mjs, index-state.mjs, ...); fixture must mirror it.
   fs.mkdirSync(path.join(proj, 'scripts', 'lib'), { recursive: true })
-  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+  for (const lib of FIXTURE_LIB_FILES) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
       path.join(proj, 'scripts', 'lib', lib))
   }

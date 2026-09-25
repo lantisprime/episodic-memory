@@ -16,8 +16,17 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
+import { computeLibClosure } from '../scripts/lib/install-manifest.mjs'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+
+// Lib + transitive imports required by bp1-build-artifact-manifest.mjs.
+// DERIVED (Rule 14) via computeLibClosure instead of a hand-maintained list
+// (matches test-bp1-build-artifact-manifest.mjs's FIXTURE_LIB_FILES) — a new
+// transitive import inside bp1-manifest.mjs (e.g. #670's index-state.mjs)
+// can no longer drift past these fixtures and crash the copied tree with
+// ERR_MODULE_NOT_FOUND.
+const FIXTURE_LIB_FILES = [...computeLibClosure(REPO, ['bp1-build-artifact-manifest.mjs'])]
 
 let pass = 0, fail = 0
 function tap(name, fn) {
@@ -186,11 +195,10 @@ tap('drift: changing scripts/lib/bp1-probe.mjs content changes artifact_version_
   execFileSync('git', ['init', '-q'], { cwd: tmp })
   fs.mkdirSync(path.join(tmp, 'scripts', 'lib'), { recursive: true })
   // Copy the real builder + manifest lib + probe to the tmp project.
-  // bp1-manifest.mjs transitively imports bp1-frontmatter.mjs + bp1-canonicalize.mjs
-  // (added in PR-1c-B Slice 2 commits 1/5 + 2/5); fixture must mirror that.
+  // FIXTURE_LIB_FILES is bp1-build-artifact-manifest.mjs's derived closure.
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'))
-  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+  for (const lib of FIXTURE_LIB_FILES) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
       path.join(tmp, 'scripts', 'lib', lib))
   }
@@ -217,7 +225,7 @@ tap('drift: changing scripts/lib/bp1-sweep.mjs content changes artifact_version_
   fs.mkdirSync(path.join(tmp, 'scripts', 'lib'), { recursive: true })
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'))
-  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+  for (const lib of FIXTURE_LIB_FILES) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
       path.join(tmp, 'scripts', 'lib', lib))
   }
@@ -240,7 +248,7 @@ tap('drift: a non-bp1 lib file (e.g. scripts/lib/foo.mjs) is NOT in the manifest
   fs.mkdirSync(path.join(tmp, 'scripts', 'lib'), { recursive: true })
   fs.copyFileSync(path.join(REPO, 'scripts', 'bp1-build-artifact-manifest.mjs'),
     path.join(tmp, 'scripts', 'bp1-build-artifact-manifest.mjs'))
-  for (const lib of ['bp1-manifest.mjs', 'bp1-frontmatter.mjs', 'bp1-canonicalize.mjs']) {
+  for (const lib of FIXTURE_LIB_FILES) {
     fs.copyFileSync(path.join(REPO, 'scripts', 'lib', lib),
       path.join(tmp, 'scripts', 'lib', lib))
   }
