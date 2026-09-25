@@ -61,12 +61,12 @@ Build a **typed-edge graph projection** computed at `em-rebuild-index.mjs` time,
 `rule` — source would be `~/.claude/projects/.../memory/feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`; identifier = filename (slug from frontmatter `name`). Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
 
 A rule file with no frontmatter `name:` key has no identifier and is SKIPPED, counted in the
-scan's `skipped` total, never projected under a filename-derived slug (which `:133` forbids).
+scan's `skipped` total, never projected under a filename-derived slug (forbidden by the `slugify()` section).
 As observed on 2026-07-25, eight files in the reference corpus are in this state and every one of
 them is a `MEMORY*` file: `MEMORY.md`, `MEMORY_alwaystier_incidents.md`, `MEMORY_anchors.md`,
 `MEMORY_incidents_2026-07-10.md`, `MEMORY_open_issues.md`, `MEMORY_pr_history.md`,
 `MEMORY_seat_ops.md`, `MEMORY_tooling.md` — eight of the nine files matching the `MEMORY.md` plus
-`MEMORY_*.md` globs, the exception being `MEMORY_workplan_changelog.md`. Note that `:233` names
+`MEMORY_*.md` globs, the exception being `MEMORY_workplan_changelog.md`. Note that the Orphan allowlist bullet of Storage Part 2 names
 `MEMORY.md` among the canonical entry-point roots, so a canonical root is currently
 unprojectable. That tension is tracked on issue #585 with the other `entry_point` contradictions.
 
@@ -266,9 +266,9 @@ When rebuild cost per query becomes the binding constraint, the following design
 **Status: PARTIAL — key parsed in Phase 2, consumed in Phase 4.** The key is read and carried on
 `rule` nodes by `scripts/lib/rule-nodes.mjs` and surfaced as `entry_point` on projected rule nodes
 (opt-in via `--nodes rule`). Its audit consumption — suppression from `nodes_with_no_edges[]` and
-appearance in `entry_points[]` via `--graph-health` — remains Phase 4 (`:304`, `:361`), and its
-persisted form inside `graph.json` remains Phase 6 (`:363`). This three-way split is the
-reconciliation of the phase assignments that this section, `:304`, and `:363` previously gave
+appearance in `entry_points[]` via `--graph-health` — remains Phase 4 (the Phase 4 row of the Phases table),
+and its persisted form inside `graph.json` remains Phase 6 (the Phase 6 row of the Phases table). This three-way
+split is the reconciliation of the phase assignments that this section and those two rows previously gave
 without narrating; adopted by the Phase 2 PR.
 
 Rule nodes (`feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`) may carry these optional frontmatter keys recognized by the projection (in addition to the existing `name`, `description`, `type` keys):
@@ -283,7 +283,7 @@ This is a query-time convention (consumed by `--graph-health`), not an edge-extr
 alphanumerics only after NFC normalization, so a name composed entirely of non-ASCII characters
 (Greek, Cyrillic, CJK) reduces to `""`. Such a file has no identifier, is skipped, and is counted
 in the scan's `skipped` total on exactly the same footing as a file carrying no `name:` key at all
-(`:133`). Diacritic folding is deliberately NOT performed — `café` slugifies to `caf`, not
+(see the `slugify()` — single source of truth section). Diacritic folding is deliberately NOT performed — `café` slugifies to `caf`, not
 `cafe` — because this RFC specifies no folding table, and inventing one at projection time would
 put the identifier grammar somewhere other than this document.
 
