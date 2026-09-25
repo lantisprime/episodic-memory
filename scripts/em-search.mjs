@@ -525,57 +525,53 @@ let searchWarning = null
 // #666 S2 :583/:621/:712: per-row body-read skip warnings for the scoring +
 // --full output sites below, joined into the final `warnings` array (F5).
 const searchBodyWarnings = []
+// #459: index lookups are per scope. Each active scope uses its own index when
+// present and holding the key; a scope whose index is missing/corrupt (or lacks
+// the key) is linear-scanned on its own rows, so one scope's missing index can
+// never drop another scope's matches. Returns the kept rows plus the scopes
+// whose index was unusable (for the rebuild warning).
+function filterByScopeIndex(rows, loadScopeIndex, key, linearMatch) {
+  const scopes = []
+  if (scope === 'local' || scope === 'all') scopes.push(['local', LOCAL_DIR])
+  if (scope === 'global' || scope === 'all') scopes.push(['global', GLOBAL_DIR])
+  const idsByScope = new Map()
+  const missing = []
+  for (const [label, dir] of scopes) {
+    const idx = loadScopeIndex(dir)
+    if (idx && Object.prototype.hasOwnProperty.call(idx, key)) idsByScope.set(label, new Set(idx[key]))
+    else if (!idx) missing.push(label)
+  }
+  const kept = rows.filter(e => {
+    const ids = idsByScope.get(e._source)
+    return ids ? ids.has(e.id) : linearMatch(e)
+  })
+  return { kept, missing, anyIndexHit: idsByScope.size > 0 }
+}
+function rebuildHint(file, missing) {
+  const target = missing.length === 1 ? missing[0] : 'all'
+  return `${file} missing or corrupt in ${missing.join(' and ')} store${missing.length === 1 ? '' : 's'}. Falling back to linear scan for ${missing.length === 1 ? 'that scope' : 'those scopes'}. Run em-rebuild-index.mjs --scope ${target} to regenerate.`
+}
 if (tag) {
   const normalizedTag = normalizeTags(tag)[0]
   if (normalizedTag) {
-    // Try tags.json from all active scopes
-    let tagIds = null
-    const dirs = []
-    if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
-    if (scope === 'global' || scope === 'all') dirs.push(GLOBAL_DIR)
-    for (const dir of dirs) {
-      const idx = loadTagsIndex(dir)
-      if (idx && idx[normalizedTag]) {
-        if (!tagIds) tagIds = new Set()
-        for (const id of idx[normalizedTag]) tagIds.add(id)
-      } else if (!idx) {
-        searchWarning = 'tags.json missing or corrupt. Run em-rebuild-index.mjs to regenerate.'
-      }
-    }
-    if (tagIds) {
-      results = results.filter(e => tagIds.has(e.id))
-    } else {
-      // Fallback: linear scan with normalized comparison
-      if (!searchWarning) searchWarning = 'tags.json missing or does not contain tag. Falling back to linear scan. Run em-rebuild-index.mjs to regenerate.'
-      results = results.filter(e => e.tags && e.tags.map(t => t.toLowerCase().trim()).includes(normalizedTag))
-    }
+    const { kept, missing, anyIndexHit } = filterByScopeIndex(results, loadTagsIndex, normalizedTag,
+      e => e.tags && e.tags.map(t => t.toLowerCase().trim()).includes(normalizedTag))
+    results = kept
+    if (missing.length) searchWarning = rebuildHint('tags.json', missing)
+    else if (!anyIndexHit) searchWarning = 'tags.json missing or does not contain tag. Falling back to linear scan. Run em-rebuild-index.mjs to regenerate.'
   }
 }
 if (category) {
   // Index-backed (R10d), symmetric with --tag: canonicalize the query, read category-index.json
-  // from each active scope, intersect ids. Missing/corrupt index → linear-scan fallback + a
+  // per active scope (#459). Missing/corrupt index → linear-scan fallback for that scope + a
   // rebuild warning. An active-name query returns the same set as the old exact-match filter.
+  // Linear scan canonicalizes stored categories too so a deprecated-alias query still matches;
+  // for an active name with no aliases this is exactly the old e.category === c.
   const canonical = canonicalCategory(category)
-  let catIds = null
-  const dirs = []
-  if (scope === 'local' || scope === 'all') dirs.push(LOCAL_DIR)
-  if (scope === 'global' || scope === 'all') dirs.push(GLOBAL_DIR)
-  for (const dir of dirs) {
-    const idx = loadCategoryIndex(dir)
-    if (idx && Object.prototype.hasOwnProperty.call(idx, canonical)) {
-      if (!catIds) catIds = new Set()
-      for (const id of idx[canonical]) catIds.add(id)
-    } else if (!idx) {
-      if (!searchWarning) searchWarning = 'category-index.json missing or corrupt. Falling back to linear scan. Run em-rebuild-index.mjs to regenerate.'
-    }
-  }
-  if (catIds) {
-    results = results.filter(e => catIds.has(e.id))
-  } else {
-    // Fallback: linear scan. Canonicalize stored categories too so a deprecated-alias query
-    // still matches; for an active name with no aliases this is exactly the old e.category === c.
-    results = results.filter(e => e.category === category || canonicalCategory(e.category) === canonical)
-  }
+  const { kept, missing } = filterByScopeIndex(results, loadCategoryIndex, canonical,
+    e => e.category === category || canonicalCategory(e.category) === canonical)
+  results = kept
+  if (missing.length && !searchWarning) searchWarning = rebuildHint('category-index.json', missing)
 }
 if (since) {
   results = results.filter(e => e.date >= since)
