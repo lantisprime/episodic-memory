@@ -11,6 +11,7 @@
  *   - /api/run read path (stats) returns the child script's JSON verbatim
  *   - unknown command → 400; unknown flag → 400; bad int → 400;
  *     leading-dash string value → 400 (flag-smuggling guard)
+ *   - graph --nodes/--edges list flags reach em-graph; values validated (#619)
  *   - write command on a read-only server → 403 AND no store mutation
  *     (fail-closed negative, verified on disk)
  *   - write command on an --allow-write server: store → search roundtrip
@@ -234,6 +235,35 @@ await (async () => {
       assert.strictEqual(bad.status, 400, `newline in tag accepted (got ${bad.status})`)
       const good = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'search', flags: { query: 'line one\nline two' } } })
       assert.strictEqual(good.status, 200, 'multiline prose query rejected')
+    })
+    await test('graph --nodes/--edges reach em-graph: rule nodes + wiki-link edge visible (#619)', async () => {
+      const ruleDir = path.join(s1.home, '.claude', 'projects', s1.cwd.split(path.sep).join('-'), 'memory')
+      fs.mkdirSync(ruleDir, { recursive: true })
+      fs.writeFileSync(path.join(ruleDir, 'feedback_a.md'), '---\nname: console-rule-a\n---\n\nsee [[console-rule-b]]\n')
+      fs.writeFileSync(path.join(ruleDir, 'feedback_b.md'), '---\nname: console-rule-b\n---\n\nbody\n')
+      const base = await req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'graph', flags: { hubs: true, scope: 'local' } } })
+      assert.strictEqual(base.status, 200)
+      assert.ok(!base.json.result.nodes.some((n) => n.type === 'rule'), 'rule nodes leaked without --nodes')
+      const r = await req(ro.port, '/api/run', {
+        method: 'POST', token: TOKEN,
+        body: { cmd: 'graph', flags: { hubs: true, scope: 'local', nodes: 'rule', edges: 'wiki-link' } },
+      })
+      assert.strictEqual(r.status, 200, `graph nodes/edges rejected: ${r.text}`)
+      const rules = r.json.result.nodes.filter((n) => n.type === 'rule').map((n) => [n.id, n.degree]).sort()
+      assert.deepStrictEqual(rules, [['console-rule-a', 1], ['console-rule-b', 1]], JSON.stringify(r.json.result))
+    })
+    await test('graph --nodes/--edges accept every em-graph type and "all"; reject unknown, empty and dash items (#619)', async () => {
+      // Parity guard: the console vocabulary must track em-graph's own lists.
+      const src = fs.readFileSync(path.join(REPO, 'scripts', 'em-graph.mjs'), 'utf8')
+      const listOf = (name) => JSON.parse(src.match(new RegExp(`const ${name} = (\\[[^\\]]*\\])`))[1].replace(/'/g, '"'))
+      const run = (flags) => req(ro.port, '/api/run', { method: 'POST', token: TOKEN, body: { cmd: 'graph', flags: { hubs: true, scope: 'local', ...flags } } })
+      for (const n of [...listOf('NODE_TYPES'), 'all', 'episode,rule']) assert.strictEqual((await run({ nodes: n })).status, 200, `nodes "${n}" rejected`)
+      for (const e of [...listOf('EDGE_TYPES'), 'all', 'cites,wiki-link']) assert.strictEqual((await run({ edges: e })).status, 200, `edges "${e}" rejected`)
+      for (const bad of ['bogus', '', 'rule,', '--scope', 'rule,--x', 'rule, rfc', 'all,rule']) {
+        const r = await run({ nodes: bad })
+        assert.strictEqual(r.status, 400, `nodes "${bad}" accepted (got ${r.status})`)
+      }
+      assert.strictEqual((await run({ edges: 'cites,--x' })).status, 400)
     })
     await test('every write:false command leaves the store byte-identical (F5 conformance)', async () => {
       const READ_CASES = [

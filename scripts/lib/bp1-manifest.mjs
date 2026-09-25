@@ -29,6 +29,16 @@ import { execFileSync } from 'child_process'
 // update + activation re-run.
 export const NON_BP1_SCRIPTS = ['scripts/em-review-request.mjs']
 
+// Explicit non-bp1-prefixed scripts/lib/ files that bp1-*.mjs lib helpers
+// import as load-bearing dependencies (#670 review round: bp1-manifest.mjs,
+// bp1-atomic.mjs, and bp1-episode-verify.mjs all import readBodyBufferOrSkip
+// from index-state.mjs — a shared cross-subsystem primitive, not bp1-*
+// prefixed, so it was invisible to buildScriptsLib's closed bp1-*.mjs glob).
+// Same precedent as NON_BP1_SCRIPTS above (mirrors buildScripts' pattern) —
+// closed list, additions require RFC update + builder update + activation
+// re-run.
+export const NON_BP1_LIB_SCRIPTS = ['scripts/lib/index-state.mjs']
+
 // Episode-id pattern: <date>-<time>-<slug>-<rand>. Matches the
 // `<id>` token used in agent loader files for canonical prompt references.
 // Lowercase-only: the corpus convention is lowercase IDs and case-insensitive
@@ -71,18 +81,28 @@ function buildScripts(projectRoot) {
 }
 
 function buildScriptsLib(projectRoot) {
-  // PR-1b-A: load-bearing helpers under scripts/lib/. Only bp1-*.mjs files
-  // are hashed — other lib files (e.g. local-dir.mjs) are not BP1-runtime
-  // critical and not subject to drift detection here.
+  // PR-1b-A: load-bearing helpers under scripts/lib/. bp1-*.mjs files are
+  // hashed by glob; other lib files (e.g. local-dir.mjs) are not BP1-runtime
+  // critical and not subject to drift detection here — EXCEPT the explicit
+  // NON_BP1_LIB_SCRIPTS closed list (#670 review round: index-state.mjs is a
+  // load-bearing non-bp1-prefixed dependency, same shape as NON_BP1_SCRIPTS
+  // above for the top-level scripts/ surface).
   // Codex plan-review round 1 Q3.2: prior manifest scanned only top-level
   // scripts/bp1-*.mjs, so changes to lib helpers (probe stub → real probe at
   // M1, sweep helper logic) would NOT have triggered bp1-flag-version-drift.
   // This surface closes that hole.
   const libDir = path.join(projectRoot, 'scripts', 'lib')
-  return listMatching(libDir, /^bp1-.*\.mjs$/).map(f => {
+  const out = listMatching(libDir, /^bp1-.*\.mjs$/).map(f => {
     const rel = `scripts/lib/${f}`
     return { path: rel, sha256: sha256File(path.join(projectRoot, rel)) }
   })
+  for (const rel of NON_BP1_LIB_SCRIPTS) {
+    const abs = path.join(projectRoot, rel)
+    if (fs.existsSync(abs)) {
+      out.push({ path: rel, sha256: sha256File(abs) })
+    }
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path))
 }
 
 function buildHooks(projectRoot) {
@@ -484,6 +504,7 @@ export function verifyManifest(payload, signatureHex, verifyKey32B) {
 // ===========================================================================
 
 import { parseBp1Frontmatter } from './bp1-frontmatter.mjs'
+import { readBodyBufferOrSkip } from './index-state.mjs'
 import { canonicalize } from './bp1-canonicalize.mjs'
 
 function readEpisodesIn(dir) {
@@ -544,14 +565,17 @@ export function collectEpisodeRecords(runId, projectRoot) {
   const records = []
   for (const store of stores) {
     for (const filePath of readEpisodesIn(store)) {
-      let buf
-      try {
-        buf = fs.readFileSync(filePath)
-      } catch {
-        // Unreadable file is a hard failure for finalize: a run's records must
-        // be enumerable. The orchestrator surfaces this as bp1-finalize-fence-fail.
-        throw new Error(`collectEpisodeRecords: unreadable episode file ${filePath}`)
+      // #670 S2: guarded fd-based read (never blocks on a FIFO) — but this
+      // enumerator is fail-closed BY DESIGN: unreadable is still a hard
+      // failure for finalize (a run's records must be enumerable), so
+      // ok:false RE-THROWS a typed Error citing the path + code instead of
+      // silently skipping. The orchestrator surfaces this as
+      // bp1-finalize-fence-fail (or, from finalize-recover, an uncaught exit).
+      const r = readBodyBufferOrSkip(fs, filePath)
+      if (!r.ok) {
+        throw new Error(`collectEpisodeRecords: unreadable episode file ${filePath} (${r.code})`)
       }
+      const buf = r.raw
       let parsed
       try {
         parsed = parseBp1Frontmatter(buf)

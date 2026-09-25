@@ -38,6 +38,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { parseBp1Frontmatter } from './bp1-frontmatter.mjs'
+import { readBodyBufferOrSkip } from './index-state.mjs'
 import { canonicalize } from './bp1-canonicalize.mjs'
 import { verifyCanonical } from './bp1-hmac.mjs'
 
@@ -80,15 +81,17 @@ export function verifyEpisodeOnDisk(opts) {
   }
 
   const episodePath = path.join(projectRoot, '.episodic-memory', 'episodes', `${episodeId}.md`)
-  let buf
-  try {
-    buf = fs.readFileSync(episodePath)
-  } catch (e) {
-    if (e.code === 'ENOENT') {
+  // #670 S2: guarded fd-based read (never blocks on a FIFO). ENOENT keeps the
+  // existing parent-missing outcome; any other unreadable code (dir, FIFO,
+  // EACCES, ...) gets a parent-unreadable: entry per this file's vocabulary.
+  const r = readBodyBufferOrSkip(fs, episodePath)
+  if (!r.ok) {
+    if (r.code === 'ENOENT') {
       return { ok: false, errors: [`parent-missing: ${episodePath}`] }
     }
-    return { ok: false, errors: [`parent-unreadable: ${e.message}`] }
+    return { ok: false, errors: [`parent-unreadable: ${r.code} (${episodePath})`] }
   }
+  const buf = r.raw
 
   let parsed
   try {

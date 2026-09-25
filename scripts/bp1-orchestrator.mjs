@@ -73,6 +73,7 @@ import {
   assertRunIdShape,
 } from './lib/bp1-manifest.mjs'
 import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
+import { readBodyBufferOrSkip } from './lib/index-state.mjs'
 import { writeBp1Episode } from './lib/bp1-episode-writer.mjs'
 import { verifyEpisodeOnDisk } from './lib/bp1-episode-verify.mjs'
 import { writeMarker, cleanupApprovalMarker } from './lib/bp1-marker.mjs'
@@ -602,12 +603,13 @@ function decisionLogFence(runId, projectRoot, runKey32B) {
     for (const f of fs.readdirSync(store).sort()) {
       if (!f.endsWith('.md')) continue
       const fp = path.join(store, f)
-      let buf
-      try {
-        buf = fs.readFileSync(fp)
-      } catch {
-        continue
-      }
+      // #670 S2: guarded fd-based read — a FIFO/dir/unreadable episode is
+      // skipped here (loop-scan, tolerated) instead of hanging; a raw
+      // read/parse failure is likewise tolerated — collectEpisodeRecords
+      // hard-fails at step 2 for anything that actually matters.
+      const r = readBodyBufferOrSkip(fs, fp)
+      if (!r.ok) continue
+      const buf = r.raw
       let parsed
       try {
         parsed = parseBp1Frontmatter(buf)
@@ -716,10 +718,11 @@ function findManifestEpisode(projectRoot, runId) {
   for (const f of fs.readdirSync(local)) {
     if (!f.endsWith('.md')) continue
     const fp = path.join(local, f)
-    let buf
-    try {
-      buf = fs.readFileSync(fp)
-    } catch { continue }
+    // #670 S2: guarded fd-based read; a FIFO/dir/unreadable episode is
+    // skipped (loop-scan) instead of hanging.
+    const r = readBodyBufferOrSkip(fs, fp)
+    if (!r.ok) continue
+    const buf = r.raw
     let parsed
     try { parsed = parseBp1Frontmatter(buf) } catch { continue }
     const fm = parsed.frontmatter
