@@ -423,6 +423,34 @@ t('identity::testLockTimeoutSurfaces', () => {
   }
 })
 
+t('identity::testInvalidLockTimeoutRejected', () => {
+  // #548: a non-numeric lockTimeoutS used to yield a NaN deadline that spun
+  // forever under a held lock. Probe each value in a child with a hard kill
+  // timeout so a regression fails the suite instead of hanging CI.
+  const s = mkStore('lock-timeout-invalid')
+  const lockFile = path.join(s.dataDir, 'clerk-apply.lock')
+  const probe = `
+    import fs from 'node:fs'
+    const lib = await import(${JSON.stringify(LIB_URL)})
+    const [dir, lockFile] = process.argv.slice(1)
+    fs.writeFileSync(lockFile, process.pid + '\\n' + new Date().toISOString() + '\\n' + process.ppid + '\\n')
+    const out = []
+    for (const fn of ['mintStoreIdentity', 'rebindStoreIdentity', 'detachStoreIdentity']) {
+      for (const v of ['abc', NaN, Infinity, -1, null]) out.push({ fn, v: String(v), r: lib[fn](dir, { lockTimeoutS: v }) })
+    }
+    fs.unlinkSync(lockFile)
+    console.log(JSON.stringify(out))
+  `
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe, s.dataDir, lockFile], { encoding: 'utf8', timeout: 10000 })
+  try { fs.unlinkSync(lockFile) } catch { /* ignore */ }
+  assert(!r.error && r.signal === null, `probe must finish within 10s (hang regression): ${r.error && r.error.code} signal=${r.signal}`)
+  eq(r.status, 0, `probe exits 0: stderr=${r.stderr}`)
+  const rows = JSON.parse(r.stdout)
+  eq(rows.length, 15, 'probe covered 3 fns x 5 values')
+  for (const row of rows) eq(row.r.error, 'lock-timeout-invalid', `${row.fn}(lockTimeoutS=${row.v})`)
+  assert(!fs.existsSync(lockFile), 'probe released its held lockfile')
+})
+
 t('identity::testMintUpdatesIndexIncrementally', () => {
   const s = mkStore('incr-index')
   const r = mintStoreIdentity(s.dataDir)
