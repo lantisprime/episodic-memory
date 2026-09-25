@@ -34,10 +34,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
 import { UsageError } from "./lib/path-contain.mjs";
+import { isMain } from "./lib/run-direct.mjs";
 
 const BP_STEM_RE = /^(bp-[0-9]{3})-/;
 const TIER_DEFAULT = "STRONG";
@@ -209,6 +209,6 @@ function main() {
   process.exit(0);
 }
 
-// pathToFileURL main-guard (P2a step-6 F4 class: a raw-template compare can
-// silently skip main() and green the CI step with no output).
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();
+// isMain main-guard (P2a step-6 F4 / #380 class: a raw compare can silently
+// skip main() and green the CI step with no output).
+if (isMain(import.meta.url)) main();

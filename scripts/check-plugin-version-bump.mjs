@@ -39,6 +39,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isMain } from './lib/run-direct.mjs'
 
 const MANIFEST = '.claude-plugin/plugin.json'
 const ZERO_SHA = /^0{40}$/
@@ -251,4 +252,4 @@ function main() {
   process.exit(verdict.ok ? 0 : 1)
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main()
+if (isMain(import.meta.url)) main()

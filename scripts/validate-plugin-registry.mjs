@@ -31,11 +31,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { validateInstance, assertAllSchemasModeled } from "./lib/json-instance-validate.mjs";
 import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
 import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs";
+import { isMain } from "./lib/run-direct.mjs";
 // The tier algebra (TIER_RANK / effectiveTier / eventActionId) lives in
 // scripts/lib/effective-tier.mjs (extracted P3b-2, R3) so this validator's Table B
 // rendering and enforce-contract's runtime stop decision share ONE algebra
@@ -921,8 +921,7 @@ function main() {
 }
 
 // Run as CLI only when invoked directly (not when imported by tests).
-// pathToFileURL, not `file://${argv[1]}`: a path needing URL-encoding (space,
-// non-ASCII) makes the raw template compare false -> main() never runs ->
-// exit 0 with empty output, a vacuous green for the CI gate (P2a step-6 F4;
-// same fix as validate-schemas.mjs, pattern from test-plugin.mjs:361).
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();
+// isMain (lib/run-direct.mjs): a raw compare fails under a symlinked or
+// URL-encoded argv[1] -> main() never runs -> exit 0 with empty output, a
+// vacuous green for the CI gate (P2a step-6 F4, #380).
+if (isMain(import.meta.url)) main();

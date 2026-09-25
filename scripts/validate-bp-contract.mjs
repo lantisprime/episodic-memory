@@ -75,7 +75,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { validateInstance, assertAllSchemasModeled } from "./lib/json-instance-validate.mjs";
 import { lintSchema, assertSelfConsistent } from "./lib/mini-jsonschema.mjs";
@@ -83,6 +82,7 @@ import { taxonomyVersion, eventsVersion } from "./lib/version-hash.mjs";
 import { contained, resolveContained, UsageError } from "./lib/path-contain.mjs";
 import { deriveBpIds } from "./scaffold-bp.mjs";
 import { GATE_EVENT_MAP, GATE_CONTRACT_KEY } from "./lib/effective-tier.mjs";
+import { isMain } from "./lib/run-direct.mjs";
 
 const BP_STRICT_RE = /^bp-[0-9]{3}\.json$/;
 // Case-INSENSITIVE on purpose (step-6 F-3): on case-insensitive filesystems
@@ -808,5 +808,5 @@ function main() {
   process.exit(exit);
 }
 
-// pathToFileURL main-guard (P2a step-6 F4 class).
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();
+// isMain main-guard (P2a step-6 F4 / #380 class).
+if (isMain(import.meta.url)) main();

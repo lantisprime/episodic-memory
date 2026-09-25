@@ -27,6 +27,7 @@ import { pathToFileURL } from "node:url";
 import { validateRegistry } from "./validate-plugin-registry.mjs";
 import { validateInstance } from "./lib/json-instance-validate.mjs";
 import { interpretBindings } from "./lib/field-bindings.mjs";
+import { isMain } from "./lib/run-direct.mjs";
 
 const TIERS = ["STRONG", "MEDIUM", "WEAK", "TBD"];
 const AGENT_MANIFEST_SENTINEL = "## 🤖 Agent invocation manifest";
@@ -676,4 +677,4 @@ function main() {
   process.exit(exit);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();
+if (isMain(import.meta.url)) main();
