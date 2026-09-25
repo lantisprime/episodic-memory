@@ -172,6 +172,56 @@ test('testInvalidFlagRejected: --min-reply-chars abc fails before any storage wr
     'no .review-store may be created when a rejecting flag is invalid')
 })
 
+// #359: exit 0 + empty stdout must surface as its own actionable code on every
+// path (single dispatch and consensus) and every storage backend, never as a
+// storage error or a generic invalid reply, and must persist no reply.
+function countReplies(tmp, storage) {
+  if (storage === 'files') {
+    const dir = path.join(tmp, '.review-store', 'replies')
+    return fs.existsSync(dir) ? fs.readdirSync(dir).length : 0
+  }
+  const dir = path.join(tmp, '.episodic-memory', 'episodes')
+  if (!fs.existsSync(dir)) return 0
+  return fs.readdirSync(dir)
+    .filter((f) => fs.readFileSync(path.join(dir, f), 'utf8').includes('reply-to-'))
+    .length
+}
+
+for (const storage of ['files', 'episodic']) {
+  for (const mode of ['dispatch', 'consensus']) {
+    for (const [label, body] of [['empty', ''], ['whitespace', ' \n\t ']]) {
+      test(`testEmptyOutput[${storage}/${mode}/${label}]: → provider-empty-output, no reply`, () => {
+        const tmp = makeTmpProject()
+        const modeArgs = mode === 'dispatch'
+          ? ['--dispatch']
+          : ['--consensus', '--max-rounds', '3', '--rebuttal-cb', makeRebuttalCb()]
+        const r = runHarness([
+          'request', '--provider', 'stub', '--project', tmp, '--storage', storage,
+          '--body', 'reply sanity body', '--summary', 'empty output', ...modeArgs,
+        ], { extraEnv: { HOME: tmp, SO_STUB_RAW_BODY: body, SO_STUB_RAW_STDERR: 'rate limited: 429' } })
+        assert.strictEqual(r.parsed.status, 'error',
+          `expected error envelope, got: ${JSON.stringify(r.parsed)}`)
+        assert.strictEqual(r.parsed.code, 'provider-empty-output',
+          `expected provider-empty-output, got: ${JSON.stringify(r.parsed)}`)
+        assert.notStrictEqual(r.exitCode, 0, 'harness must exit non-zero')
+        assert.strictEqual(r.parsed.provider, 'stub')
+        assert.strictEqual(r.parsed.exitCode, 0)
+        assert.strictEqual(r.parsed.stderrTail, 'rate limited: 429')
+        assert.match(r.parsed.message, /exited 0 with empty stdout.*retry or switch provider/)
+        assert.strictEqual(countReplies(tmp, storage), 0, 'no reply may be persisted')
+      })
+    }
+  }
+}
+
+test('testEmptyOutputStderrTailBounded: stderrTail keeps only the last 500 chars', () => {
+  const tmp = makeTmpProject()
+  const stderr = 'x'.repeat(1000) + 'TAIL'
+  const r = runHarness(baseArgs(tmp), { extraEnv: { SO_STUB_RAW_BODY: '', SO_STUB_RAW_STDERR: stderr } })
+  assert.strictEqual(r.parsed.code, 'provider-empty-output')
+  assert.strictEqual(r.parsed.stderrTail, stderr.slice(-500))
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error}`)
