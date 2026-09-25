@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   classifyIndexFile, assertReadableIndex, readIndexFileOrThrow, openReadableIndex, IndexUnreadableError,
-  readBodyOrSkip, openReadableBody, BodyUnreadableError,
+  readBodyOrSkip, readBodyBufferOrSkip, openReadableBody, BodyUnreadableError,
 } from '../scripts/lib/index-state.mjs'
 
 // EM651_TEST_REPO_OVERRIDE: points spawned scripts at an alternate repo root
@@ -453,6 +453,86 @@ function cleanup(world) {
     })
   } else {
     skip('S1 openReadableBody — FIFO (ENOTREG)', 'mkfifo unavailable on win32')
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})()
+
+// =============================================================================
+// S1b — readBodyBufferOrSkip unit legs (issue #670 S1): same contract as
+// readBodyOrSkip but returns raw BYTES (Buffer.isBuffer(raw) === true) so
+// parseBp1Frontmatter's STRICT_UTF8_DECODER fatal decode keeps running on
+// bytes instead of a pre-decoded string. FIFO leg spawned + alarm-wrapped for
+// the same reason as S1 above (a same-process call is safe TODAY because
+// O_NONBLOCK makes open() return immediately, but that's exactly the
+// property a regression could break).
+// =============================================================================
+;(function S1b_bodyBufferHelper() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'em670-s1b-'))
+  const INDEX_STATE_PATH = path.join(SCRIPTS, 'lib', 'index-state.mjs')
+
+  function spawnBodyHelperChild(name, childSrcLines) {
+    const childPath = path.join(dir, `child-${name}.mjs`)
+    fs.writeFileSync(childPath, childSrcLines.join('\n'))
+    const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' })
+    fs.rmSync(childPath, { force: true })
+    return r
+  }
+
+  t('S1b readBodyBufferOrSkip — absent (ENOENT), never throws', () => {
+    const p = path.join(dir, 'absent.md')
+    const r = readBodyBufferOrSkip(fs, p)
+    assert(r.ok === false && r.code === 'ENOENT', JSON.stringify(r))
+  })
+
+  t('S1b readBodyBufferOrSkip — directory (EISDIR)', () => {
+    const p = path.join(dir, 'adir.md')
+    fs.mkdirSync(p)
+    const r = readBodyBufferOrSkip(fs, p)
+    assert(r.ok === false && r.code === 'EISDIR', JSON.stringify(r))
+    fs.rmdirSync(p)
+  })
+
+  t('S1b readBodyBufferOrSkip — ok on a regular file, returns a Buffer of the exact bytes', () => {
+    const p = path.join(dir, 'ok.md')
+    fs.writeFileSync(p, 'hello body\n')
+    const r = readBodyBufferOrSkip(fs, p)
+    assert(r.ok === true && Buffer.isBuffer(r.raw), JSON.stringify({ ok: r.ok, isBuffer: Buffer.isBuffer(r.raw) }))
+    assert(r.raw.toString('utf8') === 'hello body\n', r.raw.toString('utf8'))
+    fs.unlinkSync(p)
+  })
+
+  t('S1b readBodyBufferOrSkip — invalid UTF-8 bytes pass through UNDECODED (Buffer passthrough invariant)', () => {
+    // A lone 0xFF byte is invalid UTF-8. If this helper silently decoded to a
+    // string (like readBodyOrSkip does), the invalid byte would normalize to
+    // U+FFFD and the caller's STRICT_UTF8_DECODER would never see it. This
+    // asserts the raw byte survives verbatim.
+    const p = path.join(dir, 'invalid-utf8.md')
+    fs.writeFileSync(p, Buffer.from([0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0x0a]))
+    const r = readBodyBufferOrSkip(fs, p)
+    assert(r.ok === true && Buffer.isBuffer(r.raw) && r.raw[4] === 0xff, JSON.stringify({ ok: r.ok, isBuffer: Buffer.isBuffer(r.raw), byte4: r.raw && r.raw[4] }))
+    fs.unlinkSync(p)
+  })
+
+  if (!IS_WIN) {
+    t('S1b readBodyBufferOrSkip — FIFO (ENOTREG), no hang (spawned, alarm-wrapped)', () => {
+      const p = path.join(dir, 'fifo.md')
+      const mk = spawnSync('mkfifo', [p])
+      assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
+      const r = spawnBodyHelperChild('readBodyBufferOrSkip-fifo', [
+        `import fs from 'node:fs'`,
+        `import { readBodyBufferOrSkip } from ${JSON.stringify(INDEX_STATE_PATH)}`,
+        `const r = readBodyBufferOrSkip(fs, ${JSON.stringify(p)})`,
+        `console.log(JSON.stringify({ ok: r.ok, code: r.code }))`,
+      ])
+      fs.unlinkSync(p)
+      assert(r.signal === null, `S1b readBodyBufferOrSkip FIFO: no signal (timeout/kill) — got ${r.signal} (this is the fail-not-freeze regression signature)`)
+      assert(r.status === 0, `S1b readBodyBufferOrSkip FIFO: child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+      const j = JSON.parse((r.stdout || '').trim())
+      assert(j.ok === false && j.code === 'ENOTREG', JSON.stringify(j))
+    })
+  } else {
+    skip('S1b readBodyBufferOrSkip — FIFO (ENOTREG)', 'mkfifo unavailable on win32')
   }
 
   fs.rmSync(dir, { recursive: true, force: true })
