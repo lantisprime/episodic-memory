@@ -30,6 +30,7 @@ import { computeProtectedIds, resolvePlaybookProtection } from './lib/protection
 import { resolveRegisteredStoresWithStatus } from './lib/registered-stores.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
 import { assertReadableIndex, readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
+import { removeIdsFromInvertedIndexes } from './lib/archive-indexes.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -95,15 +96,6 @@ function loadIndexRowsOrAbort(dataDir, storeLabel) {
     const file = path.join(dataDir, 'index.jsonl')
     console.log(JSON.stringify({ status: 'error', message: `em-prune: aborting archival — episode index unreadable (${e && e.code ? e.code : (e && e.message) || 'unknown'}) (${file})`, ...(e && e.code ? { code: `index-unreadable:${e.code}` } : {}) }))
     process.exit(1)
-  }
-}
-
-function loadInvertedIndex(dataDir, fileName) {
-  const indexPath = path.join(dataDir, fileName)
-  try {
-    return JSON.parse(fs.readFileSync(indexPath, 'utf8'))
-  } catch {
-    return {}
   }
 }
 
@@ -243,19 +235,8 @@ function pruneDir(dataDir, label, protectedIds) {
 
     // Remove pruned IDs from every present inverted index. Keeping category
     // and token postings in step with index.jsonl is part of the transaction,
-    // not a later rebuild obligation.
-    const prunedIds = new Set(toPrune.map(e => e.id))
-    for (const [fileName, pretty] of [['tags.json', true], ['category-index.json', true], ['tokens.json', false]]) {
-      const indexPath = path.join(dataDir, fileName)
-      if (!fs.existsSync(indexPath)) continue
-      const inverted = loadInvertedIndex(dataDir, fileName)
-      for (const key of Object.keys(inverted)) {
-        if (!Array.isArray(inverted[key])) continue
-        inverted[key] = inverted[key].filter(id => !prunedIds.has(id))
-        if (inverted[key].length === 0) delete inverted[key]
-      }
-      atomicReplaceFileSync(indexPath, JSON.stringify(inverted, ...(pretty ? [null, 2] : [])))
-    }
+    // not a later rebuild obligation (shared with em-consolidate fold, #476).
+    removeIdsFromInvertedIndexes(dataDir, new Set(toPrune.map(e => e.id)))
 
     // Read-merge-replace archived-index while still holding the same lock.
     // Backstop wrap (TOCTOU against the preflight classify above, same trust

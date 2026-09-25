@@ -335,6 +335,9 @@ jobs:
       - name: Run em-consolidate fold-superseded suite (S4)
         run: node tests/test-fold-superseded.mjs
 
+      - name: "Run archive inverted-index cleanup suite (#476)"
+        run: node tests/test-archive-indexes.mjs
+
       - name: Run RFC-009 P4-S1 telemetry suite (#505 / REQ-22)
         run: node tests/test-rfc-009-p4-telemetry.mjs
 
