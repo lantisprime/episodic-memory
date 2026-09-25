@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 
@@ -170,6 +171,63 @@ tap('I3b run.key oversized to 33 bytes → loadRunKey error size', () => {
   const loaded = loadRunKey(proj, RUN_ID)
   assert.equal(loaded.error, 'size')
 })
+
+// =============================================================================
+// Issue #670 §2b — mode-600 run.key FIFO leg (round-1's acceptance-falsifying
+// probe): `mkfifo -m 600 run.key` PASSES the OLD statSync-based mode-0600
+// gate (statSync doesn't distinguish a FIFO from a regular file for mode
+// purposes) and then blocks forever on a path-based readFileSync. Spawned
+// into a CHILD process with a hard timeout — a same-process call against
+// unfixed code would hang this entire suite with no external alarm.
+// =============================================================================
+if (process.platform !== 'win32') {
+  tap('#670 loadRunKey — FIFO run.key at mode 0600 → error unreadable (NOT mode), no hang (spawned, alarm-wrapped)', () => {
+    const proj = makeProjectRoot()
+    const keyPath = runKeyPath(proj, RUN_ID)
+    fs.mkdirSync(path.dirname(keyPath), { recursive: true })
+    const mk = spawnSync('mkfifo', ['-m', '600', keyPath])
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+    const KEYS_PATH = path.join(REPO, 'scripts', 'lib', 'bp1-keys.mjs')
+    const childPath = path.join(proj, 'child-probe.mjs')
+    fs.writeFileSync(childPath, [
+      `import { loadRunKey } from ${JSON.stringify(KEYS_PATH)}`,
+      `const r = loadRunKey(${JSON.stringify(proj)}, ${JSON.stringify(RUN_ID)})`,
+      `console.log(JSON.stringify(r))`,
+    ].join('\n'))
+    const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' })
+    fs.rmSync(childPath, { force: true })
+    fs.unlinkSync(keyPath)
+    assert.ok(r.signal === null, `no signal (timeout/kill) — got ${r.signal} (this is the fail-not-freeze regression signature that falsified round-1's acceptance battery)`)
+    assert.equal(r.status, 0, `child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+    const j = JSON.parse((r.stdout || '').trim())
+    // A FIFO must fail the SHAPE check (fstat(fd).isFile() === false), not
+    // the perm check — mode 0600 on the FIFO must never be reached/reported.
+    assert.equal(j.error, 'unreadable', JSON.stringify(j))
+  })
+
+  tap('#670 loadVerifyKey — FIFO verify-key at mode 0600 → error unreadable (NOT mode), no hang (spawned, alarm-wrapped)', () => {
+    const home = makeHomeDir()
+    const keyPath = verifyKeyPath(home)
+    const mk = spawnSync('mkfifo', ['-m', '600', keyPath])
+    assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+    const KEYS_PATH = path.join(REPO, 'scripts', 'lib', 'bp1-keys.mjs')
+    const childPath = path.join(home, 'child-probe.mjs')
+    fs.writeFileSync(childPath, [
+      `import { loadVerifyKey } from ${JSON.stringify(KEYS_PATH)}`,
+      `const r = loadVerifyKey(${JSON.stringify(home)})`,
+      `console.log(JSON.stringify(r))`,
+    ].join('\n'))
+    const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' })
+    fs.rmSync(childPath, { force: true })
+    fs.unlinkSync(keyPath)
+    assert.ok(r.signal === null, `no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature)`)
+    assert.equal(r.status, 0, `child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+    const j = JSON.parse((r.stdout || '').trim())
+    assert.equal(j.error, 'unreadable', JSON.stringify(j))
+  })
+} else {
+  tap('#670 loadRunKey/loadVerifyKey — FIFO mode-600 legs', () => { /* mkfifo unavailable on win32 */ })
+}
 
 // =============================================================================
 // TB2a — hex sig wrong length → verify false (NOT throw)

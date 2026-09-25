@@ -38,6 +38,10 @@ import path from 'node:path'
 import { getRunState } from './lib/bp1-run-state.mjs'
 import { parseBp1Frontmatter } from './lib/bp1-frontmatter.mjs'
 import { canonicalProjectRoot } from './lib/bp1-manifest.mjs'
+import { readBodyOrSkip } from './lib/index-state.mjs'
+import { loadRunKey } from './lib/bp1-keys.mjs'
+import { canonicalize } from './lib/bp1-canonicalize.mjs'
+import { verifyCanonical } from './lib/bp1-hmac.mjs'
 
 // Plan v2 §1 — five-min naked-entry threshold for codex_review entries.
 export const PATH_B_AGE_THRESHOLD_MS = 5 * 60 * 1000
@@ -443,7 +447,10 @@ export function classifyRunCrash({ runState, episodes, markerPresent, markerExpi
  * memory store, parse their frontmatter, and return chronologically-sorted
  * frontmatter records. Episodes whose frontmatter cannot be parsed are
  * dropped silently (per RFC §753-771 fail-closed parser; replay tolerates
- * skipped records).
+ * skipped records). Episodes whose hmac_signature does not verify against
+ * the run's key (missing/empty signature, tampered content, or forged
+ * entirely) are also dropped silently (#670 review round MAJOR-1) — only
+ * verified-signed records reach the classifier.
  *
  * @param {string} projectRoot
  * @param {string} runId
@@ -458,15 +465,33 @@ export function loadRunEpisodes(projectRoot, runId) {
     if (e.code === 'ENOENT') return []
     throw e
   }
+  // #670 review round MAJOR-1 (adjudicated, evidence-driven): every
+  // legitimate BP-1 run-scoped episode class classifyRunCrash consumes is
+  // written via the shared writeBp1Episode helper (lib/bp1-episode-writer.mjs),
+  // which unconditionally requires a 32-byte run key and HMAC-signs — no
+  // current writer emits an unsigned classifyRunCrash-consumed episode
+  // (empirically verified: grep of every scripts/bp1-*.mjs writer). Gate on
+  // that signature, mirroring the same canonicalize+verifyCanonical check
+  // bp1-atomic.mjs's findSignedStateEpisode already performs: an episode
+  // whose hmac_signature does not verify against the run's key is forged/
+  // tampered/unverifiable and is SKIPPED — restores fail-closed classification
+  // against forged-unsigned input (codex repro: a forged unsigned fresh
+  // codex_review episode silently steered classification from needs-human
+  // to in-flight). If the run's key can't be loaded at all (e.g. already
+  // shredded post-terminal), nothing is verifiable — degrades to the
+  // dormant always-[] behavior, which is safe: classifyRunCrash short-
+  // circuits on TERMINAL_STATES before consulting episodes.
+  const keyResult = loadRunKey(projectRoot, runId)
+  const runKey32B = keyResult.key32B
   const records = []
   for (const name of names) {
     if (!name.endsWith('.md')) continue
-    let text
-    try {
-      text = fs.readFileSync(path.join(dir, name), 'utf8')
-    } catch (_e) {
-      continue
-    }
+    // #670 S2: guarded read — a FIFO/dir/unreadable episode is skipped
+    // instead of hanging (string variant: body is discarded post-parse,
+    // never fed to parseBp1Frontmatter's strict Buffer/UTF-8 path).
+    const r = readBodyOrSkip(fs, path.join(dir, name))
+    if (!r.ok) continue
+    const text = r.raw
     let fm
     try {
       fm = parseBp1Frontmatter(text)
@@ -474,9 +499,28 @@ export function loadRunEpisodes(projectRoot, runId) {
       continue  // skip unparseable
     }
     if (!fm || typeof fm !== 'object') continue
-    if (fm.run_id !== runId) continue
-    fm.__filename = name
-    records.push(fm)
+    // #670 S2c (round-1 MAJOR-2 bugfix rider, completed per plan §7
+    // build-round amendment): parseBp1Frontmatter returns {frontmatter,
+    // body} — fm.run_id was always undefined on the wrapper, so this loop
+    // unconditionally `continue`d and loadRunEpisodes ALWAYS returned [].
+    // The run_id filter fix alone half-activated this: pushing the WRAPPER
+    // (fm) left every other field (state, type, id, ...) undefined to
+    // callers, since those live under fm.frontmatter. Push the CONTENT.
+    if (fm.frontmatter.run_id !== runId) continue
+    // HMAC verification gate (MAJOR-1): no usable run key -> nothing is
+    // verifiable -> skip. Missing/empty signature -> skip (unsigned).
+    if (!runKey32B) continue
+    const storedSig = fm.frontmatter.hmac_signature
+    if (typeof storedSig !== 'string' || storedSig === '') continue
+    let canonicalBytes
+    try {
+      ;({ canonicalBytes } = canonicalize(fm.frontmatter, fm.body))
+    } catch (_e) {
+      continue
+    }
+    if (!verifyCanonical(canonicalBytes, runKey32B, storedSig)) continue
+    fm.frontmatter.__filename = name
+    records.push(fm.frontmatter)
   }
   // Sort by filename — BP-1 episode ids are timestamp-prefixed, so
   // lexicographic sort is chronological.
@@ -497,13 +541,13 @@ export function loadRunEpisodes(projectRoot, runId) {
  */
 export function readApprovalMarkerStatus(projectRoot, runId, nowMs = Date.now()) {
   const markerPath = path.join(projectRoot, '.checkpoints', `bp1-approval-${runId}.json`)
-  let raw
-  try {
-    raw = fs.readFileSync(markerPath, 'utf8')
-  } catch (e) {
-    if (e.code === 'ENOENT') return { present: false, expired: false, deadline_at: null }
-    return { present: false, expired: false, deadline_at: null }
-  }
+  // #670 S2b: guarded fd-based read (never blocks on a FIFO). No new status
+  // vocabulary — ENOENT and any other unreadable code already collapsed to
+  // the SAME {present:false,...} outcome before this change; the guard just
+  // makes that outcome reachable without hanging on a non-regular marker.
+  const r = readBodyOrSkip(fs, markerPath)
+  if (!r.ok) return { present: false, expired: false, deadline_at: null }
+  const raw = r.raw
   let parsed
   try {
     parsed = JSON.parse(raw)
