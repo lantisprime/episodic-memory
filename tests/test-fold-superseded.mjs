@@ -6,13 +6,15 @@
  *   - --dry-run lists EXACTLY what a real run moves and writes nothing
  *     (byte-level snapshot); the real run's folded list equals the dry-run's;
  *   - the archive mechanism is em-prune's: file -> archived/, index row ->
- *     archived-index.jsonl, tags.json cleaned; bytes preserved (never
+ *     archived-index.jsonl, tags.json + category-index.json + tokens.json
+ *     cleaned (#476); bytes preserved (never
  *     deleted), terminal untouched;
  *   - chain resolvability: em-search --history <terminal> and <root> still
  *     show the FULL chain after folding, archived members flagged
  *     `archived: true`, --full bodies resolve from archived/;
  *   - pinned members are kept; non-linear (forked) chains skip whole;
- *   - post-fold em-doctor has no error-level findings.
+ *   - post-fold em-doctor has no error-level findings and reports the
+ *     inverted indexes (tags/category/tokens) consistent — no stale ids (#476).
  */
 
 import assert from 'node:assert/strict';
@@ -140,6 +142,19 @@ t('real run moves EXACTLY the dry-run list via the em-prune mechanism (never del
   assert.deepEqual(archRows.map(a => a.id).sort(), [...nonTerminal].sort(), 'rows preserved in archived-index.jsonl');
   const tags = JSON.parse(fs.readFileSync(path.join(fx.store, 'tags.json'), 'utf8'));
   for (const list of Object.values(tags)) for (const id of list) assert.ok(!nonTerminal.includes(id), 'tags.json cleaned');
+  // #476: category-index.json + tokens.json must be cleaned in the same step,
+  // with the terminal kept under its canonical category and no emptied keys.
+  const cats = JSON.parse(fs.readFileSync(path.join(fx.store, 'category-index.json'), 'utf8'));
+  for (const [k, list] of Object.entries(cats)) {
+    assert.ok(list.length > 0, `category-index key "${k}" left as an empty list`);
+    for (const id of list) assert.ok(!nonTerminal.includes(id), `category-index.json still references folded ${id}`);
+  }
+  assert.ok(cats.decision.includes(terminal), 'terminal stays in category-index.json');
+  const toks = JSON.parse(fs.readFileSync(path.join(fx.store, 'tokens.json'), 'utf8'));
+  for (const [k, list] of Object.entries(toks)) {
+    if (k === '_dropped') continue;
+    for (const id of list) assert.ok(!nonTerminal.includes(id), `tokens.json "${k}" still references folded ${id}`);
+  }
 });
 
 t('terminal untouched and still searchable; short chain untouched', () => {
@@ -175,6 +190,12 @@ t('re-run finds nothing left to fold; post-fold em-doctor has no errors', () => 
   const doc = run('em-doctor.mjs', ['--scope', 'local'], fx.cwd, fx.env);
   const errors = doc.json.checks.filter(c => c.level === 'error');
   assert.deepEqual(errors, [], JSON.stringify(errors));
+  // #476: before the fix category-index/tokens-index warned
+  // "references N id(s) not in index.jsonl" until em-rebuild-index.
+  for (const id of ['tags-index', 'category-index', 'tokens-index']) {
+    const c = doc.json.checks.find(x => x.id === id);
+    assert.equal(c?.level, 'ok', `${id}: ${JSON.stringify(c)}`);
+  }
 });
 
 t('pinned member anchors R6 chain-closure: whole chain kept, nothing folds (matches em-prune)', () => {
