@@ -185,6 +185,9 @@ jobs:
       - name: Run lib-closure import-form coverage (RFC-008 P4d S2 F3 — bare/default/re-export/dynamic captured; computed not)
         run: node tests/test-lib-closure.mjs
 
+      - name: Run direct-run guard suite (#380 — isMain holds under symlinked / space-containing argv[1]; no vacuous exit 0)
+        run: node tests/test-run-direct.mjs
+
       - name: Run second-opinion gate per-project install E2E (RFC-008 P4d — gate + libs + runbooks per-project; snapshot global)
         run: node tests/test-install-second-opinion-e2e.mjs
 

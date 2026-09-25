@@ -41,10 +41,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { lintSchema, assertSelfConsistent } from "./lib/mini-jsonschema.mjs";
 import { UsageError } from "./lib/path-contain.mjs";
+import { isMain } from "./lib/run-direct.mjs";
 
 const SCAN_ROOTS = ["patterns", "plugins", "schemas"];
 const CORPUS_REL = "tests/fixtures/schema-negative-corpus.json";
@@ -286,7 +286,7 @@ function main() {
 }
 
 // Run as CLI only when invoked directly (not when imported by tests).
-// pathToFileURL, not `file://${argv[1]}`: a path needing URL-encoding (space,
-// non-ASCII) makes the raw template compare false -> main() never runs ->
-// exit 0 with empty output, a vacuous green for the CI gate (step-6 F4).
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) main();
+// isMain (lib/run-direct.mjs): a raw compare fails under a symlinked or
+// URL-encoded argv[1] -> main() never runs -> exit 0 with empty output, a
+// vacuous green for the CI gate (step-6 F4, #380).
+if (isMain(import.meta.url)) main();

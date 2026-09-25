@@ -42,6 +42,7 @@ import { readBodyOrSkip } from './lib/index-state.mjs'
 import { loadRunKey } from './lib/bp1-keys.mjs'
 import { canonicalize } from './lib/bp1-canonicalize.mjs'
 import { verifyCanonical } from './lib/bp1-hmac.mjs'
+import { isMain } from './lib/run-direct.mjs'
 
 // Plan v2 §1 — five-min naked-entry threshold for codex_review entries.
 export const PATH_B_AGE_THRESHOLD_MS = 5 * 60 * 1000
@@ -652,11 +653,7 @@ async function main() {
   }) + '\n')
 }
 
-const invokedAsScript = (() => {
-  try { return process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname) }
-  catch { return false }
-})()
-if (invokedAsScript) {
+if (isMain(import.meta.url)) {
   main().catch(e => {
     process.stderr.write(`internal error: ${e.stack || e.message}\n`)
     process.exit(3)

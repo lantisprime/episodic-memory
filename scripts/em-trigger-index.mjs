@@ -40,12 +40,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
-import { pathToFileURL, fileURLToPath } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { loadActivationClasses, parseTriggerKind } from './lib/activation.mjs'
 import { computeCadence } from './lib/activation-log.mjs'
 import { openReadableIndex, readSidecarOrDegrade, classifyIndexFile } from './lib/index-state.mjs'
+import { isMain } from './lib/run-direct.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 
@@ -1047,11 +1048,7 @@ export function loadMergedTriggerIndex({ project, now = new Date() } = {}) {
 // ---------------------------------------------------------------------------
 // CLI (main-module guarded so writers can import the helpers without running it)
 // ---------------------------------------------------------------------------
-function isMainModule() {
-  try { return process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href } catch { return false }
-}
-
-if (isMainModule()) {
+if (isMain(import.meta.url)) {
   const argv = process.argv.slice(2)
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(JSON.stringify({ status: 'help', script: 'em-trigger-index.mjs', usage: 'node em-trigger-index.mjs [--project <root>] [--scope local|global|all] [--merged] [--with-pattern-health] — builds trigger-index.json per store; --project <root> binds the LOCAL store to <root>/.episodic-memory (path binding, not a name filter); --merged prints the deduped local-precedence merged view' }))

@@ -21,6 +21,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { isMain } from './lib/run-direct.mjs'
 
 const DEFAULTS = Object.freeze({
   model: 'claude-haiku-4-5-20251001',
@@ -203,6 +204,6 @@ function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   main()
 }

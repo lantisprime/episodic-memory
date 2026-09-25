@@ -29,6 +29,7 @@ import path from 'path'
 import crypto from 'crypto'
 import os from 'os'
 import process from 'process'
+import { isMain } from '../scripts/lib/run-direct.mjs'
 
 // ---------------------------------------------------------------------------
 // CLI parsing
@@ -339,6 +340,6 @@ function main() {
 }
 
 // Run as CLI when invoked directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   main()
 }
