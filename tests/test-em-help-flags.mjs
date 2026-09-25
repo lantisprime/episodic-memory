@@ -168,6 +168,30 @@ for (const script of SUBSTRATE) {
 }
 
 // ---------------------------------------------------------------------------
+// Mode coverage (issue #527): em-consolidate --help must document the clerk
+// report and apply forms, with the apply-only flags spelled as in
+// docs/EM_SCRIPTS_GUIDE.md. `--clerk` alone was already present before the
+// fix, so the apply-form tokens are what make this assertion discriminate.
+// ---------------------------------------------------------------------------
+console.log('mode coverage (em-consolidate clerk forms):')
+
+test('em-consolidate.mjs --help documents --clerk report and apply forms', () => {
+  const s = makeSandbox()
+  try {
+    const r = run('em-consolidate.mjs', ['--help'], s)
+    assertHelpContract(r, 'em-consolidate.mjs', 'em-consolidate.mjs --help')
+    assertNoStore(s, 'em-consolidate.mjs --help')
+    const { usage } = parseJSON(r.stdout)
+    for (const token of [
+      '--clerk', '--clerk --apply --confirm', '--reject-all',
+      '--reject-member <id>', '--lock-timeout <s>',
+    ]) {
+      assert.ok(usage.includes(token), `usage missing ${JSON.stringify(token)}`)
+    }
+  } finally { s.cleanup() }
+})
+
+// ---------------------------------------------------------------------------
 // -h short alias (covered at least once via em-list)
 // ---------------------------------------------------------------------------
 console.log('-h short alias:')
