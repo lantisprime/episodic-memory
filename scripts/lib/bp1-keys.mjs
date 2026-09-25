@@ -112,6 +112,58 @@ export function generateRunKey(projectRoot, runId) {
   return { keyPath, key32B }
 }
 
+// #670 S2b (round-1 MAJOR-1 scope extension): shared fd-based load for both
+// key types. `mkfifo -m 600 run.key` passes the OLD statSync-based mode-0600
+// gate (statSync doesn't distinguish a FIFO from a regular file for mode
+// purposes) and then blocks forever on a path-based readFileSync — same hang
+// class as the BP-1 episode-read family. This closes it: ONE
+// open(O_RDONLY|O_NONBLOCK) (a writer-less FIFO returns immediately instead
+// of blocking) + fstat(fd).isFile() check BEFORE the mode-0600 gate (a FIFO
+// must fail the shape check, not pass the perm check) + the mode gate
+// evaluated from that SAME fstat + read from that SAME fd. Symlinked legit
+// keys are unaffected — open+fstat follows symlinks exactly like the prior
+// statSync did. These functions NEVER throw (round-2 MAJOR-1R): every branch
+// returns a tagged {error} string; callers branch on it with no try/catch.
+// Pinned mapping: openSync ENOENT -> 'missing' (finalize-recover State B
+// depends on this); non-regular (fstat(fd).isFile() false) -> 'unreadable';
+// read failure -> 'unreadable'.
+function loadKeyFd(keyPath) {
+  const O_NONBLOCK_READ = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
+  let fd
+  try {
+    fd = fs.openSync(keyPath, O_NONBLOCK_READ)
+  } catch (e) {
+    if (e.code === 'ENOENT') return { error: 'missing' }
+    return { error: 'unreadable' }
+  }
+  try {
+    let stat
+    try {
+      stat = fs.fstatSync(fd)
+    } catch (_e) {
+      return { error: 'unreadable' }
+    }
+    if (!stat.isFile()) return { error: 'unreadable' }
+    const modeCheck = assertKeyMode0600(stat)
+    if (modeCheck.error) return { error: 'mode' }
+    let buf
+    try {
+      buf = fs.readFileSync(fd)
+    } catch (_e) {
+      return { error: 'unreadable' }
+    }
+    const sizeCheck = assertKey32Bytes(buf)
+    if (sizeCheck.error) return { error: 'size' }
+    return { key32B: buf }
+  } finally {
+    // #670 review round MINOR-1: closeSync can itself throw (e.g. synthetic/
+    // real EIO on close) — this is a never-throw helper (its contract is the
+    // tagged {key32B}|{error} return), so a close failure must not override
+    // that contract by escaping the finally block. Best-effort close.
+    try { fs.closeSync(fd) } catch { /* best-effort; never-throw contract */ }
+  }
+}
+
 /**
  * Load the per-run key. Asserts mode + size invariants. Returns the key
  * Buffer or a tagged error.
@@ -121,25 +173,7 @@ export function generateRunKey(projectRoot, runId) {
  * @returns {{ key32B: Buffer } | { error: 'missing'|'mode'|'size'|'unreadable' }}
  */
 export function loadRunKey(projectRoot, runId) {
-  const keyPath = runKeyPath(projectRoot, runId)
-  let stat
-  try {
-    stat = fs.statSync(keyPath)
-  } catch (e) {
-    if (e.code === 'ENOENT') return { error: 'missing' }
-    return { error: 'unreadable' }
-  }
-  const modeCheck = assertKeyMode0600(stat)
-  if (modeCheck.error) return { error: 'mode' }
-  let buf
-  try {
-    buf = fs.readFileSync(keyPath)
-  } catch (_e) {
-    return { error: 'unreadable' }
-  }
-  const sizeCheck = assertKey32Bytes(buf)
-  if (sizeCheck.error) return { error: 'size' }
-  return { key32B: buf }
+  return loadKeyFd(runKeyPath(projectRoot, runId))
 }
 
 /**
@@ -200,23 +234,7 @@ export function verifyKeyPath(homeDir = os.homedir()) {
  * @returns {{ key32B: Buffer, fingerprint16: string } | { error: 'missing'|'mode'|'size'|'unreadable' }}
  */
 export function loadVerifyKey(homeDir = os.homedir()) {
-  const keyPath = verifyKeyPath(homeDir)
-  let stat
-  try {
-    stat = fs.statSync(keyPath)
-  } catch (e) {
-    if (e.code === 'ENOENT') return { error: 'missing' }
-    return { error: 'unreadable' }
-  }
-  const modeCheck = assertKeyMode0600(stat)
-  if (modeCheck.error) return { error: 'mode' }
-  let buf
-  try {
-    buf = fs.readFileSync(keyPath)
-  } catch (_e) {
-    return { error: 'unreadable' }
-  }
-  const sizeCheck = assertKey32Bytes(buf)
-  if (sizeCheck.error) return { error: 'size' }
-  return { key32B: buf, fingerprint16: verifyKeyFingerprint(buf) }
+  const r = loadKeyFd(verifyKeyPath(homeDir))
+  if (r.error) return r
+  return { key32B: r.key32B, fingerprint16: verifyKeyFingerprint(r.key32B) }
 }

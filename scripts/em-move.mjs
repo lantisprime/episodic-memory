@@ -46,7 +46,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { normalizeTags, episodeTokens, updateTokensIndex, nullProtoIndex } from './lib/relevance.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
-import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip, openReadableBody, BodyUnreadableError } from './lib/index-state.mjs'
+import { readIndexFileOrThrow, IndexUnreadableError, readBodyOrSkip, readBodyBufferOrSkip, openReadableBody, BodyUnreadableError } from './lib/index-state.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -162,38 +162,20 @@ function readEpisodeBodyOrThrow(filePath) {
 // decode to the same string (lone surrogates become U+FFFD), so hashing the
 // decoded text collapsed them to "identical" — the found-in-both-scopes
 // divergence check then unlinked one copy as a false duplicate (data loss,
-// reviewer-confirmed: exit 0, moved, local deleted). LOCAL fd-based
-// raw-Buffer read — NOT a shared-helper change (plan §4 stands): open
-// O_NONBLOCK so a FIFO/no-writer never blocks, fstat rejects any
-// non-regular file BEFORE the read, readFileSync(fd) with NO encoding
-// returns the exact bytes. Reuses the already-exported BodyUnreadableError
-// class (index-state.mjs) purely for typed-error shape parity with
-// readEpisodeBodyOrThrow's callers — not a helper-contract change.
+// reviewer-confirmed: exit 0, moved, local deleted).
+//
+// #670 S1: thin adapter over the shared readBodyBufferOrSkip primitive (open
+// O_NONBLOCK so a FIFO/no-writer never blocks, fstat rejects any non-regular
+// file BEFORE the read, readFileSync(fd) with NO encoding returns the exact
+// bytes) — three raw-bytes call sites (this one, em-restore.mjs, and the new
+// BP-1 Buffer sites) now share ONE fd-based implementation instead of each
+// duplicating the fd logic locally. UNLIKE openReadableBody's ENOENT->null,
+// this adapter KEEPS ENOENT->throw (every caller here already confirmed
+// presence moments earlier; a race-vanish is exceptional either way).
 function readEpisodeBodyRawOrThrow(filePath) {
-  const O_NONBLOCK_READ = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
-  let fd
-  try {
-    fd = fs.openSync(filePath, O_NONBLOCK_READ)
-  } catch (e) {
-    throw new BodyUnreadableError(filePath, (e && e.code) || 'UNKNOWN')
-  }
-  try {
-    let st
-    try {
-      st = fs.fstatSync(fd)
-    } catch (e) {
-      throw new BodyUnreadableError(filePath, (e && e.code) || 'UNKNOWN')
-    }
-    if (st.isDirectory()) throw new BodyUnreadableError(filePath, 'EISDIR')
-    if (!st.isFile()) throw new BodyUnreadableError(filePath, 'ENOTREG')
-    try {
-      return fs.readFileSync(fd)
-    } catch (e) {
-      throw new BodyUnreadableError(filePath, (e && e.code) || 'UNKNOWN')
-    }
-  } finally {
-    fs.closeSync(fd)
-  }
+  const r = readBodyBufferOrSkip(fs, filePath)
+  if (r.ok) return r.raw
+  throw new BodyUnreadableError(filePath, r.code)
 }
 
 function sha256(p) {

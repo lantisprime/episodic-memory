@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * test-second-opinion-consensus-e2e.mjs — End-to-end --consensus loop test
- * using parameterizable stub provider (SO_STUB_VERDICT/SO_STUB_DEFER_COUNT).
+ * using parameterizable stub provider (SO_STUB_VERDICT/SO_STUB_DEFER_COUNT/
+ * SO_STUB_FU_SEVERITY).
  *
  * Coverage:
  *   - --consensus + ACCEPT first round → 1 round, success.
@@ -219,19 +220,15 @@ test('I-21: ACCEPT-with-FU + P1 finding → accept-with-fu-malformed', () => {
     '--max-rounds', '5',
     '--rebuttal-cb', cb,
   ], {
-    extraEnv: {
-      SO_STUB_VERDICT: 'HOLD',  // HOLD with P1 finding produces NEEDS-MORE-WORK; we want ACCEPT-with-FU
-      // Actually test ACCEPT-with-FU + P1 directly:
-      // need to override stub to emit ACCEPT-with-FU with P1 status
-    },
+    // SO_STUB_FU_SEVERITY (#576) makes the stub attach P1 to its DEFERRED-AS-FU
+    // finding, so ACCEPT-with-FU + P1 reaches the I-21 guard end-to-end.
+    extraEnv: { SO_STUB_VERDICT: 'ACCEPT-with-FU', SO_STUB_FU_SEVERITY: 'P1' },
     expectError: true,
   })
-  // The above SO_STUB_VERDICT=HOLD will produce HOLD verdict; we need ACCEPT-with-FU + P1.
-  // Skip and test via unit test (already covered in test-second-opinion-consensus.mjs).
-  // This E2E spot-check verifies HOLD forever + max-rounds=5 fires cap-reached.
-  // Reframing: E2E stub doesn't easily produce ACCEPT-with-FU + P1 mismatch; rely
-  // on unit test for I-21 critical-guard verification.
-  assert.ok(['cap-reached-no-success', 'accept-with-fu-malformed'].includes(r.parsed.code))
+  assert.strictEqual(r.parsed.code, 'accept-with-fu-malformed')
+  assert.strictEqual(r.parsed.consensus.success, false)
+  assert.strictEqual(r.parsed.consensus.stop_reason, 'accept-with-fu-malformed')
+  assert.strictEqual(r.exitCode, 1)
 })
 
 // ---------------------------------------------------------------------------
