@@ -175,6 +175,18 @@ assert_allowed "5.  Bash read-only allowed in idle" "$(mock_json 'Bash' 'ls')"
 assert_blocked "6.  git push in idle self-arms + blocks (B1 hard gate)" \
   "$(mock_json 'Bash' 'git push origin main')" "Post-implementation checkpoint required"
 assert_marker_exists "7.  push self-armed post-required in idle (B1)" "$POST_REQ"
+# #471: tracker-metadata writes (gh issue/label) publish no repo source, so the
+# push-gate must neither block them nor self-arm the post-checkpoint.
+reset_state
+assert_allowed "7a. gh issue create in idle NOT push-gated (#471)" \
+  "$(mock_json 'Bash' 'gh issue create --title x --body y')"
+assert_allowed "7b. gh issue comment in idle NOT push-gated (#471)" \
+  "$(mock_json 'Bash' 'gh issue comment 1 --body y')"
+assert_allowed "7c. gh label create in idle NOT push-gated (#471)" \
+  "$(mock_json 'Bash' 'gh label create bug')"
+assert_marker_absent "7d. gh issue/label writes did NOT arm post-required (#471)" "$POST_REQ"
+assert_blocked "7e. gh pr create in idle still push-gated (#471 control)" \
+  "$(mock_json 'Bash' 'gh pr create --title x --body y')" "Post-implementation checkpoint required"
 
 # ============================================================================
 echo ""
