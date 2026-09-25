@@ -246,7 +246,7 @@ export function stripJsComments(src) {
   let out = ''
   let i = 0
   let prev = '' // last significant (non-space, non-comment) char emitted
-  let word = '' // trailing identifier/keyword chars before `prev`
+  let word = '' // identifier/keyword ending at `prev` (for `return /re/`)
   const n = src.length
   const regexAfterWord = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await'])
   const blank = (s) => s.replace(/[^\n]/g, ' ')
