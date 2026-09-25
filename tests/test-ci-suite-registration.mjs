@@ -30,6 +30,11 @@
  *       required, line comments stripped inside it); OR
  *   (c) listed in the KNOWN_UNWIRED baseline below.
  *
+ * #614: every workflow file must also pass lintWorkflowYaml(), a zero-dep
+ * structural YAML check (see its comment for what it does and does not
+ * catch). The scanner above tolerates invalid YAML, but GitHub rejects the
+ * whole file, so every suite it wires silently stops running.
+ *
  * The baseline is SHRINK-ONLY (a ratchet): it enumerates the suites that were
  * already unwired when this lint landed (2026-07-11, #504 audit). A baseline
  * entry that becomes wired must be deleted (t_baseline_not_wired), and an
@@ -264,6 +269,175 @@ function parseWorkflow(yamlText) {
     }
   }
   return { triggers, stepSuites, partialSuites }
+}
+
+// #614: zero-dep structural YAML check for workflow files. parseWorkflow()
+// above is a line scanner that tolerates invalid YAML, so a workflow GitHub
+// rejects at parse time (every suite in it silently stops running) used to
+// leave this lint green. Node has no stdlib YAML parser and the repo takes no
+// deps, so this is NOT a parser; it rejects the failure classes seen in
+// practice, outside block scalars (`key: |` / `key: >` content is skipped):
+//   - a tab in leading indentation;
+//   - a plain (unquoted) value containing ": " or ending in ":" — the PR #613
+//     class (`- name: Suite (P1-S1: marker)`), which YAML reads as a nested
+//     mapping and rejects. `${{ }}` does not quote: `if: ${{ a: b }}` is also
+//     invalid YAML and is flagged. URLs (`https://`) have no ": " and pass;
+//   - a quoted value whose quote does not close on its line, or with text
+//     after the closing quote;
+//   - an unbalanced `[`/`{` flow value on its line (quotes respected);
+//   - a line indented deeper than a preceding `key: scalar` line (a stray
+//     continuation or mis-nested key), or a dedent to a column no open parent
+//     uses (inconsistent indentation);
+//   - a duplicate key in the same mapping.
+// Strict by design (loud false negatives beat silent false positives):
+// multi-line plain, quoted, and flow scalars are rejected even though YAML
+// allows them; quote or use a block scalar instead.
+// NOT caught: anchor/alias/tag semantics, multi-document streams, and any
+// schema-level error (unknown keys, bad `on:` events) that GitHub reports
+// after a successful parse. Workflows here use none of the YAML features.
+function lintWorkflowYaml(yamlText) {
+  const errors = []
+  const lines = yamlText.split('\n')
+  // Open block collections: { indent, keys:Set } (keys: for duplicate checks).
+  const stack = [{ indent: 0, keys: new Set() }]
+  let prev = null // { effIndent, expectsChild } for the last content line
+  const err = (i, msg) => errors.push({ line: i + 1, message: msg, text: lines[i] })
+  // Index just past a quoted scalar starting at s[0], or -1 when unclosed.
+  const quoteEnd = (s) => {
+    const q = s[0]
+    for (let j = 1; j < s.length; j++) {
+      if (q === "'" && s[j] === "'") {
+        if (s[j + 1] === "'") { j++; continue }
+        return j + 1
+      }
+      if (q === '"' && s[j] === '\\') { j++; continue }
+      if (q === '"' && s[j] === '"') return j + 1
+    }
+    return -1
+  }
+  // Skip block-scalar content: every following line deeper than line i.
+  const skipBlock = (i, indent) => {
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1]
+      if (next.trim() !== '' && next.match(/^[ \t]*/)[0].length <= indent) break
+      i++
+    }
+    return i
+  }
+  // Validate one scalar value (the text after `key: ` or `- `). Returns
+  // 'block' | 'empty' | 'scalar'.
+  const checkValue = (i, v) => {
+    if (v === '' || v.startsWith('#')) return 'empty'
+    if (/^[|>][+-]?\d*\s*(?:#.*)?$/.test(v)) return 'block'
+    if (v[0] === '"' || v[0] === "'") {
+      const end = quoteEnd(v)
+      if (end < 0) err(i, 'unterminated quoted scalar (multi-line quoted scalars are not supported by this check)')
+      else if (!/^\s*(?:#.*)?$/.test(v.slice(end))) err(i, `text after closing quote: ${JSON.stringify(v.slice(end).trim())}`)
+      return 'scalar'
+    }
+    if (v[0] === '[' || v[0] === '{') {
+      let depth = 0
+      for (let j = 0; j < v.length; j++) {
+        const c = v[j]
+        if (c === '"' || c === "'") {
+          const end = quoteEnd(v.slice(j))
+          if (end < 0) { depth = NaN; break }
+          j += end - 1
+        } else if (c === '[' || c === '{') depth++
+        else if (c === ']' || c === '}') depth--
+        else if (c === '#' && depth === 0 && /\s/.test(v[j - 1])) break
+      }
+      if (depth !== 0) err(i, 'unbalanced flow collection on one line (multi-line flow is not supported by this check)')
+      return 'scalar'
+    }
+    const plain = v.replace(/\s+#.*$/, '')
+    if (/:(\s|$)/.test(plain)) {
+      err(i, 'unquoted ": " (or trailing ":") inside a plain scalar value — YAML reads it as a nested mapping; quote the value')
+    }
+    return 'scalar'
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    if (raw.trim() === '' || /^\s*#/.test(raw)) continue
+    const lead = raw.match(/^[ \t]*/)[0]
+    if (lead.includes('\t')) { err(i, 'tab in indentation (YAML allows spaces only)'); continue }
+    const indent = lead.length
+    let content = raw.slice(indent)
+    let effIndent = indent
+    const seqIndents = []
+    while (content === '-' || content.startsWith('- ')) {
+      seqIndents.push(effIndent)
+      const rest = content.slice(1)
+      const pad = rest.match(/^ */)[0].length
+      effIndent += 1 + pad
+      content = rest.slice(pad)
+      if (content === '') break
+    }
+    const lineIndent = seqIndents.length ? seqIndents[0] : indent
+
+    // Close collections the line has dedented out of. A deeper line opens a
+    // child only under `key:` / `- ` with no inline value; any other column
+    // must be one a still-open parent already uses.
+    while (stack.length > 1 && stack[stack.length - 1].indent > lineIndent) stack.pop()
+    const top = stack[stack.length - 1]
+    const deeper = prev !== null && lineIndent > prev.effIndent
+    if (deeper && !prev.expectsChild) {
+      err(i, `unexpected deeper indentation (col ${lineIndent}) under a line that already has a scalar value`)
+    } else if (!deeper && lineIndent !== top.indent) {
+      err(i, `inconsistent indentation: col ${lineIndent} matches no open parent (nearest ${top.indent})`)
+    }
+    if (lineIndent > top.indent) stack.push({ indent: lineIndent, keys: new Set() })
+    for (let k = 1; k < seqIndents.length; k++) stack.push({ indent: seqIndents[k], keys: new Set() })
+    // A `- ` item starts a fresh mapping at its content column.
+    if (seqIndents.length && content !== '') stack.push({ indent: effIndent, keys: new Set() })
+
+    if (content === '') { prev = { effIndent, expectsChild: true }; continue }
+
+    // Key: quoted, or plain up to the first ": " / trailing ":".
+    let key = null
+    let value = null
+    if (content[0] === '"' || content[0] === "'") {
+      const end = quoteEnd(content)
+      if (end > 0 && /^\s*:(\s|$)/.test(content.slice(end))) {
+        key = content.slice(1, end - 1)
+        value = content.slice(end).replace(/^\s*:/, '').trim()
+      }
+    } else if (!/^[[{]/.test(content)) {
+      const m = content.match(/^([^#]*?):(?:\s+|$)(.*)$/)
+      if (m && !/\s$/.test(m[1])) { key = m[1]; value = m[2].trim() }
+    }
+
+    if (key === null) {
+      // Bare scalar: a sequence item value, or a stray line.
+      if (!seqIndents.length) err(i, 'line is neither a "key: value" pair nor a "- " sequence item')
+      else if (checkValue(i, content) === 'block') i = skipBlock(i, indent)
+      prev = { effIndent, expectsChild: false }
+      continue
+    }
+    const scope = stack[stack.length - 1]
+    if (scope.keys.has(key)) err(i, `duplicate key "${key}" in the same mapping`)
+    scope.keys.add(key)
+    const kind = checkValue(i, value)
+    if (kind === 'block') {
+      i = skipBlock(i, indent)
+      prev = { effIndent, expectsChild: false }
+      continue
+    }
+    // `key:` with no value may be followed by a deeper mapping or by a `- `
+    // sequence at the SAME column (YAML's compact block sequence).
+    prev = { effIndent, expectsChild: kind === 'empty' }
+  }
+  return errors
+}
+
+// Lint every workflow file; returns [{ file, line, message, text }].
+function lintWorkflowDir(dir) {
+  const out = []
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml')).sort()) {
+    for (const e of lintWorkflowYaml(fs.readFileSync(path.join(dir, f), 'utf8'))) out.push({ file: f, ...e })
+  }
+  return out
 }
 
 // A workflow only executes on PRs/pushes if its top-level `on:` declares
@@ -534,6 +708,47 @@ test('t_order_on_after_jobs (#515, F4): on-qualifier AFTER jobs still marks the 
   const { stepSuites, partialSuites } = parseWorkflow(y)
   assert.deepStrictEqual(stepSuites, [])
   assert.deepStrictEqual(partialSuites, ['test-workflow.mjs'])
+})
+
+test('t_workflow_yaml_structural (#614): every .github/workflows/*.{yml,yaml} passes the structural YAML check', () => {
+  const errors = lintWorkflowDir(workflowsDir)
+  assert.deepStrictEqual(
+    errors.map((e) => `${e.file}:${e.line}: ${e.message}\n      ${e.text.trim()}`),
+    [],
+    `workflow YAML GitHub would reject (the whole workflow stops running):\n  ${errors.map((e) => `${e.file}:${e.line}: ${e.message}\n      ${e.text.trim()}`).join('\n  ')}`,
+  )
+})
+
+test('t_mutation_workflow_yaml (#614): each rejected class is flagged; quoted, block, comment, URL and ${{ }} forms pass', () => {
+  const SKELETON = 'on:\n  pull_request:\njobs:\n  v:\n    runs-on: ubuntu-latest\n    steps:\n'
+  const flags = (steps, re) => {
+    const errs = lintWorkflowYaml(SKELETON + steps)
+    return errs.length > 0 && errs.every((e) => e.line >= 7) && (!re || errs.some((e) => re.test(e.message)))
+  }
+  // The exact PR #613 line.
+  assert.ok(flags('      - name: Run RFC-015 registration suite (P1-S1: marker + advisory + register flag + doctor audit)\n        run: node tests/x.mjs\n', /unquoted ": "/), 'PR #613 unquoted colon in step name')
+  assert.ok(flags('      - name: Suite:\n        run: x\n', /unquoted ": "/), 'trailing colon in plain scalar')
+  assert.ok(flags('      - if: ${{ a: b }}\n        run: x\n', /unquoted ": "/), '${{ }} does not quote a colon-space')
+  assert.ok(flags('      - run: echo a: b\n', /unquoted ": "/), 'colon-space in a plain run value')
+  assert.ok(flags('      - name: x\n\t  run: y\n', /tab/), 'tab indentation')
+  assert.ok(flags('      - name: x\n          run: y\n', /deeper/), 'deeper line under a scalar value')
+  assert.ok(flags('      - name: x\n       run: y\n', /inconsistent/), 'dedent to an unused column')
+  assert.ok(flags('      - name: x\n        name: y\n', /duplicate/), 'duplicate key in one mapping')
+  assert.ok(flags('      - name: "abc\n        run: y\n', /unterminated/), 'unterminated quote')
+  assert.ok(flags('      - name: "abc" def\n        run: y\n', /after closing quote/), 'text after closing quote')
+  assert.ok(flags('      - with: [a, b\n', /unbalanced/), 'unbalanced flow collection')
+  // Negative controls: valid YAML that contains colons must pass.
+  const passes = (steps) => lintWorkflowYaml(SKELETON + steps).length === 0
+  assert.ok(passes('      - name: "Suite (P1-S1: marker)"\n        run: node tests/x.mjs\n'), 'double-quoted colon-space')
+  assert.ok(passes("      - name: 'it''s: fine'\n        run: x\n"), "single-quoted colon-space with '' escape")
+  assert.ok(passes('      - name: blk\n        run: |\n          echo "a: b"\n          key: value\n          \ttabbed: inside\n\n          after blank: x\n      - run: >-\n          folded: text\n'), 'block scalar content (colons, tabs, blank lines) is skipped')
+  assert.ok(passes('      # name: a: b comment\n      - name: x # trailing: comment\n        run: y\n'), 'colons in comments')
+  assert.ok(passes('      - name: fetch https://example.com/a:b\n        run: curl https://x.y:8080/z\n'), 'URLs and host:port')
+  assert.ok(passes("      - if: ${{ github.event_name == 'push' }}\n        run: echo ${{ secrets.X }}\n        env:\n          A: ${{ matrix.os }}\n"), '${{ }} expressions without colon-space')
+  assert.ok(passes('      - uses: a/b@v1\n        with: { k: "v: w", n: [1, 2] }\n'), 'one-line flow mapping with quoted colon')
+  assert.ok(passes('    strategy:\n      matrix:\n        os:\n        - a\n        - b\n'), 'compact sequence at the parent key column')
+  assert.ok(passes('      - run: x\n        with:\n          list:\n            - |\n              a: b\n'), 'block scalar as a sequence item')
+  assert.ok(passes('      - name: a\n        run: x\n      - name: b\n        run: y\n'), 'same key in sibling sequence items is not a duplicate')
 })
 
 console.log(`\n# ${passed} passed, ${failed} failed`)
