@@ -2312,6 +2312,32 @@ test('T669c triggered_by F5 control: a vanished (ENOENT) referenced body stays p
   assert.strictEqual(r.json.valid, true, `absent triggered_by body must stay provenance-only, errors: ${JSON.stringify(r.json.errors)}`)
 })
 
+// Issue 560: a first ```json fence holding valid JSON that is not an object
+// (null crashed with an uncaught TypeError; array/number/string/boolean were
+// skipped silently) must be a structured error on the normal JSON stdout.
+for (const [literal, kind] of [['null', 'null'], ['[]', 'array'], ['5', 'number'], ['"s"', 'string'], ['true', 'boolean']]) {
+  test(`T560a non-object fenced payload ${literal} is a structured error, not a crash`, () => {
+    const id = `20260502-120000-nonobject-${kind}`
+    const fm = `---\nid: ${id}\ndate: 2026-05-02\ntime: "12:00"\nproject: test\ncategory: workflow.lifecycle\nstatus: active\ntags: []\nsummary: x\n---\n`
+    fs.writeFileSync(path.join(episodesDir, `${id}.md`), fm + '\n```json\n' + literal + '\n```\n')
+    fs.appendFileSync(indexFile, JSON.stringify({ id, date: '2026-05-02', time: '12:00', project: 'test', category: 'workflow.lifecycle', status: 'active', supersedes: null, tags: [], summary: 'x' }) + '\n')
+    const r = runValidate(['--task', 'TEST', '--gate', 'pre-checkpoint'])
+    assert.strictEqual(r.exit, 1)
+    assert.strictEqual(r.json.valid, false)
+    assert.ok(r.json.errors.some(e => e.includes(`episode:${id}`) && e.includes(`must be a JSON object, got ${kind}`)),
+      `errors[] must name the non-object payload, got: ${JSON.stringify(r.json.errors)}`)
+  })
+}
+
+test('T560b triggered_by: a referenced body whose fence is null stays provenance-only', () => {
+  const chain = mkBaseChainForReview()
+  const trigId = mkWitness({ category: 'discovery', summary: 'trigger source null fence' })
+  fs.appendFileSync(path.join(episodesDir, `${trigId}.md`), '\n```json\nnull\n```\n')
+  mkReviewRequest({ chain, extra: { triggered_by: `episode:${trigId}` } })
+  const r = runValidate(['--task', 'TEST', '--gate', 'review-request', '--head', 'abc1234'])
+  assert.strictEqual(r.json.valid, true, `null triggered_by payload must stay provenance-only, errors: ${JSON.stringify(r.json.errors)}`)
+})
+
 // ---------------------------------------------------------------------------
 console.log('================================')
 console.log(`${passed} passed, ${failed} failed`)
