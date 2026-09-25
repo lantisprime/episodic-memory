@@ -71,16 +71,12 @@ const workflowsDir = path.join(repoRoot, '.github', 'workflows')
 // wiring decisions stay per-suite.
 const KNOWN_UNWIRED = [
   'test-bp1-approval-check-hook.mjs',
-  'test-bp1-atomic.mjs',
   'test-bp1-check-deadlines.mjs',
-  'test-bp1-crash-classify.mjs',
   'test-bp1-deadlines-lib.mjs',
   'test-bp1-emit-marker-invalid-evidence.mjs',
-  'test-bp1-finalize-run.mjs',
   'test-bp1-flag-flip.mjs',
   'test-bp1-frontmatter.mjs',
   'test-bp1-hmac-manifest.mjs',
-  'test-bp1-manifest-collect.mjs',
   'test-bp1-marker-validate.mjs',
   'test-bp1-marker.mjs',
   'test-bp1-orchestrator-286-race-and-crash.mjs',

@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 
 const writerMod = await import(new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href)
 const { writeBp1Episode } = writerMod
@@ -201,6 +202,36 @@ tap('F9 filename-vs-fm.id mismatch (rename attack) → excluded', () => {
   fs.renameSync(ep.episodePath, renamed)
   const r = findSignedStateEpisode(projectRoot, RUN_ID, 'classifier-dispatch-pending', KEY)
   assert.deepEqual(r, { status: 'none' })
+})
+
+// =============================================================================
+// FIFO regression leg (issue #670): findSignedStateEpisode loop-scan must
+// skip a non-regular episode file instead of hanging. Spawned into a CHILD
+// process with a hard timeout — a same-process call against unfixed code
+// (raw fs.readFileSync on a FIFO) blocks forever with no external alarm,
+// which would freeze this entire suite rather than fail it.
+// =============================================================================
+tap('F11 FIFO-shaped episode file in episodes dir → skipped, no hang (spawned, alarm-wrapped)', () => {
+  const projectRoot = mkTmpProject()
+  const epDir = path.join(projectRoot, '.episodic-memory', 'episodes')
+  fs.mkdirSync(epDir, { recursive: true })
+  const fifoPath = path.join(epDir, `${RUN_ID}-poison.md`)
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+  const ATOMIC_PATH = new URL('../scripts/lib/bp1-atomic.mjs', import.meta.url).href
+  const childPath = path.join(projectRoot, 'child-probe.mjs')
+  fs.writeFileSync(childPath, [
+    `import { findSignedStateEpisode } from ${JSON.stringify(ATOMIC_PATH)}`,
+    `const r = findSignedStateEpisode(${JSON.stringify(projectRoot)}, ${JSON.stringify(RUN_ID)}, 'classifier-dispatch-pending', Buffer.from(${JSON.stringify(KEY.toString('hex'))}, 'hex'))`,
+    `console.log(JSON.stringify(r))`,
+  ].join('\n'))
+  const r = spawnSync(process.execPath, [childPath], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' })
+  fs.rmSync(childPath, { force: true })
+  fs.unlinkSync(fifoPath)
+  assert.ok(r.signal === null, `F11: no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature)`)
+  assert.equal(r.status, 0, `F11: child exit 0, got ${r.status}: stderr=${(r.stderr || '').slice(0, 300)}`)
+  const j = JSON.parse((r.stdout || '').trim())
+  assert.deepEqual(j, { status: 'none' }, JSON.stringify(j))
 })
 
 tap('F10 input validation — bad projectRoot, runId, state, key, expectedFields', () => {

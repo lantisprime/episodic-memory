@@ -20,6 +20,13 @@ const mod = await import(
 )
 const { classifyRunCrash, PATH_B_AGE_THRESHOLD_MS } = mod
 
+const { writeBp1Episode } = await import(
+  new URL('../scripts/lib/bp1-episode-writer.mjs', import.meta.url).href
+)
+const { generateRunKey } = await import(
+  new URL('../scripts/lib/bp1-keys.mjs', import.meta.url).href
+)
+
 const CLI = new URL('../scripts/bp1-crash-classify.mjs', import.meta.url).pathname
 
 let pass = 0, fail = 0
@@ -446,6 +453,245 @@ tap('CC-ambiguous codex_review state with no entry episodes → inconsistent', (
     markerPresent: false, markerExpired: false, now: NOW,
   })
   assert.equal(r.classification, 'inconsistent-codex-review')
+})
+
+// =============================================================================
+// Issue #670 — CLI-level loadRunEpisodes/readApprovalMarkerStatus coverage.
+// mkCrashProject/writeRunIndex/writeSignedEpisode build a real on-disk
+// fixture (no git required — canonicalProjectRoot falls back to
+// path.resolve when there's no git repo, per bp1-crash-classify.mjs main()).
+// =============================================================================
+function mkCrashProject() {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp1-cc-proj-')))
+  fs.mkdirSync(path.join(dir, '.episodic-memory', 'episodes'), { recursive: true })
+  return dir
+}
+
+function writeRunIndex(proj, runId, state) {
+  const indexDir = path.join(proj, '.episodic-memory', 'runs')
+  fs.mkdirSync(indexDir, { recursive: true })
+  fs.writeFileSync(path.join(indexDir, '_index.json'), JSON.stringify({
+    schema_version: 2,
+    runs: {
+      [runId]: {
+        run_id: runId, state,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    },
+  }, null, 2))
+}
+
+// #670 review round MAJOR-1: loadRunEpisodes now gates on HMAC verification
+// (see scripts/bp1-crash-classify.mjs loadRunEpisodes), so fixtures must
+// write REAL signed episodes via the real writer — generateRunKey plants
+// run.key on disk where loadRunKey (inside loadRunEpisodes) will find it,
+// and writeBp1Episode signs with that SAME key. Returns { key32B, episodeId }.
+function setupRunKey(proj, runId) {
+  const { key32B } = generateRunKey(proj, runId)
+  return key32B
+}
+
+function writeSignedEpisode(proj, runId, key32B, { state, filenameSuffix, tags = [] }) {
+  const written = writeBp1Episode({
+    projectRoot: proj, runId, runKey32B: key32B,
+    type: 'state-transition', state,
+    summary: `${state} for ${runId}`,
+    parentEpisode: null, expectedPostEpisodeId: null,
+    tags, body: `# ${state}\n`, filenameSuffix,
+  })
+  return written.episodeId
+}
+
+// Raw (UNSIGNED) episode write — parseBp1Frontmatter-compatible bare-token
+// frontmatter with no hmac_signature field. Used ONLY for the forged-
+// unsigned regression leg (MAJOR-1): loadRunEpisodes must SKIP this, not
+// trust it (mirrors writeEpisode() in test-bp1-manifest-collect.mjs).
+function writeRawEpisode(proj, epId, fields) {
+  const dir = path.join(proj, '.episodic-memory', 'episodes')
+  const lines = ['---']
+  for (const [k, v] of Object.entries(fields)) lines.push(`${k}: ${v}`)
+  lines.push('---', '', 'body\n')
+  fs.writeFileSync(path.join(dir, `${epId}.md`), lines.join('\n'))
+}
+
+function spawnCC(proj, runId, extraEnv) {
+  return spawnSync('node', [CLI, '--project', proj, '--run-id', runId], {
+    encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL',
+    env: { ...process.env, ...extraEnv },
+  })
+}
+
+// =============================================================================
+// §2c positive control (round-2 E3R bound): the CLI classification for a
+// valid run-tagged fixture MUST EQUAL the pure classifyRunCrash output for
+// the equivalent episode records — the same shape the CC-row1 test (top of
+// this file) injects directly. This is what makes the FIFO leg below
+// non-vacuous: loadRunEpisodes must ACTUALLY return records, not just avoid
+// hanging.
+// =============================================================================
+tap('CC-670-positive-control: rfc-detected run with ONE real on-disk SIGNED episode → CLI classification EQUALS pure classifyRunCrash output', () => {
+  const proj = mkCrashProject()
+  const runId = 'bp1-run-cc-670-pos-rfc-x-aabbcc'
+  writeRunIndex(proj, runId, 'rfc-detected')
+  const key32B = setupRunKey(proj, runId)
+  const epId = writeSignedEpisode(proj, runId, key32B, { state: 'rfc-detected', filenameSuffix: 'rfc-detected' })
+
+  const r = spawnCC(proj, runId)
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}: stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+
+  // Independently compute the pure-function expectation for the SAME
+  // records loadRunEpisodes should have produced (mirrors st('rfc-detected')
+  // at the top of this file).
+  const pure = classifyRunCrash({
+    runState: { state: 'rfc-detected' },
+    episodes: [{ id: epId, run_id: runId, type: 'state-transition', state: 'rfc-detected' }],
+    markerPresent: false, markerExpired: false, now: Date.parse(out.marker?.deadline_at || NOW) || NOW,
+  })
+  assert.equal(out.classification, pure.classification, `CLI=${out.classification} pure=${pure.classification}`)
+  assert.deepEqual(out.resume_action, pure.resume_action, `CLI=${JSON.stringify(out.resume_action)} pure=${JSON.stringify(pure.resume_action)}`)
+  // Matches the CC-row1 pure-function expectation directly (lines ~78-93).
+  assert.equal(out.classification, 'crash-mid-classify')
+  assert.equal(out.resume_action.command, 'record-classification')
+})
+
+// Discriminating positive control (plan §7 build-round amendment): the Row1
+// fixture above (CC-670-positive-control) is satisfied identically whether
+// or not loadRunEpisodes returns correctly-SHAPED flat records — its
+// classification doesn't depend on inspecting any episode field, only on
+// state-transition PRESENCE of 'classified' (absent either way there). This
+// case flips on an episode field (e.state) the fixed code must read
+// correctly through fm.frontmatter — reachable only if loadRunEpisodes
+// pushes fm.frontmatter (flat), not the {frontmatter,body} wrapper the
+// half-activated fix used to push (whose fields all read back as
+// undefined). Originally a builder STOP-and-flag finding (CLI reported
+// crash-mid-Phase-A instead of inconsistent-classified-trivial); plan-owner
+// authorized completing the wrapper-vs-content fix, so this now asserts the
+// CORRECT post-fix behavior as a committed regression leg.
+tap('CC-670-positive-control-discriminating: classified/trivial WITH an on-disk SIGNED awaiting_approval episode → CLI reads e.state correctly through fm.frontmatter', () => {
+  const proj = mkCrashProject()
+  const runId = 'bp1-run-cc-670-disc-rfc-x-aabbcc'
+  writeRunIndex(proj, runId, 'classified')
+  // Patch decided_class onto the run-state row (writeRunIndex doesn't set it).
+  const idxPath = path.join(proj, '.episodic-memory', 'runs', '_index.json')
+  const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'))
+  idx.runs[runId].decided_class = 'trivial'
+  fs.writeFileSync(idxPath, JSON.stringify(idx, null, 2))
+  const key32B = setupRunKey(proj, runId)
+  const epId = writeSignedEpisode(proj, runId, key32B, { state: 'awaiting_approval', filenameSuffix: 'awaiting-approval' })
+
+  const r = spawnCC(proj, runId)
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}: stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+
+  const pure = classifyRunCrash({
+    runState: { state: 'classified', decided_class: 'trivial' },
+    episodes: [{ id: epId, run_id: runId, type: 'state-transition', state: 'awaiting_approval' }],
+    markerPresent: false, markerExpired: false, now: NOW,
+  })
+  // Pure expectation for THIS shape: hasAwait=true -> inconsistent-classified-trivial
+  // (NOT crash-mid-Phase-A, which is what the wrapper-shaped bug wrongly
+  // reported since e.state read as undefined on every record).
+  assert.equal(pure.classification, 'inconsistent-classified-trivial', `sanity: pure fixture itself must hit the discriminating branch, got ${pure.classification}`)
+  assert.equal(out.classification, pure.classification, `CLI=${out.classification} pure=${pure.classification} (CLI diverging here would mean loadRunEpisodes is NOT returning flat frontmatter records)`)
+  assert.deepEqual(out.resume_action, pure.resume_action)
+})
+
+// =============================================================================
+// FIFO regression leg (issue #670 §2, loadRunEpisodes): a FIFO-shaped
+// episode file alongside a real one must be skipped, not hang the verb.
+// Uses the CLI (already a subprocess) with an explicit timeout so a
+// regression against unfixed code (raw fs.readFileSync on a FIFO) fails as a
+// timeout-kill instead of freezing this suite.
+// =============================================================================
+tap('CC-670-fifo-episode: FIFO episode file in run dir → skipped, classification unaffected, no hang', () => {
+  const proj = mkCrashProject()
+  const runId = 'bp1-run-cc-670-fifo-rfc-x-aabbcc'
+  writeRunIndex(proj, runId, 'rfc-detected')
+  const key32B = setupRunKey(proj, runId)
+  writeSignedEpisode(proj, runId, key32B, { state: 'rfc-detected', filenameSuffix: 'rfc-detected' })
+  const fifoPath = path.join(proj, '.episodic-memory', 'episodes', `${runId}-poison.md`)
+  const mk = spawnSync('mkfifo', [fifoPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+
+  const r = spawnCC(proj, runId)
+  fs.unlinkSync(fifoPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature); stderr=${(r.stderr || '').slice(0, 300)}`)
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}: stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.classification, 'crash-mid-classify', JSON.stringify(out))
+})
+
+// =============================================================================
+// §2b FIFO regression leg: readApprovalMarkerStatus. A FIFO-shaped marker
+// file must terminate with the function's EXISTING absent/invalid outcome
+// (marker.present === false — no new status vocabulary), not hang.
+// =============================================================================
+tap('CC-670-fifo-marker: FIFO approval-marker file → present:false, verb terminates, no hang', () => {
+  const proj = mkCrashProject()
+  const runId = 'bp1-run-cc-670-marker-rfc-x-aabbcc'
+  writeRunIndex(proj, runId, 'awaiting_approval')
+  const key32B = setupRunKey(proj, runId)
+  writeSignedEpisode(proj, runId, key32B, { state: 'awaiting_approval', filenameSuffix: 'awaiting-approval' })
+  const checkpointsDir = path.join(proj, '.checkpoints')
+  fs.mkdirSync(checkpointsDir, { recursive: true })
+  const markerPath = path.join(checkpointsDir, `bp1-approval-${runId}.json`)
+  const mk = spawnSync('mkfifo', [markerPath])
+  assert.equal(mk.status, 0, `mkfifo failed: ${mk.stderr}`)
+
+  const r = spawnCC(proj, runId)
+  fs.unlinkSync(markerPath)
+  assert.equal(r.signal, null, `no signal (timeout/kill) — got ${r.signal} (fail-not-freeze regression signature); stderr=${(r.stderr || '').slice(0, 300)}`)
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}: stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.marker.present, false, JSON.stringify(out.marker))
+  assert.equal(out.classification, 'crash-mid-Phase-B', JSON.stringify(out))
+})
+
+// =============================================================================
+// MAJOR-1 forged-unsigned regression leg (#670 review round, codex repro).
+// A forged UNSIGNED (no hmac_signature) fresh codex_review state-transition
+// episode must NOT steer classification. Pre-gate behavior (codex repro):
+// the forged episode was trusted, `codexReviewEntries.length` became 1, and
+// classification silently became 'in-flight' with resume_action:null instead
+// of the fail-closed 'inconsistent-codex-review' / needs-human every
+// codex_review run reaches with zero (verified) entry episodes. Post-gate,
+// the unsigned forgery is skipped by loadRunEpisodes and the CLI must match
+// the SAME fail-closed classification as the always-[] legacy behavior.
+// =============================================================================
+tap('CC-670-forged-unsigned: forged UNSIGNED codex_review entry episode → SKIPPED, fail-closed needs-human (not steered to in-flight)', () => {
+  const proj = mkCrashProject()
+  const runId = 'bp1-run-cc-670-forged-rfc-x-aabbcc'
+  writeRunIndex(proj, runId, 'codex_review')
+  // Plant run.key so loadRunKey succeeds (verification is reachable, not
+  // just "no key available" — the forgery must fail on SIGNATURE, not on
+  // key absence, to actually exercise the gate).
+  setupRunKey(proj, runId)
+  const forgedId = `${runId}-codex-review-forged`
+  writeRawEpisode(proj, forgedId, {
+    id: forgedId, run_id: runId, type: 'state-transition', state: 'codex_review',
+    created_at: new Date().toISOString(),
+    // No hmac_signature field at all — the codex repro shape (forged_episode_signed: false).
+  })
+
+  const r = spawnCC(proj, runId)
+  assert.equal(r.signal, null, `no signal, got ${r.signal}; stderr=${(r.stderr || '').slice(0, 300)}`)
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}: stderr=${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+
+  // Must match what classifyRunCrash produces for the empty-episodes case
+  // (the record set AFTER filtering out the unverifiable forgery).
+  const pure = classifyRunCrash({
+    runState: { state: 'codex_review' },
+    episodes: [],
+    markerPresent: false, markerExpired: false, now: NOW,
+  })
+  assert.equal(out.classification, pure.classification, `CLI=${out.classification} pure=${pure.classification}`)
+  assert.deepEqual(out.resume_action, pure.resume_action)
+  assert.equal(out.classification, 'inconsistent-codex-review', JSON.stringify(out))
+  assert.equal(out.resume_action.command, 'needs-human', JSON.stringify(out))
+  assert.notEqual(out.classification, 'in-flight', 'forged unsigned episode must NOT steer classification to in-flight')
 })
 
 console.log(`# tests ${pass + fail}`)
