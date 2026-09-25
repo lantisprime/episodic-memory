@@ -4,6 +4,8 @@
  * REQ-7 (search/list/recall stay tolerant of unknown categories — the #447 class),
  * REQ-10 (--category index-backed: canonicalize, use index, fallback on missing, active-name
  * byte-identical), B1 (search degrades on unloadable vocab).
+ * #459 (per-scope index fallback: one scope's missing index must not drop another scope's
+ * --tag/--category matches).
  * testRestoreMergesCategoryIndex lives in test-category-write.mjs (S3) and is not duplicated here.
  */
 
@@ -27,14 +29,14 @@ function t(name, fn) {
   catch (e) { fail++; console.error(`FAIL  ${name}\n      ${e.message}`); }
 }
 
-function mkStore(episodes) {
-  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'catsearch-')));
+function mkStore(episodes, root) {
+  const cwd = root || fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'catsearch-')));
   const epDir = path.join(cwd, '.episodic-memory', 'episodes');
   fs.mkdirSync(epDir, { recursive: true });
   for (const ep of episodes) {
     const lines = ['---', `id: ${ep.id}`, 'date: 2026-07-06', 'time: "00:00"', `project: ${ep.project || 'fx'}`];
     if ('category' in ep) lines.push(`category: ${ep.category}`);
-    lines.push('status: active', 'tags: []', `summary: ${ep.summary || 'fx'}`, '---', '', '# x', '', 'body', '');
+    lines.push('status: active', `tags: [${(ep.tags || []).join(', ')}]`, `summary: ${ep.summary || 'fx'}`, '---', '', '# x', '', 'body', '');
     fs.writeFileSync(path.join(epDir, `${ep.id}.md`), lines.join('\n'));
   }
   return cwd;
@@ -129,6 +131,28 @@ t('testSearchDegradesOnMissingVocab', () => {
   const r = run(EM_SEARCH, ['--category', 'lesson', '--scope', 'local', '--no-track', '--no-score'], cwd, { EM_CATEGORIES_PATH: '/nonexistent/categories.json' });
   assert.equal(r.code, 0, 'search never fatal on unloadable vocab');
   assert.ok(r.json.episodes.some((e) => e.id === 'dg1'), 'still finds the row (canonicalCategory degrades to literal)');
+});
+
+t('testSearchPerScopeIndexFallback459', () => {
+  // #459: local store keeps tags.json + category-index.json, global store's copies are deleted.
+  // A --scope all query must still return the global matches (linear scan of that scope only)
+  // and name the global scope in the rebuild warning.
+  const cwd = mkStore([{ id: 'ps-local', category: 'lesson', tags: ['t459'] }]);
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'catsearch-home-')));
+  mkStore([{ id: 'ps-global', category: 'lesson', tags: ['t459'] }, { id: 'ps-other', category: 'decision' }], home);
+  const env = { HOME: home };
+  spawnSync('node', [EM_REBUILD, '--scope', 'all'], { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
+  for (const f of ['tags.json', 'category-index.json']) {
+    assert.ok(fs.existsSync(path.join(cwd, '.episodic-memory', f)), `local ${f} present`);
+    fs.rmSync(path.join(home, '.episodic-memory', f));
+  }
+  for (const [args, file] of [[['--tag', 't459'], 'tags.json'], [['--category', 'lesson'], 'category-index.json']]) {
+    const r = run(EM_SEARCH, [...args, '--scope', 'all', '--no-track', '--no-score', '--limit', '50'], cwd, env);
+    assert.equal(r.code, 0);
+    assert.deepEqual(r.json.episodes.map((e) => e.id).sort(), ['ps-global', 'ps-local'], `${args.join(' ')} keeps both scopes`);
+    assert.ok(r.json.warning.includes(file) && r.json.warning.includes('global store'), `warning names global scope: ${r.json.warning}`);
+    assert.ok(!r.json.warning.includes('local'), 'local index is fine and must not be named');
+  }
 });
 
 console.log(`\n${pass}/${pass + fail} pass`);
