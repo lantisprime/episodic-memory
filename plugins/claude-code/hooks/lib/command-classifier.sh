@@ -3298,18 +3298,16 @@ _classify_preflight_segment() {
   # case it returns a `-`-leading index), wherever env sits in the wrapper
   # chain (`sudo env -S …`, `timeout 30s env -S …`, `env A=1 sudo env -S …`).
   # Codex r5 finding `...729a` (token-0 form) + #241 (stacked form).
-  case "$verb" in
-    -*)
-      local _envinner
-      _envinner="$(_preflight_env_split_string "$i" "${T[@]}")"
-      if [ -n "$_envinner" ]; then
-        classify_preflight_command "$_envinner" "$_repo_root"
-        return 0
-      fi
-      printf '%s\t%s\t%s\n' "none" "" "env_split_string_empty"
+  if [ "$i" -gt 0 ] && _preflight_is_env_split "$verb"; then
+    local _envinner
+    _envinner="$(_preflight_env_split_string "$i" "${T[@]}")"
+    if [ -n "$_envinner" ]; then
+      classify_preflight_command "$_envinner" "$_repo_root"
       return 0
-      ;;
-  esac
+    fi
+    printf '%s\t%s\t%s\n' "none" "" "env_split_string_empty"
+    return 0
+  fi
 
   # #241: a verb token containing whitespace can only run through a wrapper
   # that joins its argv into a shell string (`watch "codex exec foo"`).
