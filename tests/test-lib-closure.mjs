@@ -78,5 +78,39 @@ test('closure is exactly the 5 statically-resolvable relative libs', () => {
     ['bare.mjs', 'default.mjs', 'dynamic.mjs', 'nested.mjs', 'reexport.mjs'])
 })
 
+// #540: quoted specifiers inside COMMENTS must not enter the closure (phantom
+// libs), while `//` / `/*` inside strings and regex literals must not hide a
+// real import that follows on the same line.
+fs.writeFileSync(path.join(scriptsDir, 'commented.mjs'), [
+  `// e.g. import './lib/phantom-line.mjs'`,
+  `/* doc: import x from './lib/phantom-block.mjs'`,
+  `   and import('./lib/phantom-dyn.mjs') */`,
+  `/** JSDoc: \`import './lib/phantom-jsdoc.mjs'\` */`,
+  `const url = 'https://example.com/a'; import './lib/after-url.mjs'`,
+  `const re = /\\/\\/|\\/\\*/; import './lib/after-regex.mjs'`,
+  `const t = \`// not a comment\`; import './lib/after-template.mjs'`,
+  `const q = a / b; import './lib/after-division.mjs' // trailing './lib/phantom-trailing.mjs'`,
+].join('\n'))
+for (const f of ['after-url.mjs', 'after-regex.mjs', 'after-template.mjs', 'after-division.mjs',
+  'phantom-line.mjs', 'phantom-block.mjs', 'phantom-dyn.mjs', 'phantom-jsdoc.mjs', 'phantom-trailing.mjs']) {
+  fs.writeFileSync(path.join(libDir, f), `export const ok = true\n`)
+}
+const commented = computeLibClosure(repo, ['commented.mjs'])
+
+test('#540: imports inside // and /* */ comments are NOT captured', () => {
+  const phantoms = [...commented].filter((f) => f.startsWith('phantom-'))
+  assert.deepStrictEqual(phantoms, [], `comment literals leaked into closure: ${phantoms.join(', ')}`)
+})
+test('#540: `//` or `/*` inside strings, templates and regexes do not hide real imports', () => {
+  assert.deepStrictEqual([...commented].sort(),
+    ['after-division.mjs', 'after-regex.mjs', 'after-template.mjs', 'after-url.mjs'])
+})
+test('#540: real repo global closure has no phantom (non-existent) libs', () => {
+  const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+  const missing = [...computeLibClosure(REPO, fs.readdirSync(path.join(REPO, 'scripts')).filter((f) => f.endsWith('.mjs')))]
+    .filter((f) => !fs.existsSync(path.join(REPO, 'scripts', 'lib', f)))
+  assert.deepStrictEqual(missing, [], `closure names libs absent on disk: ${missing.join(', ')}`)
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) { for (const f of failures) console.error(`\n${f.name}\n${f.error}`); process.exit(1) }

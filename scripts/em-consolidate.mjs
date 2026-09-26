@@ -16,7 +16,7 @@
  * episodes). For each LINEAR supersedes-chain with >= --min-chain members
  * (default 10), the non-terminal members' episode files are archived via the
  * SAME mechanism em-prune uses — file moved to archived/, index row moved to
- * archived-index.jsonl, tags.json cleaned — never deleted, so the move is
+ * archived-index.jsonl, inverted indexes cleaned — never deleted, so the move is
  * reversible by hand or restore tooling. The terminal episode is untouched.
  * Episode ids stay immutable and bodies are never edited: folding is an
  * archival MOVE only. Chain resolvability survives because the em-search
@@ -60,7 +60,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { fileURLToPath } from 'node:url'
 import { resolveLocalDir } from './lib/local-dir.mjs'
-import { loadIndex, loadTagsIndex, normalizeTags, episodeTokens, updateTokensIndex, tokenizeQuery } from './lib/relevance.mjs'
+import { loadIndex, normalizeTags, episodeTokens, updateTokensIndex, tokenizeQuery } from './lib/relevance.mjs'
 import { loadCategories, canonicalCategory, machineConsumedCategories, validateCategory } from './lib/categories.mjs'
 import { loadProtectionRows, computeProtectedIds, resolvePlaybookProtection } from './lib/protection.mjs'
 import { assertReadableIndex, readIndexFileOrThrow, readBodyOrSkip } from './lib/index-state.mjs'
@@ -241,6 +241,7 @@ import { acquire, release } from './lib/lock.mjs'
 // (which collapses same-process inheritance onto the helper's own internal
 // tryAcquire gate). Help/dry-run/invalid-input paths stay lock-free.
 import { acquireStoreWriteLocksSync, releaseStoreWriteLocks, atomicReplaceFileSync } from './lib/store-write-lock.mjs'
+import { removeIdsFromInvertedIndexes } from './lib/archive-indexes.mjs'
 import { loadMergedTriggerIndex } from './em-trigger-index.mjs'
 import { spawnSync } from 'node:child_process'
 
@@ -445,8 +446,8 @@ if (foldSuperseded) {
 
     if (!dryRun && allFoldIds.size > 0) {
       // SAME archive mechanism as em-prune.pruneDir: move the file to
-      // archived/, drop the index row, clean tags.json, append the row to
-      // archived-index.jsonl. Reversible (nothing is ever deleted); the
+      // archived/, drop the index row, clean the inverted indexes, append the
+      // row to archived-index.jsonl. Reversible (nothing is ever deleted); the
       // history walk keeps resolving the chain from archived metadata.
       const archivedDir = path.join(dataDir, 'archived')
       const indexFile = path.join(dataDir, 'index.jsonl')
@@ -497,19 +498,9 @@ if (foldSuperseded) {
       fs.writeFileSync(tmpIndex, keptLines.join('\n') + (keptLines.length ? '\n' : ''), 'utf8')
       fs.renameSync(tmpIndex, indexFile)
 
-      const tagsFile = path.join(dataDir, 'tags.json')
-      // Null-proto map (#469/#470): a tag literally named "constructor"/"__proto__"
-      // must not resolve to an inherited Object.prototype member. loadTagsIndex
-      // is the sanctioned reader; raw JSON.parse reintroduces the collision.
-      const tagsIndex = loadTagsIndex(dataDir) || Object.create(null)
-      for (const tag of Object.keys(tagsIndex)) {
-        if (!Array.isArray(tagsIndex[tag])) continue
-        tagsIndex[tag] = tagsIndex[tag].filter(id => !allFoldIds.has(id))
-        if (tagsIndex[tag].length === 0) delete tagsIndex[tag]
-      }
-      const tagsTmp = tagsFile + '.tmp'
-      fs.writeFileSync(tagsTmp, JSON.stringify(tagsIndex, null, 2), 'utf8')
-      fs.renameSync(tagsTmp, tagsFile)
+      // tags.json, category-index.json, tokens.json: drop the folded ids
+      // (null-proto reads, atomic rewrites) — shared with em-prune (#476).
+      removeIdsFromInvertedIndexes(dataDir, allFoldIds)
 
       // Backstop wrap (TOCTOU against the preflight classify above, same
       // trust domain as DEFER D1) — classify-before-read even here.
