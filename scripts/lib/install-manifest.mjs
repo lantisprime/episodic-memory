@@ -230,6 +230,72 @@ function listRepoScripts(repoDir) {
 // `import(`./${x}.mjs`)` — cannot be resolved by static analysis; none exist in
 // scripts/ today (grep-verified) and the convention is literal specifiers only.
 // tests/test-lib-closure.mjs asserts the bare-import form is captured.
+//
+// Comments are blanked (stripJsComments) BEFORE matching, so a quoted specifier in
+// documentation — e.g. the `import './x.mjs'` example in the comment inside the walk
+// below — never enters the closure as a phantom lib (#540).
+
+// Replace // and /* */ comments with spaces (newlines kept), leaving string,
+// template and regex literal contents intact so `//` inside a URL string or a
+// regex such as /\/\// is not mistaken for a comment. A `/` starts a regex
+// literal when the previous significant char is an operator/punctuator (or
+// start of input) or the previous word is a keyword like `return` — the standard
+// heuristic; good enough for a static import scan (template `${}` bodies are
+// kept verbatim as template text).
+export function stripJsComments(src) {
+  let out = ''
+  let i = 0
+  let prev = '' // last significant (non-space, non-comment) char emitted
+  let word = '' // identifier/keyword ending at `prev` (for `return /re/`)
+  const n = src.length
+  const regexAfterWord = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await'])
+  const blank = (s) => s.replace(/[^\n]/g, ' ')
+  while (i < n) {
+    const c = src[i]
+    const d = src[i + 1]
+    if (c === '/' && d === '/') {
+      let j = src.indexOf('\n', i)
+      if (j === -1) j = n
+      out += blank(src.slice(i, j)); i = j; continue
+    }
+    if (c === '/' && d === '*') {
+      let j = src.indexOf('*/', i + 2)
+      j = j === -1 ? n : j + 2
+      out += blank(src.slice(i, j)); i = j; continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1
+      while (j < n && src[j] !== c) {
+        if (src[j] === '\\') j++
+        else if (c !== '`' && src[j] === '\n') break // unterminated line string
+        j++
+      }
+      j = Math.min(j + 1, n)
+      out += src.slice(i, j); i = j; prev = c; word = ''; continue
+    }
+    if (c === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev) || regexAfterWord.has(word))) {
+      let j = i + 1
+      let inClass = false
+      while (j < n && src[j] !== '\n') {
+        if (src[j] === '\\') { j += 2; continue }
+        if (src[j] === '[') inClass = true
+        else if (src[j] === ']') inClass = false
+        else if (src[j] === '/' && !inClass) break
+        j++
+      }
+      j = Math.min(j + 1, n)
+      out += src.slice(i, j); i = j; prev = '/'; word = ''; continue
+    }
+    out += c
+    if (!/\s/.test(c)) {
+      word = /[A-Za-z0-9_$]/.test(c) ? (/[A-Za-z0-9_$]/.test(prev) ? word + c : c) : ''
+      prev = c
+    }
+    i++
+  }
+  return out
+}
+
 export function computeLibClosure(repoDir, entryBasenames) {
   const scriptsDir = path.join(repoDir, 'scripts')
   const libDir = path.join(scriptsDir, 'lib')
@@ -245,7 +311,7 @@ export function computeLibClosure(repoDir, entryBasenames) {
     // alternative (require whitespace) matches bare side-effect imports
     // `import './x.mjs'` without false-matching identifiers; `import(` is caught
     // by the earlier `import\s*\(` alternative, `import x from` by `from\s*`.
-    for (const m of src.matchAll(/(?:from\s*|import\s*\(\s*|import\s+)['"]([^'"]+)['"]/g)) {
+    for (const m of stripJsComments(src).matchAll(/(?:from\s*|import\s*\(\s*|import\s+)['"]([^'"]+)['"]/g)) {
       const spec = m[1]
       if (!spec.startsWith('.')) continue
       let resolved = path.resolve(path.dirname(abs), spec)
@@ -568,13 +634,10 @@ export function repoCompletenessFindings(repoDir, installedScriptsDir) {
   // Flat global scripts (em-*, second-opinion.mjs, em.mjs).
   for (const f of globalEntryScripts(repoDir)) expected.add(f)
   // Global lib closure (shared libs that stay in global alongside em-*).
-  // Filter to files that actually exist on disk: the closure is derived from
-  // regex-matching import statements, which can false-positive on quoted
-  // paths in comments (e.g. 'import \'./x.mjs\'' documentation); the install
-  // iterates the actual lib dir, so non-existent files are not deployable.
-  for (const f of globalScriptLibs(repoDir)) {
-    if (fs.existsSync(path.join(repoDir, 'scripts', 'lib', f))) expected.add(`lib/${f}`)
-  }
+  // Deliberately NOT filtered by existsSync (#540): computeLibClosure strips
+  // comments, so every entry is a real import. A lib that is imported but
+  // missing from the repo is kept here and surfaces as a finding below.
+  for (const f of globalScriptLibs(repoDir)) expected.add(`lib/${f}`)
   // Recursive regular-file walk of each global subtree that exists in the repo.
   for (const s of GLOBAL_SCRIPT_SUBTREES) {
     const abs = path.join(repoDir, 'scripts', s)
@@ -587,8 +650,11 @@ export function repoCompletenessFindings(repoDir, installedScriptsDir) {
     try {
       repoBytes = fs.readFileSync(path.join(repoDir, 'scripts', p))
     } catch {
-      // Repo file missing on disk despite being enumerated — treat as
-      // finding so a degraded repo cannot vacuously report CLEAN.
+      // Repo file missing on disk despite being enumerated. Reachable for a
+      // lib-closure entry that a global script imports but the repo no longer
+      // has (#540): the import will fail with ERR_MODULE_NOT_FOUND at runtime,
+      // so report it rather than silently dropping it. (Readdir-derived
+      // entries hit this only through a TOCTOU delete.)
       findings.push(`scripts/${p}`)
       continue
     }

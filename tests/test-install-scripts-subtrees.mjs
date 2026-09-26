@@ -227,6 +227,24 @@ test('testCompletenessSkipsSymlinks: synthetic fixture with real symlink → fin
   }
 })
 
+test('testCompletenessImportedButMissingLib (#540): em-store imports absent lib → finding', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-540-missing-lib-fixture-'))
+  const installedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-540-missing-lib-installed-'))
+  try {
+    fs.mkdirSync(path.join(fixture, 'scripts', 'lib'), { recursive: true })
+    const entry = path.join(fixture, 'scripts', 'em-store.mjs')
+    fs.writeFileSync(entry, `import { x } from './lib/zz-gone.mjs'\n// doc only: import './lib/zz-doc.mjs'\n`)
+    fs.copyFileSync(entry, path.join(installedDir, 'em-store.mjs'))
+
+    const findings = repoCompletenessFindings(fixture, installedDir)
+    assert.deepStrictEqual(findings, ['scripts/lib/zz-gone.mjs'],
+      `imported-but-missing lib must be a finding (and the comment literal must not); findings=${JSON.stringify(findings)}`)
+  } finally {
+    try { fs.rmSync(fixture, { recursive: true, force: true }) } catch {}
+    try { fs.rmSync(installedDir, { recursive: true, force: true }) } catch {}
+  }
+})
+
 test('testSubtreeOrphanGreen: convergent install → subtreeOrphanFindings === []', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-green-repo-'))
   const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'p4d-539-green-inst-'))
