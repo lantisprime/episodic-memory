@@ -39,11 +39,11 @@ All five cached peer systems and all four newly-surfaced ones converge on MCP. T
 
 ### Open questions before RFC
 
-1. **Observed friction.** Are there instances of "agent forgot to recall" or "agent couldn't recall mid-conversation" in this repo's violation log? Current scan: 11 violations, all bp-001/bp-012 workflow-discipline. No retrieval-surface friction observed.
+1. **Observed friction.** Are there instances of "agent forgot to recall" or "agent couldn't recall mid-conversation" in this repo's violation log? Current scan: 11 violations, all against the workflow-discipline behavior patterns (bp-001..bp-012 is an id range, not a count: 11 patterns, bp-007 absent). No retrieval-surface friction observed.
 2. **Phase 3b coverage.** SessionStart hook auto-invokes em-recall and writes `.checkpoint-required` on bp-001 hits. Does this already close gap-(a)? Mid-conversation recall (vs session-start recall) is the residual.
 3. **Cost of MCP adoption.** Adding an MCP server breaks "zero deps." Does adoption come bundled with the @modelcontextprotocol/sdk dependency, or is a thin stdio wrapper feasible in stdlib only?
 4. **Coexistence.** Can MCP and file-based scripts ship side-by-side without dual-sourcing the storage layer? (Likely yes if MCP is a thin tool wrapper around existing em-* scripts.)
-5. **Identity / positioning.** If we add MCP, does this repo become "another mcp-memory-service" with weak differentiation? Or does the bp-001/bp-012 enforcement-loop angle remain unique regardless of surface?
+5. **Identity / positioning.** If we add MCP, does this repo become "another mcp-memory-service" with weak differentiation? Or does the behavior-pattern (bp-001..006, bp-008..012) enforcement-loop angle remain unique regardless of surface?
 
 ### Candidate directions
 

@@ -5,7 +5,7 @@ title: "Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, and 
 status: accepted
 champion: Charlton Ho
 created: 2026-04-30
-last_modified: 2026-04-30
+last_modified: 2026-09-26
 supersedes: ~
 superseded_by: ~
 ---
@@ -233,18 +233,18 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 
 **Detailed plan:** `docs/rfcs/archived/RFC-001-phase2-plan.md`
 
-### Phase 3: Proactive Recall — IN PROGRESS
+### Phase 3: Proactive Recall — SHIPPED
 
 **Files created:** `em-recall.mjs` (~260 lines) — multi-pass retrieval (project match, tag match, recent cross-project), output as `{ "preflight_warnings": [], "episodes": [...] }` object wrapper (designed for RFC-002 Phase 3 extension)
 **Depends on:** Phase 2 (scoring + access tracking)
 **Detailed plan:** `docs/rfcs/archived/RFC-001-phase3-plan.md`
 
-### Phase 4: Semantic Consolidation — NOT STARTED
+### Phase 4: Semantic Consolidation — SHIPPED (under the 2026-07-23 resolution)
 
-**Files created:** `em-consolidate.mjs` (~150 lines) — Jaccard clustering, `lesson` category, `--auto`/`--dry-run`/`--max-episodes` modes
-**Files modified:** `em-store.mjs` (add `lesson` to VALID_CATEGORIES — coordinate with RFC-002 `violation` addition)
+**Shipped as:** `em-topic-tracks.mjs` — on-demand topic tracks, deterministic dry-run by default, `--apply` only with per-candidate `--confirm`, typed `promotion_sources` provenance (PR #567 `d5b5484`). See [2026-07-23 implementation resolution](#2026-07-23-implementation-resolution-napmem-c-rfc-012) for the shipped evidence and what stays deferred.
+**Originally planned (superseded, kept for history):** `em-consolidate.mjs` (~150 lines) — Jaccard clustering, `lesson` category, `--auto`/`--dry-run`/`--max-episodes` modes. The session-end `--auto` proposal was withdrawn (RFC-012 B-2). The `scripts/em-consolidate.mjs` that exists today is a different capability: it folds near-duplicate episodes into digests and is filed under the curation family (`CAPABILITIES.md`, family table), so it does not own this phase.
+**Files modified:** `em-store.mjs` (`lesson` category; `--promotion-sources-json`, lesson only)
 **Depends on:** Phase 2 (scoring for cluster ranking)
-**Deferred details:** Hook/config/instruction integration to be specified when Phase 4 begins
 
 ### Acceptance tests (per phase)
 
@@ -272,14 +272,14 @@ Update instruction files incrementally as each phase ships (do not batch to the 
 - [x] recall falls back gracefully when `package.json`, git, or cwd is unavailable
 - [x] recall updates access tracking for surfaced episodes
 
-**Phase 4:**
-- [ ] consolidate `--auto` with ≤3 clusters exits 0 silently, no lessons written
-- [ ] consolidate `--auto` with >3 clusters writes lessons and updates index
-- [ ] consolidate `--dry-run` produces deterministic clusters and writes nothing
-- [ ] lesson files include `source_episodes` in frontmatter and `index.jsonl`
-- [ ] source episodes are not modified after consolidation
-- [ ] consolidate refuses to run above `--max-episodes` cap
-- [ ] rebuild preserves `source_episodes` from frontmatter
+**Phase 4 (historical — SUPERSEDED, not satisfied; these boxes stay unchecked on purpose and are not open items).** These were the original `em-consolidate` criteria. Phase 4 shipped under different criteria; see the [2026-07-23 implementation resolution](#2026-07-23-implementation-resolution-napmem-c-rfc-012).
+- [ ] consolidate `--auto` with ≤3 clusters exits 0 silently, no lessons written — *superseded*
+- [ ] consolidate `--auto` with >3 clusters writes lessons and updates index — *superseded*
+- [ ] consolidate `--dry-run` produces deterministic clusters and writes nothing — *superseded*
+- [ ] lesson files include `source_episodes` in frontmatter and `index.jsonl` — *superseded*
+- [ ] source episodes are not modified after consolidation — *superseded*
+- [ ] consolidate refuses to run above `--max-episodes` cap — *superseded*
+- [ ] rebuild preserves `source_episodes` from frontmatter — *superseded*
 
 ### Sequencing
 
@@ -316,7 +316,7 @@ graph TD
 | Phase 1: Tag Normalization + Inverted Index | `em-store.mjs`, `em-revise.mjs`, `em-search.mjs`, `em-rebuild-index.mjs` | 16 E2E scenarios passed | Shipped in PR #6, commit `0e45e4d`. Bugs: #2 (P1), #3 (P2), #4 (P3), #5 (P1) — all fixed. |
 | Phase 2: Relevance Decay + Access Tracking | `em-search.mjs`, `em-rebuild-index.mjs`, `em-prune.mjs` (new) | 24 Phase 2 tests + 15 existing = 39 passed | Shipped in PR #13. Scoring default-on, access tracking, pruning, performance health checks. BPs decoupled from user-preferences, bp-007 merged into bp-006, bp-011 added. |
 | Phase 3: Proactive Recall | `em-recall.mjs` (new) | 20 Phase 3 tests + 31 existing = 51 passed | Multi-pass retrieval (project, tag, recent cross-project). Context inference from package.json, git remote, git branch, cwd. Drift detection for inlined functions. 2nd opinion review applied (8 findings). |
-| Topic tracks (NAPMEM-C) | PR #567 (`d5b5484`) | `tests/test-topic-tracks.mjs` (25 files, +4157) | Derived topic tracks with provenance; NapMem assessment entry into Phase 4 territory. Phase 4 synthesis clerk + embedding arc remain open. |
+| Phase 4: Semantic Consolidation, as topic tracks (NAPMEM-C) | PR #567 (`d5b5484`) | `tests/test-topic-tracks.mjs` (25 files, +4157) | Derived topic tracks with provenance. Phase 4 ships under the 2026-07-23 implementation resolution (below); the synthesis clerk and embedding arc stay open outside that resolution. |
 
 ---
 

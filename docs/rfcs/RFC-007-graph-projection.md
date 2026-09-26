@@ -333,10 +333,10 @@ No integration with `em-rebuild-index.mjs` exists or is needed in v1, because no
   - Documentation: `docs/EM_SCRIPTS_GUIDE.md:732-750` describes the shipped behavior
 
 - **Unbuilt (recorded explicitly so it is enumerable, not deleted):**
-  - `entry_point` frontmatter convention + `nodes_with_no_edges[]` + `entry_points[]` audit array — Phase 4
+  - `entry_point` audit consumption (suppression from `nodes_with_no_edges[]`) + `nodes_with_no_edges[]` + `entry_points[]` audit array — Phase 4 (the key itself is parsed since Phase 2; see Rule-node frontmatter convention)
   - Graph-health audit surface (`--graph-health`, CI validator, contract-mirror validator `scripts/rfc-graph-contract-validate.mjs` — never created) — Phase 4
   - `cites-pr` edge; MEMORY.md machine-readable trigger block plus the `trigger-phrase` parser — Phase 5
-  - Persisted derived `graph.json` index, `envelope_version` envelope, `source` fallback enum, stale-detection, dangling-link and orphan reporting, the `assertGraphFileLocation` axis-9 helper and its fixtures — Phase 6 (DEFERRED)
+  - Persisted derived `graph.json` index, `envelope_version` envelope, `source` fallback enum, stale-detection, persisted dangling-link and orphan reporting, the `assertGraphFileLocation` axis-9 helper and its fixtures — Phase 6 (DEFERRED)
   - Folding the shipped modes back into `em-search` as `--related` / `--inbound` / `--cluster` / `--graph-health` / `--tag-cooccur` — unbuilt
 
 - **Out of scope:**
@@ -356,10 +356,10 @@ No integration with `em-rebuild-index.mjs` exists or is needed in v1, because no
 | # | Invariant | Verifier | Status |
 |---|---|---|---|
 | I1 | `graph.json.edge_count == graph.json.edges.length` | PR-1 self-test | **DEFERRED to Phase 6** — depends on the persisted `graph.json`. The per-query shipped code maintains this trivially (`emittedEdges` is a set; `outEdges` is built from a post-BFS sweep with the duplicate-edge guard at `em-graph.mjs:266-268`, within the sweep loop at `em-graph.mjs:262-270`). |
-| I2 | Every edge `from`/`to` resolves to a node in `nodes{}` OR appears in `dangling[]` | PR-2 validator | **DEFERRED to Phase 6** — `nodes_with_no_edges[]` / `dangling[]` are persisted-index fields. The shipped code guards every episode-to-episode `addEdge` call with `byId.has` at the emission site (`em-graph.mjs:171-185`); `tags` targets are created on the fly and therefore cannot dangle; the post-BFS sweep at `em-graph.mjs:264` drops any edge whose endpoint is not in `visited`. |
+| I2 | Every edge `from`/`to` resolves to a node in `nodes{}` OR appears in `dangling[]` | PR-2 validator | **DEFERRED to Phase 6** — the invariant is stated over the persisted `graph.json`. Only the persisted form of `dangling[]` / `nodes_with_no_edges[]` is Phase 6: computing them per query is the Phase 4 audit surface (Phases table), and a per-query `dangling[]` for `wiki-link` / `composes-with` edges already ships since Phase 3 (PR #617). The shipped code guards every episode-to-episode `addEdge` call with `byId.has` at the emission site (`em-graph.mjs:171-185`); `tags` targets are created on the fly and therefore cannot dangle; the post-BFS sweep at `em-graph.mjs:264` drops any edge whose endpoint is not in `visited`. |
 | I3 | `supersedes` edges form a DAG (no cycles) | PR-1 self-test | **DEFERRED to Phase 6.** The shipped code does not assert a DAG invariant; cycle prevention at traversal time is handled by the visited-set in undirected BFS. |
 | I4 | `rebuilt_at` ≥ mtime of newest episode at pass start | PR-1 self-test | **DEFERRED to Phase 6** — `rebuilt_at` is a persisted-index field. The shipped code has no staleness surface (projection rebuilt on every call). |
-| I5 | Per-scope `graph.json` references only nodes whose source files live under that scope's `scope_root` | PR-4 CI validator | **DEFERRED to Phase 6.** The shipped code already honors per-scope containment at the read site (`em-graph.mjs:107-117` loads local/global indices and de-duplicates by id with local shadowing global); the `graph.json`-on-disk form lands with Phase 6. |
+| I5 | Per-scope `graph.json` references only nodes whose source files live under that scope's `scope_root` | CI validator, lands with Phase 6 (originally slated as PR-4; the per-scope `graph.json` it checks does not exist before Phase 6) | **DEFERRED to Phase 6.** The shipped code already honors per-scope containment at the read site (`em-graph.mjs:107-117` loads local/global indices and de-duplicates by id with local shadowing global); the `graph.json`-on-disk form lands with Phase 6. |
 | I6 | Depth-bounded traversal output AND `--limit`-truncated output are deterministic. Truncation slices the result set sorted by node id ascending, then takes the first N. | PR-3 self-test | **Holds in v1 with a correction.** Shipped ordering is `(distance asc, id asc)` for traversal nodes (`em-graph.mjs:273`) and `(degree desc, id asc)` for hubs (`em-graph.mjs:224`); truncation is closest-first BFS, not sort-by-id-first. The PR-3 self-test covers depth-0, depth-boundary, and limit-rejection cases (`tests/test-em-graph.mjs`). |
 
 ---

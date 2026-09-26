@@ -120,7 +120,7 @@ Analyzes violation history per pattern and generates health reports.
 
 ### Phase 3: Actionable Recall
 
-**Modify `scripts/em-recall.mjs` (RFC-001 Phase 3, not yet built)**
+**Modify `scripts/em-recall.mjs` (RFC-001 Phase 3, shipped)**
 
 **Schema note:** RFC-001 Phase 3 specifies recall output as a JSON array of episodes. This RFC wraps it in an object: `{ "preflight_warnings": [...], "episodes": [...] }`. RFC-001 Phase 3 should be implemented with this object wrapper from the start (adding `preflight_warnings` as an empty array) to avoid a breaking schema change later.
 
@@ -243,7 +243,7 @@ Orphaned states (e.g., `.post-checkpoint-required` without `.checkpoint-required
 - `scripts/em-recall.mjs` — add `.checkpoint-required` marker creation when bp-001 violations detected
 - `scripts/em-session-end-prompt.mjs` — extend with marker cleanup (all 4: `.checkpoint-required`, `.pre-checkpoint-done`, `.post-checkpoint-required`, `.post-checkpoint-done`)
 - `install.mjs` — register checkpoint-gate (PreToolUse) + SessionStart hooks with `--install-hooks`
-- `patterns/implementation-workflow.md` — add checkpoint-gate to bp-001 enforcement table (not a new pattern bp-012)
+- `patterns/implementation-workflow.md` — add checkpoint-gate to bp-001 enforcement table (not a new pattern; bp-012 is the separate session wrap-up pattern, added in the same PR #25 as this spec)
 
 **Depends on:** Phase 3 (violation-aware recall output)
 
@@ -375,7 +375,7 @@ Split the remaining enforcement work into small follow-up phases so Claude can i
 
 ### Phase 3c: Hybrid Violation Reporting (clerk model)
 
-**Motivation:** Phase 3's user-flagged-only SessionEnd prompt places high cognitive load on the user — they must remember every behavioral pattern (currently bp-001 through bp-012) and recall every micro-violation across multi-hour sessions. Empirical evidence (session 5, 2026-05-01: bp-010 P4 self-caught at rule-18 step 6, violation episode `20260501-105506`) shows AI self-flagging already works at code-review checkpoints. But self-reporting bias is real enough that AI-detected violations cannot become authoritative without human adjudication. Codex review of OQ-6 (reply `20260501-112318`) recommends a clerk model: **AI drafts candidate violations for human adjudication; only confirmed items are stored.** Do not call this auto-detection — AI is clerk, not judge.
+**Motivation:** Phase 3's user-flagged-only SessionEnd prompt places high cognitive load on the user — they must remember every behavioral pattern (currently 11: bp-001..006 and bp-008..012; bp-007 was merged into bp-006 in RFC-001 Phase 2 and the id is unused) and recall every micro-violation across multi-hour sessions. Empirical evidence (session 5, 2026-05-01: bp-010 P4 self-caught at rule-18 step 6, violation episode `20260501-105506`) shows AI self-flagging already works at code-review checkpoints. But self-reporting bias is real enough that AI-detected violations cannot become authoritative without human adjudication. Codex review of OQ-6 (reply `20260501-112318`) recommends a clerk model: **AI drafts candidate violations for human adjudication; only confirmed items are stored.** Do not call this auto-detection — AI is clerk, not judge.
 
 **Candidate proposal schema (NOT a change to `em-violation.mjs` storage; only the SessionEnd flow):**
 
@@ -640,8 +640,8 @@ graph TD
     RFC1P3[RFC-001 Phase 3: Proactive Recall<br/>SHIPPED]
     P1[Phase 1: Violation Tracking<br/>SHIPPED]
     P2[Phase 2: Pattern Refinement<br/>SHIPPED]
-    P3[Phase 3: Actionable Recall]
-    P3b[Phase 3b: Checkpoint Enforcement Gate]
+    P3[Phase 3: Actionable Recall<br/>SHIPPED]
+    P3b[Phase 3b: Checkpoint Enforcement Gate<br/>SHIPPED]
     P4[Phase 4: Positive Reinforcement]
     INST[Instruction File Updates]
 
@@ -660,9 +660,7 @@ graph TD
     classDef tier3 fill:#e8f5e9
     classDef enforcement fill:#ffccbc
     classDef positive fill:#e8f5e9,stroke:#4caf50
-    class RFC1P3,P1,P2 shipped
-    class P3 tier2
-    class P3b enforcement
+    class RFC1P3,P1,P2,P3,P3b shipped
     class P4 positive
     class INST tier3
 ```
@@ -679,6 +677,10 @@ graph TD
 |---|---|---|---|
 | Phase 1: Violation Tracking | `em-store.mjs`, `em-violation.mjs` (new), `em-session-end-prompt.mjs` (new), `install.mjs`, bp-009 | 17 Phase 1 tests + 51 existing = 68 passed | Shells out to em-store (no SYNC copies). execFileSync for safety. Scope validation. Pattern validation with global fallback. Bugs: #19 (cmd injection), #20 (usage msg). |
 | Phase 2: Pattern Refinement | `em-pattern-health.mjs` (new), RFC-002 (enforcement-paths spec amendment) | 31 Phase 2 tests + 83 existing = 114 passed | Drops `days_since_created` (fabricated). Mirrors `em-search.mjs` for tags.json fallback + local-priority dedup. Strict word-boundary regex (negative lookaround on `[\w-]`). Expanded enforcement search to 4 paths: `~/.claude/hooks/`, `<project>/.claude/hooks/`, `<project>/.git/hooks/` (skip `.sample`), `<project>/.github/workflows/*.{yml,yaml}`. New flags: `--scope`, `--has-enforcement` (repeatable). `--summary`/`--json` mutually exclusive. CLI value-validation rejects `--flag --next-flag` patterns. `parseDateMs` rejects garbage tails. Race-window doc note added. Bugs: #26 (skipped 2nd opinion), #27 (E2E before review), #28 (Phase 3b coverage gap), #29 (date semantics), #30 (B2 rejected), #31 (false post-checkpoint), #32 (CLI value-stealing), #33 (parseDateMs garbage tail). |
+| Phase 3: Actionable Recall — PR #53 (`d0440a7`) | `scripts/em-recall.mjs` (violation pre-flight, `--task-type`, branch-token inference), `scripts/em-session-end-prompt.mjs`, `install.mjs`, instruction files, this RFC (Phase 3c spec) | `tests/test-rfc002-phase3.mjs` (new) | Pre-flight still ships: an isolated-fixture probe on 2026-09-26 (`em-violation --pattern bp-001-implementation-workflow`, then `em-recall --task-type implementation`) returned one `preflight_warnings` entry, and `--task-type general` returned none. The Phase 3 box "`em-recall.mjs` automatically touches `.checkpoint-required`" describes the original build only: arming was decoupled from task type (#84), session-start arming was removed (#352), and RFC-008 P3d (#395, `c6ac710`) moved every enforcement side effect out of `em-recall.mjs` into `enforce-contract.mjs --session-start`. `em-recall.mjs` is now pure recall. |
+| Phase 3b: Checkpoint Enforcement Gate — PR #62 (`508e8f2`) + PR #78 (`7580f52`) + PR #84 (`1ad67fd`) | #62: `hooks/checkpoint-gate.sh`, `hooks/em-recall-sessionstart.sh`, `hooks/README.md` (all new), `scripts/em-session-end-prompt.mjs` (4-marker cleanup); #78: `install.mjs` (hook deploy), `patterns/implementation-workflow.md` (bp-001 enforcement table), this RFC; #84: `hooks/em-recall-sessionstart.sh`, `scripts/em-recall.mjs` | #62: `tests/test-checkpoint-gate.sh`, `tests/test-em-recall-sessionstart.sh` (new); #78: `tests/test-install-hooks.sh` (new) | Runtime in #62, installer deploy in #78 (closes #59), arming fix in #84. RFC-003 records that it supersedes the Claude-Code-specific runtime portion of this phase (`RFC-003-pluggable-tool-adapters.md`, Related RFCs); the gates now live under `plugins/claude-code/hooks/` as part of the RFC-008 per-project enforcement layer. The "Phase 3b hardening follow-ups" checklist above stays open. |
+
+**Not shipped (no ledger row):** Phase 3c (hybrid violation reporting, clerk model) and Phase 4 (positive reinforcement). As of 2026-09-26, neither `scripts/em-violation-candidates.mjs` (Phase 3c) nor `scripts/em-pattern-success.mjs` (Phase 4) exists, and no script under `scripts/` references `compliance_count` or `complied:`. RFC-009 (Related RFCs) calls these two phases "the third arc". The RFC-009 consolidation clerk (`em-consolidate --clerk`) is a different capability and does not ship Phase 3c.
 
 ---
 
@@ -739,7 +741,7 @@ P3s deferred to implementation (stored in episodic memory): F-9 (error UX), F-10
 6. (P2) Two hooks need distinct error messages — documented, distinct messages specified
 7. (P2) Cleanup timing unspecified — SessionEnd + push-triggered cleanup
 8. (P2) Deadlock risk — allowlist pattern from plan-gate.sh
-9. (P3) Not a new pattern bp-012 — added to bp-001 enforcement table instead
+9. (P3) Not a new pattern (bp-012 is the separate session wrap-up pattern) — added to bp-001 enforcement table instead
 10. (P3) Consider merging into single write-gate.sh — evaluate during implementation
 **AI-slop check:** clean
 **Decision:** proceed (after revision applied)
