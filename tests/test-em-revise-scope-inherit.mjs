@@ -4,11 +4,9 @@
  *
  * Verifies that em-revise with no --scope inherits the original episode's
  * store (local or global), and that explicit --scope local|global preserves
- * cross-scope behavior. Runs the matrix against BOTH script copies:
- *   - scripts/em-revise.mjs              (canonical; tags.json mirror present)
- *   - plugins/episodic-memory/scripts/em-revise.mjs  (drifted plugin copy)
- *
- * tags.json mirror assertions only run against the canonical copy.
+ * cross-scope behavior. Runs the matrix against scripts/em-revise.mjs
+ * (canonical; tags.json mirror present). The drifted plugins/episodic-memory
+ * copy was retired in #671.
  *
  * Usage: node tests/test-em-revise-scope-inherit.mjs
  * Zero deps — Node stdlib + assert + child_process.
@@ -23,7 +21,6 @@ import assert from 'assert'
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const CANONICAL_STORE = path.join(REPO, 'scripts', 'em-store.mjs')
 const CANONICAL_REVISE = path.join(REPO, 'scripts', 'em-revise.mjs')
-const PLUGIN_REVISE = path.join(REPO, 'plugins', 'episodic-memory', 'scripts', 'em-revise.mjs')
 const SEARCH = path.join(REPO, 'scripts', 'em-search.mjs')
 
 let passed = 0
@@ -272,7 +269,6 @@ function runMatrix(label, REVISE, isCanonical) {
 console.log('Running em-revise scope-inheritance tests (#121)\n')
 
 runMatrix('scripts/em-revise.mjs (canonical)', CANONICAL_REVISE, true)
-runMatrix('plugins/episodic-memory/scripts/em-revise.mjs (drifted copy)', PLUGIN_REVISE, false)
 
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
