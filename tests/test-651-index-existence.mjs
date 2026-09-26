@@ -27,7 +27,6 @@ const REPO = process.env.EM651_TEST_REPO_OVERRIDE
   ? path.resolve(process.env.EM651_TEST_REPO_OVERRIDE)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SCRIPTS = path.join(REPO, 'scripts')
-const PLUGIN_SCRIPTS = path.join(REPO, 'plugins', 'episodic-memory', 'scripts')
 
 let pass = 0, fail = 0, skipped = 0
 function assert(cond, msg) { if (!cond) throw new Error(msg) }
@@ -766,35 +765,6 @@ for (const shape of T6_SHAPES) {
       }
     } finally { cleanup(world) }
   })
-}
-
-// =============================================================================
-// T7 — vendored plugin copies: same absent/unreadable behavior as T3's
-// em-search/em-list/em-check-stale, via the inlined classifier.
-// =============================================================================
-const T7_SCRIPTS = [
-  { name: 'plugin em-list', script: 'em-list.mjs', args: ['--scope', 'local'] },
-  { name: 'plugin em-search', script: 'em-search.mjs', args: ['--scope', 'local'] },
-  { name: 'plugin em-check-stale', script: 'em-check-stale.mjs', args: ['--scope', 'local'] },
-]
-for (const shape of ALL_SHAPES) {
-  const skipReason = shapeSkipReason(shape)
-  for (const s of T7_SCRIPTS) {
-    const name = `T7 ${shape} x ${s.name} -> typed abort`
-    if (skipReason) { skip(name, skipReason); continue }
-    t(name, () => {
-      const world = mkStore()
-      try {
-        const indexPath = path.join(world.localDir, 'index.jsonl')
-        applyShape(shape, indexPath, world.localDir)
-        // The vendored copies resolve LOCAL_DIR from process.cwd() directly
-        // (no resolveLocalDir walk), so cwd must equal proj exactly.
-        const r = run(path.join(PLUGIN_SCRIPTS, s.script), s.args, { cwd: world.proj, home: world.root })
-        restoreShape(shape, indexPath, world.localDir)
-        checkTyped(r, s.name.replace('plugin ', ''))
-      } finally { cleanup(world) }
-    })
-  }
 }
 
 // =============================================================================
@@ -1919,10 +1889,6 @@ t('static grep-pin: every known Family-A emission site carries `code`', () => {
     if (!/code:?\s*[=]?\s*`index-unreadable:/.test(src)) missing.push(f)
   }
   assert(missing.length === 0, `every Family-A site carries code, missing from: ${missing.join(', ')}`)
-  for (const f of ['em-search.mjs', 'em-list.mjs', 'em-check-stale.mjs']) {
-    const src = fs.readFileSync(path.join(PLUGIN_SCRIPTS, f), 'utf8')
-    assert(/code:\s*`index-unreadable:/.test(src), `vendored ${f} carries code`)
-  }
 })
 
 // -----------------------------------------------------------------------
@@ -2069,65 +2035,6 @@ t('static grep-pin: every known Family-A emission site carries `code`', () => {
         cleanup(world)
       }
     })
-  }
-}
-
-// -----------------------------------------------------------------------
-// Vendored-writer legs (§7 S7 bullet 6, audit F2): vendored em-store/
-// em-revise/em-rebuild-index x FIFO index.jsonl -> typed abort, no hang
-// (T7 pattern, spawn timeout). New behavior — these had NO guard at all
-// pre-#653 (em-store's vendored copy hangs on a FIFO index today).
-// -----------------------------------------------------------------------
-{
-  const vendoredWriterCases = [
-    {
-      name: 'plugin em-store', script: 'em-store.mjs',
-      args: ['--project', 'p651', '--category', 'decision', '--tags', 'x', '--summary', 'v', '--body', 'v', '--scope', 'local'],
-    },
-    {
-      name: 'plugin em-rebuild-index', script: 'em-rebuild-index.mjs', args: ['--scope', 'local'],
-    },
-  ]
-  for (const { name: caseName, script, args } of vendoredWriterCases) {
-    const name = `T7 vendored ${caseName} x FIFO index.jsonl -> typed abort, no hang`
-    if (IS_WIN) { skip(name, 'mkfifo unavailable on win32'); continue }
-    t(name, () => {
-      const world = mkStore()
-      try {
-        const indexPath = path.join(world.localDir, 'index.jsonl')
-        fs.rmSync(indexPath, { force: true })
-        const mk = spawnSync('mkfifo', [indexPath])
-        assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
-        const r = run(path.join(PLUGIN_SCRIPTS, script), args, { cwd: world.proj, home: world.root })
-        fs.rmSync(indexPath, { force: true })
-        checkTyped(r, caseName)
-      } finally { cleanup(world) }
-    })
-  }
-
-  // plugin em-revise needs an existing episode to revise; mkStore's seed
-  // already provides one via the VENDORED em-list contract (id shape is
-  // identical — the vendored writer just wrote it with the real em-store
-  // above in other legs, but here we seed via the real em-store for a
-  // deterministic id and then FIFO the vendored copy's index target).
-  {
-    const name = 'T7 vendored plugin em-revise x FIFO index.jsonl -> typed abort, no hang'
-    if (IS_WIN) { skip(name, 'mkfifo unavailable on win32') } else {
-      t(name, () => {
-        const world = mkStore()
-        try {
-          const indexPath = path.join(world.localDir, 'index.jsonl')
-          fs.rmSync(indexPath, { force: true })
-          const mk = spawnSync('mkfifo', [indexPath])
-          assert(mk.status === 0, `mkfifo failed: ${mk.stderr}`)
-          const r = run(path.join(PLUGIN_SCRIPTS, 'em-revise.mjs'), [
-            '--original', world.seedId, '--project', 'p651', '--tags', 'x', '--summary', 'v', '--body', 'v', '--scope', 'local',
-          ], { cwd: world.proj, home: world.root })
-          fs.rmSync(indexPath, { force: true })
-          checkTyped(r, 'plugin em-revise')
-        } finally { cleanup(world) }
-      })
-    }
   }
 }
 

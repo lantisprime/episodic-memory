@@ -75,8 +75,10 @@ const RESOLUTION_GATES = ["plan_approval", "pre_checkpoint", "post_checkpoint"];
 // typo can't silently exempt a real orphan, planner #13); "reserved-for-Follow"
 // dirs do not exist yet and are annotation-only (claude-subagent N2).
 export const RESERVED_DIRS = {
-  "episodic-memory": { presence: "on-disk", why: "Claude-Code plugin packaging (.claude-plugin/, scripts/, skills/); exists on main." },
   "second-opinion": { presence: "on-disk", why: "RFC-008 L1257/R10 second-opinion runbooks fork; runbook-carrier (NOT an enforcement plugin — manifest.schema is enforcement-only), authored on disk by the Follow move." },
+  // #671: episodic-memory is no longer reserved — its vendored scripts fork was
+  // retired (the plugin is served from the repo root, .claude-plugin/
+  // marketplace.json "source": "."), so a resurrected dir fails M8 as an orphan.
   // RFC-009 P2-S6: claude-code-activation is no longer a RESERVED (entry-less)
   // dir — plugins/_index.json now carries its real `activation` descriptor, so
   // the bidirectional dir↔entry check (M8) resolves it as a normal plugin dir.

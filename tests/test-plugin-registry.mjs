@@ -172,20 +172,22 @@ const CONTEXT_FILES = [
 // 5. RESERVED_DIRS annotation (N2) + M8 bidirectional dir<->entry (unit).
 // ===========================================================================
 {
-  assert(RESERVED_DIRS["episodic-memory"] && RESERVED_DIRS["episodic-memory"].presence === "on-disk", "M8: episodic-memory reserved as on-disk");
+  // #671: the vendored plugins/episodic-memory/ scripts fork is retired (the
+  // plugin is served from the repo root), so it is no longer reserved.
+  assert(!("episodic-memory" in RESERVED_DIRS), "M8: episodic-memory is no longer reserved (#671 retired the vendored fork)");
   assert(RESERVED_DIRS["second-opinion"] && RESERVED_DIRS["second-opinion"].presence === "on-disk", "M8: second-opinion reserved as on-disk (runbook-carrier authored by the Follow move — N2/R10)");
 
   const tmp = mkdtemp();
   try {
     fs.mkdirSync(path.join(tmp, "plugins/claude-code"), { recursive: true });
-    fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true }); // resurrected retired fork (#671)
     fs.mkdirSync(path.join(tmp, "plugins/rogue-plugin"), { recursive: true });
     const collect = () => { const vs = []; return { vs, add: (check, sev, detail, extra = {}) => vs.push({ check, ...extra }) }; };
 
     let c = collect();
     checkBidirectionalDirs(tmp, [{ directory: "plugins/claude-code" }], c.add, []);
     assert(c.vs.some((v) => v.keyword === "orphan_dir" && v.dir === "rogue-plugin"), "M8: a non-reserved orphan dir fails");
-    assert(!c.vs.some((v) => v.dir === "episodic-memory"), "M8: episodic-memory reserved dir is skipped (present on disk)");
+    assert(c.vs.some((v) => v.keyword === "orphan_dir" && v.dir === "episodic-memory"), "M8: a resurrected plugins/episodic-memory/ fails as an orphan dir (#671)");
     assert(!c.vs.some((v) => v.dir === "claude-code"), "M8: claude-code dir with an entry passes");
 
     c = collect();
@@ -197,10 +199,10 @@ const CONTEXT_FILES = [
     fs.mkdirSync(path.join(tmp2, "plugins/claude-code"), { recursive: true }); // NO episodic-memory / second-opinion / claude-code-activation dirs
     c = collect();
     checkBidirectionalDirs(tmp2, [{ directory: "plugins/claude-code" }], c.add, []);
-    assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "episodic-memory"), "M8: an on-disk reserved dir that is absent fails (typo can't silently exempt a real orphan)");
-    // RFC-008 Follow (R10): second-opinion is now on-disk reserved, so its
-    // absence is likewise reserved_absent — the carrier can't be silently exempt.
-    assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "second-opinion"), "M8: second-opinion on-disk reserved dir absent -> reserved_absent (Follow/R10)");
+    // RFC-008 Follow (R10): second-opinion is on-disk reserved, so its absence
+    // is reserved_absent — the carrier can't be silently exempt.
+    assert(c.vs.some((v) => v.keyword === "reserved_absent" && v.dir === "second-opinion"), "M8: an on-disk reserved dir that is absent fails (typo can't silently exempt a real orphan)");
+    assert(!c.vs.some((v) => v.dir === "episodic-memory"), "M8: absent plugins/episodic-memory/ raises nothing (retired, not reserved — #671)");
     // RFC-009 P2-S6: claude-code-activation is NO LONGER reserved — it is a real
     // _index.json activation entry now, so its dir is governed by the normal
     // entry↔dir rule (present-with-entry passes; the reserved exemption is gone).
@@ -210,7 +212,6 @@ const CONTEXT_FILES = [
     // exemption is honest, not stale). Mirrors the live tree post-Follow/R10.
     const tmp3 = mkdtemp();
     fs.mkdirSync(path.join(tmp3, "plugins/claude-code"), { recursive: true });
-    fs.mkdirSync(path.join(tmp3, "plugins/episodic-memory"), { recursive: true });
     fs.mkdirSync(path.join(tmp3, "plugins/second-opinion/runbooks"), { recursive: true });
     c = collect();
     checkBidirectionalDirs(tmp3, [{ directory: "plugins/claude-code" }], c.add, []);
@@ -218,6 +219,21 @@ const CONTEXT_FILES = [
     assert(!c.vs.some((v) => v.dir === "second-opinion"), "M8: present second-opinion carrier raises no orphan/absent violation");
     rmrf(tmp3);
   } finally { rmrf(tmp); }
+
+  // #671 live-tree guard: the retired fork stays gone, and nothing that
+  // installs, serves or validates the plugin names it again. The
+  // .opencode/plugins/episodic-memory/ install TARGET (install.mjs) is a
+  // different path and is excluded by the leading-char class.
+  assert(!fs.existsSync(path.join(REPO, "plugins/episodic-memory")), "#671: plugins/episodic-memory/ is absent from the live tree");
+  const FORK_REF = /(^|[^\w./-])plugins\/episodic-memory\b/m;
+  const wfDir = path.join(REPO, ".github/workflows");
+  const shipping = [
+    "install.mjs", "scripts/lib/install-manifest.mjs", "scripts/validate-plugin-registry.mjs",
+    ".claude-plugin/marketplace.json", ".claude-plugin/plugin.json", "plugins/_index.json",
+    ...fs.readdirSync(wfDir).map((f) => path.join(".github/workflows", f)),
+  ];
+  const refs = shipping.filter((rel) => FORK_REF.test(fs.readFileSync(path.join(REPO, rel), "utf8")));
+  assert(refs.length === 0, "#671: no install/serve/validate/CI file references plugins/episodic-memory/", refs.join(", "));
 }
 
 // ===========================================================================
@@ -476,7 +492,6 @@ function buildLiveProject() {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(REPO, rel), dest);
   }
-  fs.mkdirSync(path.join(tmp, "plugins/episodic-memory"), { recursive: true }); // on-disk reserved (M8)
   fs.mkdirSync(path.join(tmp, "plugins/second-opinion/runbooks"), { recursive: true }); // on-disk reserved (M8, Follow/R10)
   return tmp;
 }

@@ -552,7 +552,6 @@ function mkRegistryRoot(mutators = {}) {
   // unconditionally and every entry-declared directory from the slim index.
   // Without this scaffolding the no-crash tests' "no M8 violation" assertion
   // is masked by scaffolding-noise.
-  fs.mkdirSync(path.join(root, 'plugins/episodic-memory'), { recursive: true })
   fs.mkdirSync(path.join(root, 'plugins/second-opinion/runbooks'), { recursive: true })
   const slimEntries = (mutators.indexSlim || [])
   for (const entry of slimEntries) {
