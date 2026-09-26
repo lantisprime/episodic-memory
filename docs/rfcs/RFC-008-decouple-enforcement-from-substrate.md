@@ -1221,7 +1221,7 @@ Serves R3, R5 · depends on: P3 · **DONE (P4a #397, P4c #398, P4d S1-S8 + ESC).
 
 #### P5–P7 — Per-tool plugins (OpenCode / Codex / Pi Agent) → [RFC-008/P5-P7-tool-plugins.md](RFC-008/P5-P7-tool-plugins.md)
 
-Serves R6, R10 · depends on: P3 · **P5 DONE (#424 `f5dbaef`, doc fix #425); P6 IN PROGRESS (Codex, plan codex-ACCEPTED 2026-06-28); P7 queued** *(legacy "Phase 6/7/8")*. Same template instantiated three times: `manifest.json` + adapter + 10-section runbook + fixtures, each at its declared capability tiers. Codex `pre_tool_use: MEDIUM` (mechanism STRONG; Bash-write lexing residual caps the tier — KB codex-hooks.md).
+Serves R6, R10 · depends on: P3 · **P5 DONE (#424 `f5dbaef`, doc fix #425); P6 DONE (Codex, #431 `3b91f9b`); P7 DONE (Pi Agent, #437 `5da4418`)** *(legacy "Phase 6/7/8")*. Same template instantiated three times: `manifest.json` + adapter + 10-section runbook + fixtures, each at its declared capability tiers. Codex `pre_tool_use: MEDIUM` (mechanism STRONG; Bash-write lexing residual caps the tier — KB codex-hooks.md).
 
 #### P8 — Cursor + Windsurf plugins → [RFC-008/P8-cursor-windsurf.md](RFC-008/P8-cursor-windsurf.md)
 
@@ -1343,7 +1343,7 @@ graph TD
 
 | PR/Commit | Files changed | Tests | Notes |
 |---|---|---|---|
-| **P0** — PR #367 (`bf58e8f`) | 20 P0 files (17 schemas + 3 data) + test-only `tests/lib/mini-jsonschema.mjs` + `tests/lib/version-hash.mjs` (both later promoted to `scripts/lib/` in P1b/P2a, with re-export shims left at the `tests/lib/` paths) + `tests/test-p0-schemas.mjs` + `tests/fixtures/plugins/*` (≥16 golden + `_corpus-index.json`) + `tests/fixtures/harness-events/claude-code/*` | `node tests/test-p0-schemas.mjs` → 89/0; `em-rfc-validate` consistent | Locked schema + data layer (R3, R4; F11–F51). NO shipped `.mjs` validators (T17). Validity gate = self-asserting keyword-grammar linter (closes R0b-R3 fail-open class). Plan reviewed 3 rounds; impl review ACCEPT-with-FU (4 FUs fixed inline). Post-merge FU: P2 shared negative corpus → issue #368. |
+| **P0** — PR #367 (`d078fdc`; branch tip `bf58e8f` on `feat/rfc-008-p0-schemas`, landed on main in the #367 squash) | 20 P0 files (17 schemas + 3 data) + test-only `tests/lib/mini-jsonschema.mjs` + `tests/lib/version-hash.mjs` (both later promoted to `scripts/lib/` in P1b/P2a, with re-export shims left at the `tests/lib/` paths) + `tests/test-p0-schemas.mjs` + `tests/fixtures/plugins/*` (≥16 golden + `_corpus-index.json`) + `tests/fixtures/harness-events/claude-code/*` | `node tests/test-p0-schemas.mjs` → 89/0; `em-rfc-validate` consistent | Locked schema + data layer (R3, R4; F11–F51). NO shipped `.mjs` validators (T17). Validity gate = self-asserting keyword-grammar linter (closes R0b-R3 fail-open class). Plan reviewed 3 rounds; impl review ACCEPT-with-FU (4 FUs fixed inline). Post-merge FU: P2 shared negative corpus → issue #368. |
 | **P1a** — PR #373 (`e4f89a5`) | see PR | see PR | git mv hooks/→plugins/claude-code/hooks/ |
 | **P1b** — PR #374 (`0e27ad2`) | see PR | see PR | plugin registry+manifest+validator |
 | **P1c** — PR #376 (`a1bf7e7`) | see PR | see PR | conformance gauntlet+field_bindings |

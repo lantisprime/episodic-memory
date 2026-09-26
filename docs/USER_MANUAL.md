@@ -707,6 +707,23 @@ AI:   I tried to edit auth.ts but the checkpoint gate blocked me:
 
 **To clear a gate:** Approve the AI's plan in chat. The AI writes the checkpoint marker on your behalf — you don't run any commands manually. (Marker location is an internal implementation detail; PR #207 relocated it from `<repo>/.claude/.X` to `<repo>/.checkpoints/.X` to escape Claude Code's built-in sensitive-file prompt — readers honor both during burn-in.)
 
+**If your own `~/.claude/CLAUDE.md` tells the AI how to handle plan approval.** Older personal setups had a "Rule 8" that said to run `touch .claude/.plan-approval-pending` at plan end and `rm` it on approval. Don't use that any more. It writes the legacy bare marker, which the SessionStart hook deletes from both `.checkpoints/` and `.claude/` at the start of every session, so a plan marked that way disappears. Replace the rule with the helper, which writes a per-session marker at `<repo>/.checkpoints/.plan-approval-pending.<session-id>`:
+
+```markdown
+8. Plan approval marker (plan-gate). Use the helper, never a literal `touch`/`rm`.
+   Pass the repository root as a literal absolute path (below, `/abs/path/to/repo`):
+   - At plan end: `node ~/.episodic-memory/scripts/plan-marker.mjs --touch --root /abs/path/to/repo`
+   - When the user approves the plan: `node ~/.episodic-memory/scripts/plan-marker.mjs --approve --root /abs/path/to/repo`
+     (`--approve` is the only sanctioned approval: it creates the one-shot `.plan-approved.<session-id>` token and clears the pending marker.)
+   - To withdraw a plan without approving it: `node ~/.episodic-memory/scripts/plan-marker.mjs --rm --root /abs/path/to/repo`
+   Do not build the path with command substitution such as `"$(git rev-parse --show-toplevel)"`: plan-gate cannot prove that command
+   is a marker write, so it blocks it while the plan is pending, and `--approve` then can never run.
+   The session id comes from `CLAUDE_CODE_SESSION_ID`, which Claude Code sets for Bash commands.
+   Do not create `.plan-approval-pending` without the session suffix: SessionStart deletes it.
+```
+
+`--rm` only clears this session's pending marker; it does not approve anything. `--root` is required and must be absolute (there is no cwd fallback). The helper exits non-zero if `--root` is missing (exit 4) or `CLAUDE_CODE_SESSION_ID` is unset (exit 8). Run `node ~/.episodic-memory/scripts/plan-marker.mjs --help` for all exit codes.
+
 **False-positive: the gate blocked a read-only command.** The checkpoint gate uses a command classifier (PR #326 / PR #331) to decide whether a `Bash` invocation writes state. The classifier defaults to "shared_write" when uncertain, which can block read-only inspectors (`python3 src/inspect.py`, ad-hoc diagnostics, etc.) that the gate should ignore. When this happens you have three escape hatches:
 
 1. **Record a per-project override** via the `classify-correction` skill. This pins the correct label for that exact command shape in that project — next time the gate sees it, no LLM call, no block:
