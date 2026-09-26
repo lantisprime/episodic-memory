@@ -5,7 +5,7 @@ title: Graph Projection — first-class traversal over latent episode/rule edges
 status: accepted
 champion: Charlton Ho
 created: 2026-05-17
-last_modified: 2026-07-25
+last_modified: 2026-09-26
 adversarial_review: 2026-07-25 (second opinion on the revision diff; see Second opinion section)
 supersedes: ~
 superseded_by: ~
@@ -58,17 +58,21 @@ Build a **typed-edge graph projection** computed at `em-rebuild-index.mjs` time,
 
 `tag` — pseudo-node of the form `tag:<name>`; emitted only when `--edges tags` is requested (tag fan-out is the noisiest edge and is excluded from `DEFAULT_EDGES`).
 
-`rule` — source would be `~/.claude/projects/.../memory/feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`; identifier = filename (slug from frontmatter `name`). Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
+`rule` — source is `~/.claude/projects/.../memory/`: the scan reads files matching `feedback_*.md`, `reference_*.md`, `MEMORY.md` and `MEMORY_*.md` (`scripts/lib/rule-nodes.mjs` `RULE_GLOB_RE`); identifier = slug of frontmatter `name` (never the filename). Projected by `scripts/em-graph.mjs` since Phase 2, opt-in via `--nodes rule`. Matching the scan glob does not make a file a node: only a file carrying a frontmatter `name:` is projected.
 
 A rule file with no frontmatter `name:` key has no identifier and is SKIPPED, counted in the
-scan's `skipped` total, never projected under a filename-derived slug (forbidden by the `slugify()` section).
+query response's `skipped_nodes` total, never projected under a filename-derived slug (forbidden by the `slugify()` section).
 As observed on 2026-07-25, eight files in the reference corpus are in this state and every one of
 them is a `MEMORY*` file: `MEMORY.md`, `MEMORY_alwaystier_incidents.md`, `MEMORY_anchors.md`,
 `MEMORY_incidents_2026-07-10.md`, `MEMORY_open_issues.md`, `MEMORY_pr_history.md`,
 `MEMORY_seat_ops.md`, `MEMORY_tooling.md` — eight of the nine files matching the `MEMORY.md` plus
-`MEMORY_*.md` globs, the exception being `MEMORY_workplan_changelog.md`. Note that the Orphan allowlist bullet of Storage Part 2 names
-`MEMORY.md` among the canonical entry-point roots, so a canonical root is currently
-unprojectable. That tension is tracked on issue #585 with the other `entry_point` contradictions.
+`MEMORY_*.md` globs, the exception being `MEMORY_workplan_changelog.md`. **Resolved (issue #585, owner
+decision 2026-09-26):** `MEMORY.md` is not a projectable canonical root. The `MEMORY*` files live in the
+operator's Claude auto-memory directory, outside this repository, so the repository cannot impose a
+frontmatter convention on them, and RFC-009 §Problem 4 already names `MEMORY.md`'s hand-curated trigger
+table as the out-of-substrate workaround it replaces. A `MEMORY*` file without `name:` is reported honestly
+in `skipped_nodes` and is never an entry point; one that carries `name:` is an ordinary rule node. The
+entry-point set is defined in the Orphan allowlist bullet of Storage Part 2.
 
 `rfc` — source would be `docs/rfcs/RFC-*.md`; identifier = `rfc_id` from frontmatter. Not projected by `scripts/em-graph.mjs`; belongs to the next phase.
 
@@ -250,7 +254,7 @@ When rebuild cost per query becomes the binding constraint, the following design
   ```
 - Atomic write via temp + rename (project convention). Temps named `graph.json.tmp.<pid>.<random>`.
 - `nodes_with_no_edges[]` is distinct from `dangling[]`: dangling = edge with unresolved target; orphan = node with zero in+out edges.
-- **Orphan allowlist.** A rule file may declare `entry_point: true` in frontmatter to suppress its presence in `nodes_with_no_edges[]` — canonical roots (`MEMORY.md`, top-level index files) are entry points by design, not orphans. The allowlist is the rule files' own frontmatter; no separate config file.
+- **Orphan allowlist.** The entry-point set is exactly the rule files that carry a frontmatter `name:` identifier AND declare `entry_point: true`; such a file is suppressed from `nodes_with_no_edges[]`. A file without `name:` is not a node, so it can be neither an orphan nor an entry point: it is counted in `skipped_nodes` instead. `MEMORY.md` and the other `MEMORY*` index files carry no `name:` in the reference corpus and are therefore not entry points (issue #585, owner decision 2026-09-26). The allowlist is the rule files' own frontmatter; no separate config file.
 - **Entry-point auditability.** `--graph-health` emits `entry_points[]` as a separate array from `nodes_with_no_edges[]`. Rule files declaring `entry_point: true` appear in the former, not the latter, so reviewers can audit suppression decisions explicitly (self-attested metadata still needs a visible audit surface — see `#221` snapshot validator gap, same class).
 
 **Deferral rationale.**
@@ -271,7 +275,7 @@ and its persisted form inside `graph.json` remains Phase 6 (the Phase 6 row of t
 split is the reconciliation of the phase assignments that this section and those two rows previously gave
 without narrating; adopted by the Phase 2 PR.
 
-Rule nodes (`feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md`) may carry these optional frontmatter keys recognized by the projection (in addition to the existing `name`, `description`, `type` keys):
+Rule nodes (files matching the rule scan glob `feedback_*.md`, `reference_*.md`, `MEMORY.md`, `MEMORY_*.md` that carry a frontmatter `name:`; a file without `name:` is counted in `skipped_nodes`, not projected) may carry these optional frontmatter keys recognized by the projection (in addition to the existing `name`, `description`, `type` keys):
 
 | Key | Type | Purpose |
 |---|---|---|

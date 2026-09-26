@@ -39,11 +39,12 @@ of an under-specified plan handed to a weak executor is silent wrong implementat
 
 ### 0.2 The ambiguity tripwire (applies to every section)
 
-If any sentence in the plan contains the words **"decide", "choose", "figure out",
-"as appropriate", "if needed", "handle accordingly", "etc.", "and so on", or "TBD"**, the
-plan is not executor-ready. Resolve the decision in the plan body and restate the sentence as
-a concrete action with a named artifact. This rule is enforced by the §A.1 forbidden-phrase
-lint before any plan is marked ready.
+If any sentence in the plan contains a **§A.1 forbidden phrase**, the plan is not
+executor-ready. Resolve the decision in the plan body and restate the sentence as a concrete
+action with a named artifact. The phrase list lives in §A.1 only (its grep pattern is the single
+source; `node tools/check-plan-template-sync.mjs` fails CI if a second copy here or the §A.1 prose
+list drifts from it, issue #438). This rule is enforced by the §A.1 forbidden-phrase lint before
+any plan is marked ready.
 
 ### 0.3 This repo's planning rules (do not skip)
 
@@ -484,8 +485,8 @@ probably`, `something like`, `or similar`. Resolve each into a concrete action.
 grep -niE "decide|choose|figure out|as appropriate|if needed|handle accordingly|\betc\.|and so on|TBD|should probably|something like|or similar" <this-plan>.md
 ```
 
-Expected result for a ready plan: the grep WILL match template prose (§0.2 and this section quote
-the phrases). Acceptance rule, mechanically dischargeable: list every match's line number; the
+Expected result for a ready plan: the grep WILL match template prose (this section quotes the
+phrases). Acceptance rule, mechanically dischargeable: list every match's line number; the
 plan is ready iff no match falls inside a §A.5 block or a §A.7 step-table row. Record the match
 list and per-match dispositions beside the lint run.
 
@@ -626,7 +627,7 @@ imported return) — never a constant, and never a string the step author wrote 
 **Executor-ready gate (the plan author MUST pass this before handoff):** every step's `File` column
 names exactly one file; every `EDIT` quotes a verbatim `ANCHOR` + exact `REPLACE` (smallest diff, no
 reformatting of untouched lines); whole-file `Write` appears only in `CREATE` steps; no step text
-contains a §0.2 forbidden phrase or — as a *description of intent* — "assert that", "verify that",
+contains a §A.1 forbidden phrase or — as a *description of intent* — "assert that", "verify that",
 "check that", or "ensure"; every constant, error string, regex, and signature appears verbatim (here
 or in §A.5); every Verify passes §A.6b; **a step whose scope names N edit sites is backed by N
 fenced code blocks** (in its Listing or inline) — prose describing a site is not a Listing, and a

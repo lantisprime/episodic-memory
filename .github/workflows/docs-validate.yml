@@ -1,0 +1,56 @@
+name: Docs validation
+
+# Docs checkers (cluster C32b): #130 flag snippets + anchors, #131/#210
+# parallel-file and top-level-docs drift, #203 instruction-file lint, #438
+# PLAN_TEMPLATE phrase-list sync. Zero-dep tools under tools/.
+#
+# No `paths:` filter, on purpose: the flag check reads each script's live
+# `--help`, and the inventory checks read scripts/ and the install manifest,
+# so a code-only PR that drops a flag or adds a script drifts the docs just as
+# a docs PR does. The whole job runs in seconds.
+#
+# tools/validate-plan-template.mjs (#453) is NOT run on plans here: it is a
+# manual pre-review authoring tool (operator-locked 2026-06-28: no
+# plan-template linter in CI). Only its self-test runs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Doc command flags + anchor links (#130)
+        run: node tools/check-doc-snippets.mjs
+
+      - name: Parallel-file consistency registry (#131, #210)
+        run: node tools/check-doc-consistency.mjs
+
+      - name: Instruction-file markdown lint (#203)
+        run: node tools/lint-instruction-md.mjs
+
+      - name: PLAN_TEMPLATE forbidden-phrase list sync (#438)
+        run: node tools/check-plan-template-sync.mjs
+
+      - name: check-doc-snippets self-test
+        run: node tests/test-check-doc-snippets.mjs
+
+      - name: check-doc-consistency self-test
+        run: node tests/test-check-doc-consistency.mjs
+
+      - name: lint-instruction-md self-test
+        run: node tests/test-lint-instruction-md.mjs
+
+      - name: check-plan-template-sync self-test
+        run: node tests/test-check-plan-template-sync.mjs
+
+      - name: validate-plan-template self-test (#453)
+        run: node tests/test-validate-plan-template.mjs

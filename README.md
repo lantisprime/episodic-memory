@@ -211,7 +211,7 @@ This project ships two in-tree skills. Each is a self-contained SKILL.md the age
 | `episodic-memory` | `instructions/SKILL.md` → installed to `.claude/skills/episodic-memory/`, `.agents/skills/episodic-memory/`, etc. (see [Supported Tools](#supported-tools)) | The main skill the agent reads at session start to learn how to recall, store, revise, and surface episodes. Wraps every `em-*` script. |
 | `classify-correction` | `skills/classify-correction/SKILL.md` (PR [#327](https://github.com/lantisprime/episodic-memory/pull/327)) | Records a per-project override for the LLM checkpoint-gate classifier when a command was mislabeled (e.g. a read-only inspector blocked as `shared_write`). Writes to `<project>/.episodic-memory/classifier-overrides.jsonl`. |
 
-Three additional SKILLs are invoked from `launchd` rather than the agent's session loop — see [Scheduled Routines](#scheduled-routines-launchd-macos): `episodic-memory-daily-mining`, `episodic-memory-weekly-digest`, `instruction-hygiene-maintenance`.
+Three additional SKILLs are invoked from `launchd` rather than the agent's session loop — see [Scheduled Routines](#scheduled-routines--legacy-macos-launchd-bootstrap-maintainer-machine-only): `episodic-memory-daily-mining`, `episodic-memory-weekly-digest`, `instruction-hygiene-maintenance`.
 
 ## Episode Categories
 
@@ -326,26 +326,32 @@ Episodic-memory and user-preferences are fully independent — install either or
 
 ## RFCs
 
+Status is the RFC lifecycle status from [`docs/rfcs/_index.json`](docs/rfcs/_index.json); phase-level shipped/unbuilt state lives in each RFC's Implementation plan and ledger. `node tools/check-doc-consistency.mjs` fails CI when this table drifts from the index (issue #210).
+
 | RFC | Title | Status |
 |-----|-------|--------|
-| [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, Semantic Consolidation | Accepted (Phases 1-3 shipped) |
-| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, Actionable Recall | Accepted (Phases 1-3 + 3b shipped + runtime-deployed) |
-| [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted (Phase 1 not yet started) |
-| [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted (M0 + M1 + M2 shipped) |
+| [RFC-001](docs/rfcs/RFC-001-memory-improvements.md) | Intelligent Memory: Tag Index, Relevance Scoring, Proactive Recall, and Semantic Consolidation | Accepted |
+| [RFC-002](docs/rfcs/RFC-002-learning-loop.md) | Learning Loop: Violation Tracking, Pattern Refinement, and Actionable Recall | Accepted |
+| [RFC-003](docs/rfcs/RFC-003-pluggable-tool-adapters.md) | Pluggable Tool Adapters: Per-Platform Enforcement and Cross-Tool Messaging | Accepted |
+| [RFC-004](docs/rfcs/RFC-004-bp1-auto-pilot.md) | BP-1 Auto-Pilot: Automated Rule-18 Implementation Workflow | Accepted |
 | [RFC-005](docs/rfcs/RFC-005-em-move.md) | em-move — atomic episode relocation between scopes | Accepted |
-| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Withdrawn (the review harness shipped separately) |
-| [RFC-007](docs/rfcs/RFC-007-graph-projection.md) | Graph Projection — first-class traversal over latent episode/rule edges | Draft |
+| [RFC-006](docs/rfcs/RFC-006-codex-review-adapter.md) | Codex Review Adapter: Typed-Request Consumer with Failure Classification and Local Fallback | Withdrawn |
+| [RFC-007](docs/rfcs/RFC-007-graph-projection.md) | Graph Projection — first-class traversal over latent episode/rule edges | Accepted |
 | [RFC-008](docs/rfcs/RFC-008-decouple-enforcement-from-substrate.md) | Decoupling the Enforcement Layer from the Memory Substrate | Accepted |
 | [RFC-009](docs/rfcs/RFC-009-lesson-activation.md) | Lesson Activation: Trigger-Bearing Lessons, Derived Trigger Index, and Bounded Advisory Recall | Accepted |
 | [RFC-010](docs/rfcs/RFC-010-versioned-central-engine.md) | Version-pinned central enforcement engine with per-project shims | Draft |
 | [RFC-011](docs/rfcs/RFC-011-playbook-activation-preferences.md) | Playbook Activation Preferences: Per-Project Session-Start and On-Demand Playbook Loading | Accepted |
+| [RFC-012](docs/rfcs/RFC-012-promotion-arc.md) | Promotion Arc: Evidence-Fed Knowledge Promotion, Advisory Cadence, and Stagnation Signals | Accepted |
+| [RFC-013](docs/rfcs/RFC-013-episode-sync.md) | Episode Sync: Cross-Host Replication of Project and Global Episode Stores | Draft |
+| [RFC-014](docs/rfcs/RFC-014-episode-server.md) | em-serve — Episode Server: Rendezvous Sync, Live Episode Feed, and Remote Recall over the CLI Contract | Draft |
+| [RFC-015](docs/rfcs/RFC-015-playbook-registration-audit.md) | Playbook Registration: Store-Time Detection, Registration Audit, and Scope Rules | Accepted |
 
 ## Scripts Reference
 
 All scripts are zero-dependency `.mjs` files using Node.js stdlib only. They output JSON to stdout.
 
 ### Unified CLI
-Every script below is also reachable through the `em` dispatcher (installed at `~/.episodic-memory/bin/em`): `em <command>` ≡ `node ~/.episodic-memory/scripts/em-<command>.mjs`. `em help` lists all commands; unknown commands get did-you-mean suggestions.
+Every script below is also reachable through the `em` dispatcher (`scripts/em.mjs`, installed at `~/.episodic-memory/bin/em`): `em <command>` ≡ `node ~/.episodic-memory/scripts/em-<command>.mjs`. `em help` lists all commands; unknown commands get did-you-mean suggestions.
 ```bash
 em store --project my-project --category decision --summary "..." --body "..."
 em search --query "auth token refresh"
@@ -529,6 +535,25 @@ node ~/.episodic-memory/scripts/em-manage.mjs
 Both are presentation layers over the same CLI contract: every button and menu
 action spawns the corresponding `em-*` script and shows its JSON. Nothing is
 decided in the UI, and no data leaves your machine.
+
+### Store identity (`em identity`)
+```bash
+# Diagnose which identity root a store carries; repair a duplicate root (#635).
+# --detach-root without --confirm prints the planned write and touches nothing.
+node ~/.episodic-memory/scripts/em-identity.mjs --status
+node ~/.episodic-memory/scripts/em-identity.mjs --detach-root <episode-id> --confirm
+```
+
+### Topic tracks (`em topic-tracks`)
+```bash
+# Preview clusters of related primary episodes (dry-run default); confirmed writes
+# become global lessons. See USER_MANUAL Scenario 8d.5.
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs
+node ~/.episodic-memory/scripts/em-topic-tracks.mjs --apply --confirm <64-hex>
+```
+
+### Classifier correction (`classify-correction` skill)
+`scripts/classify-correction.mjs` backs the `classify-correction` skill (see [Skills](#skills)): it records a per-project override when the checkpoint-gate command classifier mislabels a command, in `<project>/.episodic-memory/classifier-overrides.jsonl`.
 
 ### Graph traversal (`em graph`)
 ```bash
@@ -980,7 +1005,37 @@ node ~/.episodic-memory/scripts/validate-rfc-canonical-fields.mjs [--json]
 
 # RFC-004 §1072: §11.5 failure-table prose markdown ↔ YAML mirror parity
 node ~/.episodic-memory/scripts/validate-rfc-failure-table.mjs [--json]
+
+# RFC-004 slice 2c: contract.json mirror ↔ RFC block parity
+node ~/.episodic-memory/scripts/validate-rfc-contract-mirror.mjs
 ```
+
+### Maintainer & CI scripts
+
+Run from a repo checkout; they check the repository itself, not a memory store.
+
+| Script | What it checks or does |
+|---|---|
+| `install-wizard.mjs` | Interactive guided setup behind `node install.mjs --wizard` |
+| `check-plugin-version-bump.mjs` | CI gate (#644): a PR that changes the plugin payload must bump `.claude-plugin/plugin.json` |
+| `validate-schemas.mjs` | Every repo schema doc is a valid JSON-Schema 2020-12 document |
+| `validate-plugin-registry.mjs` | Static harness-plugin registry conformance (RFC-008 P1b) |
+| `test-plugin.mjs` | The 9-step conformance gauntlet for a harness enforcement plugin (RFC-008 P1c) |
+| `validate-bp-contract.mjs` | RFC-008 §Validation-contract assertions for bp-XXX enforcement contracts |
+| `scaffold-bp.mjs` | Generates the bp-XXX enforcement-contract data files (RFC-008 P2b) |
+| `validate-plan-marker-sites.mjs` | Plan-marker enforcement-site drift (#268) |
+| `validate-plan-listing-discipline.mjs` | Plan-authoring listing lint for changed `docs/plans/*.md` (#627) |
+| `validate-second-opinion-audit.mjs` | Second-opinion reader-canonicalization audit-table drift |
+| `check-automode-defaults.mjs` | Diffs Claude Code's autoMode defaults against the effective config |
+
+Docs checkers under `tools/` (zero-dep, JSON on stdout, wired in `.github/workflows/docs-validate.yml`):
+`check-doc-snippets.mjs` (flags in `node scripts/<x>.mjs` snippets vs the script's `--help`, and `#anchor` links, #130),
+`check-doc-consistency.mjs` (the parallel-file groups in [`docs/_consistency.json`](docs/_consistency.json), #131/#210),
+`lint-instruction-md.mjs` (unclosed fences, fence languages, duplicate headings, #203) and
+`check-plan-template-sync.mjs` (PLAN_TEMPLATE forbidden-phrase lists, #438).
+`validate-plan-template.mjs <plan.md>` (#453) is a manual pre-review authoring tool, not a CI gate.
+
+Hook-internal helpers (classifier, marker and gate plumbing) are not listed here; `docs/_consistency.json` names each one with the reason it is internal.
 
 ## License
 
