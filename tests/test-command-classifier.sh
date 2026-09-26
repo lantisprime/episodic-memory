@@ -681,6 +681,49 @@ assert_preflight_cmd "Q66 env -S non-codex" \
   'env -S "ls -la"' "none"
 assert_preflight_cmd "Q67 env --split-string=codex equals" \
   'env --split-string=codex\ exec\ foo true' "codex-review-handoff"
+# #241: env -S after a wrapper unwrap (stacked), plus the command-carrying
+# wrapper siblings (watch, script -c, su -c, runuser, find -exec, xargs,
+# parallel). Each was `none` (bypass) before the fix.
+assert_preflight_cmd "#241-01 sudo env -S codex" \
+  'sudo env -S "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-02 timeout 30s env -S codex" \
+  'timeout 30s env -S "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-03 env A=1 sudo env -S codex review" \
+  'env A=1 sudo env -S "codex review"' "codex-review-handoff"
+assert_preflight_cmd "#241-04 sudo env --split-string=codex" \
+  'sudo env --split-string="codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-05 env -iS codex (cluster)" \
+  'env -iS "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-06 watch codex exec" \
+  'watch -n 5 codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "#241-07 watch \"codex exec\" (joined string)" \
+  'watch "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-08 script -c codex" \
+  'script -q -c "codex exec foo" /dev/null' "codex-review-handoff"
+assert_preflight_cmd "#241-09 su -c codex" \
+  'su root -c "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-10 su --command= codex" \
+  'su - root --command="codex review"' "codex-review-handoff"
+assert_preflight_cmd "#241-11 runuser -u root -- codex" \
+  'runuser -u root -- codex exec foo' "codex-review-handoff"
+assert_preflight_cmd "#241-12 runuser -l root -c codex" \
+  'runuser -l root -c "codex exec foo"' "codex-review-handoff"
+assert_preflight_cmd "#241-13 find -exec codex" \
+  'find . -exec codex exec foo \;' "codex-review-handoff"
+assert_preflight_cmd "#241-14 find second -execdir codex +" \
+  'find . -exec echo {} \; -execdir codex review {} +' "codex-review-handoff"
+assert_preflight_cmd "#241-15 xargs -I {} codex" \
+  'xargs -I {} codex exec {}' "codex-review-handoff"
+assert_preflight_cmd "#241-16 parallel codex" \
+  'parallel codex exec ::: foo' "codex-review-handoff"
+assert_preflight_cmd "#241-17 sudo find -exec codex (chained)" \
+  'sudo find . -exec codex exec {} \;' "codex-review-handoff"
+# Negative controls: the same wrappers around a non-review command stay none.
+assert_preflight_cmd "#241-18 sudo env -S non-codex" 'sudo env -S "ls -la"' "none"
+assert_preflight_cmd "#241-19 watch ls" 'watch ls' "none"
+assert_preflight_cmd "#241-20 find -name codex" 'find . -name codex' "none"
+assert_preflight_cmd "#241-21 xargs echo" 'xargs echo' "none"
+assert_preflight_cmd "#241-22 su root (no -c)" 'su root' "none"
 
 echo ""
 echo "--- classify_preflight_path ---"
@@ -1038,6 +1081,122 @@ i358_run_external "#358-06 external script + different args → MISS (arg-sensit
   'node EXTDIR/ext.mjs --summary "RFC-008 (thin-contracts concern)"' \
   'node EXTDIR/ext.mjs --summary "completely different topic"' \
   "shared_write"
+
+echo ""
+echo "--- C01: classifier mislabels (#410, #256, #117, #194) ---"
+# #410: a no-op builtin's redirect and sed -i are writes to their target.
+assert_label "#410-01 ': > scripts/evil.mjs' → shared_write" \
+  ": > scripts/evil.mjs" "shared_write" "scripts/evil.mjs"
+assert_label "#410-02 ': >> file' → shared_write" \
+  ": >> scripts/evil.mjs" "shared_write" "scripts/evil.mjs"
+assert_label "#410-03 'true > file' → shared_write" \
+  "true > scripts/x.mjs" "shared_write" "scripts/x.mjs"
+assert_label "#410-04 ': > /tmp/x' carries off-repo target" \
+  ": > /tmp/x" "shared_write" "/tmp/x"
+assert_label "#410-05 ': > /dev/null' stays read_only" ": > /dev/null" "read_only"
+assert_label "#410-06 bare ':' stays read_only" ":" "read_only"
+assert_label "#410-07 sed -i 's/x/y/' file" \
+  "sed -i 's/x/y/' scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-08 sed -i '' (BSD) file" \
+  "sed -i '' 's/x/y/' scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-09 sed -i.bak file" \
+  "sed -i.bak s/x/y/ scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-10 sed -i'' file" \
+  "sed -i'' s/x/y/ scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-11 sed --in-place=.bak file" \
+  "sed --in-place=.bak s/x/y/ scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-12 sed --in-place file" \
+  "sed --in-place s/x/y/ scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-13 sed -ni cluster" \
+  "sed -ni p scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-14 sed -e SCRIPT -i file" \
+  "sed -e s/i/j/ -i scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#410-15 sed -i off-repo target" \
+  "sed -i s/x/y/ /tmp/y" "shared_write" "/tmp/y"
+assert_label "#410-16 sed -i two files → target cleared" \
+  "sed -i s/x/y/ a.mjs b.mjs" "shared_write"
+assert_label "#410-17 sed -n (no -i) stays read_only" "sed -n p scripts/foo.mjs" "read_only"
+assert_label "#410-18 sed -e 's/i/y/' stays read_only" "sed -e 's/i/y/' scripts/foo.mjs" "read_only"
+assert_label "#410-19 sed script containing -i stays read_only" "sed -n '/-i/p' f" "read_only"
+
+# #256: the redirect on a heredoc's introducing line is live shell.
+assert_label "#256-01 cat <<EOF > .checkpoints/marker → marker_write" \
+  "cat <<EOF > .checkpoints/.pre-checkpoint-done
+x
+EOF" "marker_write" "$TEST_ROOT/.checkpoints/.pre-checkpoint-done"
+assert_label "#256-02 cat <<EOF > .pre-checkpoint-done (cwd literal)" \
+  "cat <<EOF > .pre-checkpoint-done
+x
+EOF" "marker_write" "$TEST_ROOT/.pre-checkpoint-done"
+assert_label "#256-03 cat <<EOF > scripts/new.mjs → shared_write" \
+  "cat <<EOF > scripts/new.mjs
+x
+EOF" "shared_write" "scripts/new.mjs"
+assert_label "#256-04 cat <<-EOF (tab-stripped) > marker" \
+  "cat <<-EOF > .checkpoints/.pre-checkpoint-done
+	x
+	EOF" "marker_write" "$TEST_ROOT/.checkpoints/.pre-checkpoint-done"
+assert_label "#256-05 body text '> file' is NOT a redirect" \
+  "cat <<EOF
+hi > scripts/x
+EOF" "read_only"
+assert_label "#256-06 two heredocs + redirect" \
+  "cat <<A <<B > scripts/x
+a
+A
+b
+B" "shared_write" "scripts/x"
+assert_label "#256-07 cat <<EOF | sh no longer hidden" \
+  "cat <<EOF | sh
+git push
+EOF" "shared_write"
+assert_label "#256-08 command after terminator still segmented" \
+  "cat <<EOF
+x
+EOF
+git push" "push_or_pr_create"
+assert_label "#256-09 heredoc with no body → unsafe_complex" "cat <<EOF" "unsafe_complex"
+
+# #117: read subcommands of notes / stash / submodule are read_only.
+assert_label "#117-01 git notes list" "git notes list" "read_only"
+assert_label "#117-02 git notes list HEAD" "git notes list HEAD" "read_only"
+assert_label "#117-03 git notes show HEAD" "git notes show HEAD" "read_only"
+assert_label "#117-04 git notes (bare = list)" "git notes" "read_only"
+assert_label "#117-05 git notes --ref x show" "git notes --ref x show HEAD" "read_only"
+assert_label "#117-06 git stash list" "git stash list" "read_only"
+assert_label "#117-07 git stash show" "git stash show" "read_only"
+assert_label "#117-08 git stash show stash@{1}" "git stash show stash@{1}" "read_only"
+assert_label "#117-09 git submodule status" "git submodule status" "read_only"
+assert_label "#117-10 git submodule status <path>" "git submodule status sub" "read_only"
+assert_label "#117-11 git submodule summary" "git submodule summary" "read_only"
+assert_label "#117-12 git submodule (bare = status)" "git submodule" "read_only"
+assert_label "#117-13 git notes add stays nonsrc_write" "git notes add HEAD -m msg" "nonsrc_write"
+assert_label "#117-14 git notes remove stays nonsrc_write" "git notes remove HEAD" "nonsrc_write"
+assert_label "#117-15 git stash (bare = push) stays shared_write" "git stash" "shared_write"
+assert_label "#117-16 git stash push stays shared_write" "git stash push" "shared_write"
+assert_label "#117-17 git stash push -m -- file" 'git stash push -m "wip" -- file.txt' "shared_write"
+assert_label "#117-18 git stash -m list (push, msg=list)" "git stash -m list" "shared_write"
+assert_label "#117-19 git stash pop" "git stash pop" "shared_write"
+assert_label "#117-20 git stash drop" "git stash drop" "shared_write"
+assert_label "#117-21 git submodule update --init" "git submodule update --init" "shared_write"
+assert_label "#117-22 git submodule add <url>" "git submodule add https://x/y.git" "shared_write"
+assert_label "#117-23 git submodule deinit <path>" "git submodule deinit sub" "shared_write"
+assert_label "#117-24 git submodule foreach → unsafe_complex" "git submodule foreach 'git status'" "unsafe_complex"
+
+# #194: every redirect of the segment is inspected; a marker redirect no
+# longer masks a sibling real-file write.
+assert_label "#194-01 marker then real file → shared_write" \
+  "echo ok > .claude/.plan-approval-pending > scripts/foo.mjs" "shared_write" "scripts/foo.mjs"
+assert_label "#194-02 real file then marker → shared_write" \
+  "echo ok > scripts/foo.mjs > .claude/.plan-approval-pending" "shared_write" "scripts/foo.mjs"
+assert_label "#194-03 marker + off-repo file carries off-repo target" \
+  "echo ok > .claude/.plan-approval-pending > /tmp/foo" "shared_write" "/tmp/foo"
+assert_label "#194-04 two different markers → shared_write" \
+  "echo ok > .claude/.plan-approval-pending > .checkpoints/.pre-checkpoint-done" "shared_write"
+assert_label "#194-05 lone marker unchanged" \
+  "echo ok > .claude/.plan-approval-pending" "marker_write" "$TEST_ROOT/.claude/.plan-approval-pending"
+assert_label "#194-06 marker + 2>/dev/null still marker_write (#193)" \
+  "echo ok > .claude/.plan-approval-pending 2>/dev/null" "marker_write" "$TEST_ROOT/.claude/.plan-approval-pending"
 
 echo ""
 echo "=================================================="

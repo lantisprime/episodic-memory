@@ -71,6 +71,50 @@ _tokenize() {
   local cur=""        # current token being assembled
   local has_token=0   # 1 if cur represents a real token (vs empty)
 
+  # #256: heredocs introduced on the current line, in order. Their bodies
+  # are skipped at the end of the line, after its redirects/operators have
+  # been tokenized.
+  local -a HD_TERMS=()
+  local -a HD_STRIPS=()
+
+  # Skip the bodies of every queued heredoc, in order, starting at $i (the
+  # first char after the introducing line's newline). Each body runs until
+  # a line equal to its TERM (leading tabs stripped for <<-). Emits
+  # `E heredoc_unterminated` and returns 1 if a terminator is missing.
+  _skip_heredoc_bodies() {
+    local _hk=0
+    while [ $_hk -lt ${#HD_TERMS[@]} ]; do
+      local term="${HD_TERMS[$_hk]}" strip_tabs="${HD_STRIPS[$_hk]}"
+      local found_terminator=0
+      while [ $i -lt $n ]; do
+        local line=""
+        while [ $i -lt $n ] && [ "${cmd:$i:1}" != $'\n' ]; do
+          line="$line${cmd:$i:1}"
+          i=$((i+1))
+        done
+        [ $i -lt $n ] && i=$((i+1))
+        local ckline="$line"
+        if [ "$strip_tabs" = "1" ]; then
+          while [ "${ckline:0:1}" = $'\t' ]; do
+            ckline="${ckline:1}"
+          done
+        fi
+        if [ "$ckline" = "$term" ]; then
+          found_terminator=1
+          break
+        fi
+      done
+      if [ $found_terminator -eq 0 ]; then
+        printf 'E heredoc_unterminated\n'
+        return 1
+      fi
+      _hk=$((_hk+1))
+    done
+    HD_TERMS=()
+    HD_STRIPS=()
+    return 0
+  }
+
   _flush() {
     if [ "$has_token" = "1" ]; then
       printf 'T %s\n' "$cur"
@@ -395,8 +439,15 @@ _tokenize() {
         ;;
       $'\n')
         _flush
-        printf 'O NL\n'
         i=$((i+1))
+        # #256: a pending heredoc's body begins right after this newline.
+        if [ ${#HD_TERMS[@]} -gt 0 ]; then
+          _skip_heredoc_bodies || return 0
+        fi
+        # After a heredoc body this also forces the segment break: anything
+        # after the terminator is a NEW command (`cat > m <<EOF\n..\nEOF\n
+        # rm -rf /` must not hide the chained rm).
+        printf 'O NL\n'
         ;;
       ';')
         _flush
@@ -553,44 +604,14 @@ _tokenize() {
             fi
             printf 'O HEREDOC\n'
             printf 'T %s\n' "$term"
-            # Skip to end of current line
-            while [ $i -lt $n ] && [ "${cmd:$i:1}" != $'\n' ]; do
-              i=$((i+1))
-            done
-            [ $i -lt $n ] && i=$((i+1))
-            # Skip heredoc body until line that equals TERM (with optional
-            # leading tabs if strip_tabs)
-            local found_terminator=0
-            while [ $i -lt $n ]; do
-              # Read one line
-              local line=""
-              while [ $i -lt $n ] && [ "${cmd:$i:1}" != $'\n' ]; do
-                line="$line${cmd:$i:1}"
-                i=$((i+1))
-              done
-              [ $i -lt $n ] && i=$((i+1))
-              local ckline="$line"
-              if [ "$strip_tabs" = "1" ]; then
-                # Strip leading tabs
-                while [ "${ckline:0:1}" = $'\t' ]; do
-                  ckline="${ckline:1}"
-                done
-              fi
-              if [ "$ckline" = "$term" ]; then
-                found_terminator=1
-                break
-              fi
-            done
-            if [ $found_terminator -eq 0 ]; then
-              printf 'E heredoc_unterminated\n'
-              return 0
-            fi
-            # After heredoc body ends, force a segment break. Anything after
-            # the heredoc terminator is a NEW command; without this break,
-            # `cat > .pre-checkpoint-done <<EOF\n...\nEOF\nrm -rf /` would
-            # pass through as a single segment and the classifier would only
-            # see the marker_write, missing the chained rm.
-            printf 'O NL\n'
+            # #256: do NOT skip the rest of this line. The body starts on the
+            # NEXT line; everything after `<<TERM` on the introducing line
+            # (`cat <<EOF > file`, `cat <<EOF | sh`, a second `<<B`) is live
+            # shell and must be tokenized. Queue the terminator; the body is
+            # skipped when the unquoted newline ending this line is reached
+            # (see the $'\n' arm / _skip_heredoc_bodies).
+            HD_TERMS+=("$term")
+            HD_STRIPS+=("$strip_tabs")
           fi
         elif [ "${cmd:$((i+1)):1}" = "(" ]; then
           printf 'E process_substitution\n'
@@ -621,6 +642,10 @@ _tokenize() {
   done
 
   _flush
+  # #256: `<<TERM` on the last line with no body/terminator after it.
+  if [ ${#HD_TERMS[@]} -gt 0 ]; then
+    printf 'E heredoc_unterminated\n'
+  fi
   return 0
 }
 
@@ -1049,6 +1074,70 @@ _try_agent_marker_verdict() {
   return 1
 }
 
+# #410: detect GNU/BSD in-place sed. Args: $1 = index of the first sed
+# argument; $2..$N = segment tokens. Returns 0 (and prints the lone file
+# operand, or "" when ambiguous) iff -i / -i<SUF> / --in-place[=SUF] / a short
+# cluster reaching `i` (-ni, -Ei) is present; 1 otherwise (plain filter).
+# BSD `-i ''` / `-i ""`: the empty token after a bare -i is the suffix.
+_sed_inplace_target() {
+  local k=$1
+  shift
+  local -a T=("$@")
+  local n=${#T[@]}
+  local inplace=0 have_script=0 opts_done=0
+  local -a ops=()
+  while [ $k -lt $n ]; do
+    local t="${T[$k]}"
+    if [ $opts_done -eq 1 ]; then
+      ops+=("$t"); k=$((k+1)); continue
+    fi
+    case "$t" in
+      --) opts_done=1 ;;
+      --in-place|--in-place=*) inplace=1 ;;
+      --expression|--file) have_script=1; k=$((k+1)) ;;
+      --expression=*|--file=*) have_script=1 ;;
+      --line-length) k=$((k+1)) ;;
+      --*) ;;
+      -?*)
+        # Short cluster: walk letters; e/f/l take an argument (rest of the
+        # cluster, else the next token); i takes an OPTIONAL attached suffix
+        # (rest of the cluster), so it ends the cluster.
+        local _c=1 _L=${#t}
+        while [ $_c -lt $_L ]; do
+          local ch="${t:$_c:1}"
+          case "$ch" in
+            i)
+              inplace=1
+              if [ $((_c+1)) -eq $_L ] && [ $((k+1)) -lt $n ] && [ -z "${T[$((k+1))]}" ]; then
+                k=$((k+1))  # BSD `-i ''`
+              fi
+              break ;;
+            e|f)
+              have_script=1
+              [ $((_c+1)) -eq $_L ] && k=$((k+1))
+              break ;;
+            l)
+              [ $((_c+1)) -eq $_L ] && k=$((k+1))
+              break ;;
+          esac
+          _c=$((_c+1))
+        done
+        ;;
+      *) ops+=("$t") ;;
+    esac
+    k=$((k+1))
+  done
+  [ $inplace -eq 1 ] || return 1
+  # Without -e/-f the first operand is the script, not a file.
+  if [ $have_script -eq 0 ] && [ ${#ops[@]} -gt 0 ]; then
+    ops=("${ops[@]:1}")
+  fi
+  if [ ${#ops[@]} -eq 1 ]; then
+    printf '%s' "${ops[0]}"
+  fi
+  return 0
+}
+
 _classify_segment() {
   # $3 (optional): the RAW command text threaded from classify_command, used
   # by _try_agent_marker_verdict for an exact marker-key match (redirects
@@ -1136,6 +1225,19 @@ _classify_segment() {
   local r
   local has_nonmarker_redirect=0
   local nonmarker_redir_target="" nonmarker_redir_count=0
+  # #194: record marker redirects instead of returning on the first one, so
+  # a sibling redirect in the same segment (`echo ok > .claude/.plan-approval-
+  # pending > scripts/foo.mjs`) is still seen. The verdict is decided after
+  # the loop has inspected EVERY redirect.
+  local marker_redir_target="" marker_redir_count=0
+  _note_marker_redirect() {
+    local _abs
+    _abs="$(_resolve_marker_path "$1" "$target_root")"
+    if [ "$marker_redir_count" -eq 0 ] || [ "$_abs" != "$marker_redir_target" ]; then
+      marker_redir_count=$((marker_redir_count+1))
+    fi
+    [ -z "$marker_redir_target" ] && marker_redir_target="$_abs"
+  }
   for r in ${REDIRS[@]+"${REDIRS[@]}"}; do
     local rop="${r%%	*}"
     local rtarget="${r#*	}"
@@ -1158,64 +1260,43 @@ _classify_segment() {
     # layered enforcement.
     case "$rbase" in
       .pre-checkpoint-done|.post-checkpoint-done|.plan-approval-pending|.checkpoint-required|.post-checkpoint-required|.preflight-done|.last-user-prompt.json)
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       .last-user-prompt.*.json)
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       # #268 fix E1: per-session plan-marker via redirect. Same shape as
       # the legacy literal case-arm above. Loose glob here; strict validation
       # via plan_marker_basename_matches happens in checkpoint-gate.sh.
       .plan-approval-pending.*)
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       # #279 fix: per-session preflight-marker via redirect. Sibling of the
       # .plan-approval-pending.* arm. Loose glob; strict validation via
       # preflight_marker_basename_matches at gate layer.
       .preflight-done.*)
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       # Rank-2: per-session checkpoint-done markers via redirect. Siblings
       # of the .plan-approval-pending.* / .preflight-done.* arms above.
       # Loose glob; strict validation via namespaced_marker_basename_matches
       # at gate layer (checkpoint-gate.sh marker_basename_for_target).
       .pre-checkpoint-done.*|.post-checkpoint-done.*)
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       # Rank-2: per-session checkpoint-required markers via redirect (hook
       # arming surface; agents do not write these directly under normal
       # flow, but classifying as marker_write lets the helper-invocation
       # path go through the same gate validation).
       .checkpoint-required.*|.post-checkpoint-required.*)
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       .so-runbook-shown.*)
         # Runbook UX-marker (second-opinion-gate). Same-class with the
         # other marker write surfaces; classifies as marker_write so the
         # touch/rm/tee/redirect paths share the wrong-root detection +
         # exemption flow in checkpoint-gate.sh.
-        local abs_target
-        abs_target="$(_resolve_marker_path "$rtarget" "$target_root")"
-        printf '%s\t%s\t%s\n' "marker_write" "$abs_target" "redirect_to_marker"
-        return 0
+        _note_marker_redirect "$rtarget"
         ;;
       *)
         has_nonmarker_redirect=1
@@ -1228,6 +1309,25 @@ _classify_segment() {
   # F2: >1 non-marker redirect → target is ambiguous (mixed source/off-repo
   # destinations). Clear it so plan-gate localizes nothing and gates conservatively.
   [ "$nonmarker_redir_count" -gt 1 ] && nonmarker_redir_target=""
+
+  # #194: marker verdict only when EVERY output redirect is that one marker
+  # (benign /dev sinks excluded above). A marker redirect alongside a real-
+  # file redirect, or two different marker targets, is a write the marker
+  # exemption must not cover → shared_write. The target is the lone non-
+  # marker file when there is exactly one (off-repo stays allowed, R3);
+  # otherwise empty so the gates block conservatively.
+  if [ "$marker_redir_count" -gt 0 ]; then
+    if [ "$has_nonmarker_redirect" = "0" ] && [ "$marker_redir_count" -eq 1 ]; then
+      printf '%s\t%s\t%s\n' "marker_write" "$marker_redir_target" "redirect_to_marker"
+      return 0
+    fi
+    local _mixed_target=""
+    if [ "$marker_redir_count" -eq 1 ] && [ "$nonmarker_redir_count" -eq 1 ]; then
+      _mixed_target="$nonmarker_redir_target"
+    fi
+    printf '%s\t%s\t%s\n' "shared_write" "$_mixed_target" "redirect_marker_and_other_target"
+    return 0
+  fi
 
   # ---- Strip leading env-assignment tokens (VAR=value) ----
   # #268 fix F17/F18: also count how many env-prefix tokens were stripped
@@ -1268,6 +1368,20 @@ _classify_segment() {
   # ---- Empty / no-op shells ----
   case "$first" in
     :|true|false)
+      # #410: the builtin writes nothing, but its redirect does — `: > f`
+      # truncates/creates f. A non-marker (non-/dev-sink) redirect makes it
+      # a write to that target, same as the readonly_cmd arm below.
+      if [ "$has_nonmarker_redirect" = "1" ]; then
+        # G1 (#351): agent-verdict escape BEFORE the conservative shared_write
+        # (same as the readonly_cmd / echo redirect arms).
+        local __nb_mv
+        if __nb_mv="$(_try_agent_marker_verdict)"; then
+          printf '%s\n' "$__nb_mv"
+          return 0
+        fi
+        printf '%s\t%s\t%s\n' "shared_write" "$nonmarker_redir_target" "no_op_builtin_redirected"
+        return 0
+      fi
       printf '%s\t\t%s\n' "read_only" "no_op_builtin"
       return 0
       ;;
@@ -1739,6 +1853,21 @@ _classify_segment() {
       # bypass push detection if env classified as read_only. tee likewise:
       # always writes. Err safe and let those fall through to default
       # shared_write or, where structural risk warrants, unsafe_complex below.
+      # #410: `sed -i` / `--in-place` edits its file operands in place — a
+      # write, not a filter. TARGET is the lone file operand (off-repo stays
+      # allowed, R3); empty when there are several or none can be isolated.
+      if [ "$first" = "sed" ]; then
+        local __sed_inplace
+        if __sed_inplace="$(_sed_inplace_target "$((idx+1))" "${TOKS[@]}")"; then
+          local __sd_mv
+          if __sd_mv="$(_try_agent_marker_verdict)"; then
+            printf '%s\n' "$__sd_mv"
+            return 0
+          fi
+          printf '%s\t%s\t%s\n' "shared_write" "$__sed_inplace" "sed_in_place"
+          return 0
+        fi
+      fi
       if [ "$has_nonmarker_redirect" = "1" ]; then
         # G1 (#351): agent-verdict escape BEFORE the conservative shared_write.
         local __rd_mv
@@ -2179,6 +2308,50 @@ _classify_git() {
       fi
       printf '%s\t\t%s\n' "read_only" "git_config_read"
       return 0
+      ;;
+    notes|stash|submodule)
+      # #117: inverted default (same pattern as #116 branch/tag/remote). The
+      # read subcommands list/show (notes, stash) and status/summary
+      # (submodule) are pure reads; every other action keeps its previous
+      # write label. First non-flag token after the subcommand is the action
+      # (`git notes --ref=x show`, `git submodule --quiet status`).
+      local _gj=$((i+1)) _act=""
+      # `git stash -m list` / `git stash -- f` is a PUSH (any leading option
+      # means push), so for stash only the IMMEDIATE next token is the action.
+      if [ "$sub" = "stash" ]; then
+        case "${T[$_gj]:-}" in -*|"") _gj=${#T[@]} ;; esac
+      fi
+      while [ $_gj -lt ${#T[@]} ]; do
+        case "${T[$_gj]}" in
+          --ref) _gj=$((_gj+2)) ;;   # notes --ref <ref>
+          -*) _gj=$((_gj+1)) ;;
+          *)  _act="${T[$_gj]}"; break ;;
+        esac
+      done
+      case "$sub:$_act" in
+        notes:|notes:list|notes:show|stash:list|stash:show|submodule:|submodule:status|submodule:summary)
+          # Bare `git notes` = list; bare `git submodule` = status. Bare
+          # `git stash` = push (write) — NOT in this arm.
+          printf '%s\t\t%s\n' "read_only" "git_${sub}_read"
+          return 0
+          ;;
+        submodule:foreach)
+          # Runs an arbitrary shell command per submodule; not recursively
+          # classified (issue #117 deferral) → conservative.
+          printf '%s\t\t%s\n' "unsafe_complex" "git_submodule_foreach"
+          return 0
+          ;;
+        notes:*)
+          # add/edit/append/copy/remove/prune/merge/unknown → refs only.
+          printf '%s\t\t%s\n' "nonsrc_write" "git_metadata_write"
+          return 0
+          ;;
+        *)
+          # stash push/pop/apply/drop/…/bare, submodule update/add/… → ARM.
+          printf '%s\t\t%s\n' "shared_write" "git_local_write"
+          return 0
+          ;;
+      esac
       ;;
     # PR-B2 (#351, §14-F1): git subcommand as a TOTAL FUNCTION. The git
     # subcommand set is closed/finite (NOT the leaky open-binary class), so we
@@ -2748,7 +2921,7 @@ classify_path() {
 
 # Wrapper-utility prefixes that may precede the real command verb. Same set
 # the existing classifier handles for bash -c / env / sudo / nohup / timeout.
-_PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec|systemd-run|flatpak-spawn)$'
+_PREFLIGHT_WRAPPERS_RE='^(env|command|sudo|doas|nohup|timeout|stdbuf|nice|chrt|ionice|setsid|exec|systemd-run|flatpak-spawn|watch|xargs|parallel)$'
 
 # Two-word command runners: verb + fixed subcommand consume index; rest of
 # loop unwraps wrapper flags. Codex r3 finding `...bd73`. Patterns:
@@ -2763,6 +2936,39 @@ _PREFLIGHT_REVIEW_TAG_RE='codex|review|second-opinion|plan-review|code-review|cr
 # em-* CLI verbs that route review traffic. Bare names AND `node */<name>.mjs`
 # AND `npx <name>` AND plugin-script forms all classified.
 _PREFLIGHT_EM_VERBS_RE='^(em-store|em-revise|em-violation)(\.mjs)?$'
+
+# #241: env option token that introduces a command string: -S, --split-string,
+# --split-string=STR, or a short cluster of boolean flags ending the run at S
+# (-iS, -vS, -0S, -iSSTR). `-uS` is `-u S` (unset var S), not split-string.
+_preflight_is_env_split() {
+  case "$1" in
+    -S|--split-string|--split-string=*) return 0 ;;
+    --*) return 1 ;;
+  esac
+  [[ "$1" =~ ^-[iv0]*S ]]
+}
+
+# #241: print the command string for an env split-string option at index $1
+# (tokens $2..$N): the attached value (--split-string=STR, -SSTR, -iSSTR) or
+# the next token.
+_preflight_env_split_string() {
+  local k=$1
+  shift
+  local -a T=("$@")
+  local t="${T[$k]}"
+  case "$t" in
+    --split-string=*) printf '%s' "${t#*=}"; return 0 ;;
+    --split-string) printf '%s' "${T[$((k+1))]:-}"; return 0 ;;
+  esac
+  local rest="${t#-}"
+  rest="${rest#"${rest%%S*}"}"   # drop the boolean flags before S
+  rest="${rest#S}"
+  if [ -n "$rest" ]; then
+    printf '%s' "$rest"
+  else
+    printf '%s' "${T[$((k+1))]:-}"
+  fi
+}
 
 # _preflight_unwrap_index — emit (to stdout) the index past wrapper-utility
 # prefix tokens. Args: $1 = start_index; $2..$N = all tokens.
@@ -2890,9 +3096,32 @@ _preflight_unwrap_index() {
           arg_re=''
           long_arg_re='^--(env|directory|forward-fd)$'
           ;;
+        # #241: command-runner wrappers. `watch CMD…`, `xargs [-I R] CMD…`,
+        # `parallel CMD… ::: args` exec their first positional.
+        watch)
+          arg_re='^-[n]$'
+          long_arg_re='^--(interval)$'
+          ;;
+        xargs)
+          arg_re='^-[IaEdLnPs]$'
+          long_arg_re='^--(arg-file|delimiter|eof|max-lines|max-args|max-procs|max-chars|process-slot-var)$'
+          ;;
+        parallel)
+          arg_re='^-[jJSILNnPdEas]$'
+          long_arg_re='^--(jobs|sshlogin|max-args|max-lines|delimiter|arg-file|max-chars|tmpdir|joblog|results|timeout|retries|delay|env|workdir)$'
+          ;;
       esac
       while [ $i -lt $n ]; do
         local w="${T[$i]}"
+        # #241: env -S/--split-string carries a COMMAND STRING. Stop ON the
+        # option token (index points at a `-`-leading token, which the
+        # normal loop never returns) so the caller can recurse into the
+        # string — at ANY position in a wrapper chain (`sudo env -S …`,
+        # `timeout 30s env -S …`), not only when env is token 0.
+        if [ "$wrapper" = "env" ] && _preflight_is_env_split "$w"; then
+          printf '%d' "$i"
+          return 0
+        fi
         case "$w" in
           *=*) i=$((i+1)) ;;
           --*)
@@ -3036,50 +3265,6 @@ _classify_preflight_segment() {
     return 0
   fi
 
-  # Special-case: env -S "<command-string>" or env --split-string "<cmd>"
-  # treats the argument as a command vector to execute (GNU coreutils env
-  # `-S/--split-string` semantics). Codex r5 finding `...729a`. Detect
-  # before generic unwrap consumes -S as a regular arg-taking flag.
-  if [ $n -ge 3 ] && [ "${T[0]}" = "env" ]; then
-    local _envk=1
-    while [ $_envk -lt $n ]; do
-      local _envt="${T[$_envk]}"
-      case "$_envt" in
-        -S|--split-string)
-          local _envinner="${T[$((_envk+1))]:-}"
-          if [ -n "$_envinner" ]; then
-            classify_preflight_command "$_envinner" "$_repo_root"
-            return 0
-          fi
-          break
-          ;;
-        --split-string=*)
-          local _envinner="${_envt#*=}"
-          if [ -n "$_envinner" ]; then
-            classify_preflight_command "$_envinner" "$_repo_root"
-            return 0
-          fi
-          break
-          ;;
-        # `-S` may appear inside a short-opt cluster: -vS, -iS, etc.
-        -*S*)
-          case "$_envt" in
-            --*) _envk=$((_envk+1)); continue ;;
-          esac
-          local _envinner="${T[$((_envk+1))]:-}"
-          if [ -n "$_envinner" ]; then
-            classify_preflight_command "$_envinner" "$_repo_root"
-            return 0
-          fi
-          break
-          ;;
-        -*) _envk=$((_envk+1)) ;;
-        *=*) _envk=$((_envk+1)) ;;
-        *) break ;;
-      esac
-    done
-  fi
-
   local i
   i="$(_preflight_unwrap_index 0 "${T[@]}")"
   if [ $i -ge $n ]; then
@@ -3107,6 +3292,104 @@ _classify_preflight_segment() {
     printf '%s\t%s\t%s\n' "none" "" "empty_after_subshell_strip"
     return 0
   fi
+
+  # #241: env -S/--split-string (GNU coreutils) executes its argument as a
+  # command vector. _preflight_unwrap_index stops ON that option (the only
+  # case it returns a `-`-leading index), wherever env sits in the wrapper
+  # chain (`sudo env -S …`, `timeout 30s env -S …`, `env A=1 sudo env -S …`).
+  # Codex r5 finding `...729a` (token-0 form) + #241 (stacked form).
+  case "$verb" in
+    -*)
+      local _envinner
+      _envinner="$(_preflight_env_split_string "$i" "${T[@]}")"
+      if [ -n "$_envinner" ]; then
+        classify_preflight_command "$_envinner" "$_repo_root"
+        return 0
+      fi
+      printf '%s\t%s\t%s\n' "none" "" "env_split_string_empty"
+      return 0
+      ;;
+  esac
+
+  # #241: a verb token containing whitespace can only run through a wrapper
+  # that joins its argv into a shell string (`watch "codex exec foo"`).
+  # Recurse on the joined remainder (fail-closed direction: only a real
+  # review verb inside it can match).
+  case "$verb" in
+    *[[:space:]]*)
+      local _joined="${T[*]:$i}"
+      classify_preflight_command "$_joined" "$_repo_root"
+      return 0
+      ;;
+  esac
+
+  # #241: wrappers that carry the command as a -c STRING (script, su,
+  # runuser) or as a trailing argv (runuser -u U [--] CMD, find -exec CMD ;).
+  case "$verb" in
+    script|su|runuser)
+      local k=$((i+1)) _rn_user=0 _inner=""
+      while [ $k -lt $n ]; do
+        local kt="${T[$k]}"
+        case "$kt" in
+          -c|--command|--session-command)
+            _inner="${T[$((k+1))]:-}"; break ;;
+          --command=*|--session-command=*)
+            _inner="${kt#*=}"; break ;;
+          --)
+            # runuser/su `-- CMD…` (runuser -u U -- CMD) → argv form.
+            if [ "$verb" = "runuser" ] && [ $((k+1)) -lt $n ]; then
+              _classify_preflight_segment "$_repo_root" "${T[@]:$((k+1))}"
+              return 0
+            fi
+            k=$((k+1)) ;;
+          -u|--user)
+            _rn_user=1; k=$((k+2)) ;;
+          -g|--group|-G|--supp-group|-s|--shell|-w|--whitelist-environment|-E|-I|-O|-T|-B|-m|--output-limit|--log-io|--log-in|--log-out|--log-timing|--echo)
+            k=$((k+2)) ;;
+          --*) k=$((k+1)) ;;
+          -*c)
+            # short cluster ending in c (`-qc`, `-lc`) → -c STRING
+            _inner="${T[$((k+1))]:-}"; break ;;
+          -*) k=$((k+1)) ;;
+          *)
+            # runuser -u U CMD… (no --): first positional is the command.
+            if [ "$verb" = "runuser" ] && [ $_rn_user -eq 1 ]; then
+              _classify_preflight_segment "$_repo_root" "${T[@]:$k}"
+              return 0
+            fi
+            k=$((k+1)) ;;
+        esac
+      done
+      if [ -n "$_inner" ]; then
+        classify_preflight_command "$_inner" "$_repo_root"
+        return 0
+      fi
+      ;;
+    find)
+      # find … -exec|-execdir|-ok|-okdir CMD… ; (or +). Classify each
+      # command vector; first match wins.
+      local k=$((i+1))
+      while [ $k -lt $n ]; do
+        case "${T[$k]}" in
+          -exec|-execdir|-ok|-okdir)
+            local _fs=$((k+1)) _fe=$((k+1))
+            while [ $_fe -lt $n ] && [ "${T[$_fe]}" != ";" ] && [ "${T[$_fe]}" != "+" ]; do
+              _fe=$((_fe+1))
+            done
+            if [ $_fe -gt $_fs ]; then
+              local _fr
+              _fr="$(_classify_preflight_segment "$_repo_root" "${T[@]:$_fs:$((_fe-_fs))}")"
+              if [ "${_fr%%	*}" != "none" ]; then
+                printf '%s\n' "$_fr"
+                return 0
+              fi
+            fi
+            k=$((_fe+1)) ;;
+          *) k=$((k+1)) ;;
+        esac
+      done
+      ;;
+  esac
 
   # Direct codex CLI
   if [ "$verb" = "codex" ]; then
