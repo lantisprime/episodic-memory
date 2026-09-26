@@ -1046,13 +1046,13 @@ assert_blocked "B-17. Bash: 'cat /tmp/x >> .checkpoints/<marker>' from worktree"
   "$(mock_json_cwd 'Bash' 'cat /tmp/x >> .checkpoints/.pre-checkpoint-done' "$WORKTREE_DIR")" \
   "Relative marker reference"
 
-# B-18 (codex F16 heredoc): DEFERRED — classifier mis-labels
-# `cat <<EOF > .checkpoints/<marker>\nx\nEOF` as read_only, so the precheck
-# (which only runs for non-read_only) doesn't fire. This is a classifier
-# bug separate from the wrong-root cluster. Tracked as FU: "classifier
-# heredoc-with-redirect mis-classification" (see PR description).
-# The 7 other verbs (touch, mv, cp, install, dd, redirect, rm, tee, cat>>)
-# are covered by B-8/B-10/B-11/B-12/B-13/B-14/B-15/B-16/B-17.
+# B-18 (codex F16 heredoc): re-enabled by #256. The classifier used to drop
+# the redirect after `<<EOF` on the introducing line and label this read_only,
+# so the wrong-root precheck (non-read_only only) never fired. It is now
+# marker_write → the precheck blocks it like the other verbs (B-8..B-17).
+assert_blocked "B-18. Bash: 'cat <<EOF > .checkpoints/<marker>' heredoc from worktree (#256)" \
+  "$(mock_json_cwd 'Bash' $'cat <<EOF > .checkpoints/.pre-checkpoint-done\nx\nEOF' "$WORKTREE_DIR")" \
+  "Relative marker reference"
 
 # ---- Codex F15 — `./` and `././` prefix chains ----
 

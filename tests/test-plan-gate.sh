@@ -201,6 +201,30 @@ assert_blocked "7c. BashOutput blocked with marker (deferred per Codex review)" 
 assert_blocked "7d. KillBash blocked with marker (mutates process state)" \
   "$(mock_json 'KillBash')"
 
+# C01 (#410/#256/#194/#117): repo-source writes the classifier used to label
+# read_only / marker_write must be held while the plan marker is pending;
+# off-repo equivalents stay allowed (R3); read-only git subcommands pass.
+assert_blocked "7e1. ': > scripts/evil.mjs' blocked (#410)" \
+  "$(mock_json 'Bash' ': > scripts/evil.mjs')"
+assert_blocked "7e2. sed -i '' in-place edit of repo source blocked (#410)" \
+  "$(mock_json 'Bash' "sed -i '' 's/x/y/' scripts/real.mjs")"
+assert_blocked "7e3. sed -i 's/x/y/' repo source blocked (#410)" \
+  "$(mock_json 'Bash' "sed -i 's/x/y/' scripts/foo.mjs")"
+assert_allowed "7e4. ': > /tmp/x' off-repo allowed (#410 R3)" \
+  "$(mock_json 'Bash' ': > /tmp/c01-noop-target')"
+assert_allowed "7e5. sed -i '' off-repo allowed (#410 R3)" \
+  "$(mock_json 'Bash' "sed -i '' 's/x/y/' /tmp/c01-sed-target")"
+assert_blocked "7e6. heredoc redirect to repo source blocked (#256)" \
+  "$(mock_json 'Bash' $'cat <<EOF > scripts/new.mjs\nx\nEOF')"
+assert_blocked "7e7. marker redirect + sibling repo-source redirect blocked (#194)" \
+  "$(mock_json 'Bash' 'echo ok > .claude/.plan-approval-pending > scripts/foo.mjs')"
+assert_allowed "7e8. git stash list allowed (#117 read_only)" \
+  "$(mock_json 'Bash' 'git stash list')"
+assert_allowed "7e9. git submodule status allowed (#117 read_only)" \
+  "$(mock_json 'Bash' 'git submodule status')"
+assert_blocked "7e10. git stash pop still blocked (#117 write)" \
+  "$(mock_json 'Bash' 'git stash pop')"
+
 # ===========================================================================
 echo ""
 echo "--- Without marker ---"
