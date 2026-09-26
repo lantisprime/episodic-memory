@@ -721,4 +721,3 @@ node tools/deploy-audit.mjs                       # clean (S6 touched install.mj
 - **Flag high-blast-radius:** S3, S4, S5 are `focused-review-before-build`.
 - **Real-runtime E2E for install/hook:** S5/S6 drive the deployed adapter under real OpenCode + real `install.mjs`; no node-call substitute (M4).
 - **Two-runtime caveat:** adapter (Bun) spawns bridge (`node`); only the real-runtime E2E proves OpenCode honors the thrown error and that the bridge resolves the target repo from `payload.cwd`.
-```

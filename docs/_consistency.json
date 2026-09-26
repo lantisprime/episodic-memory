@@ -1,0 +1,59 @@
+{
+  "$schema_version": "1.0.0",
+  "_comment": "Parallel-file consistency groups (issues #131, #210; Rule 14). Each group names a kind implemented in tools/check-doc-consistency.mjs and the files it diffs. To add a group: pick a kind (delegate | rfc-table | script-inventory | hook-gates | same-line), add an entry with a unique id and a one-line why, run `node tools/check-doc-consistency.mjs`, and add a seeded-drift case to tests/test-check-doc-consistency.mjs. A new kind needs a checker function plus a test; see the tool header.",
+  "groups": [
+    {
+      "id": "rfc-status-registry",
+      "kind": "delegate",
+      "why": "RFC frontmatter status/title <-> docs/rfcs/_index.json <-> docs/rfcs/README.md Active RFCs table is already validated by em-rfc-validate; reused here, not re-implemented.",
+      "command": ["scripts/em-rfc-validate.mjs"]
+    },
+    {
+      "id": "readme-rfc-table",
+      "kind": "rfc-table",
+      "why": "The top-level README RFC table missed RFC-004/005/006 (2026-05-09) and later RFC-012..015 with RFC-007 still shown as Draft (#210).",
+      "index": "docs/rfcs/_index.json",
+      "file": "README.md",
+      "section": "RFCs",
+      "link_prefix": "docs/rfcs/"
+    },
+    {
+      "id": "readme-script-inventory",
+      "kind": "script-inventory",
+      "why": "README Scripts Reference missed 12 shipped scripts (2026-05-09) and 29 by 2026-09-26 (#210). Every scripts/*.mjs is documented in that section or named below as internal.",
+      "scripts_dir": "scripts",
+      "file": "README.md",
+      "section": "Scripts Reference",
+      "internal": {
+        "agent-classifier-dispatch.mjs": "Tier 2/3 orchestrator called by hooks/lib/agent-classifier.sh",
+        "bp1-rfc-scan.mjs": "RFC scan helper spawned by bp1-orchestrator.mjs",
+        "checkpoint-marker.mjs": "checkpoint quartet marker helper called by checkpoint-gate.sh",
+        "classifier-config-loader.mjs": "config resolver imported by the classifier dispatch scripts",
+        "classifier-hold-consult.mjs": "pre-hold consult called by checkpoint-gate.sh",
+        "classifier-marker.mjs": "per-session classification marker helper called by checkpoint-gate.sh",
+        "classifier-override-lookup.mjs": "Tier 0 override read helper called by hooks/lib/command-classifier.sh",
+        "classifier-override-persist.mjs": "verdict auto-persist helper called by hooks/lib/agent-classifier.sh",
+        "em-lock.mjs": "atomic file lock used by em-routines and em-backup-sync paths",
+        "enforce-contract.mjs": "enforcement thin-waist called by the gate hooks (RFC-008 P3b)",
+        "llm-classify.mjs": "Tier 3 intent classifier called by the classifier dispatch scripts",
+        "plan-marker.mjs": "plan-approval marker helper called by the gate hooks (USER_MANUAL Scenario 12 shows its one operator use)",
+        "preflight-marker-write.mjs": "pre-flight marker writer called by preflight-gate.sh and command-classifier.sh"
+      }
+    },
+    {
+      "id": "user-manual-gates",
+      "kind": "hook-gates",
+      "why": "USER_MANUAL Scenario 12 listed 2 of 3 active gates (2026-05-09). The installed gate set is HOOK_SPECS in scripts/lib/install-manifest.mjs (the list install.mjs registers); Scenario 12 must name exactly those gates and state their count.",
+      "manifest": "scripts/lib/install-manifest.mjs",
+      "file": "docs/USER_MANUAL.md",
+      "section": "Scenario 12: The Checkpoint Gate Stopped the AI"
+    },
+    {
+      "id": "workplan-discovery-recipe",
+      "kind": "same-line",
+      "why": "The session-start workplan pointer recipe is duplicated; PR #122 shipped a broken copy (--tags). The workplan revision itself lives in episodes, not in repo files, so the recipe is the repo-side pointer to keep in sync (#131).",
+      "pattern": "em-search\\.mjs --tag workplan --category decision",
+      "files": ["CLAUDE.md", "docs/PLAN.md"]
+    }
+  ]
+}
