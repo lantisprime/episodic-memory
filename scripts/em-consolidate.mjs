@@ -581,7 +581,9 @@ if (foldSuperseded) {
       stores.push({ project_path: st.project_path, data_dir: st.data_dir, label: st.label, ...res })
     }
 
-    console.log(JSON.stringify({
+    // Drain-before-exit (#486): em-search.mjs idiom — a report past the ~64KB
+    // pipe buffer is otherwise truncated by process.exit.
+    await new Promise(resolve => process.stdout.write(JSON.stringify({
       status: 'ok',
       mode: 'fold-superseded',
       all_projects: true,
@@ -590,7 +592,7 @@ if (foldSuperseded) {
       stores,
       folded_total: foldedTotal,
       ...(dryRun && foldedTotal ? { hint: 'Re-run without --dry-run (plus --confirm) to archive.' } : {}),
-    }))
+    }) + '\n', resolve))
     process.exit(0)
   }
 
@@ -620,7 +622,8 @@ if (foldSuperseded) {
     emitProtectionAbort(indexUnreadableAbort(DATA_DIR, e), 'fold-superseded')
   }
 
-  console.log(JSON.stringify({
+  // Drain-before-exit (#486): see the --all-projects report above.
+  await new Promise(resolve => process.stdout.write(JSON.stringify({
     status: 'ok',
     mode: 'fold-superseded',
     dry_run: dryRun,
@@ -630,7 +633,7 @@ if (foldSuperseded) {
     ...(res.skipped.length ? { skipped: res.skipped } : {}),
     folded_total: res.folded_total,
     ...(dryRun && res.folded_total ? { hint: 'Re-run without --dry-run to archive.' } : {}),
-  }))
+  }) + '\n', resolve))
   process.exit(0)
 }
 
@@ -1041,7 +1044,9 @@ if (!apply) {
     protectedClusters: dryRunSkips.playbookSkips,
     substitutedClusters: [],
   })
-  console.log(JSON.stringify({
+  // Drain-before-exit (#486): em-search.mjs idiom — a large cluster report is
+  // otherwise truncated at the ~64KB pipe buffer by process.exit.
+  await new Promise(resolve => process.stdout.write(JSON.stringify({
     status: 'ok',
     dry_run: true,
     clusters: report,
@@ -1049,7 +1054,7 @@ if (!apply) {
     hint: clusters.length ? 'Re-run with --apply to consolidate.' : undefined,
     ...(dryRunSkips.allSkips.length ? { protection_skips: dryRunSkips.allSkips } : {}),
     ...(dryRunAdvisory ? { playbook_advisory: dryRunAdvisory } : {}),
-  }))
+  }) + '\n', resolve))
   process.exit(0)
 }
 // No-clusters fast path: lock-free exit when --apply --confirm produced

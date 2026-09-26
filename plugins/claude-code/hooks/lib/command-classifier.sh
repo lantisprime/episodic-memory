@@ -19,7 +19,7 @@
 #                         file, non-allowlisted node/python, cp/mv/dd, working-
 #                         tree-mutating git, …). ARMS the pre-checkpoint.
 #   push_or_pr_create   publishes/mutates shared state
-#                         (git push, gh pr create/merge/close/…, gh issue …,
+#                         (git push, gh pr create/merge/close/…,
 #                          gh release, gh api -X POST/PUT/PATCH/DELETE, …)
 #   marker_write        gate-control deadlock-prevention (writes/removes a
 #                         repo-root .claude/.* marker). TARGET = absolute path.
@@ -2293,7 +2293,11 @@ _classify_gh() {
     issue)
       case "$sub" in
         create|close|reopen|edit|comment|delete|develop|lock|unlock|pin|unpin|transfer)
-          printf '%s\t\t%s\n' "push_or_pr_create" "gh_issue_${sub}"
+          # #471: issue-tracker metadata writes publish no repo source, so
+          # they must not arm the push-gate's post-checkpoint (Rule 18 E2E +
+          # bug logging). nonsrc_write keeps them visible as writes (plan-
+          # gate/audit) without the push-class hold.
+          printf '%s\t\t%s\n' "nonsrc_write" "gh_issue_${sub}"
           return 0
           ;;
         list|view|status)
@@ -2306,7 +2310,20 @@ _classify_gh() {
           ;;
       esac
       ;;
-    release|repo|gist|label|workflow|run|secret|variable|ssh-key|gpg-key)
+    label)
+      # #471: labels are tracker metadata, same class as gh issue writes.
+      case "$sub" in
+        list|"")
+          printf '%s\t\t%s\n' "read_only" "gh_label_${sub:-no_sub}"
+          return 0
+          ;;
+        *)
+          printf '%s\t\t%s\n' "nonsrc_write" "gh_label_${sub}"
+          return 0
+          ;;
+      esac
+      ;;
+    release|repo|gist|workflow|run|secret|variable|ssh-key|gpg-key)
       case "$sub" in
         list|view|status|download)
           printf '%s\t\t%s\n' "read_only" "gh_${cmd}_${sub}"
