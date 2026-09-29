@@ -395,6 +395,18 @@ jobs:
       - name: Run RFC-009 P1a --history multi-parent walk tests
         run: node tests/test-history-walk.mjs
 
+      - name: Run em-search --history fork-branch walk tests (#458)
+        run: node tests/test-history-fork-branches.mjs
+
+      - name: Run recency tiebreak tests (#621)
+        run: node tests/test-recency-tiebreak.mjs
+
+      - name: Run em-search --sort recent + unknown-flag tests (#123)
+        run: node tests/test-search-sort-recent.mjs
+
+      - name: Run em-revise tag replace/remove tests (#506)
+        run: node tests/test-revise-tag-replace.mjs
+
       - name: Run em-search --materialize suite (#634a)
         run: node tests/test-materialize.mjs
 

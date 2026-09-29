@@ -42,7 +42,7 @@ Run `node install.mjs --tool claude-code --install-second-opinion` to write the 
 ## Discovering active priorities (read on session start)
 Before recommending or starting work, fetch the latest workplan:
 ```bash
-node scripts/em-search.mjs --tag workplan --category decision --limit 1 --scope all --full --no-score --no-track
+node scripts/em-search.mjs --tag workplan --category decision --limit 1 --scope all --full --sort recent --no-track
 ```
 Workplans are `category: decision` + tag `workplan`. The terminal revision in the supersedes chain is current. The active queue table holds priority/status/session/tokens/depends-on per item. Flag rationale: see `scripts/em-search.mjs --help`.
 
