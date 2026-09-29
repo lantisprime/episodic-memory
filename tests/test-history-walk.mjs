@@ -8,8 +8,8 @@
  * root, and the forward walk resumes FROM the requested id with `visited` seeded by the entire
  * spine. This guarantees the requested id is always present in its own history and that a
  * cyclic/contradictory back-edge into the spine cannot re-splice a duplicate (audit F1). A
- * supersedes FORK *beyond* the anchor (what supersedes/succeeds a node forward of the requested
- * id) stays CHARACTERIZED — last-writer-wins, deferred, relates #621.
+ * supersedes FORK *beyond* the anchor now returns every branch (#458) — pinned in
+ * test-history-fork-branches.mjs.
  */
 
 import assert from 'node:assert/strict';
@@ -84,8 +84,8 @@ t('testHistorySupersedesForkCharacterized', () => {
   // root superseded by BOTH b and c (fork immediately below root). #634b anchors the walk at the
   // REQUESTED id: querying either fork branch member returns THAT member's own line — the
   // requested id is always present in its own history (previously it could be entirely absent
-  // when the forward-from-root walk happened to surface the OTHER branch). Fork selection BEYOND
-  // the anchor stays characterized (last-writer-wins, deferred, relates #621) — not asserted here.
+  // when the forward-from-root walk happened to surface the OTHER branch). Every branch BEYOND
+  // the anchor is returned since #458 — asserted in test-history-fork-branches.mjs.
   const cwd = mkStore([{ id: 'root' }, { id: 'b', supersedes: 'root' }, { id: 'c', supersedes: 'root' }]);
   for (const branch of ['b', 'c']) {
     const r = history(cwd, branch);

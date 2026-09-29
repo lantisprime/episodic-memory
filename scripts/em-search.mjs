@@ -7,7 +7,7 @@
  *                      [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>]
  *                      [--scope local|global|all] [--include-superseded]
  *                      [--read <id>] [--history <id>] [--full] [--materialize]
- *                      [--no-score] [--no-track]
+ *                      [--no-score] [--no-track] [--sort score|recent]
  *                      (if both --read and --history are passed, --read wins;
  *                      --materialize composes with --read (never ambiguous), or
  *                      with a filter query iff the pre-limit match count is 1 —
@@ -16,6 +16,14 @@
  *
  * By default, searches local then global (scope=all), hides superseded episodes,
  * scores results by relevance, and tracks access.
+ * --sort recent (#123) keeps every filter but orders the matches newest-first
+ * (date + time, then the id's HHMMSS stamp, then id — #621) instead of by
+ * score; the score field is still reported. Unknown flags are rejected
+ * (exit 1) instead of being silently ignored (#123: `--tags`/`--id` typos
+ * returned unfiltered results).
+ * --history returns EVERY branch of a supersedes/consolidates fork beyond the
+ * requested id (#458), depth-first, siblings oldest-first; when the walk forks,
+ * `terminals` lists each branch's leaf id.
  * Outputs JSON: { status, count, episodes: [...] }
  */
 
@@ -26,7 +34,7 @@ import { resolveLocalDir } from './lib/local-dir.mjs'
 import { canonicalCategory } from './lib/categories.mjs'
 import {
   normalizeTags, loadTagsIndex, loadCategoryIndex, loadIndex, loadArchivedIndex,
-  computeScore, writeBackAccessTracking, scoreTextMatch,
+  computeScore, writeBackAccessTracking, scoreTextMatch, compareRecency,
   tokenizeQuery, loadTokensIndex, tokenCandidates, scorePartialMatch
 } from './lib/relevance.mjs'
 import { IndexUnreadableError, readBodyOrSkip, openReadableBody, BodyUnreadableError } from './lib/index-state.mjs'
@@ -40,7 +48,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-search.mjs', usage: 'node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>] [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] [--include-superseded] [--read <id>] [--history <id>] [--full] [--materialize] [--no-score] [--no-track] (if both --read and --history are passed, --read wins; --materialize composes with --read (never ambiguous), or with a filter query iff the pre-limit match count is 1 — otherwise a materialize-ambiguous error) [--warn-time-ms <n>] [--warn-count <n>]' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-search.mjs', usage: 'node em-search.mjs [--project <name>] [--tag <tag>] [--category <cat>] [--query <text>] [--since <YYYY-MM-DD>] [--limit <n>] [--scope local|global|all] [--include-superseded] [--read <id>] [--history <id>] [--full] [--materialize] [--no-score] [--no-track] [--sort score|recent] (if both --read and --history are passed, --read wins; --materialize composes with --read (never ambiguous), or with a filter query iff the pre-limit match count is 1 — otherwise a materialize-ambiguous error) [--warn-time-ms <n>] [--warn-count <n>]', notes: ['--sort score (default): rank by relevance (text match x time decay x usage boost).', '--sort recent: keep every filter (--tag/--category/--project/--query/--since/--scope) but order matches newest-first by date + time, then the id\'s HHMMSS stamp, then id; score is still reported, the partial-match tier is skipped. Use it for "the latest episode tagged X": --tag X --limit 1 --sort recent.', '--no-score: skip scoring entirely and order newest-first (same recency order as --sort recent, no score field); cannot be combined with --sort score.', '--history <id>: root -> requested id, then every successor branch forward of it (supersedes, superseded_by, consolidates), depth-first with siblings oldest-first; `terminals` is present when the walk forks.', 'Unknown flags are rejected with {status:"error", unknown_flag} and exit 1.'] }))
   process.exit(0)
 }
 
@@ -66,6 +74,39 @@ const noScore = argv.includes('--no-score')
 const noTrack = argv.includes('--no-track')
 const warnTimeMs = parseInt(flag('--warn-time-ms') || '500', 10)
 const warnCount = parseInt(flag('--warn-count') || '5000', 10)
+const sortMode = flag('--sort') ?? (argv.includes('--sort') ? '' : 'score')
+
+// #123: reject unknown flags instead of silently ignoring them — `--tags X`
+// (for --tag) and `--id X` (for --read) used to return UNFILTERED results that
+// looked like answers. Valued flags consume the next token (mirroring flag()),
+// so a value that happens to start with '-' is never misread as a flag.
+const VALUED_FLAGS = new Set(['--project', '--tag', '--category', '--query', '--since', '--limit', '--scope',
+  '--history', '--read', '--warn-time-ms', '--warn-count', '--sort'])
+const BOOLEAN_FLAGS = new Set(['--full', '--include-superseded', '--materialize', '--no-score', '--no-track'])
+const FLAG_HINTS = { '--tags': '--tag', '--id': '--read', '--scopes': '--scope', '--queries': '--query', '--categories': '--category' }
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i]
+  if (VALUED_FLAGS.has(a)) { i++; continue }
+  if (BOOLEAN_FLAGS.has(a) || !a.startsWith('-')) continue
+  const hint = FLAG_HINTS[a]
+  console.log(JSON.stringify({
+    status: 'error',
+    message: `Unknown flag "${a}"${hint ? ` (did you mean ${hint}?)` : ''}. Run with --help for the supported flags.`,
+    unknown_flag: a,
+  }))
+  process.exit(1)
+}
+
+const VALID_SORTS = ['score', 'recent']
+if (!VALID_SORTS.includes(sortMode)) {
+  console.log(JSON.stringify({ status: 'error', message: `Invalid --sort "${sortMode}". Must be one of: ${VALID_SORTS.join(', ')}` }))
+  process.exit(1)
+}
+if (noScore && flag('--sort') === 'score') {
+  console.log(JSON.stringify({ status: 'error', message: '--no-score and --sort score are contradictory; pass only one.' }))
+  process.exit(1)
+}
+const sortRecent = sortMode === 'recent' || noScore
 
 const VALID_SCOPES_SEARCH = ['local', 'global', 'all']
 if (!VALID_SCOPES_SEARCH.includes(scope)) {
@@ -438,6 +479,8 @@ if (historyId) {
   }
 
   let chain = []
+  // Set only when the forward walk forks (#458) — a linear chain's output shape is unchanged.
+  let historyTerminals = null
   if (spine.length) {
     chain = [...spine].reverse() // root -> requested
 
@@ -447,37 +490,59 @@ if (historyId) {
     //      byte-identical),
     //   2. the scalar superseded_by edge,
     //   3. a consolidates successor (an active episode whose consolidates array names current).
-    // The requested id is now the walk's anchor: §17-E fork loss is FIXED at the anchor spine
-    // (querying any spine member is guaranteed to see itself in its own history). Fork selection
-    // BEYOND the anchor (what supersedes/succeeds a node forward of the requested id) is
-    // UNCHANGED — still last-writer-wins by Map insertion order, characterized not fixed,
-    // tiebreak-by-id deferred (relates #621).
+    // The requested id is the walk's anchor (#634b): querying any spine member is guaranteed to
+    // see itself in its own history, and siblings of the anchor (forks at or above it on the
+    // spine) are not "forward" of it, so they stay out.
+    //
+    // #458: successors are MULTI-valued. A supersedes fork (two revisions of one original) or two
+    // consolidations naming the same member used to be last-writer-wins in a single-successor
+    // Map, silently dropping a branch. Now every successor over all three edge kinds is
+    // followed, depth-first (each branch stays contiguous in `chain`), siblings ordered
+    // oldest-first by the shared recency comparator (#621) so the output is deterministic
+    // regardless of index row order. A linear chain walks exactly as before.
     //
     // The visited Set is seeded with the ENTIRE spine, not just root (audit F1): seeding only
     // root left every OTHER spine member free to be re-discovered and re-pushed by the forward
     // walk (a contradictory/cyclic superseded_by or consolidates edge pointing back into the
     // spine would duplicate it in `chain`); seeding the whole spine also bounds a cyclic fixture
-    // to a single pass (EC7).
+    // to a single pass (EC7). A node reachable along two branches is emitted once.
     const bySupersedes = new Map()
     const byConsolidates = new Map()
+    const pushTo = (m, k, e) => { if (!m.has(k)) m.set(k, []); m.get(k).push(e) }
     for (const e of allEntries) {
-      if (e.supersedes) bySupersedes.set(e.supersedes, e)
+      if (e.supersedes) pushTo(bySupersedes, e.supersedes, e)
       if (Array.isArray(e.consolidates)) {
-        for (const cid of e.consolidates) byConsolidates.set(cid, e)
+        for (const cid of e.consolidates) pushTo(byConsolidates, cid, e)
       }
     }
-    const visited = new Set(spine.map(e => e.id))
-    let current = spine[0] // the requested episode
-    while (true) {
-      let next = null
-      if (bySupersedes.has(current.id)) next = bySupersedes.get(current.id)
-      else if (current.superseded_by && byId.has(current.superseded_by)) next = byId.get(current.superseded_by)
-      else if (byConsolidates.has(current.id)) next = byConsolidates.get(current.id)
-      if (!next || visited.has(next.id)) break
-      visited.add(next.id)
-      chain.push(next)
-      current = next
+    const successorsOf = (cur) => {
+      const out = [...(bySupersedes.get(cur.id) || [])].sort(compareRecency)
+      if (cur.superseded_by && byId.has(cur.superseded_by)) out.push(byId.get(cur.superseded_by))
+      out.push(...[...(byConsolidates.get(cur.id) || [])].sort(compareRecency))
+      return out
     }
+    const visited = new Set(spine.map(e => e.id))
+    const terminals = []
+    // Iterative DFS (no recursion-depth limit on long chains). The stack holds successors
+    // reversed so they pop in their sorted order.
+    const stack = [spine[0]] // the requested episode
+    let isAnchor = true
+    while (stack.length) {
+      const current = stack.pop()
+      if (!isAnchor) {
+        if (visited.has(current.id)) continue
+        visited.add(current.id)
+        chain.push(current)
+      }
+      isAnchor = false
+      const succ = successorsOf(current)
+      // A terminal is a leaf: no successor edge at all (a successor already emitted via
+      // another branch — a diamond — does not make this node a leaf).
+      if (!succ.length) terminals.push(current.id)
+      const next = succ.filter(n => !visited.has(n.id))
+      for (let i = next.length - 1; i >= 0; i--) stack.push(next[i])
+    }
+    if (terminals.length > 1) historyTerminals = terminals
   }
 
   // Include full body if requested (archived members read from archived/).
@@ -507,6 +572,7 @@ if (historyId) {
   await new Promise((resolve) => process.stdout.write(
     JSON.stringify({
       status: 'ok', count: output.length, chain: output,
+      ...(historyTerminals ? { terminals: historyTerminals } : {}),
       ...(historyWarnings.length ? { warning: historyWarnings.join(' | ') } : {}),
     }) + '\n', resolve))
   process.exit(0)
@@ -640,7 +706,9 @@ if (query) {
   })
 
   let partials = []
-  if (!noScore && qtokens.length > 1 && matched.length < limit) {
+  // Skipped under --sort recent (#123) as under --no-score: partials exist to
+  // fill the limit BELOW every strict match, which a recency order would undo.
+  if (!sortRecent && qtokens.length > 1 && matched.length < limit) {
     const matchedIds = new Set(matched.map(e => e.id))
     // With the token index, body membership is known without file reads and
     // the pool narrows to episodes containing at least one token; on the
@@ -728,16 +796,19 @@ if (!noScore) {
     const textMatch = e._textMatch || 1.0
     e._score = computeScore(e, textMatch)
   }
-  results.sort((a, b) => b._score - a._score)
+}
+if (sortRecent) {
+  // --sort recent (#123) / --no-score: newest first via the shared recency
+  // comparator (lib/relevance.mjs compareRecency — date + time, then the id's
+  // second-granular HHMMSS stamp, then id; #621), tolerant of foreign-harness
+  // index rows (non-string dates sort last). Filters above are untouched; only
+  // the order differs from the default score ranking.
+  results.sort((a, b) => compareRecency(b, a))
 } else {
-  // No scoring — keep date-based sort, tolerant of foreign-harness index rows
-  // (hand-appended without em-store): only string-typed fields participate. A
-  // non-string date would either crash (NaN.localeCompare) or, stringified,
-  // out-sort ISO keys ("20260703" > "2026-07-04..."); time joins only when
-  // date is a string so a time-only key cannot beat ISO date keys. Rows
-  // without a string date get key '' and sort last in descending order.
-  const dtKey = e => typeof e.date === 'string' ? e.date + (typeof e.time === 'string' ? e.time : '') : ''
-  results.sort((a, b) => dtKey(b).localeCompare(dtKey(a)))
+  // Equal scores (same day, same access/feedback — e.g. a fork-closure stub and
+  // its terminal) fall back to newest-first instead of index insertion order,
+  // which put the OLDER row first (#621). Only exact ties are affected.
+  results.sort((a, b) => (b._score - a._score) || compareRecency(b, a))
 }
 
 // Apply limit AFTER scoring/sorting

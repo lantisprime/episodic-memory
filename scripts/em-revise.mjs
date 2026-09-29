@@ -11,6 +11,16 @@
  * Tag forms accepted (merged + deduplicated; mirrors em-store):
  *   --tags a,b,c       --tag a --tag b       --tags a,b --tag c
  *
+ * Tag inheritance (#506): by default the revision's tags are the UNION of the
+ * original's tags and the passed ones — a plain revision can never drop a tag.
+ *   --replace-tags             the passed tags REPLACE the inherited set
+ *                              (no passed tags → the revision carries none)
+ *   --remove-tag <t> / --remove-tags <t1,t2>
+ *                              drop these tags from the resulting set
+ *                              (repeatable; composes with union or replace)
+ * The original keeps its own tags (history is intact); only the new revision's
+ * frontmatter, index row, tags.json and tokens.json reflect the result.
+ *
  * --scope defaults to "inherit" (write the revision to the same store as the
  * original). Pass "local" or "global" only to force a cross-scope revision.
  *
@@ -48,7 +58,7 @@ const LOCAL_DIR = resolveLocalDir()
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [--playbook] [--no-playbook] [--register-playbook [session_start|on_demand]] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before this script runs — safe form: --body-file - <<\'EOF\' … EOF)' }))
+  console.log(JSON.stringify({ status: 'help', script: 'em-revise.mjs', usage: 'node em-revise.mjs --original <id> --project <name> [--tags <t1,t2>] [--tag <t>]... [--replace-tags] [--remove-tag <t>]... [--remove-tags <t1,t2>] --summary <text> (--body <text> | --body-file <path|->) [--scope inherit|local|global] [--pin] [--playbook] [--no-playbook] [--register-playbook [session_start|on_demand]] [--promotion-sources-json <json> (lesson only)] [lesson-only activation: --trigger <phrase|tool:T:glob|activity:class>]... [--applies-to-project <slug|*>]... [--applies-to-tool <id>]... [--priority <1-7>] [--review-by <YYYY-MM-DD>] [--evidence <violation-id>]...  (--body-file - reads stdin; prefer it over inline --body for bodies with backticks/$()/$VAR, which the shell corrupts before this script runs — safe form: --body-file - <<\'EOF\' … EOF)', notes: ['Tags: by default the revision carries the UNION of the original\'s tags and --tag/--tags (a plain revision never drops a tag). --replace-tags makes the passed tags replace the inherited set; --remove-tag <t> (repeatable) / --remove-tags <t1,t2> drop tags from the result. The original episode keeps its tags.'] }))
   process.exit(0)
 }
 
@@ -78,6 +88,11 @@ const originalId = flag('--original')
 const project = flag('--project')
 const tagsRaw = flag('--tags')
 const tagRepeats = flagAll('--tag')
+// #506: opt out of the tag union. --replace-tags: passed tags replace the
+// inherited set; --remove-tag(s): drop tags from the resulting set.
+const replaceTags = argv.includes('--replace-tags')
+const removeTagsRaw = flag('--remove-tags')
+const removeTagRepeats = flagAll('--remove-tag')
 const summary = flag('--summary')
 const bodyArg = flag('--body')
 const bodyFile = flag('--body-file')
@@ -169,6 +184,11 @@ for (const [label, value] of [['summary', summary], ...(project !== undefined ? 
     console.log(JSON.stringify({ status: 'error', message: `--${label} contains illegal line-breaking character ${JSON.stringify(bad)}` }))
     process.exit(1)
   }
+}
+if ((argv.includes('--remove-tags') && (removeTagsRaw === undefined || removeTagsRaw.startsWith('--'))) ||
+    argv.filter(a => a === '--remove-tag').length !== removeTagRepeats.length) {
+  console.log(JSON.stringify({ status: 'error', message: '--remove-tag/--remove-tags requires a tag value' }))
+  process.exit(1)
 }
 for (const tag of [...(tagsRaw ? tagsRaw.split(',') : []), ...tagRepeats]) {
   const bad = illegalScalarChar(tag)
@@ -630,7 +650,12 @@ try {
   const resolvedProject = origProject || path.basename(process.cwd())
 
   // Inherit original episode's tags (captured during first index pass above)
-  const mergedTags = normalizeTags([...origTagsFromIndex, ...tags])
+  // unless --replace-tags opts out of the union (#506); then drop any
+  // --remove-tag(s). Every downstream writer (frontmatter, index row,
+  // tags.json, tokens.json) consumes this one list, so they stay consistent.
+  const removeSet = new Set(normalizeTags(removeTagsRaw, removeTagRepeats))
+  const mergedTags = normalizeTags(replaceTags ? tags : [...origTagsFromIndex, ...tags])
+    .filter(t => !removeSet.has(t))
 
   // Pinning survives revision: a corrected pinned decision is still a pinned
   // decision. --pin additionally pins an unpinned chain at revision time.

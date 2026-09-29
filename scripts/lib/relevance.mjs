@@ -147,6 +147,46 @@ export function loadArchivedIndex(dataDir, source) {
 }
 
 // ---------------------------------------------------------------------------
+// compareRecency(a, b) — ascending recency comparator (older first; negate or
+// swap the arguments for newest-first). Shared by every recency sort
+// (em-search --no-score / --sort recent, em-list, the --history fork walk) so
+// they cannot drift (#621).
+//
+//   1. date + time — tolerant of foreign-harness index rows (hand-appended
+//      without em-store): only string-typed fields participate. A non-string
+//      date would either crash (NaN.localeCompare) or, stringified, out-sort
+//      ISO keys ("20260703" > "2026-07-04..."); time joins only when date is a
+//      string so a time-only key cannot beat ISO date keys. Rows without a
+//      string date get key '' and sort oldest.
+//   2. the id's embedded YYYYMMDD-HHMMSS stamp — `time` is stored at MINUTE
+//      granularity, so two episodes written in the same minute (a fork-closure
+//      stub and its terminal, seconds apart) tie on (1); em-store/em-revise
+//      stamp the same UTC instant into the id at SECOND granularity. Consulted
+//      only on a (1) tie, so it can never reorder episodes (1) already orders.
+//   3. the id itself — a final total order, so ties never fall back to index
+//      insertion order.
+// Stored frontmatter is unchanged; this is a pure sort-key change.
+// ---------------------------------------------------------------------------
+const ID_STAMP_RE = /^(\d{8}-\d{6})/
+function recencyDateKey(e) {
+  return typeof e.date === 'string' ? e.date + (typeof e.time === 'string' ? e.time : '') : ''
+}
+function recencyIdStamp(e) {
+  const m = typeof e.id === 'string' ? ID_STAMP_RE.exec(e.id) : null
+  return m ? m[1] : ''
+}
+// Code-unit comparison for (2)/(3): ids are ASCII, and localeCompare's
+// collation may weigh punctuation ('-') differently from its byte order.
+function cmpStr(x, y) {
+  return x < y ? -1 : x > y ? 1 : 0
+}
+export function compareRecency(a, b) {
+  return recencyDateKey(a).localeCompare(recencyDateKey(b)) ||
+    cmpStr(recencyIdStamp(a), recencyIdStamp(b)) ||
+    cmpStr(typeof a.id === 'string' ? a.id : '', typeof b.id === 'string' ? b.id : '')
+}
+
+// ---------------------------------------------------------------------------
 // computeScore(entry, textMatchScore) — relevance = text match × linear time
 // decay × usage boost.
 //

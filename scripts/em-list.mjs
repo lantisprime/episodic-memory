@@ -14,6 +14,7 @@ import path from 'path'
 import os from 'os'
 import { resolveLocalDir } from './lib/local-dir.mjs'
 import { readIndexFileOrThrow, IndexUnreadableError } from './lib/index-state.mjs'
+import { compareRecency } from './lib/relevance.mjs'
 
 const GLOBAL_DIR = path.join(os.homedir(), '.episodic-memory')
 const LOCAL_DIR = resolveLocalDir()
@@ -76,14 +77,10 @@ if (project) {
   results = results.filter(e => e.project === project)
 }
 
-// Sort key tolerant of foreign-harness index rows (hand-appended without
-// em-store): only string-typed fields participate. A non-string date (absent,
-// null, numeric) would either crash (NaN.localeCompare) or, stringified,
-// out-sort ISO keys ("20260703" > "2026-07-04..."); time joins only when date
-// is a string so a time-only key like "23:59" cannot beat ISO date keys.
-// Rows without a string date get key '' and sort last in descending order.
-const dtKey = e => typeof e.date === 'string' ? e.date + (typeof e.time === 'string' ? e.time : '') : ''
-results.sort((a, b) => dtKey(b).localeCompare(dtKey(a)))
+// Newest first via the shared recency comparator (lib/relevance.mjs): date +
+// time, then the id's second-granular HHMMSS stamp, then id (#621 — same-minute
+// episodes are otherwise unorderable). Tolerant of foreign-harness rows.
+results.sort((a, b) => compareRecency(b, a))
 results = results.slice(0, limit)
 
 const output = results.map(({ _source, ...rest }) => ({ ...rest, source: _source }))
